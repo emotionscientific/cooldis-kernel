@@ -79,6 +79,22 @@ if [[ -z "$VERSION" ]]; then
   exit 1
 fi
 
+RELEASE_VERSION="${COOLDIS_RELEASE_VERSION:-}"
+if [[ -z "$RELEASE_VERSION" && "${GITHUB_REF_NAME:-}" == v* ]]; then
+  RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+fi
+if [[ -z "$RELEASE_VERSION" ]]; then
+  RELEASE_VERSION="$VERSION"
+fi
+case "$RELEASE_VERSION" in
+  "$VERSION"|"$VERSION"-*) ;;
+  *)
+    echo "release version '$RELEASE_VERSION' does not match crate version '$VERSION'" >&2
+    echo "expected $VERSION or $VERSION-<prerelease>" >&2
+    exit 1
+    ;;
+esac
+
 HOST_TRIPLE="$(rustc -vV | awk '/^host:/ { print $2 }')"
 if [[ -z "$HOST_TRIPLE" ]]; then
   echo "could not determine Rust host triple" >&2
@@ -123,7 +139,7 @@ else
   RELEASE_BIN_DIR="$TARGET_DIR/$TARGET/release"
 fi
 
-PACKAGE="cooldis-$VERSION-$TARGET"
+PACKAGE="cooldis-$RELEASE_VERSION-$TARGET"
 STAGE="$OUT_DIR/$PACKAGE"
 ARCHIVE="$PACKAGE.tar.gz"
 
@@ -142,7 +158,7 @@ for bin in "${BINS[@]}"; do
 done
 
 cat >"$STAGE/README.txt" <<EOF
-Cooldis $VERSION
+Cooldis $RELEASE_VERSION
 Target: $TARGET
 
 Binaries:

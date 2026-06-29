@@ -38,6 +38,19 @@ The release also includes `latest.json` and `install.sh`. The installer selects
 the correct archive for the current machine, verifies the SHA-256 checksum, and
 links the binaries into `~/.local/bin`.
 
+Install the latest stable release:
+
+```sh
+curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/latest/download/install.sh | sh
+```
+
+Install a release candidate directly:
+
+```sh
+curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/download/v0.1.0-rc.1/install.sh \
+  | sh -s -- --version 0.1.0-rc.1
+```
+
 ## Local Packaging
 
 Build the host target:
