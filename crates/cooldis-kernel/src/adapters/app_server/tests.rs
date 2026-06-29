@@ -6720,7 +6720,7 @@ async fn fs_methods_cover_basic_host_file_operations() {
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone());
     initialize_for_test(&connection).await;
-    let root = std::env::temp_dir().join(format!("cooldis-fs-test-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("cooldis-vfs-test-{}", Uuid::now_v7()));
     let nested = root.join("nested");
     let file = nested.join("hello.txt");
     let copied = nested.join("copy.txt");
