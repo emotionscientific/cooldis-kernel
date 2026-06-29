@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "json": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "pointer": { "type": "string" }
+  },
+  "required": ["json", "pointer"]
+}

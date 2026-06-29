@@ -1,0 +1,54 @@
+{
+  "prompt_steer_continue": [
+    {
+      "kind": "turn.continue.requested",
+      "payload": {
+        "next_turn_input": "Ask the user to pick the deployment lane.",
+        "reason": "need explicit release lane choice",
+        "schema": "cooldis.event.turn.continue.requested/1",
+        "snapshot_id": "snapshot-a",
+        "subject": {
+          "loop_id": "prompt-steer",
+          "parent_turn_id": "turn-1"
+        },
+        "template_id": "std::prompt.steer",
+        "trigger_event_id": "018f0000-0000-7000-8000-000000000048",
+        "trigger_kind": "turn.completed"
+      },
+      "stream": "control"
+    }
+  ],
+  "prompt_steer_read_plan": [
+    {
+      "kind": "context.read_plan.set",
+      "payload": {
+        "checkpoint_event_id": "018f0000-0000-7000-8000-00000000004a",
+        "name": "instructions.default",
+        "pipeline_id": "context.instructions",
+        "read_plan": {
+          "entries": [
+            {
+              "event_id": "018f0000-0000-7000-8000-00000000004a",
+              "event_role": "instruction_checkpoint",
+              "kind": "event_ref",
+              "stream_id": "derived:context:instruction-fixture"
+            }
+          ],
+          "frontier": "compile_frontier",
+          "name": "instructions.default",
+          "schema": "cooldis.context.read_plan/1",
+          "source_stream": "derived:context:instruction-fixture"
+        },
+        "reason": "approved steering instructions",
+        "schema": "cooldis.event.context.read_plan.set/1",
+        "scope": "thread",
+        "snapshot_id": "snapshot-a",
+        "source_id": "derived:context:instruction-fixture",
+        "template_id": "std::prompt.steer",
+        "trigger_event_id": "018f0000-0000-7000-8000-000000000049",
+        "trigger_kind": "approval.resolved"
+      },
+      "stream": "control"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "completion_callback": [
+    {
+      "kind": "loop.completed",
+      "payload": {
+        "completed_coupling_id": "std::queue.task",
+        "completed_discharged_event_ids": [
+          "018f0000-0000-7000-8000-00000000001f"
+        ],
+        "completed_trigger_event_id": "018f0000-0000-7000-8000-00000000001e",
+        "reason": "queued work completed",
+        "schema": "cooldis.event.loop.completed/1",
+        "snapshot_id": "snapshot-a",
+        "template_id": "std::queue.completion_callback"
+      },
+      "stream": "control"
+    }
+  ],
+  "queue_task": [
+    {
+      "kind": "turn.waiting",
+      "payload": {
+        "entry_id": "entry-1",
+        "reason": "queued by std::queue.task",
+        "schema": "cooldis.event.turn.waiting/1",
+        "snapshot_id": "snapshot-a",
+        "status": "queued",
+        "task_id": "task:018f0000-0000-7000-8000-00000000001e",
+        "template_id": "std::queue.task",
+        "turn_id": "turn-1",
+        "waiting_on_event_id": "018f0000-0000-7000-8000-00000000001e"
+      },
+      "stream": "control"
+    }
+  ]
+}

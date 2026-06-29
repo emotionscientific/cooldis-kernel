@@ -1,0 +1,59 @@
+{
+  "context_spill": [
+    {
+      "event_id": "018f0000-0000-7000-8000-000000000029",
+      "kind": "context.summary.completed",
+      "payload": {
+        "compile_event_id": "018f0000-0000-7000-8000-000000000028",
+        "content": {
+          "sha256": "sha256:15babf03bf890536d410548d29c08c4fa985b7be2d077e277b0e59495182e251"
+        },
+        "covered_ranges": [
+          {
+            "from_sequence": 1,
+            "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
+            "to_sequence": 4
+          }
+        ],
+        "role": "summary_checkpoint",
+        "schema": "cooldis.event.context.summary.completed/1",
+        "template_id": "std::context.spill",
+        "text": "Spilled 640 bytes from context.compile.completed 018f0000-0000-7000-8000-000000000028."
+      },
+      "stream": "derived:context"
+    },
+    {
+      "kind": "context.read_plan.set",
+      "payload": {
+        "name": "history.default",
+        "pipeline_id": "context.default",
+        "read_plan": {
+          "entries": [
+            {
+              "covers": {
+                "from": "start",
+                "to": {
+                  "sequence": 4
+                }
+              },
+              "event_id": "018f0000-0000-7000-8000-000000000029",
+              "event_role": "summary_checkpoint",
+              "kind": "event_ref",
+              "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+            }
+          ],
+          "frontier": "compile_frontier",
+          "name": "history.default",
+          "schema": "cooldis.context.read_plan/1",
+          "source_stream": "thread:018f0000-0000-7000-8000-000000000001"
+        },
+        "schema": "cooldis.event.context.read_plan.set/1",
+        "scope": "thread",
+        "source_id": "thread:018f0000-0000-7000-8000-000000000001",
+        "summary_event_id": "018f0000-0000-7000-8000-000000000029",
+        "template_id": "std::context.spill"
+      },
+      "stream": "derived:context"
+    }
+  ]
+}

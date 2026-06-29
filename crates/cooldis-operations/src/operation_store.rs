@@ -1,0 +1,1100 @@
+use crate::{
+    CooldisOperationsError as CooldisError, CooldisResult, OperationProjectionSet,
+    RegisteredOperation, tool_package::ToolInterfaceContract,
+};
+use cooldis_abi::WasmOperationManifest;
+use cooldis_wasm::{WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
+
+const RECORD_SCHEMA_VERSION: u32 = 1;
+const BINDING_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug)]
+pub struct OperationBlobStore {
+    root: PathBuf,
+}
+
+impl OperationBlobStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn put(&self, bytes: &[u8]) -> CooldisResult<String> {
+        let hash = wasm_sha256(bytes);
+        let path = self.artifact_path(&hash)?;
+        if path.exists() {
+            let existing = fs::read(&path).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read existing blob {}: {err}",
+                    path.display()
+                ))
+            })?;
+            if wasm_sha256(&existing) == hash {
+                return Ok(hash);
+            }
+            fs::remove_file(&path).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to replace corrupt existing blob {}: {err}",
+                    path.display()
+                ))
+            })?;
+        }
+        let Some(parent) = path.parent() else {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "blob path {} has no parent directory",
+                path.display()
+            )));
+        };
+        fs::create_dir_all(parent).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to create blob directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+        let tmp_path = parent.join(format!(".{hash}.tmp.{}", Uuid::now_v7()));
+        {
+            let mut file = fs::File::create(&tmp_path).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to create temp blob {}: {err}",
+                    tmp_path.display()
+                ))
+            })?;
+            file.write_all(bytes).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to write temp blob {}: {err}",
+                    tmp_path.display()
+                ))
+            })?;
+            file.sync_all().map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to sync temp blob {}: {err}",
+                    tmp_path.display()
+                ))
+            })?;
+        }
+        match fs::rename(&tmp_path, &path) {
+            Ok(()) => Ok(hash),
+            Err(err) if path.exists() => {
+                let _ = fs::remove_file(&tmp_path);
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(hash)
+                } else {
+                    Ok(hash)
+                }
+            }
+            Err(err) => Err(CooldisError::RuntimeFactory(format!(
+                "failed to install blob {}: {err}",
+                path.display()
+            ))),
+        }
+    }
+
+    pub fn get(&self, hash: &str) -> CooldisResult<Option<Vec<u8>>> {
+        validate_hash(hash)?;
+        let path = self.artifact_path(hash)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!("failed to read blob {}: {err}", path.display()))
+        })?;
+        let actual = wasm_sha256(&bytes);
+        if actual != hash {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "blob {} hash mismatch: expected {hash}, got {actual}",
+                path.display()
+            )));
+        }
+        Ok(Some(bytes))
+    }
+
+    pub fn artifact_path(&self, hash: &str) -> CooldisResult<PathBuf> {
+        validate_hash(hash)?;
+        Ok(self.root.join(&hash[..2]).join(format!("{hash}.wasm")))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalOperationRegistry {
+    root: PathBuf,
+    blobs: OperationBlobStore,
+}
+
+impl LocalOperationRegistry {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        Self {
+            blobs: OperationBlobStore::new(root.join("blobs")),
+            root,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn blobs(&self) -> &OperationBlobStore {
+        &self.blobs
+    }
+
+    pub async fn publish_artifact(
+        &self,
+        request: PublishOperationRequest,
+    ) -> CooldisResult<PublishedOperationRecord> {
+        let name = validate_record_name(&request.name)?;
+        let bytes = fs::read(&request.artifact_path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read operation artifact {}: {err}",
+                request.artifact_path.display()
+            ))
+        })?;
+        let validation_config = WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(bytes.clone()))
+            .with_capability_grants(request.capability_grants.clone());
+        let validation = WasmRuntimeFactory::new(validation_config)?
+            .validate_operation_artifact()
+            .await?;
+        validate_required_grants(&name, &validation, &request.capability_grants)?;
+
+        let hash = self.blobs.put(&bytes)?;
+        let registered = RegisteredOperation {
+            name: name.clone(),
+            manifest: validation.clone(),
+            capability_grants: request.capability_grants.clone(),
+            metadata: request.metadata.clone(),
+        };
+        if let Some(interface) = &request.interface {
+            interface.validate_against_operation_record(
+                &name,
+                &validation,
+                &registered.projections(),
+            )?;
+        }
+        let record = PublishedOperationRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            name,
+            active_artifact_hash: hash,
+            manifest: validation,
+            projections: registered.projections(),
+            interface: request.interface,
+            capability_grants: request.capability_grants,
+            metadata: request.metadata,
+            source: request.source,
+            build: PublishedOperationBuild {
+                artifact_path: request.artifact_path,
+                published_at_ms: now_ms(),
+            },
+        };
+        record.validate()?;
+        self.write_version_record_atomically(&record)?;
+        self.write_record_atomically(&record)?;
+        Ok(record)
+    }
+
+    pub fn publish_interface_record(
+        &self,
+        request: PublishInterfaceOperationRequest,
+    ) -> CooldisResult<PublishedOperationRecord> {
+        let name = validate_record_name(&request.name)?;
+        validate_manifest_shape(&request.manifest)?;
+        validate_required_grants(&name, &request.manifest, &request.capability_grants)?;
+        let interface = request.interface;
+        let artifact_bytes = serde_json::to_vec(&interface).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to encode kernel operation contract for {name:?}: {err}"
+            ))
+        })?;
+        let hash = self.blobs.put(&artifact_bytes)?;
+        let registered = RegisteredOperation {
+            name: name.clone(),
+            manifest: request.manifest.clone(),
+            capability_grants: request.capability_grants.clone(),
+            metadata: request.metadata.clone(),
+        };
+        interface.validate_against_operation_record(
+            &name,
+            &request.manifest,
+            &registered.projections(),
+        )?;
+        let record = PublishedOperationRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            name,
+            active_artifact_hash: hash,
+            manifest: request.manifest,
+            projections: registered.projections(),
+            interface: Some(interface),
+            capability_grants: request.capability_grants,
+            metadata: request.metadata,
+            source: request.source,
+            build: PublishedOperationBuild {
+                artifact_path: PathBuf::from("<interface-contract>"),
+                published_at_ms: now_ms(),
+            },
+        };
+        record.validate()?;
+        self.write_version_record_atomically(&record)?;
+        self.write_record_atomically(&record)?;
+        Ok(record)
+    }
+
+    pub fn load_record(&self, name: &str) -> CooldisResult<PublishedOperationRecord> {
+        let name = validate_record_name(name)?;
+        let path = self.record_path(&name)?;
+        let bytes = fs::read(&path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read operation record {}: {err}",
+                path.display()
+            ))
+        })?;
+        let record: PublishedOperationRecord = serde_json::from_slice(&bytes).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to decode operation record {}: {err}",
+                path.display()
+            ))
+        })?;
+        record.validate()?;
+        if record.name != name {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation record {} names {:?}, expected {:?}",
+                path.display(),
+                record.name,
+                name
+            )));
+        }
+        Ok(record)
+    }
+
+    pub fn list_records(&self) -> CooldisResult<Vec<PublishedOperationRecord>> {
+        let records_dir = self.root.join("records");
+        if !records_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&records_dir).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read operation records directory {}: {err}",
+                records_dir.display()
+            ))
+        })? {
+            let entry = entry.map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read operation record entry in {}: {err}",
+                    records_dir.display()
+                ))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            names.push(validate_record_name(name)?);
+        }
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| self.load_record(&name))
+            .collect()
+    }
+
+    pub fn load_version_record(
+        &self,
+        name: &str,
+        artifact_hash: &str,
+    ) -> CooldisResult<PublishedOperationRecord> {
+        let name = validate_record_name(name)?;
+        validate_hash(artifact_hash)?;
+        let path = self.version_record_path(&name, artifact_hash)?;
+        let bytes = fs::read(&path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read operation version record {}: {err}",
+                path.display()
+            ))
+        })?;
+        let record: PublishedOperationRecord = serde_json::from_slice(&bytes).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to decode operation version record {}: {err}",
+                path.display()
+            ))
+        })?;
+        record.validate()?;
+        if record.name != name {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation version record {} names {:?}, expected {:?}",
+                path.display(),
+                record.name,
+                name
+            )));
+        }
+        if record.active_artifact_hash != artifact_hash {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation version record {} uses artifact hash {}, expected {}",
+                path.display(),
+                record.active_artifact_hash,
+                artifact_hash
+            )));
+        }
+        Ok(record)
+    }
+
+    pub fn bind_capsule_operation(
+        &self,
+        scope: CapsuleBindingScope,
+        operation_name: impl AsRef<str>,
+        artifact_hash: impl AsRef<str>,
+    ) -> CooldisResult<CapsuleBindingRecord> {
+        let operation_name = validate_record_name(operation_name.as_ref())?;
+        let artifact_hash = artifact_hash.as_ref();
+        self.load_version_record(&operation_name, artifact_hash)
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "cannot bind capsule operation {operation_name:?} to version {artifact_hash}: {err}"
+                ))
+            })?;
+        let record = CapsuleBindingRecord {
+            schema_version: BINDING_SCHEMA_VERSION,
+            scope,
+            operation_name,
+            target: CapsuleBindingTarget::Version {
+                artifact_hash: artifact_hash.to_string(),
+            },
+            updated_at_ms: now_ms(),
+        };
+        record.validate()?;
+        self.write_binding_record_atomically(&record)?;
+        Ok(record)
+    }
+
+    pub fn unbind_capsule_operation(
+        &self,
+        scope: CapsuleBindingScope,
+        operation_name: impl AsRef<str>,
+    ) -> CooldisResult<CapsuleBindingRecord> {
+        let record = CapsuleBindingRecord {
+            schema_version: BINDING_SCHEMA_VERSION,
+            scope,
+            operation_name: validate_record_name(operation_name.as_ref())?,
+            target: CapsuleBindingTarget::Tombstone,
+            updated_at_ms: now_ms(),
+        };
+        record.validate()?;
+        self.write_binding_record_atomically(&record)?;
+        Ok(record)
+    }
+
+    pub fn list_capsule_bindings(
+        &self,
+        scope: CapsuleBindingScope,
+    ) -> CooldisResult<Vec<CapsuleBindingRecord>> {
+        let dir = self.binding_scope_dir(&scope)?;
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read capsule binding directory {}: {err}",
+                dir.display()
+            ))
+        })? {
+            let entry = entry.map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read capsule binding entry in {}: {err}",
+                    dir.display()
+                ))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            names.push(validate_record_name(name)?);
+        }
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| self.load_capsule_binding(scope.clone(), &name))
+            .collect()
+    }
+
+    pub fn load_capsule_binding(
+        &self,
+        scope: CapsuleBindingScope,
+        operation_name: &str,
+    ) -> CooldisResult<CapsuleBindingRecord> {
+        let operation_name = validate_record_name(operation_name)?;
+        let path = self.binding_record_path(&scope, &operation_name)?;
+        let bytes = fs::read(&path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read capsule binding record {}: {err}",
+                path.display()
+            ))
+        })?;
+        let record: CapsuleBindingRecord = serde_json::from_slice(&bytes).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to decode capsule binding record {}: {err}",
+                path.display()
+            ))
+        })?;
+        record.validate()?;
+        if record.scope != scope {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "capsule binding record {} has scope {:?}, expected {:?}",
+                path.display(),
+                record.scope,
+                scope
+            )));
+        }
+        if record.operation_name != operation_name {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "capsule binding record {} names {:?}, expected {:?}",
+                path.display(),
+                record.operation_name,
+                operation_name
+            )));
+        }
+        Ok(record)
+    }
+
+    pub fn resolve_capsule_binding_snapshot(
+        &self,
+        request: CapsuleBindingResolutionRequest,
+    ) -> CooldisResult<CapsuleBindingSnapshot> {
+        let mut resolved = BTreeMap::<String, PublishedOperationRecord>::new();
+        let mut binding_records = Vec::new();
+        let scopes = request.scopes()?;
+        for scope in scopes {
+            for binding in self.list_capsule_bindings(scope)? {
+                match &binding.target {
+                    CapsuleBindingTarget::Version { artifact_hash } => {
+                        let record =
+                            self.load_version_record(&binding.operation_name, artifact_hash)?;
+                        resolved.insert(binding.operation_name.clone(), record);
+                    }
+                    CapsuleBindingTarget::Tombstone => {
+                        resolved.remove(&binding.operation_name);
+                    }
+                }
+                binding_records.push(binding);
+            }
+        }
+
+        if request.load_all_active_when_unbound
+            && resolved.is_empty()
+            && binding_records.is_empty()
+            && request.active_operation_names.is_empty()
+        {
+            for record in self.list_records()? {
+                resolved.insert(record.name.clone(), record);
+            }
+        }
+
+        for operation_name in request.active_operation_names {
+            let record = self.load_record(&operation_name)?;
+            resolved.insert(operation_name, record);
+        }
+
+        Ok(CapsuleBindingSnapshot {
+            records: resolved.into_values().collect(),
+            bindings: binding_records,
+        })
+    }
+
+    pub async fn load_runtime_config_for_record(
+        &self,
+        record: &PublishedOperationRecord,
+    ) -> CooldisResult<WasmRuntimeConfig> {
+        let config = self.load_runtime_config_for_published_record(record)?;
+        let manifest = WasmRuntimeFactory::new(config.clone())?
+            .validate_operation_artifact()
+            .await?;
+        if manifest != record.manifest {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation {:?} manifest mismatch for artifact {}",
+                record.name, record.active_artifact_hash
+            )));
+        }
+        Ok(config)
+    }
+
+    pub fn load_runtime_config_for_published_record(
+        &self,
+        record: &PublishedOperationRecord,
+    ) -> CooldisResult<WasmRuntimeConfig> {
+        record.validate()?;
+        if matches!(record.source, PublishedOperationSource::Kernel { .. }) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation {:?} is kernel-native and can only run through the in-process kernel dispatcher",
+                record.name
+            )));
+        }
+        let bytes = self
+            .blobs
+            .get(&record.active_artifact_hash)?
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(format!(
+                    "operation blob {} for {:?} was not found",
+                    record.active_artifact_hash, record.name
+                ))
+            })?;
+        Ok(WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(bytes))
+            .with_capability_grants(record.capability_grants.clone()))
+    }
+
+    pub fn record_path(&self, name: &str) -> CooldisResult<PathBuf> {
+        let name = validate_record_name(name)?;
+        Ok(self.root.join("records").join(format!("{name}.json")))
+    }
+
+    pub fn version_record_path(&self, name: &str, artifact_hash: &str) -> CooldisResult<PathBuf> {
+        let name = validate_record_name(name)?;
+        validate_hash(artifact_hash)?;
+        Ok(self
+            .root
+            .join("versions")
+            .join(name)
+            .join(format!("{artifact_hash}.json")))
+    }
+
+    pub fn binding_record_path(
+        &self,
+        scope: &CapsuleBindingScope,
+        operation_name: &str,
+    ) -> CooldisResult<PathBuf> {
+        let operation_name = validate_record_name(operation_name)?;
+        Ok(self
+            .binding_scope_dir(scope)?
+            .join(format!("{operation_name}.json")))
+    }
+
+    fn write_record_atomically(&self, record: &PublishedOperationRecord) -> CooldisResult<()> {
+        let path = self.record_path(&record.name)?;
+        write_json_atomically(&path, format!("operation record {:?}", record.name), record)
+    }
+
+    fn write_version_record_atomically(
+        &self,
+        record: &PublishedOperationRecord,
+    ) -> CooldisResult<()> {
+        record.validate()?;
+        let path = self.version_record_path(&record.name, &record.active_artifact_hash)?;
+        if path.exists() {
+            self.load_version_record(&record.name, &record.active_artifact_hash)?;
+            return Ok(());
+        }
+        write_json_atomically(
+            &path,
+            format!(
+                "operation version record {:?}@{}",
+                record.name, record.active_artifact_hash
+            ),
+            record,
+        )
+    }
+
+    fn write_binding_record_atomically(&self, record: &CapsuleBindingRecord) -> CooldisResult<()> {
+        record.validate()?;
+        let path = self.binding_record_path(&record.scope, &record.operation_name)?;
+        write_json_atomically(
+            &path,
+            format!(
+                "capsule binding record {:?} in {:?}",
+                record.operation_name, record.scope
+            ),
+            record,
+        )
+    }
+
+    fn binding_scope_dir(&self, scope: &CapsuleBindingScope) -> CooldisResult<PathBuf> {
+        scope.validate()?;
+        Ok(match scope {
+            CapsuleBindingScope::Global => self.root.join("bindings").join("global"),
+            CapsuleBindingScope::Tenant { tenant_id } => self
+                .root
+                .join("bindings")
+                .join("tenant")
+                .join(validate_scope_segment("tenant_id", tenant_id)?),
+            CapsuleBindingScope::Thread {
+                tenant_id,
+                thread_id,
+            } => self
+                .root
+                .join("bindings")
+                .join("thread")
+                .join(validate_scope_segment("tenant_id", tenant_id)?)
+                .join(validate_scope_segment("thread_id", thread_id)?),
+        })
+    }
+}
+
+fn write_json_atomically<T: Serialize>(path: &Path, label: String, value: &T) -> CooldisResult<()> {
+    let Some(parent) = path.parent() else {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "{label} path {} has no parent directory",
+            path.display()
+        )));
+    };
+    fs::create_dir_all(parent).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to create {label} directory {}: {err}",
+            parent.display()
+        ))
+    })?;
+    let tmp_path = parent.join(format!(".cooldis.tmp.{}", Uuid::now_v7()));
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|err| CooldisError::RuntimeFactory(format!("failed to encode {label}: {err}")))?;
+    {
+        let mut file = fs::File::create(&tmp_path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to create temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        file.write_all(&bytes).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to write temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        file.sync_all().map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to sync temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+    }
+    fs::rename(&tmp_path, &path).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to atomically install {label} {}: {err}",
+            path.display()
+        ))
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct PublishOperationRequest {
+    pub name: String,
+    pub artifact_path: PathBuf,
+    pub source: PublishedOperationSource,
+    pub interface: Option<ToolInterfaceContract>,
+    pub capability_grants: BTreeSet<String>,
+    pub metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublishInterfaceOperationRequest {
+    pub name: String,
+    pub source: PublishedOperationSource,
+    pub manifest: WasmOperationManifest,
+    pub interface: ToolInterfaceContract,
+    pub capability_grants: BTreeSet<String>,
+    pub metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PublishedOperationSource {
+    Rust { module_path: PathBuf, release: bool },
+    Wasm { bin_path: PathBuf },
+    Kernel { package: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedOperationBuild {
+    pub artifact_path: PathBuf,
+    pub published_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PublishedOperationRecord {
+    pub schema_version: u32,
+    pub name: String,
+    pub active_artifact_hash: String,
+    pub manifest: WasmOperationManifest,
+    pub projections: OperationProjectionSet,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<ToolInterfaceContract>,
+    pub capability_grants: BTreeSet<String>,
+    pub metadata: BTreeMap<String, Value>,
+    pub source: PublishedOperationSource,
+    pub build: PublishedOperationBuild,
+}
+
+impl PublishedOperationRecord {
+    pub fn validate(&self) -> CooldisResult<()> {
+        if self.schema_version != RECORD_SCHEMA_VERSION {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "unsupported operation record schema version {}",
+                self.schema_version
+            )));
+        }
+        let name = validate_record_name(&self.name)?;
+        if name != self.name {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation record name {:?} did not normalize to itself",
+                self.name
+            )));
+        }
+        validate_hash(&self.active_artifact_hash)?;
+        validate_manifest_shape(&self.manifest)?;
+        validate_required_grants(&self.name, &self.manifest, &self.capability_grants)?;
+        let registered = RegisteredOperation {
+            name: self.name.clone(),
+            manifest: self.manifest.clone(),
+            capability_grants: self.capability_grants.clone(),
+            metadata: self.metadata.clone(),
+        };
+        let expected = registered.projections();
+        if self.projections != expected {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation record {:?} projections are stale",
+                self.name
+            )));
+        }
+        if let Some(interface) = &self.interface {
+            interface.validate_against_operation_record(
+                &self.name,
+                &self.manifest,
+                &self.projections,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum CapsuleBindingScope {
+    Global,
+    Tenant {
+        #[serde(rename = "tenantId", alias = "tenant_id")]
+        tenant_id: String,
+    },
+    Thread {
+        #[serde(rename = "tenantId", alias = "tenant_id")]
+        tenant_id: String,
+        #[serde(rename = "threadId", alias = "thread_id")]
+        thread_id: String,
+    },
+}
+
+impl CapsuleBindingScope {
+    pub fn global() -> Self {
+        Self::Global
+    }
+
+    pub fn tenant(tenant_id: impl Into<String>) -> Self {
+        Self::Tenant {
+            tenant_id: tenant_id.into(),
+        }
+    }
+
+    pub fn thread(tenant_id: impl Into<String>, thread_id: impl Into<String>) -> Self {
+        Self::Thread {
+            tenant_id: tenant_id.into(),
+            thread_id: thread_id.into(),
+        }
+    }
+
+    fn validate(&self) -> CooldisResult<()> {
+        match self {
+            Self::Global => Ok(()),
+            Self::Tenant { tenant_id } => {
+                validate_scope_segment("tenant_id", tenant_id)?;
+                Ok(())
+            }
+            Self::Thread {
+                tenant_id,
+                thread_id,
+            } => {
+                validate_scope_segment("tenant_id", tenant_id)?;
+                validate_scope_segment("thread_id", thread_id)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum CapsuleBindingTarget {
+    Version {
+        #[serde(rename = "artifactHash", alias = "artifact_hash")]
+        artifact_hash: String,
+    },
+    Tombstone,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapsuleBindingRecord {
+    pub schema_version: u32,
+    pub scope: CapsuleBindingScope,
+    pub operation_name: String,
+    pub target: CapsuleBindingTarget,
+    pub updated_at_ms: u64,
+}
+
+impl CapsuleBindingRecord {
+    pub fn validate(&self) -> CooldisResult<()> {
+        if self.schema_version != BINDING_SCHEMA_VERSION {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "unsupported capsule binding schema version {}",
+                self.schema_version
+            )));
+        }
+        self.scope.validate()?;
+        let operation_name = validate_record_name(&self.operation_name)?;
+        if operation_name != self.operation_name {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "capsule binding operation name {:?} did not normalize to itself",
+                self.operation_name
+            )));
+        }
+        match &self.target {
+            CapsuleBindingTarget::Version { artifact_hash } => validate_hash(artifact_hash)?,
+            CapsuleBindingTarget::Tombstone => {}
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapsuleBindingResolutionRequest {
+    pub tenant_id: String,
+    pub thread_id: Option<String>,
+    pub active_operation_names: BTreeSet<String>,
+    pub load_all_active_when_unbound: bool,
+}
+
+impl CapsuleBindingResolutionRequest {
+    pub fn for_tenant(tenant_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            thread_id: None,
+            active_operation_names: BTreeSet::new(),
+            load_all_active_when_unbound: false,
+        }
+    }
+
+    pub fn for_thread(tenant_id: impl Into<String>, thread_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            thread_id: Some(thread_id.into()),
+            active_operation_names: BTreeSet::new(),
+            load_all_active_when_unbound: false,
+        }
+    }
+
+    pub fn with_active_operation_name(mut self, name: impl Into<String>) -> Self {
+        self.active_operation_names.insert(name.into());
+        self
+    }
+
+    pub fn with_active_operation_names<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.active_operation_names
+            .extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn load_all_active_when_unbound(mut self, value: bool) -> Self {
+        self.load_all_active_when_unbound = value;
+        self
+    }
+
+    fn scopes(&self) -> CooldisResult<Vec<CapsuleBindingScope>> {
+        validate_scope_segment("tenant_id", &self.tenant_id)?;
+        let mut scopes = vec![
+            CapsuleBindingScope::Global,
+            CapsuleBindingScope::tenant(self.tenant_id.clone()),
+        ];
+        if let Some(thread_id) = &self.thread_id {
+            validate_scope_segment("thread_id", thread_id)?;
+            scopes.push(CapsuleBindingScope::thread(
+                self.tenant_id.clone(),
+                thread_id.clone(),
+            ));
+        }
+        Ok(scopes)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapsuleBindingSnapshot {
+    pub records: Vec<PublishedOperationRecord>,
+    pub bindings: Vec<CapsuleBindingRecord>,
+}
+
+impl CapsuleBindingSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn operation_names(&self) -> Vec<String> {
+        self.records
+            .iter()
+            .map(|record| record.name.clone())
+            .collect()
+    }
+}
+
+pub fn validate_record_name(name: &str) -> CooldisResult<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CooldisError::RuntimeFactory(
+            "operation record name cannot be empty".to_string(),
+        ));
+    }
+    if name == "." || name == ".." || name.len() > 128 {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "operation record name {name:?} is not path-safe"
+        )));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "operation record name {name:?} must use ASCII letters, numbers, '.', '_' or '-'"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+fn validate_scope_segment(label: &str, value: &str) -> CooldisResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "capsule binding scope {label} cannot be empty"
+        )));
+    }
+    if value == "." || value == ".." || value.len() > 128 {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "capsule binding scope {label} {value:?} is not path-safe"
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "capsule binding scope {label} {value:?} must use ASCII letters, numbers, '.', '_' or '-'"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+pub fn wasm_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn validate_hash(hash: &str) -> CooldisResult<()> {
+    if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(CooldisError::RuntimeFactory(format!(
+            "operation artifact hash {hash:?} is not a sha256 hex digest"
+        )))
+    }
+}
+
+fn validate_required_grants(
+    name: &str,
+    manifest: &WasmOperationManifest,
+    grants: &BTreeSet<String>,
+) -> CooldisResult<()> {
+    let missing: Vec<_> = manifest
+        .operations
+        .iter()
+        .flat_map(|operation| {
+            operation
+                .required_capabilities
+                .iter()
+                .filter(|capability| !grants.contains(capability.as_str()))
+                .map(|capability| format!("{}:{capability}", operation.name))
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CooldisError::RuntimeFactory(format!(
+            "operation publish {name:?} requires ungranted capabilities: {}",
+            missing.join(", ")
+        )))
+    }
+}
+
+fn validate_manifest_shape(manifest: &WasmOperationManifest) -> CooldisResult<()> {
+    if manifest.abi != "cooldis.operation/0.1" {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "unsupported operation record manifest abi {:?}",
+            manifest.abi
+        )));
+    }
+    if manifest.operations.is_empty() {
+        return Err(CooldisError::RuntimeFactory(
+            "operation record manifest has no operations".to_string(),
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for operation in &manifest.operations {
+        if operation.id == 0 {
+            return Err(CooldisError::RuntimeFactory(
+                "operation record manifest uses reserved operation id 0".to_string(),
+            ));
+        }
+        if operation.name.trim().is_empty() {
+            return Err(CooldisError::RuntimeFactory(
+                "operation record manifest has an empty operation name".to_string(),
+            ));
+        }
+        if !ids.insert(operation.id) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation record manifest has duplicate operation id {}",
+                operation.id
+            )));
+        }
+        if !names.insert(operation.name.clone()) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "operation record manifest has duplicate operation name {:?}",
+                operation.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests;

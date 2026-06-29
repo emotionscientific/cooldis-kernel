@@ -1,0 +1,64 @@
+{
+  "context_summarize": [
+    {
+      "event_id": "018f0000-0000-7000-8000-00000000002c",
+      "kind": "context.summary.completed",
+      "payload": {
+        "content": {
+          "sha256": "sha256:b3e994a9e54c99520b7679962be2942652daf0c8ee2bc6a0771eb5a2dc2536dc"
+        },
+        "covered_ranges": [
+          {
+            "from_sequence": 1,
+            "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
+            "to_sequence": 11
+          }
+        ],
+        "reason": "summary checkpoint selected",
+        "role": "summary_checkpoint",
+        "schema": "cooldis.event.context.summary.completed/1",
+        "snapshot_id": "snapshot-a",
+        "template_id": "std::context.summarize",
+        "text": "The user wants SQLite first, S2 later, and explicit segment maps.",
+        "trigger_event_id": "018f0000-0000-7000-8000-00000000002b",
+        "trigger_kind": "turn.completed"
+      },
+      "stream": "derived:context"
+    },
+    {
+      "kind": "context.read_plan.set",
+      "payload": {
+        "name": "history.default",
+        "pipeline_id": "context.summarize",
+        "read_plan": {
+          "entries": [
+            {
+              "covers": {
+                "from": "start",
+                "to": {
+                  "sequence": 11
+                }
+              },
+              "event_id": "018f0000-0000-7000-8000-00000000002c",
+              "event_role": "summary_checkpoint",
+              "kind": "event_ref",
+              "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+            }
+          ],
+          "frontier": "compile_frontier",
+          "name": "history.default",
+          "schema": "cooldis.context.read_plan/1",
+          "source_stream": "thread:018f0000-0000-7000-8000-000000000001"
+        },
+        "schema": "cooldis.event.context.read_plan.set/1",
+        "scope": "thread",
+        "source_id": "thread:018f0000-0000-7000-8000-000000000001",
+        "summary_event_id": "018f0000-0000-7000-8000-00000000002c",
+        "template_id": "std::context.summarize",
+        "trigger_event_id": "018f0000-0000-7000-8000-00000000002b",
+        "trigger_kind": "turn.completed"
+      },
+      "stream": "derived:context"
+    }
+  ]
+}

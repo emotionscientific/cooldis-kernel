@@ -1,0 +1,30 @@
+target/
+**/target/
+
+.tmp/
+.site/
+# Local daemon runtime state (publish records embed absolute home paths).
+**/.cooldis/
+_site/
+dist/
+scratch/
+notes/
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.codex/
+.pi/
+.DS_Store
+.env
+.env.*
+*.profraw
+*.profdata
+
+# Personal live-provider smoke helpers live in local Codex skills, not the repo.
+scripts/with-wafer-env.sh
+scripts/mcp-wafer-backwards-smoke.sh
+scripts/wafer-glm-host-author-smoke.sh
+crates/cooldis-kernel/src/bin/cooldis-wafer-glm-host-author-smoke.rs
+
+# Upstream Codex test fixtures can be too large for this repo's commit hooks.
+vendor/codex/codex-rs/tui/tests/fixtures/oss-story.jsonl

@@ -1,0 +1,43 @@
+{
+  "schedule_continue": [
+    {
+      "kind": "turn.continue.requested",
+      "payload": {
+        "next_turn_input": "run scheduled nightly summary",
+        "reason": "scheduled occurrence accepted",
+        "schedule": {
+          "mandate_event_id": "018f0000-0000-7000-8000-000000000050",
+          "mandate_id": "mandate-nightly-summary",
+          "max_occurrences": 2,
+          "occurrence": 1,
+          "schedule_id": "nightly-summary"
+        },
+        "schema": "cooldis.event.turn.continue.requested/1",
+        "snapshot_id": "snapshot-a",
+        "subject": {
+          "loop_id": "loop-nightly",
+          "parent_turn_id": "turn-nightly-root"
+        },
+        "template_id": "std::schedule.cron"
+      },
+      "stream": "control"
+    }
+  ],
+  "schedule_exhausted": [
+    {
+      "kind": "loop.budget_exhausted",
+      "payload": {
+        "mandate_event_id": "018f0000-0000-7000-8000-000000000051",
+        "mandate_id": "mandate-nightly-summary",
+        "max_occurrences": 2,
+        "occurrence": 3,
+        "reason": "schedule budget exhausted after occurrence 3/2",
+        "schedule_id": "nightly-summary",
+        "schema": "cooldis.event.loop.budget_exhausted/1",
+        "snapshot_id": "snapshot-a",
+        "template_id": "std::schedule.cron"
+      },
+      "stream": "control"
+    }
+  ]
+}

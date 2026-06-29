@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "found": { "type": "boolean" }
+  },
+  "required": ["found"],
+  "additionalProperties": true
+}

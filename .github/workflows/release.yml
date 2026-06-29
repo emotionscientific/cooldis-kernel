@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-x64
+            runner: macos-26-intel
+            target: x86_64-apple-darwin
+          - name: macos-arm64
+            runner: macos-26
+            target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Check release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,${{ matrix.target }}
+
+      - name: Package release binary
+        run: scripts/package-release-binary.sh --out-dir dist --target "${{ matrix.target }}"
+
+      - name: Smoke release archive
+        shell: bash
+        run: |
+          archive="$(find dist -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
+          test -n "$archive"
+          scripts/smoke-release-archive.sh "$archive"
+
+      - name: Smoke installer
+        shell: bash
+        run: |
+          archive="$(find dist -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
+          test -n "$archive"
+          scripts/smoke-install.sh "$archive"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cooldis-${{ matrix.target }}
+          path: |
+            dist/cooldis-*.tar.gz
+            dist/cooldis-*.tar.gz.sha256
+          if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare install assets
+        shell: bash
+        run: |
+          scripts/write-release-manifest.sh \
+            --out-dir dist \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME"
+          cp scripts/install.sh dist/install.sh
+
+      - name: Smoke installer against Linux release artifact
+        shell: bash
+        run: |
+          archive="$(find dist -maxdepth 1 -name 'cooldis-*-x86_64-unknown-linux-gnu.tar.gz' | head -n 1)"
+          test -n "$archive"
+          scripts/smoke-install.sh "$archive"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

@@ -1,0 +1,43 @@
+{
+  "failure_deadletter": [
+    {
+      "kind": "coupling.run.failed",
+      "payload": {
+        "deadletter_id": "deadletter:018f0000-0000-7000-8000-000000000032",
+        "failure": {
+          "budget_spent": {
+            "discharge_events": 0
+          },
+          "config_hash": "sha256:queue-task",
+          "coupling_id": "std::queue.task",
+          "depth": 0,
+          "discharged_event_ids": [],
+          "function_ref": "op://std-queue-task/run@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "remote service unavailable",
+          "root_event_id": "018f0000-0000-7000-8000-000000000030",
+          "snapshot_id": "snapshot-a",
+          "source_cut": {
+            "entries": []
+          },
+          "source_event_ids": [],
+          "status": "failed",
+          "trigger_event_id": "018f0000-0000-7000-8000-000000000031",
+          "trigger_sequence": 2,
+          "trigger_stream_id": "thread:fixture-thread"
+        },
+        "queue": "default",
+        "reason": "deadletter failed control facts for inspection",
+        "role": "deadletter_projection",
+        "schema": "cooldis.event.coupling.run.failed/1",
+        "snapshot_id": "snapshot-a",
+        "source_event_id": "018f0000-0000-7000-8000-000000000032",
+        "source_kind": "coupling.run.failed",
+        "source_sequence": 3,
+        "source_stream_id": "control:018f0000-0000-7000-8000-000000000001",
+        "status": "deadlettered",
+        "template_id": "std::failure.deadletter"
+      },
+      "stream": "derived:deadletter"
+    }
+  ]
+}

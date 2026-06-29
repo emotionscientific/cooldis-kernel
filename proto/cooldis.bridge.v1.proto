@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package cooldis.bridge.v1;
+
+// CapabilityBridge is the long-lived local/remote operation bridge. Shell
+// execution is one namespace, not the whole protocol.
+service CapabilityBridge {
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc Invoke(InvokeRequest) returns (stream OperationEvent);
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+}
+
+message Scope {
+  string tenant_id = 1;
+  string user_id = 2;
+  string session_id = 3;
+  optional string thread_id = 4;
+}
+
+enum BackendKind {
+  BACKEND_KIND_UNSPECIFIED = 0;
+  BACKEND_KIND_IN_PROCESS = 1;
+  BACKEND_KIND_LOCAL_DAEMON = 2;
+  BACKEND_KIND_REMOTE_SERVICE = 3;
+  BACKEND_KIND_SANDBOX_FLEET = 4;
+}
+
+message CapabilityDescriptor {
+  string namespace = 1;
+  repeated string operations = 2;
+  BackendKind backend_kind = 3;
+  optional string description = 4;
+}
+
+message CapabilitiesRequest {}
+
+message CapabilitiesResponse {
+  string backend_id = 1;
+  BackendKind backend_kind = 2;
+  repeated CapabilityDescriptor capabilities = 3;
+}
+
+message CapabilityGrant {
+  string namespace = 1;
+  repeated string operations = 2;
+}
+
+message OpenSessionRequest {
+  Scope scope = 1;
+  repeated CapabilityGrant requested_capabilities = 2;
+  map<string, string> metadata = 3;
+}
+
+message OpenSessionResponse {
+  string bridge_session_id = 1;
+  Scope scope = 2;
+  repeated CapabilityGrant granted_capabilities = 3;
+}
+
+message InvokeRequest {
+  string operation_id = 1;
+  string bridge_session_id = 2;
+  Scope scope = 3;
+  string namespace = 4;
+  string operation = 5;
+  bytes json_payload = 6;
+  optional uint64 timeout_ms = 7;
+  map<string, string> metadata = 8;
+}
+
+message OperationEvent {
+  string operation_id = 1;
+
+  oneof event {
+    Started started = 2;
+    StreamBytes stdout = 3;
+    StreamBytes stderr = 4;
+    Log log = 5;
+    Artifact artifact = 6;
+    FileDelta file_delta = 7;
+    Frame frame = 8;
+    Completed completed = 9;
+    Failed failed = 10;
+    Cancelled cancelled = 11;
+  }
+}
+
+message Started {}
+
+message StreamBytes {
+  bytes bytes = 1;
+}
+
+message Log {
+  string level = 1;
+  string message = 2;
+}
+
+message Artifact {
+  string artifact_id = 1;
+  optional string path = 2;
+  optional string mime_type = 3;
+}
+
+message FileDelta {
+  string kind = 1;
+  string path = 2;
+  optional string target = 3;
+}
+
+message Frame {
+  string frame_id = 1;
+  string mime_type = 2;
+}
+
+message Completed {
+  optional int32 code = 1;
+  bool success = 2;
+}
+
+message Failed {
+  string code = 1;
+  string message = 2;
+}
+
+message Cancelled {
+  string reason = 1;
+}
+
+message CancelRequest {
+  string operation_id = 1;
+}
+
+message CancelResponse {}
+
+message CloseSessionRequest {
+  string bridge_session_id = 1;
+}
+
+message CloseSessionResponse {}

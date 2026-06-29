@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a focused project improvement.
+title: "[feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or maintainer problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - runtime core
+        - ABI or contracts
+        - tools or operations
+        - providers
+        - VFS or sandboxing
+        - docs
+        - examples
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What did you consider instead?
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks or compatibility concerns
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I have searched existing issues.
+          required: true
+        - label: I am willing to discuss scope before implementation.
+          required: true

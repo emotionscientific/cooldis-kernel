@@ -1,0 +1,42 @@
+{
+  "approval_gate": [
+    {
+      "kind": "approval.requested",
+      "payload": {
+        "approval_id": "approval-shell-call",
+        "kind": "tool.call",
+        "reason": "operator approval required",
+        "request_event_id": "018f0000-0000-7000-8000-00000000005c",
+        "resume_token": "resume-shell-call",
+        "schema": "cooldis.event.approval.requested/1",
+        "snapshot_id": "snapshot-a",
+        "subject": {
+          "call_id": "call-approval",
+          "turn_id": "turn-1"
+        },
+        "template_id": "std::permission.approval_gate",
+        "tool_name": "shell.exec"
+      },
+      "stream": "control"
+    },
+    {
+      "kind": "tool.call.suspended",
+      "payload": {
+        "approval_id": "approval-shell-call",
+        "approval_requested_event_role": "approval_request",
+        "reason": "operator approval required",
+        "request_event_id": "018f0000-0000-7000-8000-00000000005c",
+        "resume_token": "resume-shell-call",
+        "schema": "cooldis.event.tool.call.suspended/1",
+        "snapshot_id": "snapshot-a",
+        "subject": {
+          "call_id": "call-approval",
+          "turn_id": "turn-1"
+        },
+        "template_id": "std::permission.approval_gate",
+        "tool_name": "shell.exec"
+      },
+      "stream": "control"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "url": { "type": "string" },
+    "headers": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "timeoutMs": { "type": "integer" },
+    "maxResponseBytes": { "type": "integer" }
+  },
+  "required": ["url"]
+}

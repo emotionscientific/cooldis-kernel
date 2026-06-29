@@ -1,0 +1,53 @@
+{
+  "child_turn_completed": [
+    {
+      "kind": "loop.completed",
+      "payload": {
+        "child": {
+          "child_thread_id": "018f0000-0000-7000-8000-000000000002",
+          "child_turn_id": "child-turn-1",
+          "parent_thread_id": "018f0000-0000-7000-8000-000000000001",
+          "status": "completed"
+        },
+        "parent_thread_id": "018f0000-0000-7000-8000-000000000001",
+        "reason": "child work joined back to supervisor",
+        "schema": "cooldis.event.loop.completed/1",
+        "snapshot_id": "snapshot-a",
+        "template_id": "std::supervisor.child_completion",
+        "trigger_event_id": "018f0000-0000-7000-8000-000000000064",
+        "trigger_kind": "turn.completed"
+      },
+      "stream": "control"
+    }
+  ],
+  "spawn_receipt_continue": [
+    {
+      "kind": "turn.continue.requested",
+      "payload": {
+        "child": {
+          "child_thread_id": "018f0000-0000-7000-8000-000000000002",
+          "child_turn_id": "child-turn-1",
+          "completed_coupling_id": "std::supervisor.spawn",
+          "completed_discharged_event_ids": [
+            "018f0000-0000-7000-8000-000000000064"
+          ],
+          "completed_trigger_event_id": "018f0000-0000-7000-8000-000000000063",
+          "parent_thread_id": "018f0000-0000-7000-8000-000000000001",
+          "status": "completed"
+        },
+        "next_turn_input": "incorporate child release evidence",
+        "reason": "child completion should resume the supervisor",
+        "schema": "cooldis.event.turn.continue.requested/1",
+        "snapshot_id": "snapshot-a",
+        "subject": {
+          "loop_id": "supervisor-release",
+          "parent_turn_id": "parent-turn-1"
+        },
+        "template_id": "std::supervisor.child_completion",
+        "trigger_event_id": "018f0000-0000-7000-8000-000000000065",
+        "trigger_kind": "coupling.run.completed"
+      },
+      "stream": "control"
+    }
+  ]
+}

@@ -1,0 +1,987 @@
+//! Kernel-native operation packages synthesized by the daemon at startup.
+//!
+//! These records are published into the same operation registry as Wasm tools,
+//! but their artifact bytes are the canonical serialized interface contract and
+//! execution is dispatched back into kernel code by record and operation name.
+
+use super::operation_store::PublishInterfaceOperationRequest;
+use super::tool_package::TOOL_MANUAL_SCHEMA_VERSION;
+use crate::{
+    CooldisError, CooldisResult, LocalOperationRegistry, PublishedOperationRecord,
+    PublishedOperationSource, ToolCommandContract, ToolInterfaceContract, ToolManualExitStatus,
+    ToolOperationInterface, ToolOperationManual, ToolPackageIdentity, ToolRuntimeContract,
+    WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest, WasmOperationMode,
+    WasmOperationValueKind, wasm_sha256,
+};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+pub const COOLDIS_THREADS_PACKAGE: &str = "cooldis-threads";
+pub const COOLDIS_PROCESS_PACKAGE: &str = "cooldis-process";
+pub const COOLDIS_NOTIFY_PACKAGE: &str = "cooldis-notify";
+pub const THREAD_SPAWN_OPERATION: &str = "thread_spawn";
+pub const THREAD_SUBMIT_OPERATION: &str = "thread_submit";
+pub const THREAD_WAIT_OPERATION: &str = "thread_wait";
+pub const THREAD_STATUS_OPERATION: &str = "thread_status";
+pub const THREAD_CANCEL_OPERATION: &str = "thread_cancel";
+pub const PROCESS_EXEC_OPERATION: &str = "process_exec";
+pub const PROCESS_POLL_OPERATION: &str = "process_poll";
+pub const PROCESS_WRITE_OPERATION: &str = "process_write";
+pub const PROCESS_TERMINATE_OPERATION: &str = "process_terminate";
+pub const NOTIFY_PREVIEW_OPERATION: &str = "notify_preview";
+pub const CHANNEL_EMIT_OPERATION: &str = "channel_emit";
+pub const THREADS_SPAWN_CAPABILITY: &str = "threads.spawn";
+pub const THREADS_CONTROL_CAPABILITY: &str = "threads.control";
+pub const THREADS_READ_CAPABILITY: &str = "threads.read";
+pub const PROCESS_SPAWN_CAPABILITY: &str = "process.spawn";
+pub const PROCESS_READ_CAPABILITY: &str = "process.read";
+pub const PROCESS_WRITE_CAPABILITY: &str = "process.write";
+pub const PROCESS_CONTROL_CAPABILITY: &str = "process.control";
+pub const NOTIFY_PREVIEW_CAPABILITY: &str = "notify.preview";
+pub const CHANNEL_EMIT_CAPABILITY: &str = "channel.emit";
+pub const KERNEL_RUNTIME_KIND: &str = "kernel";
+pub const OPERATION_METADATA_RUNTIME_KIND: &str = "cooldis.runtime.kind";
+
+pub fn ensure_cooldis_threads_published(
+    registry_root: Option<&Path>,
+) -> CooldisResult<Option<PublishedOperationRecord>> {
+    let Some(registry_root) = registry_root else {
+        eprintln!(
+            "cooldis app-server: no operation registry root configured; skipping cooldis-threads kernel package"
+        );
+        return Ok(None);
+    };
+    let registry = LocalOperationRegistry::new(registry_root);
+    let package = cooldis_threads_kernel_package();
+    let expected_hash = package.interface_hash()?;
+    if let Ok(existing) = registry.load_record(COOLDIS_THREADS_PACKAGE)
+        && existing.active_artifact_hash == expected_hash
+    {
+        return Ok(Some(existing));
+    }
+    Ok(registry
+        .publish_interface_record(PublishInterfaceOperationRequest {
+            name: COOLDIS_THREADS_PACKAGE.to_string(),
+            source: PublishedOperationSource::Kernel {
+                package: COOLDIS_THREADS_PACKAGE.to_string(),
+            },
+            manifest: package.manifest,
+            interface: package.interface,
+            capability_grants: package.capability_grants,
+            metadata: BTreeMap::from([(
+                OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                Value::String(KERNEL_RUNTIME_KIND.to_string()),
+            )]),
+        })
+        .map(Some)?)
+}
+
+pub fn ensure_cooldis_process_published(
+    registry_root: Option<&Path>,
+) -> CooldisResult<Option<PublishedOperationRecord>> {
+    let Some(registry_root) = registry_root else {
+        eprintln!(
+            "cooldis app-server: no operation registry root configured; skipping cooldis-process kernel package"
+        );
+        return Ok(None);
+    };
+    let registry = LocalOperationRegistry::new(registry_root);
+    let package = cooldis_process_kernel_package();
+    let expected_hash = package.interface_hash()?;
+    if let Ok(existing) = registry.load_record(COOLDIS_PROCESS_PACKAGE)
+        && existing.active_artifact_hash == expected_hash
+    {
+        return Ok(Some(existing));
+    }
+    Ok(registry
+        .publish_interface_record(PublishInterfaceOperationRequest {
+            name: COOLDIS_PROCESS_PACKAGE.to_string(),
+            source: PublishedOperationSource::Kernel {
+                package: COOLDIS_PROCESS_PACKAGE.to_string(),
+            },
+            manifest: package.manifest,
+            interface: package.interface,
+            capability_grants: package.capability_grants,
+            metadata: BTreeMap::from([(
+                OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                Value::String(KERNEL_RUNTIME_KIND.to_string()),
+            )]),
+        })
+        .map(Some)?)
+}
+
+pub fn ensure_cooldis_notify_published(
+    registry_root: Option<&Path>,
+) -> CooldisResult<Option<PublishedOperationRecord>> {
+    let Some(registry_root) = registry_root else {
+        eprintln!(
+            "cooldis app-server: no operation registry root configured; skipping cooldis-notify kernel package"
+        );
+        return Ok(None);
+    };
+    let registry = LocalOperationRegistry::new(registry_root);
+    let package = cooldis_notify_kernel_package();
+    let expected_hash = package.interface_hash()?;
+    if let Ok(existing) = registry.load_record(COOLDIS_NOTIFY_PACKAGE)
+        && existing.active_artifact_hash == expected_hash
+    {
+        return Ok(Some(existing));
+    }
+    Ok(registry
+        .publish_interface_record(PublishInterfaceOperationRequest {
+            name: COOLDIS_NOTIFY_PACKAGE.to_string(),
+            source: PublishedOperationSource::Kernel {
+                package: COOLDIS_NOTIFY_PACKAGE.to_string(),
+            },
+            manifest: package.manifest,
+            interface: package.interface,
+            capability_grants: package.capability_grants,
+            metadata: BTreeMap::from([(
+                OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                Value::String(KERNEL_RUNTIME_KIND.to_string()),
+            )]),
+        })
+        .map(Some)?)
+}
+
+pub struct KernelPackageDefinition {
+    pub manifest: WasmOperationManifest,
+    pub interface: ToolInterfaceContract,
+    pub capability_grants: BTreeSet<String>,
+}
+
+impl KernelPackageDefinition {
+    fn interface_hash(&self) -> CooldisResult<String> {
+        let bytes = serde_json::to_vec(&self.interface).map_err(|err| {
+            CooldisError::RuntimeFactory(format!("failed to encode kernel interface: {err}"))
+        })?;
+        Ok(wasm_sha256(&bytes))
+    }
+}
+
+pub fn cooldis_threads_kernel_package() -> KernelPackageDefinition {
+    let specs = thread_operation_specs();
+    let manifest = WasmOperationManifest {
+        abi: "cooldis.operation/0.1".to_string(),
+        operations: specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| WasmOperationDefinition {
+                id: (index + 1) as u32,
+                name: spec.name.to_string(),
+                input: WasmOperationValueKind::Json,
+                output: WasmOperationValueKind::Json,
+                events: WasmOperationEventKind::None,
+                mode: WasmOperationMode::Sync,
+                required_capabilities: spec
+                    .capabilities
+                    .iter()
+                    .map(|capability| (*capability).to_string())
+                    .collect(),
+            })
+            .collect(),
+    };
+    let identity = ToolPackageIdentity {
+        name: COOLDIS_THREADS_PACKAGE.to_string(),
+        version: Some("1.0.0".to_string()),
+        description: Some(
+            "Thread control operations implemented by the Cooldis kernel.".to_string(),
+        ),
+        owner: Some("cooldis".to_string()),
+    };
+    let runtime = ToolRuntimeContract {
+        kind: KERNEL_RUNTIME_KIND.to_string(),
+        state: None,
+        module_path: None,
+        bin_path: None,
+        release: None,
+        timeout_ms: None,
+        max_input_bytes: None,
+        max_output_bytes: None,
+    };
+    let operations = specs
+        .iter()
+        .map(|spec| {
+            let required_capabilities = spec
+                .capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect::<BTreeSet<_>>();
+            ToolOperationInterface {
+                name: spec.name.to_string(),
+                description: Some(spec.summary.to_string()),
+                input_schema: (spec.input_schema)(),
+                output_schema: (spec.output_schema)(),
+                required_capabilities: required_capabilities.clone(),
+                command: Some(ToolCommandContract {
+                    name: spec.name.to_string(),
+                    stdin: Some("json".to_string()),
+                    stdout: Some("json".to_string()),
+                }),
+                mcp: None,
+                manual: Some(ToolOperationManual {
+                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                    tool_name: COOLDIS_THREADS_PACKAGE.to_string(),
+                    operation_name: spec.name.to_string(),
+                    summary: spec.summary.to_string(),
+                    usage: vec![spec.name.to_string()],
+                    input_schema: (spec.input_schema)(),
+                    output_schema: (spec.output_schema)(),
+                    required_capabilities,
+                    examples: Vec::new(),
+                    exit_status: manual_exit_status(),
+                    generated: false,
+                    warnings: Vec::new(),
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let capability_grants = operations
+        .iter()
+        .flat_map(|operation| operation.required_capabilities.iter().cloned())
+        .collect();
+    KernelPackageDefinition {
+        manifest,
+        interface: ToolInterfaceContract {
+            schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
+            identity,
+            runtime,
+            operations,
+            fixtures: Vec::new(),
+        },
+        capability_grants,
+    }
+}
+
+pub fn cooldis_process_kernel_package() -> KernelPackageDefinition {
+    let specs = process_operation_specs();
+    let manifest = WasmOperationManifest {
+        abi: "cooldis.operation/0.1".to_string(),
+        operations: specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| WasmOperationDefinition {
+                id: (index + 1) as u32,
+                name: spec.name.to_string(),
+                input: WasmOperationValueKind::Json,
+                output: WasmOperationValueKind::Json,
+                events: WasmOperationEventKind::None,
+                mode: WasmOperationMode::Sync,
+                required_capabilities: spec
+                    .capabilities
+                    .iter()
+                    .map(|capability| (*capability).to_string())
+                    .collect(),
+            })
+            .collect(),
+    };
+    let identity = ToolPackageIdentity {
+        name: COOLDIS_PROCESS_PACKAGE.to_string(),
+        version: Some("1.0.0".to_string()),
+        description: Some(
+            "Process handle operations implemented by the Cooldis kernel.".to_string(),
+        ),
+        owner: Some("cooldis".to_string()),
+    };
+    let runtime = ToolRuntimeContract {
+        kind: KERNEL_RUNTIME_KIND.to_string(),
+        state: None,
+        module_path: None,
+        bin_path: None,
+        release: None,
+        timeout_ms: None,
+        max_input_bytes: None,
+        max_output_bytes: None,
+    };
+    let operations = specs
+        .iter()
+        .map(|spec| {
+            let required_capabilities = spec
+                .capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect::<BTreeSet<_>>();
+            ToolOperationInterface {
+                name: spec.name.to_string(),
+                description: Some(spec.summary.to_string()),
+                input_schema: (spec.input_schema)(),
+                output_schema: process_snapshot_output_schema(spec.receipt_operation),
+                required_capabilities: required_capabilities.clone(),
+                command: Some(ToolCommandContract {
+                    name: spec.name.to_string(),
+                    stdin: Some("json".to_string()),
+                    stdout: Some("json".to_string()),
+                }),
+                mcp: None,
+                manual: Some(ToolOperationManual {
+                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                    tool_name: COOLDIS_PROCESS_PACKAGE.to_string(),
+                    operation_name: spec.name.to_string(),
+                    summary: spec.summary.to_string(),
+                    usage: vec![spec.name.to_string()],
+                    input_schema: (spec.input_schema)(),
+                    output_schema: process_snapshot_output_schema(spec.receipt_operation),
+                    required_capabilities,
+                    examples: Vec::new(),
+                    exit_status: manual_exit_status(),
+                    generated: false,
+                    warnings: vec![
+                        "Host process execution must be explicitly granted; it is not included in the default agent manifest.".to_string(),
+                    ],
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let capability_grants = operations
+        .iter()
+        .flat_map(|operation| operation.required_capabilities.iter().cloned())
+        .collect();
+    KernelPackageDefinition {
+        manifest,
+        interface: ToolInterfaceContract {
+            schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
+            identity,
+            runtime,
+            operations,
+            fixtures: Vec::new(),
+        },
+        capability_grants,
+    }
+}
+
+pub fn cooldis_notify_kernel_package() -> KernelPackageDefinition {
+    let specs = notify_operation_specs();
+    let manifest = WasmOperationManifest {
+        abi: "cooldis.operation/0.1".to_string(),
+        operations: specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| WasmOperationDefinition {
+                id: (index + 1) as u32,
+                name: spec.name.to_string(),
+                input: WasmOperationValueKind::Json,
+                output: WasmOperationValueKind::Json,
+                events: WasmOperationEventKind::None,
+                mode: WasmOperationMode::Sync,
+                required_capabilities: spec
+                    .capabilities
+                    .iter()
+                    .map(|capability| (*capability).to_string())
+                    .collect(),
+            })
+            .collect(),
+    };
+    let identity = ToolPackageIdentity {
+        name: COOLDIS_NOTIFY_PACKAGE.to_string(),
+        version: Some("1.0.0".to_string()),
+        description: Some(
+            "Notification and channel intent operations implemented by the Cooldis kernel."
+                .to_string(),
+        ),
+        owner: Some("cooldis".to_string()),
+    };
+    let runtime = ToolRuntimeContract {
+        kind: KERNEL_RUNTIME_KIND.to_string(),
+        state: None,
+        module_path: None,
+        bin_path: None,
+        release: None,
+        timeout_ms: None,
+        max_input_bytes: None,
+        max_output_bytes: None,
+    };
+    let operations = specs
+        .iter()
+        .map(|spec| {
+            let required_capabilities = spec
+                .capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect::<BTreeSet<_>>();
+            ToolOperationInterface {
+                name: spec.name.to_string(),
+                description: Some(spec.summary.to_string()),
+                input_schema: (spec.input_schema)(),
+                output_schema: notify_receipt_output_schema(spec.receipt_operation),
+                required_capabilities: required_capabilities.clone(),
+                command: Some(ToolCommandContract {
+                    name: spec.name.to_string(),
+                    stdin: Some("json".to_string()),
+                    stdout: Some("json".to_string()),
+                }),
+                mcp: None,
+                manual: Some(ToolOperationManual {
+                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                    tool_name: COOLDIS_NOTIFY_PACKAGE.to_string(),
+                    operation_name: spec.name.to_string(),
+                    summary: spec.summary.to_string(),
+                    usage: vec![spec.name.to_string()],
+                    input_schema: (spec.input_schema)(),
+                    output_schema: notify_receipt_output_schema(spec.receipt_operation),
+                    required_capabilities,
+                    examples: Vec::new(),
+                    exit_status: manual_exit_status(),
+                    generated: false,
+                    warnings: vec![
+                        "This V1 reference package records channel intent and does not deliver to Slack, Telegram, email, or HITL channels.".to_string(),
+                    ],
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let capability_grants = operations
+        .iter()
+        .flat_map(|operation| operation.required_capabilities.iter().cloned())
+        .collect();
+    KernelPackageDefinition {
+        manifest,
+        interface: ToolInterfaceContract {
+            schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
+            identity,
+            runtime,
+            operations,
+            fixtures: Vec::new(),
+        },
+        capability_grants,
+    }
+}
+
+struct ThreadOperationSpec {
+    name: &'static str,
+    summary: &'static str,
+    capabilities: &'static [&'static str],
+    input_schema: fn() -> Value,
+    output_schema: fn() -> Value,
+}
+
+struct ProcessOperationSpec {
+    name: &'static str,
+    summary: &'static str,
+    capabilities: &'static [&'static str],
+    input_schema: fn() -> Value,
+    receipt_operation: &'static str,
+}
+
+struct NotifyOperationSpec {
+    name: &'static str,
+    summary: &'static str,
+    capabilities: &'static [&'static str],
+    input_schema: fn() -> Value,
+    receipt_operation: &'static str,
+}
+
+fn thread_operation_specs() -> Vec<ThreadOperationSpec> {
+    vec![
+        ThreadOperationSpec {
+            name: THREAD_SPAWN_OPERATION,
+            summary: "Start a supervised child thread and submit its first message.",
+            capabilities: &[THREADS_SPAWN_CAPABILITY],
+            input_schema: thread_spawn_input_schema,
+            output_schema: spawn_output_schema,
+        },
+        ThreadOperationSpec {
+            name: THREAD_SUBMIT_OPERATION,
+            summary: "Submit a user message to a scoped thread.",
+            capabilities: &[THREADS_CONTROL_CAPABILITY],
+            input_schema: target_message_input_schema,
+            output_schema: submit_output_schema,
+        },
+        ThreadOperationSpec {
+            name: THREAD_WAIT_OPERATION,
+            summary: "Wait for a scoped thread to settle.",
+            capabilities: &[THREADS_READ_CAPABILITY],
+            input_schema: wait_input_schema,
+            output_schema: wait_output_schema,
+        },
+        ThreadOperationSpec {
+            name: THREAD_STATUS_OPERATION,
+            summary: "Report status for self or a scoped thread, including children.",
+            capabilities: &[THREADS_READ_CAPABILITY],
+            input_schema: optional_target_input_schema,
+            output_schema: status_output_schema,
+        },
+        ThreadOperationSpec {
+            name: THREAD_CANCEL_OPERATION,
+            summary: "Cancel a scoped thread.",
+            capabilities: &[THREADS_CONTROL_CAPABILITY],
+            input_schema: cancel_input_schema,
+            output_schema: lifecycle_output_schema,
+        },
+    ]
+}
+
+fn process_operation_specs() -> Vec<ProcessOperationSpec> {
+    vec![
+        ProcessOperationSpec {
+            name: PROCESS_EXEC_OPERATION,
+            summary: "Start a host command process and return its first process snapshot.",
+            capabilities: &[PROCESS_SPAWN_CAPABILITY],
+            input_schema: process_exec_input_schema,
+            receipt_operation: "cooldis.process_exec",
+        },
+        ProcessOperationSpec {
+            name: PROCESS_POLL_OPERATION,
+            summary: "Poll an existing process handle and return its latest process snapshot.",
+            capabilities: &[PROCESS_READ_CAPABILITY],
+            input_schema: process_handle_input_schema,
+            receipt_operation: "cooldis.process_poll",
+        },
+        ProcessOperationSpec {
+            name: PROCESS_WRITE_OPERATION,
+            summary: "Write base64 stdin bytes to a process handle and return its latest snapshot.",
+            capabilities: &[PROCESS_WRITE_CAPABILITY],
+            input_schema: process_write_input_schema,
+            receipt_operation: "cooldis.process_write",
+        },
+        ProcessOperationSpec {
+            name: PROCESS_TERMINATE_OPERATION,
+            summary: "Terminate a process handle and return its terminal process snapshot.",
+            capabilities: &[PROCESS_CONTROL_CAPABILITY],
+            input_schema: process_terminate_input_schema,
+            receipt_operation: "cooldis.process_terminate",
+        },
+    ]
+}
+
+fn thread_spawn_input_schema() -> Value {
+    object_schema(
+        json!({
+            "task_name": string_schema("Stable task name for the child thread."),
+            "message": string_schema("Initial user message submitted to the child thread."),
+            "agent_ref": string_schema("Optional published agent reference for the child thread.")
+        }),
+        &["task_name", "message"],
+    )
+}
+
+fn notify_operation_specs() -> Vec<NotifyOperationSpec> {
+    vec![
+        NotifyOperationSpec {
+            name: NOTIFY_PREVIEW_OPERATION,
+            summary: "Normalize a notification intent without delivering it to a channel.",
+            capabilities: &[NOTIFY_PREVIEW_CAPABILITY],
+            input_schema: notify_preview_input_schema,
+            receipt_operation: "cooldis.notify_preview",
+        },
+        NotifyOperationSpec {
+            name: CHANNEL_EMIT_OPERATION,
+            summary: "Record channel egress intent for an explicit external delivery adapter.",
+            capabilities: &[CHANNEL_EMIT_CAPABILITY],
+            input_schema: channel_emit_input_schema,
+            receipt_operation: "cooldis.channel_emit",
+        },
+    ]
+}
+
+fn process_exec_input_schema() -> Value {
+    object_schema(
+        json!({
+            "command": {
+                "type": "array",
+                "description": "Command argv to execute. The first item is the executable.",
+                "items": string_schema("Command argument.")
+            },
+            "cwd": string_schema("Optional working directory."),
+            "env": {
+                "type": "object",
+                "description": "Optional environment variable overrides.",
+                "additionalProperties": string_schema("Environment variable value.")
+            },
+            "stream_stdin": { "type": "boolean" },
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Optional hard execution deadline in milliseconds."
+            },
+            "yield_time_ms": {
+                "type": "integer",
+                "description": "How long to wait for output or terminal state before returning."
+            },
+            "output_bytes_cap": {
+                "type": "integer",
+                "description": "Maximum stdout/stderr bytes retained for this snapshot."
+            }
+        }),
+        &["command"],
+    )
+}
+
+fn notify_preview_input_schema() -> Value {
+    object_schema(
+        json!({
+            "channel": string_schema("Logical channel family or adapter name."),
+            "subject": string_schema("Short notification subject."),
+            "body": string_schema("Notification body."),
+            "severity": string_schema("Optional severity such as info, warning, or critical.")
+        }),
+        &["channel", "body"],
+    )
+}
+
+fn channel_emit_input_schema() -> Value {
+    object_schema(
+        json!({
+            "channel": string_schema("Logical channel family or adapter name."),
+            "message": string_schema("Channel message body."),
+            "thread_id": string_schema("Optional Cooldis thread id associated with the egress intent.")
+        }),
+        &["channel", "message"],
+    )
+}
+
+fn process_handle_input_schema() -> Value {
+    object_schema(
+        json!({
+            "process_id": string_schema("Cooldis process id."),
+            "yield_time_ms": {
+                "type": "integer",
+                "description": "How long to wait for output or terminal state before returning."
+            },
+            "output_bytes_cap": {
+                "type": "integer",
+                "description": "Maximum stdout/stderr bytes retained for this snapshot."
+            }
+        }),
+        &["process_id"],
+    )
+}
+
+fn process_write_input_schema() -> Value {
+    object_schema(
+        json!({
+            "process_id": string_schema("Cooldis process id."),
+            "delta_base64": string_schema("Base64 encoded stdin bytes."),
+            "yield_time_ms": {
+                "type": "integer",
+                "description": "How long to wait for output or terminal state before returning."
+            },
+            "output_bytes_cap": {
+                "type": "integer",
+                "description": "Maximum stdout/stderr bytes retained for this snapshot."
+            }
+        }),
+        &["process_id", "delta_base64"],
+    )
+}
+
+fn process_terminate_input_schema() -> Value {
+    object_schema(
+        json!({
+            "process_id": string_schema("Cooldis process id."),
+            "reason": string_schema("Human-readable termination reason."),
+            "yield_time_ms": {
+                "type": "integer",
+                "description": "How long to wait for terminal state before returning."
+            }
+        }),
+        &["process_id"],
+    )
+}
+
+fn target_message_input_schema() -> Value {
+    object_schema(
+        json!({
+            "target_thread_id": string_schema("Target Cooldis thread id."),
+            "message": string_schema("User message to submit.")
+        }),
+        &["target_thread_id", "message"],
+    )
+}
+
+fn wait_input_schema() -> Value {
+    object_schema(
+        json!({
+            "target_thread_id": string_schema("Target Cooldis thread id."),
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Optional timeout in milliseconds."
+            }
+        }),
+        &["target_thread_id"],
+    )
+}
+
+fn optional_target_input_schema() -> Value {
+    object_schema(
+        json!({
+            "target_thread_id": string_schema("Optional target Cooldis thread id.")
+        }),
+        &[],
+    )
+}
+
+fn cancel_input_schema() -> Value {
+    object_schema(
+        json!({
+            "target_thread_id": string_schema("Target Cooldis thread id.")
+        }),
+        &["target_thread_id"],
+    )
+}
+
+fn process_snapshot_output_schema(operation: &str) -> Value {
+    object_schema(
+        json!({
+            "operation": {
+                "type": "string",
+                "enum": [operation],
+                "description": "Receipt operation name."
+            },
+            "process_id": string_schema("Running process id, omitted once the process reaches a terminal state."),
+            "status": process_status_schema("Current process status."),
+            "backend": string_schema("Process backend kind."),
+            "label": string_schema("Human-readable process label."),
+            "exit_code": {
+                "type": "integer",
+                "description": "Process exit code, present after an exit code is known."
+            },
+            "stdout": string_schema("Visible stdout bytes decoded as UTF-8 lossily."),
+            "stderr": string_schema("Visible stderr bytes decoded as UTF-8 lossily."),
+            "truncated": { "type": "boolean" },
+            "stdout_truncated": { "type": "boolean" },
+            "stderr_truncated": { "type": "boolean" },
+            "event_count": {
+                "type": "integer",
+                "description": "Number of process events represented by this snapshot."
+            }
+        }),
+        &[
+            "operation",
+            "status",
+            "backend",
+            "label",
+            "stdout",
+            "stderr",
+            "truncated",
+            "stdout_truncated",
+            "stderr_truncated",
+            "event_count",
+        ],
+    )
+}
+
+fn notify_receipt_output_schema(operation: &str) -> Value {
+    object_schema(
+        json!({
+            "operation": {
+                "type": "string",
+                "enum": [operation],
+                "description": "Receipt operation name."
+            },
+            "status": {
+                "type": "string",
+                "enum": ["recorded"],
+                "description": "The channel intent was normalized as a receipt."
+            },
+            "delivery": {
+                "type": "string",
+                "enum": ["not_sent"],
+                "description": "V1 reference operations do not deliver to external channels."
+            },
+            "channel": string_schema("Logical channel family or adapter name."),
+            "subject": string_schema("Notification subject, when provided."),
+            "body": string_schema("Notification body, for notify_preview."),
+            "message": string_schema("Channel message body, for channel_emit."),
+            "severity": string_schema("Notification severity, when provided."),
+            "thread_id": string_schema("Associated thread id, when provided."),
+            "channel_decision_required": { "type": "boolean" },
+            "reason": string_schema("Why this reference operation did not deliver externally.")
+        }),
+        &[
+            "operation",
+            "status",
+            "delivery",
+            "channel",
+            "channel_decision_required",
+            "reason",
+        ],
+    )
+}
+
+fn spawn_output_schema() -> Value {
+    object_schema(
+        json!({
+            "operation": string_schema("Receipt operation name."),
+            "caller_thread_id": string_schema("Calling thread id."),
+            "thread_id": string_schema("Created child thread id."),
+            "parent_thread_id": string_schema("Parent thread id."),
+            "status": thread_status_schema("Current child thread status."),
+            "task_name": string_schema("Stable task name, when provided."),
+            "submitted_turn_id": string_schema("Submitted initial turn id.")
+        }),
+        &[
+            "operation",
+            "caller_thread_id",
+            "thread_id",
+            "parent_thread_id",
+            "status",
+            "submitted_turn_id",
+        ],
+    )
+}
+
+fn submit_output_schema() -> Value {
+    object_schema(
+        json!({
+            "operation": string_schema("Receipt operation name."),
+            "caller_thread_id": string_schema("Calling thread id."),
+            "target_thread_id": string_schema("Target thread id."),
+            "interaction_id": string_schema("Recorded interaction id."),
+            "status": thread_status_schema("Current target thread status."),
+            "turn_id": string_schema("Submitted turn id.")
+        }),
+        &[
+            "operation",
+            "caller_thread_id",
+            "target_thread_id",
+            "interaction_id",
+            "status",
+            "turn_id",
+        ],
+    )
+}
+
+fn wait_output_schema() -> Value {
+    object_schema(
+        json!({
+            "operation": string_schema("Receipt operation name."),
+            "caller_thread_id": string_schema("Calling thread id."),
+            "target_thread_id": string_schema("Target thread id."),
+            "status": thread_status_schema("Current target thread status."),
+            "timed_out": { "type": "boolean" },
+            "latest_output": string_schema("Latest target output, when available."),
+            "result_interaction_id": string_schema("Recorded result interaction id, when available.")
+        }),
+        &[
+            "operation",
+            "caller_thread_id",
+            "target_thread_id",
+            "status",
+            "timed_out",
+        ],
+    )
+}
+
+fn status_output_schema() -> Value {
+    object_schema(
+        json!({
+            "operation": string_schema("Receipt operation name."),
+            "caller_thread_id": string_schema("Calling thread id."),
+            "target_thread_id": string_schema("Target thread id."),
+            "parent_thread_id": string_schema("Parent thread id, when present."),
+            "status": thread_status_schema("Current target thread status."),
+            "children": {
+                "type": "array",
+                "items": child_schema()
+            }
+        }),
+        &[
+            "operation",
+            "caller_thread_id",
+            "target_thread_id",
+            "status",
+            "children",
+        ],
+    )
+}
+
+fn lifecycle_output_schema() -> Value {
+    object_schema(
+        json!({
+            "operation": string_schema("Receipt operation name."),
+            "caller_thread_id": string_schema("Calling thread id."),
+            "target_thread_id": string_schema("Target thread id."),
+            "status": thread_status_schema("Current target thread lifecycle status.")
+        }),
+        &[
+            "operation",
+            "caller_thread_id",
+            "target_thread_id",
+            "status",
+        ],
+    )
+}
+
+fn child_schema() -> Value {
+    object_schema(
+        json!({
+            "thread_id": string_schema("Child thread id."),
+            "parent_thread_id": string_schema("Parent thread id."),
+            "status": thread_status_schema("Current child thread status.")
+        }),
+        &["thread_id", "status"],
+    )
+}
+
+fn object_schema(properties: Value, required: &[&str]) -> Value {
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    })
+}
+
+fn string_schema(description: &str) -> Value {
+    json!({
+        "type": "string",
+        "description": description
+    })
+}
+
+fn thread_status_schema(description: &str) -> Value {
+    json!({
+        "type": "string",
+        "enum": [
+            "starting",
+            "idle",
+            "running",
+            "cancelling",
+            "stopped",
+            "failed"
+        ],
+        "description": description
+    })
+}
+
+fn process_status_schema(description: &str) -> Value {
+    json!({
+        "type": "string",
+        "enum": [
+            "running",
+            "completed",
+            "failed",
+            "timed_out",
+            "cancelled"
+        ],
+        "description": description
+    })
+}
+
+fn manual_exit_status() -> Vec<ToolManualExitStatus> {
+    vec![
+        ToolManualExitStatus {
+            code: 0,
+            meaning: "operation succeeded".to_string(),
+        },
+        ToolManualExitStatus {
+            code: 1,
+            meaning: "operation failed at runtime".to_string(),
+        },
+        ToolManualExitStatus {
+            code: 2,
+            meaning: "caller supplied invalid input or arguments".to_string(),
+        },
+        ToolManualExitStatus {
+            code: 126,
+            meaning: "capability or policy denied execution".to_string(),
+        },
+        ToolManualExitStatus {
+            code: 127,
+            meaning: "tool or operation was not found".to_string(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests;

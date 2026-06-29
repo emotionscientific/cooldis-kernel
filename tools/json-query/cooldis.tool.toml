@@ -1,0 +1,41 @@
+kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "json-query"
+version = "0.1.0"
+description = "Read a value from JSON with an RFC 6901 pointer."
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "."
+state = "stateless"
+max_input_bytes = 262144
+max_output_bytes = 262144
+
+[[operations]]
+name = "json_query"
+description = "Return the value selected by an RFC 6901 JSON pointer."
+input_schema = "schemas/json_query.input.json"
+output_schema = "schemas/json_query.output.json"
+required_capabilities = []
+
+[operations.command]
+name = "json-query query"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "json_query"
+
+[[fixtures]]
+name = "found_nested_value"
+operation = "json_query"
+input = "fixtures/found.input.json"
+expect = "fixtures/found.expect.json"
+
+[[fixtures]]
+name = "missing_pointer"
+operation = "json_query"
+input = "fixtures/missing.input.json"
+expect = "fixtures/missing.expect.json"

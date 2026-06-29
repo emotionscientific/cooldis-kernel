@@ -1,0 +1,154 @@
+use super::*;
+use crate::{ProviderApi, ThreadContext, ThreadCoordinates, TurnBudget};
+
+#[test]
+fn context_compilation_is_deterministic_and_reports_drops() {
+    let input = compile_input(
+        vec![
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("old"),
+            },
+            SessionEntryKind::CustomContextMessage {
+                message: CanonicalMessage::user_text("hook"),
+            },
+            SessionEntryKind::Message {
+                message: CanonicalMessage::assistant(
+                    "openai",
+                    ProviderApi::OpenAIResponses,
+                    "gpt-test",
+                    vec![CanonicalContent::text("abcdef")],
+                    crate::CanonicalStopReason::EndTurn,
+                ),
+            },
+        ],
+        AgentContextCompilePolicy {
+            max_messages: Some(2),
+            max_text_bytes: Some(5),
+        },
+    );
+
+    let first = AgentContextCompiler::compile(input.clone());
+    let second = AgentContextCompiler::compile(input);
+
+    assert_eq!(first, second);
+    assert_eq!(first.diagnostics.dropped_entries.len(), 1);
+    assert_eq!(first.diagnostics.retained_text_bytes, 5);
+    assert_eq!(first.diagnostics.truncated_text_bytes, 5);
+    assert_eq!(message_texts(&first.messages), vec!["", "bcdef"]);
+}
+
+#[test]
+fn compaction_entry_replaces_prior_model_visible_context() {
+    let input = compile_input(
+        vec![
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("old"),
+            },
+            SessionEntryKind::Compaction {
+                summary: "old facts".to_string(),
+            },
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("new"),
+            },
+        ],
+        AgentContextCompilePolicy::unbounded(),
+    );
+
+    let compiled = AgentContextCompiler::compile(input);
+
+    assert_eq!(
+        message_texts(&compiled.messages),
+        vec!["Compacted conversation summary:\nold facts", "new"]
+    );
+    assert_eq!(compiled.diagnostics.dropped_entries.len(), 1);
+    assert_eq!(
+        compiled.diagnostics.dropped_entries[0].reason,
+        "cleared_by_compaction"
+    );
+}
+
+#[test]
+fn environment_and_attachment_inputs_are_explicit_context() {
+    let mut input = compile_input(Vec::new(), AgentContextCompilePolicy::unbounded());
+    input.turn_context.cwd = Some(PathBuf::from("/tmp/work"));
+    input.attachments.push(AgentContextAttachment {
+        path: PathBuf::from("notes.md"),
+        mime_type: Some("text/markdown".to_string()),
+        size_bytes: Some(42),
+        sha256: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let compiled = AgentContextCompiler::compile(input);
+
+    assert_eq!(compiled.diagnostics.attachment_count, 1);
+    assert_eq!(
+        message_texts(&compiled.messages),
+        vec![
+            "<environment_context>\ncwd=/tmp/work\n</environment_context>",
+            "<attachments>\npath=notes.md mime_type=text/markdown size_bytes=42\n</attachments>"
+        ]
+    );
+}
+
+fn compile_input(
+    kinds: Vec<SessionEntryKind>,
+    policy: AgentContextCompilePolicy,
+) -> AgentContextCompileInput {
+    let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+    let entries = kinds
+        .into_iter()
+        .map(|kind| SessionEntry::new(coordinates.clone(), None, kind))
+        .collect::<Vec<_>>();
+    let thread = ThreadContext::root(coordinates);
+    AgentContextCompileInput {
+        system: vec![SystemBlock::text("system")],
+        session_entries: entries,
+        turn_context: TurnContextSnapshot {
+            turn_id: "turn".to_string(),
+            trace_id: "trace".to_string(),
+            coordinates: thread.coordinates,
+            parent_thread_id: thread.parent_thread_id,
+            topology: thread.topology,
+            cwd: None,
+            workspace_roots: Vec::new(),
+            model: Some("gpt-test".to_string()),
+            provider: Some("openai".to_string()),
+            thinking: None,
+            permission_profile: None,
+            provider_metadata: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            environment: BTreeMap::new(),
+            model_visible_context: Vec::new(),
+            budget: TurnBudget::default(),
+            cancellation_requested: false,
+        },
+        hook_contexts: Vec::new(),
+        environment_contexts: Vec::new(),
+        attachments: Vec::new(),
+        tools: vec![ToolDefinition::new(
+            "tool",
+            "tool",
+            serde_json::json!({"type":"object"}),
+        )],
+        policy,
+    }
+}
+
+fn message_texts(messages: &[CanonicalMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .map(|message| match message {
+            CanonicalMessage::User { content, .. }
+            | CanonicalMessage::Assistant { content, .. }
+            | CanonicalMessage::ToolResult { content, .. } => content
+                .iter()
+                .filter_map(|content| match content {
+                    CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+        .collect()
+}

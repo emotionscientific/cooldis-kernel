@@ -1,0 +1,72 @@
+# Researcher — the first real agent manifest example.
+#
+# A small research agent composed from the standard operation set
+# (docs/standard-operations.md): fetch a page over HTTP, read workspace
+# files, extract fields from JSON. Model profile uses provider-neutral example
+# refs; replace them with configured catalog refs for live provider runs.
+#
+# This file is a TEMPLATE. Operation refs are content-addressed; the
+# `{..._SHA256}` placeholders are substituted with the artifact hashes from
+# the local operation registry by publish.sh, which then publishes the
+# rendered manifest into the agent registry. See README.md.
+
+[agent]
+name = "researcher"
+version = "0.1.0"
+description = "Research starter: web fetch, file read, JSON extraction over the standard ops."
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local/default"
+model_ref = "model://local/default"
+
+[model_profiles.params]
+max_tokens = 4096
+
+[[tools]]
+type = "bash_tool"
+id = "http_fetch"
+command = "http_fetch"
+operation_ref = "op://http-fetch@sha256:{HTTP_FETCH_SHA256}"
+grants = ["net.http:GET:https://*", "net.http:GET:http://*"]
+
+[[tools]]
+type = "bash_tool"
+id = "file_read"
+command = "file_read"
+operation_ref = "op://file-read@sha256:{FILE_READ_SHA256}"
+grants = ["fs.read:/workspace"]
+
+[[tools]]
+type = "bash_tool"
+id = "json_query"
+command = "json_query"
+operation_ref = "op://json-query@sha256:{JSON_QUERY_SHA256}"
+
+# A live protocol universe import (search surface only). Disabled by default:
+# it needs an mcp:// source configured in the daemon's source registry and any
+# credential required by that server. Source refs bind by configured source name
+# today; content-addressing of MCP source records is a future pin-acceptance
+# concern (ticket 0039).
+#
+# [[tools]]
+# type = "protocol_tool_import"
+# id = "search"
+# protocol = "mcp"
+# server_ref = "mcp://search"
+# include_tools = ["search"]
+# grants = []
+
+[runtime]
+default_cwd = "."
+streaming = true
+
+[runtime.overrides]
+allow = ["default_cwd"]
+
+[policies]
+network = "declared-origins"
+filesystem = "vfs"
+allow_child_agents = false

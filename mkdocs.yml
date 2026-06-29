@@ -1,0 +1,32 @@
+site_name: Cooldis Docs
+site_description: Open serverless agent platform for packageable, governed agents.
+site_url: https://cooldis.someone.cool/docs/
+repo_url: https://github.com/emotionscientific/cooldis
+docs_dir: docs
+site_dir: .site/docs
+
+theme:
+  name: mkdocs
+  locale: en
+  navigation_depth: 3
+
+nav:
+  - Overview: index.md
+  - Getting Started: getting-started.md
+  - Concepts:
+      - Declarative Agents: concepts/declarative-agents.md
+      - Local To Managed Deployment: concepts/local-to-managed.md
+      - Permissions And Governance: concepts/permissions-and-governance.md
+  - Developers:
+      - Runtime Primitives: developers/runtime-primitives.md
+      - Protocol Surfaces: developers/protocol-surfaces.md
+      - Public API Surface: developers/public-api-surface.md
+      - Documentation System: developers/documentation-system.md
+  - Roadmap: roadmap.md
+
+markdown_extensions:
+  - admonition
+  - fenced_code
+  - tables
+  - toc:
+      permalink: true

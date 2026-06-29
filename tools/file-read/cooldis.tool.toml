@@ -1,0 +1,41 @@
+kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "file-read"
+version = "0.1.0"
+description = "Read text from a VFS path."
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "."
+state = "stateless"
+max_input_bytes = 262144
+max_output_bytes = 262144
+
+[[operations]]
+name = "file_read"
+description = "Read a byte range from a VFS file as UTF-8 text."
+input_schema = "schemas/file_read.input.json"
+output_schema = "schemas/file_read.output.json"
+required_capabilities = []
+
+[operations.command]
+name = "file-read read"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "file_read"
+
+[[fixtures]]
+name = "read_fixture_file"
+operation = "file_read"
+input = "fixtures/read.input.json"
+expect = "fixtures/read.expect.json"
+
+[[fixtures]]
+name = "missing_file"
+operation = "file_read"
+input = "fixtures/missing.input.json"
+expect = "fixtures/missing.expect.json"

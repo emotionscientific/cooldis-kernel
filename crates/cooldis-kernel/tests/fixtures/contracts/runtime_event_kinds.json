@@ -1,0 +1,222 @@
+[
+  {
+    "interaction_id": "018f0000-0000-7000-8000-000000000001",
+    "kind": "prompt_submitted",
+    "metadata": {
+      "operation": "cooldis.submit_to_thread"
+    },
+    "source_thread_id": "018f0000-0000-7000-8000-000000000001",
+    "target_thread_id": "018f0000-0000-7000-8000-000000000002",
+    "target_turn_id": "turn-2",
+    "type": "thread_interaction"
+  },
+  {
+    "text": "hello",
+    "type": "text_delta"
+  },
+  {
+    "call_id": "call_1",
+    "input": {
+      "command": "pwd"
+    },
+    "name": "bash",
+    "type": "tool_call_started"
+  },
+  {
+    "call_id": "call_1",
+    "duration_ms": 17,
+    "output": "ok",
+    "success": true,
+    "type": "tool_call_result"
+  },
+  {
+    "call_id": "call_1",
+    "level": "info",
+    "message": "tool completed",
+    "metadata": {
+      "duration_ms": "17"
+    },
+    "tool_name": "bash",
+    "type": "tool_log"
+  },
+  {
+    "event_name": "pre_tool_use",
+    "hook_id": "pre-echo",
+    "matcher": "echo_search",
+    "type": "hook_started"
+  },
+  {
+    "duration_ms": 12,
+    "event_name": "pre_tool_use",
+    "hook_id": "pre-echo",
+    "status": "completed",
+    "type": "hook_completed"
+  },
+  {
+    "action": "write_file",
+    "approval_id": "approval_1",
+    "metadata": {
+      "path": "/workspace/a"
+    },
+    "type": "approval_requested"
+  },
+  {
+    "approval_id": "approval_1",
+    "decision": "approved",
+    "type": "approval_resolved"
+  },
+  {
+    "call_id": "call_1",
+    "decision": "deny",
+    "reason": "policy denied",
+    "tool_name": "bash",
+    "type": "permission_decision"
+  },
+  {
+    "diagnostics": {
+      "attachment_count": 0,
+      "input_entry_count": 2,
+      "output_message_count": 1,
+      "retained_text_bytes": 11,
+      "system_block_count": 1,
+      "tool_count": 1,
+      "truncated_text_bytes": 4
+    },
+    "provider_dropped_messages": 1,
+    "provider_retained_text_bytes": 9,
+    "provider_truncated_text_bytes": 2,
+    "type": "context_compiled"
+  },
+  {
+    "api": "openai_responses",
+    "max_tokens": 128,
+    "message_count": 2,
+    "mode": "complete",
+    "model": "gpt-test",
+    "provider": "openai",
+    "purpose": "turn",
+    "request_id": "req_1",
+    "system_block_count": 1,
+    "tool_count": 3,
+    "turn_id": "turn-1",
+    "type": "model_request_started"
+  },
+  {
+    "api": "openai_responses",
+    "duration_ms": 25,
+    "mode": "complete",
+    "model": "gpt-test",
+    "provider": "openai",
+    "purpose": "turn",
+    "request_id": "req_1",
+    "stop_reason": "end_turn",
+    "turn_id": "turn-1",
+    "type": "model_request_completed",
+    "usage": {
+      "cache_creation_input_tokens": 3,
+      "cache_read_input_tokens": 4,
+      "input_tokens": 1,
+      "output_tokens": 2
+    }
+  },
+  {
+    "api": "openai_responses",
+    "attempt": 1,
+    "delay_ms": 50,
+    "error": "rate limited",
+    "error_class": "rate_limited",
+    "mode": "complete",
+    "model": "gpt-test",
+    "next_attempt": 2,
+    "next_request_id": "req_1_retry",
+    "provider": "openai",
+    "purpose": "turn",
+    "request_id": "req_1",
+    "turn_id": "turn-1",
+    "type": "model_request_retry_scheduled"
+  },
+  {
+    "error": "provider down",
+    "error_class": "retryable",
+    "from_api": "openai_responses",
+    "from_model": "gpt-test",
+    "from_provider": "openai",
+    "mode": "complete",
+    "purpose": "turn",
+    "request_id": "req_1",
+    "to_api": "openai_responses",
+    "to_model": "gpt-fallback",
+    "to_provider": "fallback",
+    "turn_id": "turn-1",
+    "type": "model_request_fallback_selected"
+  },
+  {
+    "api": "openai_responses",
+    "duration_ms": 3,
+    "error": "network",
+    "error_class": "retryable",
+    "mode": "stream",
+    "model": "gpt-test",
+    "provider": "openai",
+    "purpose": "compaction",
+    "request_id": "req_2",
+    "turn_id": "turn-1",
+    "type": "model_request_failed"
+  },
+  {
+    "state": "completed",
+    "type": "terminal"
+  },
+  {
+    "operation": "turn",
+    "timeout_ms": 100,
+    "type": "timeout"
+  },
+  {
+    "code": "max_pending_inputs",
+    "message": "full",
+    "type": "policy_rejected"
+  },
+  {
+    "action": "abort_runtime",
+    "reason": "timeout",
+    "type": "recovery"
+  },
+  {
+    "type": "usage",
+    "usage": {
+      "cache_creation_input_tokens": 3,
+      "cache_read_input_tokens": 4,
+      "input_tokens": 1,
+      "output_tokens": 2
+    }
+  },
+  {
+    "child_thread_id": "018f0000-0000-7000-8000-000000000002",
+    "type": "subthread_started"
+  },
+  {
+    "child_thread_id": "018f0000-0000-7000-8000-000000000002",
+    "status": "stopped",
+    "type": "subthread_finished"
+  },
+  {
+    "checkpoint_id": "018f0000-0000-7000-8000-000000000001",
+    "label": "label",
+    "type": "checkpoint"
+  },
+  {
+    "summary": "summary",
+    "trigger": "manual",
+    "type": "compaction"
+  },
+  {
+    "reason": "stop",
+    "type": "cancelled"
+  },
+  {
+    "code": "runtime_execution",
+    "message": "boom",
+    "type": "failed"
+  }
+]

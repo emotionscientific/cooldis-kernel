@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "path": { "type": "string" },
+    "offsetBytes": { "type": "integer" },
+    "maxBytes": { "type": "integer" }
+  },
+  "required": ["path"]
+}

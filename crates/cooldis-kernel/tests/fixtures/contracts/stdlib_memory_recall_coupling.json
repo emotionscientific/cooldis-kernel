@@ -1,0 +1,36 @@
+{
+  "memory_recall": [
+    {
+      "kind": "context.read_plan.set",
+      "payload": {
+        "name": "memory.default",
+        "pipeline_id": "context.memory",
+        "read_plan": {
+          "entries": [
+            {
+              "event_id": "018f0000-0000-7000-8000-00000000002e",
+              "event_role": "memory_checkpoint",
+              "kind": "event_ref",
+              "stream_id": "derived:memory:018f0000-0000-7000-8000-000000000001"
+            }
+          ],
+          "frontier": "compile_frontier",
+          "name": "memory.default",
+          "schema": "cooldis.context.read_plan/1",
+          "source_stream": "derived:memory:018f0000-0000-7000-8000-000000000001"
+        },
+        "schema": "cooldis.event.context.read_plan.set/1",
+        "scope": "thread",
+        "selected_event_ids": [
+          "018f0000-0000-7000-8000-00000000002e"
+        ],
+        "snapshot_id": "snapshot-a",
+        "source_id": "derived:memory:018f0000-0000-7000-8000-000000000001",
+        "template_id": "std::memory.recall",
+        "trigger_event_id": "018f0000-0000-7000-8000-00000000002f",
+        "trigger_kind": "turn.submitted"
+      },
+      "stream": "derived:context"
+    }
+  ]
+}

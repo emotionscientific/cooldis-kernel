@@ -1,0 +1,913 @@
+use crate::{
+    CooldisAppServer, CooldisError, CooldisIoRouteConfig, CooldisResult, CooldisSupervisor,
+    RuntimeEventKind, RuntimeTerminalState, RuntimeThreadHandle, ThreadCoordinates, ThreadEvent,
+    ThreadId, ThreadStartRequest, ThreadTopology, TurnInput, TurnSubmissionMode,
+};
+use async_trait::async_trait;
+use cooldis_io_core::{
+    AdmissionDecision, EgressAdapter, EgressEnvelope, EgressKind, IngressAck, IngressEnvelope,
+    IngressQueueStore, IngressSink, IngressState, IoError, IoResult, IoTurnInput, KernelIoBridge,
+    KernelIoReceipt, ProviderPolicy, ResolvedIoTarget, ThreadAddress,
+};
+use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
+use serde_json::json;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, RwLock, broadcast};
+
+const DEFAULT_QUEUE_BATCH: usize = 16;
+const DEFAULT_WORKER_POLL_MS: u64 = 250;
+const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone)]
+pub struct CooldisDaemonIoBridge {
+    supervisor: CooldisSupervisor,
+    tenant_id: String,
+    user_id: String,
+    model: String,
+    model_provider: String,
+    cwd: PathBuf,
+    threads: Arc<Mutex<HashMap<String, ThreadCoordinates>>>,
+    active_turns: Arc<Mutex<HashMap<String, String>>>,
+    egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
+}
+
+impl CooldisDaemonIoBridge {
+    pub fn new(
+        supervisor: CooldisSupervisor,
+        tenant_id: impl Into<String>,
+        user_id: impl Into<String>,
+        model_provider: impl Into<String>,
+        model: impl Into<String>,
+        cwd: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            supervisor,
+            tenant_id: tenant_id.into(),
+            user_id: user_id.into(),
+            model: model.into(),
+            model_provider: model_provider.into(),
+            cwd: cwd.into(),
+            threads: Arc::new(Mutex::new(HashMap::new())),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            egress_adapters: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub fn from_app_server(server: &CooldisAppServer) -> Self {
+        Self::new(
+            server.supervisor(),
+            server.tenant_id().to_string(),
+            server.user_id().to_string(),
+            server.model_provider().to_string(),
+            server.model().to_string(),
+            server.cwd().to_path_buf(),
+        )
+    }
+
+    pub fn direct_sink(&self) -> Arc<dyn IngressSink> {
+        Arc::new(DirectRuntimeIngressSink::new(self.clone()))
+    }
+
+    pub async fn register_egress_adapter(
+        &self,
+        protocol: impl Into<String>,
+        instance_id: impl Into<String>,
+        adapter: Arc<dyn EgressAdapter>,
+    ) {
+        let protocol = protocol.into();
+        let instance_id = instance_id.into();
+        self.egress_adapters
+            .write()
+            .await
+            .insert(source_scope(&protocol, &instance_id), adapter);
+    }
+
+    pub async fn submit_envelope(&self, envelope: IngressEnvelope) -> IoResult<KernelIoReceipt> {
+        let target = self.resolve_target(&envelope).await?;
+        let state = self.ingress_state(&target).await;
+        let decision = self.decide(&envelope, &target, &state).await?;
+        self.apply(&envelope, &target, &decision).await
+    }
+
+    async fn resolve_target(&self, envelope: &IngressEnvelope) -> IoResult<ResolvedIoTarget> {
+        let threading = envelope
+            .metadata
+            .get("cooldis_route_threading")
+            .map(String::as_str)
+            .unwrap_or("per_conversation");
+        let session_id = match threading {
+            "single_thread" | "route_single_thread" => {
+                format!("io:{}", envelope.source.stable_scope())
+            }
+            "per_actor" => format!(
+                "io:{}:{}",
+                envelope.source.stable_scope(),
+                envelope
+                    .actor
+                    .as_ref()
+                    .map(|actor| actor.external_actor_id.as_str())
+                    .unwrap_or("anonymous")
+            ),
+            _ => format!(
+                "io:{}:{}",
+                envelope.source.stable_scope(),
+                envelope.conversation.stable_key()
+            ),
+        };
+
+        let mut target = ResolvedIoTarget::new(ThreadAddress::new(
+            self.tenant_id.clone(),
+            self.user_id.clone(),
+            session_id,
+        ))
+        .with_provider_policy(ProviderPolicy::new(
+            self.model_provider.clone(),
+            self.model.clone(),
+        ));
+        target.metadata.insert(
+            "cooldis_source_scope".to_string(),
+            envelope.source.stable_scope(),
+        );
+        Ok(target)
+    }
+
+    async fn ingress_state(&self, target: &ResolvedIoTarget) -> IngressState {
+        let active_turn_id = self
+            .active_turns
+            .lock()
+            .await
+            .get(&target.address.scope_key())
+            .cloned();
+        IngressState {
+            active_turn_id,
+            pending_count: 0,
+            dedupe_seen: false,
+            metadata: target.metadata.clone(),
+        }
+    }
+
+    async fn decide(
+        &self,
+        envelope: &IngressEnvelope,
+        target: &ResolvedIoTarget,
+        state: &IngressState,
+    ) -> IoResult<AdmissionDecision> {
+        let input = IoTurnInput::from_envelope(envelope, target);
+        let turn_id = format!("turn-{}", uuid::Uuid::now_v7());
+        match envelope
+            .metadata
+            .get("cooldis_route_policy")
+            .map(String::as_str)
+            .unwrap_or("queue_per_conversation")
+        {
+            "observe_only" => Ok(AdmissionDecision::ObserveOnly {
+                reason: "route policy observe_only".to_string(),
+            }),
+            "reject" => Ok(AdmissionDecision::reject("route policy reject")),
+            "steer" | "steer_when_active" => {
+                if let Some(active_turn_id) = &state.active_turn_id {
+                    Ok(AdmissionDecision::steer(
+                        turn_id,
+                        Some(active_turn_id.clone()),
+                        input,
+                    ))
+                } else {
+                    Ok(AdmissionDecision::queue(turn_id, input))
+                }
+            }
+            "interrupt" | "interrupt_on_new_dm" => Ok(AdmissionDecision::Interrupt {
+                reason: "route policy interrupt".to_string(),
+                replacement_turn_id: Some(turn_id),
+                replacement: Some(input),
+            }),
+            _ => Ok(AdmissionDecision::queue(turn_id, input)),
+        }
+    }
+
+    async fn ensure_thread(
+        &self,
+        target: &ResolvedIoTarget,
+    ) -> IoResult<(ThreadCoordinates, RuntimeThreadHandle)> {
+        if let Some(thread_id) = &target.address.thread_id {
+            let thread_id = ThreadId::parse_str(thread_id)
+                .map_err(|err| IoError::Bridge(format!("invalid target thread id: {err}")))?;
+            let coordinates = ThreadCoordinates {
+                tenant_id: target.address.tenant_id.clone(),
+                user_id: target.address.user_id.clone(),
+                session_id: target.address.session_id.clone(),
+                thread_id,
+            };
+            let handle = self
+                .supervisor
+                .get_thread_at(&coordinates)
+                .await
+                .map_err(cooldis_bridge_error)?;
+            return Ok((coordinates, handle));
+        }
+
+        let scope_key = target.address.scope_key();
+        if let Some(coordinates) = self.threads.lock().await.get(&scope_key).cloned() {
+            let handle = self
+                .supervisor
+                .get_thread_at(&coordinates)
+                .await
+                .map_err(cooldis_bridge_error)?;
+            return Ok((coordinates, handle));
+        }
+
+        let topology = target
+            .parent_thread_id
+            .as_deref()
+            .map(ThreadId::parse_str)
+            .transpose()
+            .map_err(|err| IoError::Bridge(format!("invalid parent thread id: {err}")))?
+            .map(ThreadTopology::spawned_from)
+            .unwrap_or_else(ThreadTopology::root);
+
+        let handle = self
+            .supervisor
+            .start_thread(ThreadStartRequest {
+                tenant_id: target.address.tenant_id.clone(),
+                user_id: target.address.user_id.clone(),
+                session_id: target.address.session_id.clone(),
+                topology,
+                metadata: Default::default(),
+            })
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let coordinates = handle.context().coordinates.clone();
+        self.threads
+            .lock()
+            .await
+            .insert(scope_key, coordinates.clone());
+        Ok((coordinates, handle))
+    }
+
+    fn runtime_input(&self, input: &IoTurnInput) -> TurnInput {
+        let policy = input.provider_policy.clone().unwrap_or_else(|| {
+            ProviderPolicy::new(self.model_provider.clone(), self.model.clone())
+        });
+        let mut turn = TurnInput::text(input.text.clone())
+            .with_provider(policy.provider)
+            .with_model(policy.model)
+            .with_cwd(self.cwd.clone());
+        for (key, value) in &input.metadata {
+            turn = turn.with_metadata(key.clone(), value.clone());
+        }
+        for attachment in &input.attachments {
+            turn = turn.with_metadata(
+                format!("attachment:{}", attachment.id),
+                attachment
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| attachment.media_type.clone()),
+            );
+        }
+        turn
+    }
+
+    async fn watch_for_egress(
+        self,
+        envelope: IngressEnvelope,
+        target: ResolvedIoTarget,
+        turn_id: String,
+        mut events: broadcast::Receiver<ThreadEvent>,
+    ) {
+        let mut assistant_text = String::new();
+        let mut terminal = false;
+        let timeout = tokio::time::sleep(Duration::from_secs(30));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => break,
+                event = events.recv() => {
+                    let Ok(event) = event else {
+                        break;
+                    };
+                    match event {
+                        ThreadEvent::Runtime { event, .. } => match event.kind {
+                            RuntimeEventKind::TextDelta { text } => assistant_text.push_str(&text),
+                            RuntimeEventKind::Terminal { state } => {
+                                terminal = matches!(
+                                    state,
+                                    RuntimeTerminalState::Completed
+                                        | RuntimeTerminalState::Cancelled
+                                        | RuntimeTerminalState::Stopped
+                                        | RuntimeTerminalState::Failed
+                                );
+                                break;
+                            }
+                            RuntimeEventKind::Failed { message, .. } => {
+                                self.deliver_egress(EgressEnvelope::for_ingress(
+                                    &envelope,
+                                    EgressKind::Error { message },
+                                    now_ms(),
+                                ))
+                                .await;
+                                break;
+                            }
+                            _ => {}
+                        },
+                        ThreadEvent::Failed { message, .. } => {
+                            self.deliver_egress(EgressEnvelope::for_ingress(
+                                &envelope,
+                                EgressKind::Error { message },
+                                now_ms(),
+                            ))
+                            .await;
+                            break;
+                        }
+                        ThreadEvent::Stopped { .. } | ThreadEvent::Cancelled { .. } => {
+                            terminal = true;
+                            break;
+                        }
+                        ThreadEvent::Output { text, .. } => {
+                            if assistant_text.is_empty() {
+                                assistant_text = text;
+                            }
+                            terminal = true;
+                            break;
+                        }
+                        ThreadEvent::Started { .. }
+                        | ThreadEvent::CanonicalMirror { .. }
+                        | ThreadEvent::Signal { .. } => {}
+                    }
+                }
+            }
+        }
+
+        self.active_turns
+            .lock()
+            .await
+            .remove(&target.address.scope_key());
+
+        if terminal && !assistant_text.is_empty() {
+            self.deliver_egress(EgressEnvelope::for_ingress(
+                &envelope,
+                EgressKind::AssistantMessage {
+                    text: assistant_text,
+                },
+                now_ms(),
+            ))
+            .await;
+        } else if !terminal {
+            eprintln!(
+                "cooldis daemon IO turn {turn_id} egress watcher stopped before terminal event"
+            );
+        }
+    }
+
+    async fn deliver_egress(&self, envelope: EgressEnvelope) {
+        let key = envelope.target.source.stable_scope();
+        let adapter = self.egress_adapters.read().await.get(&key).cloned();
+        let Some(adapter) = adapter else {
+            return;
+        };
+        if let Err(err) = adapter.deliver(envelope).await {
+            eprintln!("cooldis daemon IO egress delivery failed: {err}");
+        }
+    }
+}
+
+#[async_trait]
+impl KernelIoBridge for CooldisDaemonIoBridge {
+    async fn apply(
+        &self,
+        envelope: &IngressEnvelope,
+        target: &ResolvedIoTarget,
+        decision: &AdmissionDecision,
+    ) -> IoResult<KernelIoReceipt> {
+        match decision {
+            AdmissionDecision::Queue { turn_id, input } => {
+                let (coordinates, handle) = self.ensure_thread(target).await?;
+                let events = handle.subscribe_events();
+                self.active_turns
+                    .lock()
+                    .await
+                    .insert(target.address.scope_key(), turn_id.clone());
+                self.supervisor
+                    .submit_turn_to_with_mode(
+                        &coordinates,
+                        turn_id.clone(),
+                        self.runtime_input(input),
+                        TurnSubmissionMode::Queue,
+                    )
+                    .await
+                    .map_err(cooldis_bridge_error)?;
+                tokio::spawn(self.clone().watch_for_egress(
+                    envelope.clone(),
+                    target.clone(),
+                    turn_id.clone(),
+                    events,
+                ));
+                let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
+                receipt.thread_id = Some(coordinates.thread_id.to_string());
+                Ok(receipt)
+            }
+            AdmissionDecision::Steer { turn_id, input, .. } => {
+                let (coordinates, handle) = self.ensure_thread(target).await?;
+                let events = handle.subscribe_events();
+                self.active_turns
+                    .lock()
+                    .await
+                    .insert(target.address.scope_key(), turn_id.clone());
+                self.supervisor
+                    .submit_turn_to_with_mode(
+                        &coordinates,
+                        turn_id.clone(),
+                        self.runtime_input(input),
+                        TurnSubmissionMode::Steer,
+                    )
+                    .await
+                    .map_err(cooldis_bridge_error)?;
+                tokio::spawn(self.clone().watch_for_egress(
+                    envelope.clone(),
+                    target.clone(),
+                    turn_id.clone(),
+                    events,
+                ));
+                let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
+                receipt.thread_id = Some(coordinates.thread_id.to_string());
+                Ok(receipt)
+            }
+            AdmissionDecision::Interrupt {
+                reason,
+                replacement_turn_id,
+                replacement,
+            } => {
+                let (coordinates, handle) = self.ensure_thread(target).await?;
+                let events = handle.subscribe_events();
+                self.supervisor
+                    .cancel_at(&coordinates, reason.clone())
+                    .await
+                    .map_err(cooldis_bridge_error)?;
+                if let (Some(turn_id), Some(input)) = (replacement_turn_id, replacement) {
+                    self.active_turns
+                        .lock()
+                        .await
+                        .insert(target.address.scope_key(), turn_id.clone());
+                    self.supervisor
+                        .submit_turn_to_with_mode(
+                            &coordinates,
+                            turn_id.clone(),
+                            self.runtime_input(input),
+                            TurnSubmissionMode::Interrupt,
+                        )
+                        .await
+                        .map_err(cooldis_bridge_error)?;
+                    tokio::spawn(self.clone().watch_for_egress(
+                        envelope.clone(),
+                        target.clone(),
+                        turn_id.clone(),
+                        events,
+                    ));
+                }
+                let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
+                receipt.thread_id = Some(coordinates.thread_id.to_string());
+                Ok(receipt)
+            }
+            AdmissionDecision::ObserveOnly { .. } => {
+                Ok(KernelIoReceipt::new(envelope, target.clone(), decision))
+            }
+            AdmissionDecision::Reject { reason, .. } => {
+                Err(IoError::PolicyRejected(reason.clone()))
+            }
+            AdmissionDecision::Fork { .. } => Err(IoError::Bridge(
+                "fork admission is not wired into the daemon bridge yet".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DirectRuntimeIngressSink {
+    bridge: CooldisDaemonIoBridge,
+}
+
+impl DirectRuntimeIngressSink {
+    pub fn new(bridge: CooldisDaemonIoBridge) -> Self {
+        Self { bridge }
+    }
+}
+
+#[async_trait]
+impl IngressSink for DirectRuntimeIngressSink {
+    async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        let ack = IngressAck::accepted(&envelope);
+        self.bridge.submit_envelope(envelope).await?;
+        Ok(ack)
+    }
+}
+
+pub struct RouteIngressSink {
+    inner: Arc<dyn IngressSink>,
+    route_id: String,
+    policy: Option<String>,
+    threading: Option<String>,
+}
+
+impl RouteIngressSink {
+    pub fn new(inner: Arc<dyn IngressSink>, route: &CooldisIoRouteConfig) -> Self {
+        Self {
+            inner,
+            route_id: route.id.clone(),
+            policy: route.policy.clone(),
+            threading: route.threading.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl IngressSink for RouteIngressSink {
+    async fn submit(&self, mut envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        envelope
+            .metadata
+            .insert("cooldis_route_id".to_string(), self.route_id.clone());
+        if let Some(policy) = &self.policy {
+            envelope
+                .metadata
+                .insert("cooldis_route_policy".to_string(), policy.clone());
+        }
+        if let Some(threading) = &self.threading {
+            envelope
+                .metadata
+                .insert("cooldis_route_threading".to_string(), threading.clone());
+        }
+        self.inner.submit(envelope).await
+    }
+}
+
+pub struct CooldisDaemonQueueWorker {
+    queue: Arc<dyn IngressQueueStore>,
+    bridge: CooldisDaemonIoBridge,
+    worker_id: String,
+    max_messages: usize,
+    poll_interval: Duration,
+    visibility_timeout_secs: u32,
+}
+
+impl CooldisDaemonQueueWorker {
+    pub fn new(
+        queue: Arc<dyn IngressQueueStore>,
+        bridge: CooldisDaemonIoBridge,
+        worker_id: impl Into<String>,
+        visibility_timeout_secs: u32,
+    ) -> Self {
+        Self {
+            queue,
+            bridge,
+            worker_id: worker_id.into(),
+            max_messages: DEFAULT_QUEUE_BATCH,
+            poll_interval: Duration::from_millis(DEFAULT_WORKER_POLL_MS),
+            visibility_timeout_secs,
+        }
+    }
+
+    pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    pub fn with_max_messages(mut self, max_messages: usize) -> Self {
+        self.max_messages = max_messages;
+        self
+    }
+
+    pub async fn drain_once(&self) -> IoResult<usize> {
+        let leased = self
+            .queue
+            .lease_ingress(
+                &self.worker_id,
+                self.max_messages,
+                self.visibility_timeout_secs,
+            )
+            .await?;
+        let count = leased.len();
+        for message in leased {
+            match self.bridge.submit_envelope(message.envelope).await {
+                Ok(_) => self.queue.complete_ingress(&message.message_id).await?,
+                Err(err) => {
+                    let reason = err.to_string();
+                    self.queue
+                        .retry_ingress(&message.message_id, &reason)
+                        .await?;
+                    return Err(err);
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    pub async fn run(self) {
+        loop {
+            match self.drain_once().await {
+                Ok(0) => tokio::time::sleep(self.poll_interval).await,
+                Ok(_) => {}
+                Err(err) => {
+                    eprintln!("cooldis daemon ingress worker failed: {err}");
+                    tokio::time::sleep(self.poll_interval).await;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TelegramWebhookServerConfig {
+    pub route_id: String,
+    pub listen: String,
+    pub path: String,
+    pub secret_token: Option<String>,
+}
+
+pub struct TelegramWebhookServer {
+    config: TelegramWebhookServerConfig,
+    listener: TcpListener,
+    sink: Arc<dyn IngressSink>,
+}
+
+impl TelegramWebhookServer {
+    pub async fn bind(
+        config: TelegramWebhookServerConfig,
+        sink: Arc<dyn IngressSink>,
+    ) -> CooldisResult<Self> {
+        let listener = TcpListener::bind(&config.listen).await.map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to bind Telegram webhook route {} on {}: {err}",
+                config.route_id, config.listen
+            ))
+        })?;
+        Ok(Self {
+            config,
+            listener,
+            sink,
+        })
+    }
+
+    pub fn local_addr(&self) -> CooldisResult<SocketAddr> {
+        self.listener.local_addr().map_err(|err| {
+            CooldisError::RuntimeFactory(format!("failed to read Telegram webhook address: {err}"))
+        })
+    }
+
+    pub async fn serve(self) -> CooldisResult<()> {
+        let adapter = Arc::new(TelegramWebhookAdapter::new(self.config.route_id.clone()));
+        loop {
+            let (stream, _) = self.listener.accept().await.map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to accept Telegram webhook connection: {err}"
+                ))
+            })?;
+            let config = self.config.clone();
+            let sink = self.sink.clone();
+            let adapter = adapter.clone();
+            tokio::spawn(async move {
+                if let Err(err) =
+                    handle_telegram_webhook_connection(stream, config, adapter, sink).await
+                {
+                    eprintln!("cooldis Telegram webhook request failed: {err}");
+                }
+            });
+        }
+    }
+}
+
+async fn handle_telegram_webhook_connection(
+    mut stream: TcpStream,
+    config: TelegramWebhookServerConfig,
+    adapter: Arc<TelegramWebhookAdapter>,
+    sink: Arc<dyn IngressSink>,
+) -> CooldisResult<()> {
+    let request = match read_http_request(&mut stream).await {
+        Ok(request) => request,
+        Err(err) => {
+            write_json_response(
+                &mut stream,
+                400,
+                json!({ "ok": false, "error": err.to_string() }),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    if request.method != "POST" {
+        write_json_response(
+            &mut stream,
+            405,
+            json!({ "ok": false, "error": "method_not_allowed" }),
+        )
+        .await?;
+        return Ok(());
+    }
+    if request.path != config.path {
+        write_json_response(
+            &mut stream,
+            404,
+            json!({ "ok": false, "error": "not_found" }),
+        )
+        .await?;
+        return Ok(());
+    }
+    if let Some(secret_token) = config.secret_token.as_deref() {
+        let actual = request
+            .headers
+            .get("x-telegram-bot-api-secret-token")
+            .map(String::as_str);
+        if actual != Some(secret_token) {
+            write_json_response(
+                &mut stream,
+                401,
+                json!({ "ok": false, "error": "unauthorized" }),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    let update: TelegramUpdate = serde_json::from_slice(&request.body).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to decode Telegram update JSON: {err}"))
+    })?;
+    match adapter
+        .submit_update(sink.as_ref(), &update, now_ms())
+        .await
+        .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?
+    {
+        Some(ack) => {
+            write_json_response(
+                &mut stream,
+                200,
+                json!({ "ok": true, "accepted": ack.accepted, "envelopeId": ack.envelope_id }),
+            )
+            .await?;
+        }
+        None => {
+            write_json_response(
+                &mut stream,
+                200,
+                json!({ "ok": true, "accepted": false, "reason": "unsupported_update" }),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct HttpRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+async fn read_http_request(stream: &mut TcpStream) -> CooldisResult<HttpRequest> {
+    let mut buffer = Vec::new();
+    let header_end;
+    loop {
+        let mut chunk = [0_u8; 1024];
+        let read = stream.read(&mut chunk).await.map_err(|err| {
+            CooldisError::RuntimeFactory(format!("failed to read HTTP request: {err}"))
+        })?;
+        if read == 0 {
+            return Err(CooldisError::RuntimeFactory(
+                "connection closed before HTTP headers".to_string(),
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = find_header_end(&buffer) {
+            header_end = index;
+            break;
+        }
+        if buffer.len() > MAX_HTTP_HEADER_BYTES {
+            return Err(CooldisError::RuntimeFactory(
+                "HTTP headers are too large".to_string(),
+            ));
+        }
+    }
+
+    let headers_text = std::str::from_utf8(&buffer[..header_end]).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("HTTP headers are not UTF-8: {err}"))
+    })?;
+    let mut lines = headers_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| CooldisError::RuntimeFactory("missing HTTP request line".to_string()))?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| CooldisError::RuntimeFactory("missing HTTP method".to_string()))?
+        .to_string();
+    let path = request_parts
+        .next()
+        .ok_or_else(|| CooldisError::RuntimeFactory("missing HTTP path".to_string()))?
+        .to_string();
+
+    let mut headers = HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+
+    let content_length = headers
+        .get("content-length")
+        .map(|value| {
+            value.parse::<usize>().map_err(|err| {
+                CooldisError::RuntimeFactory(format!("invalid content-length {value:?}: {err}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if content_length > MAX_HTTP_BODY_BYTES {
+        return Err(CooldisError::RuntimeFactory(
+            "HTTP body is too large".to_string(),
+        ));
+    }
+
+    let body_start = header_end + 4;
+    let mut body = buffer[body_start..].to_vec();
+    while body.len() < content_length {
+        let mut chunk = vec![0_u8; content_length - body.len()];
+        let read = stream.read(&mut chunk).await.map_err(|err| {
+            CooldisError::RuntimeFactory(format!("failed to read HTTP body: {err}"))
+        })?;
+        if read == 0 {
+            return Err(CooldisError::RuntimeFactory(
+                "connection closed before HTTP body".to_string(),
+            ));
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(content_length);
+
+    Ok(HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
+}
+
+async fn write_json_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: serde_json::Value,
+) -> CooldisResult<()> {
+    let body = body.to_string();
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Internal Server Error",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+Content-Type: application/json\r\n\
+Content-Length: {}\r\n\
+Connection: close\r\n\
+\r\n\
+{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await.map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to write HTTP response: {err}"))
+    })?;
+    Ok(())
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn source_scope(protocol: &str, instance_id: &str) -> String {
+    format!("{protocol}:{instance_id}")
+}
+
+fn cooldis_bridge_error(err: CooldisError) -> IoError {
+    IoError::Bridge(err.to_string())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests;

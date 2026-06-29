@@ -1,0 +1,70 @@
+{
+  "agent_process_submit": {
+    "caller_thread_id": "018f0000-0000-7000-8000-000000000009",
+    "interaction_id": "018f0000-0000-7000-8000-000000000002",
+    "operation": "submit_to_thread",
+    "status": "running",
+    "target_thread_id": "018f0000-0000-7000-8000-000000000001",
+    "turn_id": "turn-2"
+  },
+  "checkpoint": {
+    "active_entry_id": "018f0000-0000-7000-8000-000000000001",
+    "coordinates": {
+      "session_id": "session_1",
+      "tenant_id": "tenant_a",
+      "thread_id": "018f0000-0000-7000-8000-000000000001",
+      "user_id": "user_1"
+    },
+    "created_at_ms": 200,
+    "id": "018f0000-0000-7000-8000-000000000001",
+    "label": "after-tool",
+    "metadata": {
+      "source": "contract"
+    },
+    "parent_checkpoint_id": null
+  },
+  "lifecycle": {
+    "coordinates": {
+      "session_id": "session_1",
+      "tenant_id": "tenant_a",
+      "thread_id": "018f0000-0000-7000-8000-000000000001",
+      "user_id": "user_1"
+    },
+    "created_at_ms": 1,
+    "latest_checkpoint_id": "018f0000-0000-7000-8000-000000000001",
+    "latest_signal_id": "018f0000-0000-7000-8000-000000000001",
+    "metadata": {
+      "tenant_home": "/tmp/tenant"
+    },
+    "parent_thread_id": "018f0000-0000-7000-8000-000000000009",
+    "status": "idle",
+    "topology": {
+      "controller_thread_id": "018f0000-0000-7000-8000-000000000009",
+      "initiation": {
+        "thread_id": "018f0000-0000-7000-8000-000000000009",
+        "type": "thread"
+      },
+      "lineage": {
+        "type": "root"
+      },
+      "spawn_attribution": {
+        "source_thread_id": "018f0000-0000-7000-8000-000000000009"
+      }
+    },
+    "updated_at_ms": 201
+  },
+  "signal": {
+    "coordinates": {
+      "session_id": "session_1",
+      "tenant_id": "tenant_a",
+      "thread_id": "018f0000-0000-7000-8000-000000000001",
+      "user_id": "user_1"
+    },
+    "created_at_ms": 100,
+    "id": "018f0000-0000-7000-8000-000000000001",
+    "kind": "user_steer",
+    "metadata": {
+      "turn_id": "turn-2"
+    }
+  }
+}

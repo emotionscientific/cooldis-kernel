@@ -1,0 +1,28 @@
+{
+  "memory_extract": [
+    {
+      "kind": "context.summary.completed",
+      "payload": {
+        "content": {
+          "sha256": "sha256:5ab05010794bf58b10e96d872372f426357516f95dd71a7e5c1098fc18251517"
+        },
+        "covered_ranges": [
+          {
+            "from_sequence": 1,
+            "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
+            "to_sequence": 6
+          }
+        ],
+        "memory_kind": "observation",
+        "role": "summary_checkpoint",
+        "schema": "cooldis.event.context.summary.completed/1",
+        "snapshot_id": "snapshot-a",
+        "source_event_id": "018f0000-0000-7000-8000-00000000002d",
+        "source_kind": "turn.completed",
+        "template_id": "std::memory.extract",
+        "text": "User prefers SQLite first, then S2 as stream backend."
+      },
+      "stream": "derived:memory"
+    }
+  ]
+}

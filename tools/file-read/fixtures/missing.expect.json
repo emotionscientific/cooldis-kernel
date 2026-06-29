@@ -1,0 +1,9 @@
+{
+  "content": "",
+  "bytesRead": 0,
+  "eof": true,
+  "error": {
+    "code": "not_found",
+    "message": "file not found"
+  }
+}

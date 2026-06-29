@@ -1,0 +1,7 @@
+# Add repository code owners before enabling "Require review from Code Owners".
+#
+# Prefer an organization team, for example:
+# * @emotionscientific/cooldis-maintainers
+#
+# Keep security-sensitive runtime, policy, and automation paths owned by
+# maintainers once the public owner or team is ready.

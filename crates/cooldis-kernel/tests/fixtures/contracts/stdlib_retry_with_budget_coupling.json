@@ -1,0 +1,42 @@
+{
+  "retry_continue": [
+    {
+      "kind": "turn.continue.requested",
+      "payload": {
+        "next_turn_input": "retry last failed step",
+        "reason": "retry remote transient failure",
+        "retry": {
+          "attempt": 2,
+          "error_class": "retryable",
+          "failed_event_id": "018f0000-0000-7000-8000-00000000003c",
+          "max_attempts": 2,
+          "previous_attempt": 1
+        },
+        "schema": "cooldis.event.turn.continue.requested/1",
+        "snapshot_id": "snapshot-a",
+        "subject": {
+          "loop_id": "loop-1",
+          "parent_turn_id": "turn-1"
+        },
+        "template_id": "std::retry.with_budget"
+      },
+      "stream": "control"
+    }
+  ],
+  "retry_exhausted": [
+    {
+      "kind": "loop.budget_exhausted",
+      "payload": {
+        "attempt": 2,
+        "error_class": "retryable",
+        "failed_event_id": "018f0000-0000-7000-8000-00000000003d",
+        "max_attempts": 2,
+        "reason": "retry budget exhausted after attempt 2/2",
+        "schema": "cooldis.event.loop.budget_exhausted/1",
+        "snapshot_id": "snapshot-a",
+        "template_id": "std::retry.with_budget"
+      },
+      "stream": "control"
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "ackClasses": [
+    "local_committed",
+    "query_projected"
+  ],
+  "backend": {
+    "ackClasses": [
+      "local_committed",
+      "query_projected"
+    ],
+    "kind": "sqlite",
+    "sessionStorePath": "/tmp/cooldis/session_history.sqlite3"
+  },
+  "generatedAtMs": 1771718499999,
+  "receipts": [
+    {
+      "createdAtMs": 1771718400021,
+      "eventId": "018f0000-0000-7000-8000-000000000015",
+      "kind": "manifest.bind.completed",
+      "origin": "discharged",
+      "payloadSchema": "cooldis.event.manifest.bind.completed/1",
+      "sequence": 2,
+      "streamId": "thread:018f0000-0000-7000-8000-000000000001"
+    }
+  ],
+  "redaction": {
+    "enabled": true,
+    "mode": "secret-shaped-json-keys",
+    "redactedKeys": [
+      "api_key"
+    ],
+    "replacement": "[REDACTED]"
+  },
+  "schema": "cooldis.debug.thread_export/1",
+  "streams": [
+    {
+      "ackClasses": [
+        "local_committed",
+        "query_projected"
+      ],
+      "backend": {
+        "kind": "sqlite",
+        "sessionStorePath": "/tmp/cooldis/session_history.sqlite3"
+      },
+      "cursor": null,
+      "data": [
+        {
+          "atMs": 1771718400020,
+          "coordinates": {
+            "session_id": "session_1",
+            "tenant_id": "tenant_a",
+            "thread_id": "018f0000-0000-7000-8000-000000000001",
+            "user_id": "user_1"
+          },
+          "created_at_ms": 1771718400020,
+          "eventId": "018f0000-0000-7000-8000-000000000014",
+          "event_id": "018f0000-0000-7000-8000-000000000014",
+          "kind": "turn.submitted",
+          "origin": "witnessed",
+          "payload": {
+            "input_text": "export evidence",
+            "schema": "cooldis.event.turn.submitted/1",
+            "turn_id": "turn-1"
+          },
+          "payload_schema": "cooldis.event.turn.submitted/1",
+          "provenance": {},
+          "schema": "cooldis.stream.record/1",
+          "sequence": 1,
+          "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+        },
+        {
+          "atMs": 1771718400021,
+          "coordinates": {
+            "session_id": "session_1",
+            "tenant_id": "tenant_a",
+            "thread_id": "018f0000-0000-7000-8000-000000000001",
+            "user_id": "user_1"
+          },
+          "created_at_ms": 1771718400021,
+          "eventId": "018f0000-0000-7000-8000-000000000015",
+          "event_id": "018f0000-0000-7000-8000-000000000015",
+          "kind": "manifest.bind.completed",
+          "origin": "discharged",
+          "payload": {
+            "agent_ref": "agent://export-fixture@0.1.0",
+            "manifest_hash": "sha256:manifest",
+            "schema": "cooldis.event.manifest.bind.completed/1"
+          },
+          "payload_schema": "cooldis.event.manifest.bind.completed/1",
+          "provenance": {
+            "config_hash": "sha256:manifest-bind-config",
+            "discharged_by": "manifest:bind",
+            "function": "manifest_bind/v1",
+            "source_event_ids": [
+              "018f0000-0000-7000-8000-000000000014"
+            ],
+            "source_streams": [
+              "thread:018f0000-0000-7000-8000-000000000001"
+            ]
+          },
+          "schema": "cooldis.stream.record/1",
+          "sequence": 2,
+          "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+        }
+      ],
+      "eventCount": 2,
+      "range": {
+        "fromCursor": "djE6MQ==",
+        "fromSequence": 1,
+        "lastExportedSequence": 2,
+        "lastExportedStreamCursor": {
+          "event_id": "018f0000-0000-7000-8000-000000000015",
+          "schema": "cooldis.stream.cursor/1",
+          "sequence": 2,
+          "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+        },
+        "tailCursor": "djE6Mw==",
+        "tailSequence": 2,
+        "tailStreamCursor": {
+          "event_id": "018f0000-0000-7000-8000-000000000015",
+          "schema": "cooldis.stream.cursor/1",
+          "sequence": 2,
+          "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+        },
+        "toCursor": "djE6Mw=="
+      },
+      "selector": "thread",
+      "streamCursor": null,
+      "streamId": "thread:018f0000-0000-7000-8000-000000000001",
+      "truncated": false
+    }
+  ],
+  "thread": null,
+  "threadId": "018f0000-0000-7000-8000-000000000001"
+}

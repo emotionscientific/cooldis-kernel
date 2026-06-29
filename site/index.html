@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>cooldis // open serverless agent platform</title>
+<meta name="description" content="Cooldis is an open serverless agent platform for defining agents, not app servers: build locally, publish to managed cloud, and keep the runtime definition portable." />
+<meta name="theme-color" content="#0a0c0a" />
+<meta property="og:title" content="cooldis // open serverless agent platform" />
+<meta property="og:description" content="Define the agent, not the app around it. Managed agent infrastructure without vendor lock-in." />
+<meta property="og:type" content="website" />
+<style>
+  :root{
+    --bg:#0a0c0a;
+    --bg2:#0d100d;
+    --fg:#b9c2b7;
+    --dim:#6f7a6d;
+    --faint:#4a534a;
+    --green:#5ad67d;
+    --green2:#8ef0a6;
+    --cyan:#5fd0d6;
+    --amber:#e3b341;
+    --red:#f0726a;
+    --line:#1b2119;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--fg);
+    font-family:var(--mono);
+    font-size:15px;
+    line-height:1.65;
+    letter-spacing:0;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  /* subtle CRT: vignette + faint scanlines */
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
+    background:
+      radial-gradient(120% 80% at 50% 0%, rgba(90,214,125,.05), transparent 60%),
+      radial-gradient(140% 120% at 50% 100%, rgba(0,0,0,.55), transparent 55%);
+  }
+  body::after{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:2;opacity:.35;
+    background:repeating-linear-gradient(to bottom, rgba(255,255,255,.018) 0 1px, transparent 1px 3px);
+  }
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto}
+    .cursor{animation:none}
+  }
+  .wrap{max-width:78ch;margin:0 auto;padding:clamp(20px,5vw,56px) clamp(16px,4vw,28px) 96px;position:relative;z-index:1}
+
+  a{color:var(--cyan);text-decoration:none;border-bottom:1px solid transparent}
+  a:hover{border-bottom-color:var(--cyan)}
+
+  .glow{text-shadow:0 0 14px rgba(90,214,125,.35)}
+  .prompt{color:var(--green)}
+  .dim{color:var(--dim)}
+  .faint{color:var(--faint)}
+  .amber{color:var(--amber)}
+  .cyan{color:var(--cyan)}
+  .red{color:var(--red)}
+  b,strong{color:var(--green2);font-weight:600}
+
+  /* hero */
+  header{margin:8px 0 22px}
+  .brand{
+    font-size:clamp(34px,9vw,64px);
+    line-height:1;
+    font-weight:700;
+    color:var(--green2);
+    letter-spacing:0;
+    margin:18px 0 6px;
+  }
+  .brand .b{color:var(--green)}
+  .tagline{color:var(--fg);min-height:3.3em;font-size:clamp(15px,3.6vw,18px)}
+  #tw{transition:opacity .16s ease}
+  .sub{color:var(--dim);margin-top:6px}
+  .cursor{display:inline-block;width:.62ch;height:1.05em;background:var(--green);vertical-align:-2px;margin-left:2px;animation:blink 1.05s steps(1) infinite;box-shadow:0 0 10px rgba(90,214,125,.6)}
+  @keyframes blink{50%{opacity:0}}
+
+  /* command/output blocks */
+  section{margin:46px 0 0}
+  .hero-output{margin-top:20px;border-left-color:var(--green);font-size:13.5px}
+  .hero-kicker{color:var(--amber);font-size:13px;margin:16px 0 0}
+  .hero-links{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  .hero-links a{
+    border:1px solid var(--line);
+    border-radius:3px;
+    padding:7px 12px;
+    color:var(--green2);
+    background:rgba(90,214,125,.035);
+    font-size:13px;
+  }
+  .hero-links a:hover{border-color:var(--green);border-bottom-color:var(--green);background:rgba(90,214,125,.08)}
+  .cmd{color:var(--dim);margin-bottom:14px;font-size:13.5px}
+  .cmd .prompt{margin-right:.5ch}
+  h2{font-size:18px;margin:2px 0 10px;color:var(--green2);font-weight:600;letter-spacing:0}
+  p{margin:0 0 14px}
+  .lead{color:var(--fg)}
+
+  pre{
+    background:var(--bg2);
+    border:1px solid var(--line);
+    border-left:2px solid var(--faint);
+    padding:16px 18px;
+    overflow:auto;
+    border-radius:3px;
+    color:var(--fg);
+    font-size:13px;
+    line-height:1.55;
+    margin:14px 0;
+  }
+  pre.diagram{border-left-color:var(--green);color:var(--dim)}
+  pre .g{color:var(--green)} pre .a{color:var(--amber)} pre .c{color:var(--cyan)} pre .r{color:var(--red)} pre .d{color:var(--faint)} pre .w{color:var(--fg)}
+
+  ul{list-style:none;padding:0;margin:14px 0}
+  li{padding:2px 0 2px 2.2ch;position:relative}
+  li::before{content:"–";position:absolute;left:0;color:var(--green)}
+
+  .law{border:1px dashed var(--faint);padding:14px 18px;margin:16px 0;color:var(--green2);border-radius:3px;background:rgba(90,214,125,.03)}
+  .punch{border-top:1px solid var(--line);padding-top:28px}
+  .punch h2{font-size:clamp(22px,5vw,34px);line-height:1.18;margin-bottom:14px;color:var(--green2)}
+  .punch .lead{font-size:clamp(15px,3.5vw,18px);line-height:1.6}
+  .claim-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:18px 0}
+  .claim{border:1px solid var(--line);border-radius:3px;background:var(--bg2);padding:12px 14px;min-height:92px}
+  .claim b{display:block;margin-bottom:4px}
+  .claim span{color:var(--dim);font-size:13px;line-height:1.45;display:block}
+  @media (max-width: 680px){
+    .claim-grid{grid-template-columns:1fr}
+    .hero-links a{flex:1 1 auto}
+    .brand{font-size:44px}
+    .hero-output{font-size:10px;padding:14px 10px}
+  }
+
+  /* flip control */
+  .flip-bar{display:flex;gap:10px;align-items:center;margin:6px 0 4px;flex-wrap:wrap}
+  button.flip{
+    font-family:var(--mono);font-size:13px;cursor:pointer;
+    background:transparent;color:var(--green);border:1px solid var(--line);
+    border-radius:3px;padding:6px 12px;transition:background .15s,border-color .15s;
+  }
+  button.flip:hover{border-color:var(--green);background:rgba(90,214,125,.07)}
+  .topo{position:relative}
+  .topo pre{transition:opacity .22s ease}
+  .topo .hidden{display:none}
+  .eq{color:var(--amber);font-weight:600;margin-top:2px}
+  .label{color:var(--dim);font-size:12.5px;margin-top:-6px}
+
+  /* proof block */
+  .proof{border:1px solid var(--line);border-radius:3px;padding:16px 18px;background:var(--bg2)}
+  .proof .url{color:var(--green2)}
+  .proof.early{margin-top:16px;border-color:#263020}
+
+  /* triplet */
+  .triplet{font-size:clamp(15px,4vw,19px);line-height:1.9;margin:8px 0;color:var(--fg)}
+  .triplet .l{color:var(--dim)} .triplet .r{color:var(--green2)}
+
+  /* CTA */
+  footer{margin-top:56px;border-top:1px solid var(--line);padding-top:22px}
+  .links{display:flex;gap:10px 22px;flex-wrap:wrap;margin-top:10px}
+  .links a{font-size:14px}
+  .star{display:inline-block;border:1px solid var(--green);border-radius:3px;padding:8px 16px;color:var(--green2);margin:6px 0}
+  .star:hover{background:rgba(90,214,125,.08);border-bottom-color:var(--green)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="cmd"><span class="prompt">visitor@cooldis:~$</span> cooldis agent run fleet-architect --prompt "how do I run a thousand different agents?"</div>
+    <div class="brand glow">cool<span class="b">dis</span></div>
+    <div class="tagline"><span id="tw"></span><span class="cursor" aria-hidden="true"></span></div>
+    <div class="sub">open serverless agent platform for governed agent fleets</div>
+    <pre class="hero-output"><span class="g">fleet-architect</span> answered
+<span class="d">substrate</span>   declarations <span class="a">-&gt;</span> governed execution
+<span class="d">harness</span>     model + context + tools + grants
+<span class="d">behavior</span>    roles + goals + responsibilities
+<span class="d">placement</span>   outside <span class="d">|</span> inside <span class="d">|</span> userland sandbox
+<span class="d">capability</span>  publish once <span class="a">-&gt;</span> tool <span class="d">|</span> cli <span class="d">|</span> http <span class="d">|</span> mcp
+<span class="d">control</span>     grants <span class="a">-&gt;</span> events <span class="a">-&gt;</span> receipts <span class="a">-&gt;</span> resume</pre>
+    <div class="hero-kicker">robustness and flexibility belong in the same system.</div>
+    <div class="hero-links">
+      <a href="https://github.com/emotionscientific/cooldis" rel="noopener">star github</a>
+      <a href="/docs/">read docs</a>
+      <a href="https://github.com/emotionscientific/cooldis/blob/main/docs/abi.md" rel="noopener">operation contract</a>
+    </div>
+  </header>
+
+  <!-- 0. the pitch -->
+  <section class="punch">
+    <div class="cmd"><span class="prompt">$</span> cooldis agent run fleet-architect --prompt "what is the simplest shape for a serious agent fleet?"</div>
+    <h2>The easiest, most robust way to run thousands of heterogeneous agents.</h2>
+    <p class="lead">Every serious agent product needs the same declarative
+    substrate: provider policy, context assembly, tool grants, behavior rules,
+    sandbox boundaries, event logs, receipts, spend controls, resume, and a way
+    to publish new powers while the system is already running.</p>
+    <p>Cooldis makes that substrate explicit. Declare an agent as a <b>portable
+    harness</b>; declare behavior as goals and strategies; publish a capability
+    once; let the runtime project it into the surface each caller needs.</p>
+    <div class="claim-grid">
+      <div class="claim"><b>For builders</b><span>one place to author tools, hooks, context policy, and model/provider choices.</span></div>
+      <div class="claim"><b>For operators</b><span>scope what each agent can touch, watch every execution, and keep receipts.</span></div>
+      <div class="claim"><b>For agents</b><span>hot-swap capabilities through explicit runtime grants.</span></div>
+      <div class="claim"><b>For infrastructure</b><span>run local, remote, nested, or distributed under the same contract.</span></div>
+    </div>
+    <div class="law">Cooldis turns declarations into governed agent execution.</div>
+    <div class="proof early">
+      <p style="margin:0"><b>This is already production-shaped.</b> The core is
+      being carved out of
+      the runtime behind <span class="url">someone.cool</span>,
+      where one system operates radically different agents while preserving
+      control of context, tools, state, and spend.</p>
+    </div>
+  </section>
+
+  <!-- I. real contract -->
+  <section>
+    <div class="cmd"><span class="prompt">$</span> cooldis op show web.search <span class="faint"># illustrative — see docs/abi.md</span></div>
+    <h2>I. Publish capability once; expose it everywhere.</h2>
+    <p class="lead">A capability declares its contract once. Cooldis projects it into
+    every caller&rsquo;s native shape through one governed runtime path.</p>
+    <pre><span class="g">operation</span> <span class="c">"web.search"</span>
+  <span class="d">source </span> query: <span class="a">text</span>
+  <span class="d">sink   </span> results: <span class="a">json</span>
+  <span class="d">effect </span> <span class="g">net.http:</span>api.example.com    <span class="d"># capability-gated</span>
+  <span class="d">grant  </span> <span class="g">secret:</span>SEARCH_API_KEY       <span class="r"># fail-closed</span>
+  <span class="d">event  </span> progress, truncation
+  <span class="d">receipt</span> required for durable writes
+
+<span class="g">projections</span>:
+  <span class="d">llm  ─▶</span> tool       <span class="c">web.search</span>
+  <span class="d">cli  ─▶</span> command    <span class="c">web search &lt;query&gt;</span>
+  <span class="d">http ─▶</span> POST       <span class="c">/ops/web.search</span>
+  <span class="d">mcp  ─▶</span> export     <span class="c">web.search</span></pre>
+    <p>Publish a new capability at runtime; Cooldis validates it before it&rsquo;s
+    visible and swaps it atomically. A failed extension leaves the previous one
+    installed. This is governed self-extension through explicit runtime power.</p>
+    <p class="dim">The agent carries a portable harness: model/provider policy,
+    context strategy, operation bindings, hook points, requested grants, placement
+    hints, and audit rules. The harness moves; the runtime enforces.</p>
+  </section>
+
+  <!-- II. scaling -->
+  <section>
+    <div class="cmd"><span class="prompt">$</span> cooldis agent run runtime-architect --prompt "what changes when every agent and capability goes through one contract?"</div>
+    <h2>II. One narrow waist for every agent and capability.</h2>
+    <p class="lead">The runtime contract gives every new agent and every new capability
+    the same governed integration path. Cooldis turns fleet complexity into a
+    narrow waist.</p>
+    <pre class="diagram"><span class="d">                       unenforced            enforced</span>
+<span class="d">                       ───────────           ──────────</span>
+<span class="w">integration</span>      <span class="r">N callers × M caps</span>     <span class="g">N + M</span>      <span class="d">(the narrow waist)</span>
+<span class="w">context</span>          <span class="r">O(n²) attention</span>       <span class="g">bounded summaries</span>
+<span class="w">coupling</span>         <span class="r">O(n²) all-pairs</span>       <span class="g">declared edges only</span>
+<span class="w">verification</span>     <span class="r">multiplicative</span>        <span class="g">additive</span>
+<span class="d">                       ───────────           ──────────</span>
+<span class="w">net result</span>       <span class="r">everything quadratic</span>  <span class="a">only judgment is</span></pre>
+    <div class="law">Every accidental quadratic gets forced back through the runtime contract.</div>
+    <p class="dim">Enforcement
+    <b>eliminates the accidental superlinear terms</b>. Cost becomes proportional to
+    real work plus irreducible judgment. The load-bearing word is <b>enforce</b> &mdash;
+    fail-closed grants, lossless projections, validate-before-visible registration,
+    atomic replace.</p>
+  </section>
+
+  <!-- III. topology -->
+  <section>
+    <div class="cmd"><span class="prompt">$</span> cooldis agent run placement-planner --prompt "where can a Cooldis thread run?"</div>
+    <h2>III. Harness outside, inside, or as the sandboxed userland.</h2>
+    <p class="lead">Cooldis keeps the same grants, events, receipts, and history
+    across all three shapes: wrap a boundary from outside, run the harness
+    inside it, or let the harness provide the controlled userland with virtual
+    bash, VFS, scoped operations, and receipts.</p>
+    <div class="flip-bar">
+      <button class="flip" id="flipBtn">[ flip topology ]</button>
+      <span class="label" id="flipLabel">showing &middot; A: call-in</span>
+    </div>
+    <div class="topo">
+      <pre class="diagram" id="topoA"><span class="d">┌─ host ─────────────┐</span>          <span class="d">┌─ sandbox ───────────┐</span>
+<span class="d">│</span>  <span class="g">orchestrator</span>      <span class="d">│</span>──<span class="a">call in</span>──<span class="d">▶│</span>  <span class="c">cooldis agent</span>      <span class="d">│</span>
+<span class="d">└────────────────────┘</span>          <span class="d">└─────────────────────┘</span>
+
+  <span class="d">the orchestrator attaches</span> <span class="w">to</span> <span class="d">an agent inside the sandbox.</span></pre>
+      <pre class="diagram hidden" id="topoB"><span class="d">┌─ sandbox ──────────┐</span>          <span class="d">┌─ host ──────────────┐</span>
+<span class="d">│</span>  <span class="g">cooldis orchestr.</span> <span class="d">│</span>──<span class="a">seam out</span>──<span class="d">▶│</span>  <span class="c">bash / executor</span>    <span class="d">│</span>
+<span class="d">└────────────────────┘</span>          <span class="d">└─────────────────────┘</span>
+
+  <span class="d">the runtime can sit inside the sandbox and expose a controlled seam out.</span>
+  <span class="d">from the host&rsquo;s view: a remote sandbox attachment.</span></pre>
+    </div>
+    <p class="eq">outside &equiv; inside &equiv; userland sandbox &nbsp;<span class="dim">— same grants, same events, same receipts, same history. Only placement changed.</span></p>
+    <p>That is what makes one operating model hold across local development, cloud
+    workers, on-prem installs, VPCs, nested agent systems, and sandboxes that
+    need their own governed userland.</p>
+  </section>
+
+  <!-- V. existence proof -->
+  <section>
+    <div class="cmd"><span class="prompt">$</span> curl -sI https://someone.cool</div>
+    <h2>IV. Already running in production.</h2>
+    <div class="proof">
+      <p style="margin:0"><b>someone.cool is the proof.</b></p>
+      <p style="margin:12px 0 0" class="dim"><span class="url">someone.cool</span>
+      &mdash; a multi-surface AI companion &mdash; runs on this core. One runtime authors
+      and operates a workout planner for a 56-year-old over iMessage and drafts a
+      biotech founder&rsquo;s papers. <span class="amber">That range is the product and the
+      proof of the core&rsquo;s polymorphism.</span></p>
+    </div>
+  </section>
+
+  <!-- V. triplet -->
+  <section>
+    <div class="cmd"><span class="prompt">$</span> cooldis agent run runtime-architect --prompt "why make this a runtime?"</div>
+    <h2>V. Short scaffolding, long substrate</h2>
+    <p class="dim">Cooldis is a long on model progress. As models get stronger,
+    the scarce resource becomes the substrate where probabilistic output becomes
+    durable, governed, composable capability.</p>
+    <p class="triplet">
+      <span class="l">the model guesses.</span> <span class="r">the runtime guarantees.</span><br/>
+      <span class="l">the model proposes.</span> <span class="r">the runtime disposes.</span><br/>
+      <span class="l">the model is the energy.</span> <span class="r">the kernel is the engine block.</span>
+    </p>
+  </section>
+
+  <footer>
+    <div class="cmd"><span class="prompt">$</span> git clone https://github.com/emotionscientific/cooldis</div>
+    <a class="star glow" href="https://github.com/emotionscientific/cooldis" rel="noopener">★ star cooldis on github</a>
+    <p class="dim" style="margin:10px 0 0">If this feels like the missing substrate, star it &mdash; it&rsquo;s how we find the others.</p>
+    <div class="links">
+      <a href="https://github.com/emotionscientific/cooldis">repo</a>
+      <a href="/docs/">docs</a>
+      <a href="https://github.com/emotionscientific/cooldis/blob/main/docs/index.md">overview</a>
+      <a href="https://github.com/emotionscientific/cooldis/blob/main/docs/abi.md">abi</a>
+      <a href="https://github.com/emotionscientific/cooldis/blob/main/docs/agent-manifest-ontology.md">manifest</a>
+      <a href="https://github.com/emotionscientific/cooldis/blob/main/docs/command-contracts.md">commands</a>
+      <a href="https://someone.cool">someone.cool</a>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // shuffled hero carousel
+  var el = document.getElementById('tw');
+  var heroLines = [
+    'the easiest way to run thousands of agents.',
+    'the safest way to give agents real powers.',
+    'the most robust way to manage your agent fleet.',
+    'the cleanest way to compose agent systems.',
+    'the most governable way to extend agents at runtime.',
+    'the cheapest way to monitor every execution.'
+  ];
+  function shuffle(lines){
+    var out = lines.slice();
+    for(var i = out.length - 1; i > 0; i--){
+      var j = Math.floor(Math.random() * (i + 1));
+      var tmp = out[i];
+      out[i] = out[j];
+      out[j] = tmp;
+    }
+    return out;
+  }
+  var queue = shuffle(heroLines);
+  if(reduce){ el.textContent = heroLines[0]; }
+  else{
+    var lineIndex = 0;
+    function nextLine(){
+      if(lineIndex >= queue.length){
+        queue = shuffle(heroLines);
+        lineIndex = 0;
+      }
+      return queue[lineIndex++];
+    }
+    function showNext(){
+      el.style.opacity = '0';
+      setTimeout(function(){
+        el.textContent = nextLine();
+        el.style.opacity = '1';
+      }, 170);
+    }
+    showNext();
+    setInterval(showNext, 3200);
+  }
+
+  // topology flip
+  var btn = document.getElementById('flipBtn');
+  var a = document.getElementById('topoA');
+  var b = document.getElementById('topoB');
+  var label = document.getElementById('flipLabel');
+  var showingA = true;
+  btn.addEventListener('click', function(){
+    showingA = !showingA;
+    a.classList.toggle('hidden', !showingA);
+    b.classList.toggle('hidden', showingA);
+    label.innerHTML = showingA ? 'showing &middot; A: call-in' : 'showing &middot; B: call-out';
+  });
+})();
+</script>
+</body>
+</html>

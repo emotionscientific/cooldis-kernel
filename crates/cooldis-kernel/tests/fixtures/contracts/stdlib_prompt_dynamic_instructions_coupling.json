@@ -1,0 +1,58 @@
+{
+  "prompt_dynamic_instructions": [
+    {
+      "event_id": "018f0000-0000-7000-8000-000000000047",
+      "kind": "context.summary.completed",
+      "payload": {
+        "content": {
+          "sha256": "sha256:1e05470f02126a937e9337bd5678e2bd6956dcc5a1aa03eab4a9f9d53de53791"
+        },
+        "covered_ranges": [
+          {
+            "from_sequence": 1,
+            "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
+            "to_sequence": 8
+          }
+        ],
+        "instruction_name": "instructions.default",
+        "role": "summary_checkpoint",
+        "schema": "cooldis.event.context.summary.completed/1",
+        "snapshot_id": "snapshot-a",
+        "source_event_id": "018f0000-0000-7000-8000-000000000046",
+        "source_kind": "manifest.bind.completed",
+        "template_id": "std::prompt.dynamic_instructions",
+        "text": "When choosing the V1 stream backend, prefer SQLite event sourcing unless a live integration explicitly asks for S2."
+      },
+      "stream": "derived:context"
+    },
+    {
+      "kind": "context.read_plan.set",
+      "payload": {
+        "instruction_event_id": "018f0000-0000-7000-8000-000000000047",
+        "name": "instructions.default",
+        "pipeline_id": "context.instructions",
+        "read_plan": {
+          "entries": [
+            {
+              "event_id": "018f0000-0000-7000-8000-000000000047",
+              "event_role": "instruction_checkpoint",
+              "kind": "event_ref",
+              "stream_id": "derived:context:018f0000-0000-7000-8000-000000000001"
+            }
+          ],
+          "frontier": "compile_frontier",
+          "name": "instructions.default",
+          "schema": "cooldis.context.read_plan/1",
+          "source_stream": "derived:context:018f0000-0000-7000-8000-000000000001"
+        },
+        "schema": "cooldis.event.context.read_plan.set/1",
+        "scope": "thread",
+        "source_id": "derived:context:018f0000-0000-7000-8000-000000000001",
+        "template_id": "std::prompt.dynamic_instructions",
+        "trigger_event_id": "018f0000-0000-7000-8000-000000000046",
+        "trigger_kind": "manifest.bind.completed"
+      },
+      "stream": "derived:context"
+    }
+  ]
+}

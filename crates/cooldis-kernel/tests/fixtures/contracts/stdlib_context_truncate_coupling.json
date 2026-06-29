@@ -1,0 +1,51 @@
+{
+  "context_truncate": [
+    {
+      "kind": "context.read_plan.set",
+      "payload": {
+        "name": "history.default",
+        "pipeline_id": "context.truncate",
+        "read_plan": {
+          "entries": [
+            {
+              "kind": "drop_range",
+              "range": {
+                "from": "start",
+                "to": {
+                  "sequence": 7
+                }
+              },
+              "reason": "fixture keeps only the raw tail",
+              "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+            },
+            {
+              "kind": "raw_range",
+              "range": {
+                "from": {
+                  "sequence": 7
+                },
+                "to": {
+                  "sequence": 10
+                }
+              },
+              "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+            }
+          ],
+          "frontier": "compile_frontier",
+          "name": "history.default",
+          "schema": "cooldis.context.read_plan/1",
+          "source_stream": "thread:018f0000-0000-7000-8000-000000000001"
+        },
+        "reason": "fixture keeps only the raw tail",
+        "retain_tail_events": 3,
+        "schema": "cooldis.event.context.read_plan.set/1",
+        "scope": "thread",
+        "source_id": "thread:018f0000-0000-7000-8000-000000000001",
+        "template_id": "std::context.truncate",
+        "trigger_event_id": "018f0000-0000-7000-8000-00000000002a",
+        "trigger_kind": "context.compile.completed"
+      },
+      "stream": "control"
+    }
+  ]
+}

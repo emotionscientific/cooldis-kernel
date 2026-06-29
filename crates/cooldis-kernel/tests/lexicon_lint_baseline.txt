@@ -1,0 +1,18 @@
+# Existing terminology debt. Entries are counted per file and word so unrelated
+# line edits do not churn the baseline. This file only shrinks.
+crates/cooldis-kernel/src/adapters/app_server/connection.rs capsule 47
+crates/cooldis-kernel/src/adapters/app_server/mod.rs capsule 27
+crates/cooldis-kernel/src/adapters/app_server/tests.rs capsule 118
+crates/cooldis-kernel/src/adapters/app_server/threads.rs capsule 10
+crates/cooldis-kernel/src/adapters/mcp_server.rs capsule 28
+crates/cooldis-kernel/src/adapters/mcp_server/tests.rs capsule 33
+crates/cooldis-kernel/src/adapters/provider_runtime.rs hook 1
+crates/cooldis-kernel/src/adapters/provider_runtime/tests.rs observation_store 1
+crates/cooldis-kernel/src/agent/hooks.rs hook 24
+crates/cooldis-kernel/src/agent/tool_interceptor.rs hook 1
+crates/cooldis-kernel/src/capabilities/execution/tests.rs capsule 1
+crates/cooldis-kernel/src/cli/mod.rs capsule 20
+crates/cooldis-kernel/src/cli/tests.rs capsule 4
+crates/cooldis-kernel/src/kernel/context_compiler.rs hook 1
+crates/cooldis-kernel/src/lib.rs capsule 6
+crates/cooldis-kernel/src/lib.rs observation_store 1

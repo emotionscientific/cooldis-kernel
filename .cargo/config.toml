@@ -1,0 +1,4 @@
+# Keep local build artifacts out of the Cooldis checkout. This sibling cache can
+# be deleted at any time with `rm -rf ../.cargo-target/cooldis`.
+[build]
+target-dir = "../.cargo-target/cooldis"

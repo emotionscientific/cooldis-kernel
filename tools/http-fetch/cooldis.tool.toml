@@ -1,0 +1,29 @@
+kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "http-fetch"
+version = "0.1.0"
+description = "Fetch a URL with an HTTP GET request."
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "."
+state = "stateless"
+max_input_bytes = 262144
+max_output_bytes = 262144
+
+[[operations]]
+name = "http_fetch"
+description = "Fetch a URL with GET and return text plus response metadata."
+input_schema = "schemas/http_fetch.input.json"
+output_schema = "schemas/http_fetch.output.json"
+required_capabilities = []
+
+[operations.command]
+name = "http-fetch fetch"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "http_fetch"

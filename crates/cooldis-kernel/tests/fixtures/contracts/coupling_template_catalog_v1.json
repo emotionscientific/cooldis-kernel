@@ -1,0 +1,73 @@
+{
+  "channel_decision_required": [
+    "std::io.channel_ingress",
+    "std::io.channel_egress"
+  ],
+  "ids": [
+    "std::queue.task",
+    "std::queue.completion_callback",
+    "std::context.spill",
+    "std::context.truncate",
+    "std::context.summarize",
+    "std::memory.extract",
+    "std::memory.recall",
+    "std::permission.approval_gate",
+    "std::permission.tool_gate",
+    "std::prompt.steer",
+    "std::prompt.dynamic_instructions",
+    "std::io.channel_ingress",
+    "std::io.channel_egress",
+    "std::schedule.cron",
+    "std::supervisor.spawn",
+    "std::supervisor.child_completion",
+    "std::retry.with_budget",
+    "std::failure.deadletter"
+  ],
+  "maturity": {
+    "kernel_backed": [
+      "std::context.truncate",
+      "std::context.summarize",
+      "std::permission.tool_gate",
+      "std::supervisor.spawn",
+      "std::supervisor.child_completion"
+    ],
+    "reference_only": [
+      "std::queue.task",
+      "std::queue.completion_callback",
+      "std::context.spill",
+      "std::memory.extract",
+      "std::memory.recall",
+      "std::permission.approval_gate",
+      "std::prompt.steer",
+      "std::prompt.dynamic_instructions",
+      "std::io.channel_ingress",
+      "std::io.channel_egress",
+      "std::schedule.cron",
+      "std::retry.with_budget",
+      "std::failure.deadletter"
+    ]
+  },
+  "must_have": [
+    "std::queue.task",
+    "std::queue.completion_callback",
+    "std::context.spill"
+  ],
+  "runtime_executable": [
+    "std::queue.task",
+    "std::queue.completion_callback",
+    "std::context.spill",
+    "std::context.truncate",
+    "std::context.summarize",
+    "std::memory.extract",
+    "std::memory.recall",
+    "std::permission.approval_gate",
+    "std::permission.tool_gate",
+    "std::prompt.steer",
+    "std::prompt.dynamic_instructions",
+    "std::schedule.cron",
+    "std::supervisor.child_completion",
+    "std::retry.with_budget",
+    "std::failure.deadletter"
+  ],
+  "schema": "cooldis.coupling.template_catalog/1"
+}
