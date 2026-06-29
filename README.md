@@ -37,6 +37,15 @@ belong in product repos or adapters.
 
 For the detailed repository map, see [docs/repository-map.md](docs/repository-map.md).
 
+## Related Repositories
+
+- [cooldis-console](https://github.com/emotionscientific/cooldis-console):
+  desktop/web console and product-side client for the Cooldis app-server
+  protocol.
+
+When checked out as sibling repositories, the console usually lives at
+`../cooldis-console`.
+
 ## Current Status
 
 The V1 work is focused on runtime primitives:
