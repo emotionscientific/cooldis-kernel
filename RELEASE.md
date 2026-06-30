@@ -90,7 +90,32 @@ The package smoke verifies the canonical CLI help surface, including
 `cooldis commands`, `cooldis chat --help`, `cooldis auth --help`,
 `cooldis tool manual --help`, and `cooldis debug rpc --help`.
 
-## Publishing
+## Async Publishing
+
+Maintainers can run a local host-target package smoke before triggering the
+remote release matrix:
+
+```sh
+scripts/release-async.sh v0.1.0-rc.N
+```
+
+This validates the tag, builds and smokes the local release archive, creates the
+annotated tag at `HEAD`, pushes the current branch and tag, prints the GitHub
+Actions release URL, and exits without watching the remote build. GitHub
+Actions remains the publisher of record for the supported target matrix and the
+release assets consumed by `install.sh`.
+
+Use the full deterministic V1 gate before pushing the tag when the release needs
+the broader local test lane:
+
+```sh
+scripts/release-async.sh v0.1.0-rc.N --full-gate
+```
+
+The default helper path is intentionally shorter than the full gate so local
+development is not blocked on the hosted release matrix.
+
+## Manual Publishing
 
 After the documentation pass and first public commit:
 

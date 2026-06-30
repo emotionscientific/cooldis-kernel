@@ -68,6 +68,17 @@ scripts/check-release-tag.sh v$(cargo metadata --format-version 1 --no-deps \
 
 GitHub Actions runs the tag check before publishing artifacts.
 
+For normal maintainer release iteration, use the async helper after local
+changes are committed:
+
+```sh
+scripts/release-async.sh v0.1.0-rc.N
+```
+
+The helper performs a local host-target package smoke, pushes the tag, prints
+the Release workflow URL, and exits. Pass `--full-gate` to run this full V1 gate
+before the tag push.
+
 ## Binary Artifacts
 
 Release packaging is target-aware:

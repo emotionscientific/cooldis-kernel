@@ -99,7 +99,8 @@ cargo test --workspace --all-targets --locked
 ```
 
 For the first local path, see [docs/getting-started.md](docs/getting-started.md).
-For release packaging and tag checks, see [RELEASE.md](RELEASE.md).
+For release packaging, tag checks, and async release publishing, see
+[RELEASE.md](RELEASE.md).
 
 ## Contributing
 
