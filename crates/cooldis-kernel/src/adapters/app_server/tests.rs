@@ -357,9 +357,12 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
     let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
     config.agent_registry_root = root.join("agents");
     let provider_id = "fixture-auth";
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let project_metadata_path = config.metadata_store_path();
+    let user_metadata_path = config.user_metadata_store_path();
+    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path).unwrap();
     metadata_store
         .upsert_provider(
             LlmProviderRecord::new(
@@ -408,15 +411,28 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
             .contains("stored-openai_compatible-key")
     );
 
-    let store = crate::SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
-    let provider = store
+    let project_store = crate::SqliteMetadataStore::open(&project_metadata_path).unwrap();
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path).unwrap();
+    let provider = project_store
         .get_provider(provider_id)
         .unwrap()
         .expect("default provider should be seeded");
-    let resolved =
-        crate::resolve_llm_provider_auth(&store, &provider, &crate::LlmProviderAuthContext::new())
-            .unwrap()
-            .expect("stored provider credential should resolve");
+    assert!(
+        crate::resolve_llm_provider_auth(
+            &project_store,
+            &provider,
+            &crate::LlmProviderAuthContext::new()
+        )
+        .unwrap()
+        .is_none()
+    );
+    let resolved = crate::resolve_llm_provider_auth(
+        &user_store,
+        &provider,
+        &crate::LlmProviderAuthContext::new(),
+    )
+    .unwrap()
+    .expect("stored provider credential should resolve");
     assert_eq!(resolved.source, crate::LlmProviderAuthSourceKind::Stored);
     assert_eq!(resolved.api_key, "stored-openai_compatible-key");
 
@@ -429,10 +445,15 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .await
         .unwrap();
     assert_eq!(deleted["auth"]["configured"], false);
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path).unwrap();
     assert!(
-        crate::resolve_llm_provider_auth(&store, &provider, &crate::LlmProviderAuthContext::new())
-            .unwrap()
-            .is_none()
+        crate::resolve_llm_provider_auth(
+            &user_store,
+            &provider,
+            &crate::LlmProviderAuthContext::new()
+        )
+        .unwrap()
+        .is_none()
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -482,8 +503,10 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
     let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
+    let user_metadata_path = config.user_metadata_store_path();
     let app = CooldisAppServer::new_local(config).await.unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone());
     initialize_for_test(&connection).await;
@@ -515,7 +538,14 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
     assert!(!upsert.to_string().contains("fixture-token"));
     assert!(!upsert.to_string().contains("fixture-secret-like-value"));
 
-    let secret = SqliteSecretStore::open(&metadata_path)
+    assert!(
+        SqliteSecretStore::open(&metadata_path)
+            .unwrap()
+            .resolve_secret("mcp.arcade.bearer")
+            .unwrap()
+            .is_none()
+    );
+    let secret = SqliteSecretStore::open(&user_metadata_path)
         .unwrap()
         .resolve_secret("mcp.arcade.bearer")
         .unwrap()
@@ -2560,6 +2590,78 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
 }
 
 #[tokio::test]
+async fn app_server_startup_skips_stale_manifest_threads() {
+    let root = unique_test_root("app-server-stale-manifest-startup");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let agent_registry_root = root.join("agents");
+    let metadata_path;
+    let thread_id;
+
+    {
+        let listen = AppServerListenAddr::Unix(
+            std::env::temp_dir().join(format!("cooldis-stale-manifest-a-{}.sock", Uuid::now_v7())),
+        );
+        let mut config = CooldisAppServerConfig::local(listen, &workspace);
+        config.runtime_home = root.join("runtime");
+        config.state_home = root.join("state");
+        config.agent_registry_root = agent_registry_root.clone();
+        metadata_path = config.metadata_store_path();
+        let app = CooldisAppServer::new_local(config).await.unwrap();
+        let (connection, _outbound_rx) = test_connection(app.clone());
+        initialize_for_test(&connection).await;
+
+        let thread_start = app
+            .dispatch_request(&connection, "thread/start", Some(json!({})))
+            .await
+            .unwrap();
+        thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
+    }
+
+    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let store = SqliteMetadataStore::open(&metadata_path).unwrap();
+    let mut lifecycle = store
+        .get_thread_lifecycle(parsed)
+        .unwrap()
+        .expect("thread/start should persist lifecycle metadata");
+    lifecycle.metadata.insert(
+        THREAD_AGENT_MANIFEST_HASH_METADATA.to_string(),
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+    );
+    store.upsert_thread_lifecycle(lifecycle).unwrap();
+    drop(store);
+
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-stale-manifest-b-{}.sock", Uuid::now_v7())),
+    );
+    let mut restarted_config = CooldisAppServerConfig::local(listen, &workspace);
+    restarted_config.runtime_home = root.join("runtime");
+    restarted_config.state_home = root.join("state");
+    restarted_config.agent_registry_root = agent_registry_root.clone();
+    let restarted = CooldisAppServer::new_local(restarted_config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(restarted.clone());
+    initialize_for_test(&connection).await;
+
+    let err = restarted
+        .dispatch_request(
+            &connection,
+            "thread/resume",
+            Some(json!({
+                "threadId": thread_id,
+                "excludeTurns": true,
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.contains("manifest thread stored hash"),
+        "unexpected resume error: {err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn thread_start_with_agent_ref_records_manifest_receipts_before_turns() {
     use crate::EventStore;
 
@@ -4522,6 +4624,7 @@ fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_stored_au
         .unwrap();
 
     let resolved = resolve_catalog_openai_chat_completions_provider(
+        &store,
         &store,
         &crate::LlmProviderAuthContext::new(),
         crate::OPENAI_COMPATIBLE_PROVIDER_ID,
@@ -6662,6 +6765,126 @@ async fn app_server_websocket_listen_serves_health_endpoints() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn app_server_websocket_listen_serves_console_assets() {
+    let root = unique_test_root("app-server-console-assets");
+    let assets = root.join("console");
+    std::fs::create_dir_all(assets.join("assets")).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<!doctype html><html><head><title>Console</title></head><body><div id=\"app\"></div></body></html>",
+    )
+    .unwrap();
+    std::fs::write(
+        assets.join("assets").join("app.js"),
+        "console.log('asset');",
+    )
+    .unwrap();
+    std::fs::write(assets.join("favicon.png"), "png").unwrap();
+
+    let addr = unused_loopback_addr();
+    let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
+    let mut config =
+        CooldisAppServerConfig::local(listen.clone(), std::env::current_dir().unwrap())
+            .with_console_assets(&assets, "fixture-token");
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let server_task = tokio::spawn(async move { app.serve(listen).await });
+
+    let response = get_tcp_response(addr, "/").await;
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected console root response: {response:?}"
+    );
+    assert!(response.contains("Content-Type: text/html"));
+    assert!(response.contains("__COOLDIS_CONSOLE_CONFIG__"));
+    assert!(response.contains("fixture-token"));
+
+    let response = get_tcp_response(addr, "/index.html").await;
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected console index response: {response:?}"
+    );
+    assert!(response.contains("__COOLDIS_CONSOLE_CONFIG__"));
+
+    let response = get_tcp_response(addr, "/assets/app.js").await;
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected console asset response: {response:?}"
+    );
+    assert!(response.contains("Content-Type: text/javascript"));
+    assert!(response.contains("console.log('asset');"));
+
+    let response = get_tcp_response(addr, "/healthz").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains(APP_SERVER_HEALTH_RESPONSE_BODY));
+
+    server_task.abort();
+    let _ = server_task.await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn app_server_websocket_listen_requires_console_session_token() {
+    let root = unique_test_root("app-server-console-token");
+    let assets = root.join("console");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<html><head></head><body></body></html>",
+    )
+    .unwrap();
+
+    let addr = unused_loopback_addr();
+    let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
+    let mut config =
+        CooldisAppServerConfig::local(listen.clone(), std::env::current_dir().unwrap())
+            .with_console_assets(&assets, "fixture-token");
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let server_task = tokio::spawn(async move { app.serve(listen).await });
+
+    let missing = get_tcp_raw_response(
+        addr,
+        &format!(
+            "GET /rpc HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ),
+    )
+    .await;
+    assert!(
+        missing.starts_with("HTTP/1.1 401 Unauthorized"),
+        "unexpected missing-token response: {missing:?}"
+    );
+
+    let wrong = get_tcp_raw_response(
+        addr,
+        &format!(
+            "GET /rpc?token=wrong HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ),
+    )
+    .await;
+    assert!(
+        wrong.starts_with("HTTP/1.1 401 Unauthorized"),
+        "unexpected wrong-token response: {wrong:?}"
+    );
+
+    let mut client =
+        connect_ws_tui_test_client(&format!("ws://{addr}/rpc?token=fixture-token")).await;
+    assert_eq!(
+        client.initialize_result()["userAgent"],
+        "cooldis-app-server/0.1"
+    );
+
+    client.close().await.unwrap();
+    server_task.abort();
+    let _ = server_task.await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn app_server_listen_addr_parses_websocket_urls() {
     let addr: std::net::SocketAddr = "127.0.0.1:8765".parse().unwrap();
@@ -7858,6 +8081,7 @@ where
         CapsuleBindingsConfig::default(),
         None,
         Some(config.metadata_store_path()),
+        None,
         Some(config.state_home.join("session_history.sqlite3")),
         None,
         None,
@@ -9219,14 +9443,21 @@ fn unused_loopback_addr() -> std::net::SocketAddr {
 }
 
 async fn get_tcp_health_response(addr: std::net::SocketAddr, path: &str) -> String {
+    get_tcp_response(addr, path).await
+}
+
+async fn get_tcp_response(addr: std::net::SocketAddr, path: &str) -> String {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    get_tcp_raw_response(addr, &request).await
+}
+
+async fn get_tcp_raw_response(addr: std::net::SocketAddr, request: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut last_error = None;
     for _ in 0..100 {
         match TcpStream::connect(addr).await {
             Ok(mut stream) => {
-                let request =
-                    format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
                 stream.write_all(request.as_bytes()).await.unwrap();
                 let mut response = String::new();
                 stream.read_to_string(&mut response).await.unwrap();
@@ -9239,7 +9470,7 @@ async fn get_tcp_health_response(addr: std::net::SocketAddr, path: &str) -> Stri
         }
     }
     panic!(
-        "timed out connecting health probe to {addr}; last error: {}",
+        "timed out connecting TCP probe to {addr}; last error: {}",
         last_error.unwrap_or_else(|| "none".to_string())
     );
 }

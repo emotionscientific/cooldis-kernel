@@ -165,6 +165,174 @@ fn parse_chat_args_collects_attach_endpoint() {
 }
 
 #[test]
+fn parse_console_args_defaults_to_loopback_and_open() {
+    let parsed = parse_console_args(Vec::new()).unwrap();
+
+    assert_eq!(
+        parsed.listen.ip(),
+        "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+    );
+    assert_eq!(parsed.listen.port(), 0);
+    assert!(parsed.open);
+    assert_eq!(parsed.config_path, None);
+    assert!(!parsed.cwd_explicit);
+}
+
+#[test]
+fn parse_console_args_collects_browser_and_runtime_options() {
+    let args = vec![
+        "--no-open",
+        "--cwd",
+        "/tmp/work",
+        "--config",
+        "/tmp/cooldis.toml",
+        "--port",
+        "4321",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+
+    let parsed = parse_console_args(args).unwrap();
+
+    assert_eq!(parsed.listen, "127.0.0.1:4321".parse().unwrap());
+    assert!(!parsed.open);
+    assert_eq!(parsed.cwd, PathBuf::from("/tmp/work"));
+    assert!(parsed.cwd_explicit);
+    assert_eq!(parsed.config_path, Some(PathBuf::from("/tmp/cooldis.toml")));
+}
+
+#[test]
+fn console_app_server_config_from_toml_preserves_config_cwd_unless_overridden() {
+    let root = std::env::temp_dir().join(format!("cooldis-console-config-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let config_path = root.join("cooldis.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[daemon.runtime]
+cwd = "configured-work"
+
+[daemon.app_server]
+listen = "unix:///tmp/ignored-console-config.sock"
+"#,
+    )
+    .unwrap();
+    let listen = AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
+
+    let parsed = parse_console_args(
+        vec!["--config", config_path.to_str().unwrap()]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+    )
+    .unwrap();
+    let config = console_app_server_config(&parsed, listen.clone()).unwrap();
+    assert_eq!(config.listen, listen);
+    assert_eq!(config.cwd, root.join("configured-work"));
+
+    let parsed = parse_console_args(
+        vec![
+            "--config",
+            config_path.to_str().unwrap(),
+            "--cwd",
+            "/tmp/override-work",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect(),
+    )
+    .unwrap();
+    let config = console_app_server_config(&parsed, listen).unwrap();
+    assert_eq!(config.cwd, PathBuf::from("/tmp/override-work"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn console_app_server_config_defaults_to_project_local_roots_and_user_state() {
+    let root = std::env::temp_dir().join(format!("cooldis-console-project-{}", Uuid::now_v7()));
+    let nested = root.join("work/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(root.join("work/.cooldis")).unwrap();
+    let parsed = parse_console_args(
+        vec!["--cwd", nested.to_str().unwrap()]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+    )
+    .unwrap();
+    let listen = AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
+    let config = console_app_server_config(&parsed, listen).unwrap();
+
+    let project = root.join("work");
+    assert_eq!(config.runtime_home, project.join(".cooldis/runtime"));
+    assert_eq!(config.state_home, project.join(".cooldis/state"));
+    assert_eq!(config.agent_registry_root, project.join(".cooldis/agents"));
+    assert_eq!(
+        config.capsule_bindings.registry_root,
+        Some(project.join(".cooldis/operations"))
+    );
+    assert_eq!(
+        config.user_metadata_store_path(),
+        default_user_cooldis_home()
+            .unwrap()
+            .join("state/metadata.sqlite3")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn console_project_storage_root_does_not_reuse_user_home() {
+    let root = std::env::temp_dir().join(format!("cooldis-console-home-{}", Uuid::now_v7()));
+    let project_root = root.join("home");
+    let user_home = project_root.join(".cooldis");
+
+    assert_eq!(
+        console_project_storage_root(&project_root, &user_home),
+        user_home.join("projects/home")
+    );
+    assert_eq!(
+        console_project_storage_root(&root.join("work"), &user_home),
+        root.join("work/.cooldis")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn prepare_console_project_storage_creates_operation_registry_root() {
+    let root = std::env::temp_dir().join(format!("cooldis-console-roots-{}", Uuid::now_v7()));
+    let workspace = root.join("workspace");
+    let mut config = CooldisAppServerConfig::local(
+        AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
+        &workspace,
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    config.capsule_bindings.registry_root = Some(root.join("operations"));
+
+    prepare_console_project_storage(&config).unwrap();
+
+    assert!(config.runtime_home.is_dir());
+    assert!(config.state_home.is_dir());
+    assert!(config.user_state_home.is_dir());
+    assert!(config.agent_registry_root.is_dir());
+    assert!(
+        config
+            .capsule_bindings
+            .registry_root
+            .as_ref()
+            .is_some_and(|path| path.is_dir())
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn parse_daemon_service_print_uses_explicit_target_and_config() {
     let args = vec![
         "--target",

@@ -87,6 +87,8 @@ pub const APP_SERVER_ANTHROPIC_BEDROCK_MODEL: &str =
 const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
 const APP_SERVER_HEALTH_RESPONSE_BODY: &str = "{\"status\":\"ok\"}";
 const APP_SERVER_USER_AGENT: &str = "cooldis-app-server/0.1";
+const HTTP_UNAUTHORIZED_BODY: &str = "missing or invalid Cooldis console session token";
+const MAX_HTTP_REQUEST_HEADER_BYTES: usize = 8192;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_COMMAND_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 const DEFAULT_AGENT_REGISTRY_ROOT: &str = ".cooldis/agents";
@@ -169,6 +171,7 @@ pub struct CooldisAppServerConfig {
     pub listen: AppServerListenAddr,
     pub runtime_home: PathBuf,
     pub state_home: PathBuf,
+    pub user_state_home: PathBuf,
     pub cwd: PathBuf,
     pub tenant_id: String,
     pub user_id: String,
@@ -177,15 +180,17 @@ pub struct CooldisAppServerConfig {
     pub provider: AppServerProviderConfig,
     pub capsule_bindings: CapsuleBindingsConfig,
     pub agent_registry_root: PathBuf,
+    pub console_assets: Option<ConsoleAssetConfig>,
 }
 
 impl CooldisAppServerConfig {
     pub fn local(listen: AppServerListenAddr, cwd: impl Into<PathBuf>) -> Self {
-        let root = std::env::temp_dir().join("cooldis-app-server");
+        let root = std::env::temp_dir().join(format!("cooldis-app-server-{}", Uuid::now_v7()));
         Self {
             listen,
             runtime_home: root.join("runtime"),
             state_home: root.join("state"),
+            user_state_home: root.join("user-state"),
             cwd: cwd.into(),
             tenant_id: "cooldis_app_server".to_string(),
             user_id: "local_user".to_string(),
@@ -195,6 +200,7 @@ impl CooldisAppServerConfig {
             capsule_bindings: CapsuleBindingsConfig::default()
                 .with_registry_root(DEFAULT_OPERATION_REGISTRY_ROOT),
             agent_registry_root: PathBuf::from(DEFAULT_AGENT_REGISTRY_ROOT),
+            console_assets: None,
         }
     }
 
@@ -307,13 +313,35 @@ impl CooldisAppServerConfig {
         self
     }
 
+    pub fn with_console_assets(
+        mut self,
+        root: impl Into<PathBuf>,
+        session_token: impl Into<String>,
+    ) -> Self {
+        self.console_assets = Some(ConsoleAssetConfig {
+            root: root.into(),
+            session_token: session_token.into(),
+        });
+        self
+    }
+
     pub fn metadata_store_path(&self) -> PathBuf {
         self.state_home.join(METADATA_DB_NAME)
     }
 
-    pub fn provider_metadata_store_path(&self) -> PathBuf {
-        self.metadata_store_path()
+    pub fn user_metadata_store_path(&self) -> PathBuf {
+        self.user_state_home.join(METADATA_DB_NAME)
     }
+
+    pub fn provider_metadata_store_path(&self) -> PathBuf {
+        self.user_metadata_store_path()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsoleAssetConfig {
+    pub root: PathBuf,
+    pub session_token: String,
 }
 
 fn operation_registry_root_for_kernel_publish(config: &CooldisAppServerConfig) -> Option<&Path> {
@@ -427,11 +455,14 @@ struct CooldisAppServerInner {
     provider: AppServerProviderConfig,
     capsule_bindings: CapsuleBindingsConfig,
     agent_registry_root: PathBuf,
+    console_assets: Option<ConsoleAssetConfig>,
     cwd: PathBuf,
     codex_home: PathBuf,
     metadata_store_path: PathBuf,
+    user_metadata_store_path: PathBuf,
     session_store_path: PathBuf,
     metadata_store: SqliteMetadataStore,
+    user_metadata_store: SqliteMetadataStore,
     process_manager: AsyncExecutionManager,
     subscriptions: Mutex<AppServerSubscriptions>,
     state: RwLock<AppServerState>,
@@ -491,10 +522,18 @@ impl ProviderClient for AppServerOfflineProviderClient {
 impl CooldisAppServer {
     pub async fn new_local(mut config: CooldisAppServerConfig) -> CooldisResult<Self> {
         let metadata_store = open_and_seed_metadata_store(config.metadata_store_path())?;
+        let user_metadata_store = open_and_seed_metadata_store(config.user_metadata_store_path())?;
         sync_catalog_provider_identity(&mut config, &metadata_store)?;
         normalize_registry_roots(&mut config);
-        let runtime_factory = runtime_factory_from_config(&config, &metadata_store).await?;
-        Self::with_runtime_factory_and_metadata_store(config, runtime_factory, metadata_store).await
+        let runtime_factory =
+            runtime_factory_from_config(&config, &metadata_store, &user_metadata_store).await?;
+        Self::with_runtime_factory_and_metadata_stores(
+            config,
+            runtime_factory,
+            metadata_store,
+            user_metadata_store,
+        )
+        .await
     }
 
     pub async fn with_runtime_factory(
@@ -502,13 +541,37 @@ impl CooldisAppServer {
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
     ) -> CooldisResult<Self> {
         let metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
-        Self::with_runtime_factory_and_metadata_store(config, runtime_factory, metadata_store).await
+        let user_metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
+        Self::with_runtime_factory_and_metadata_stores(
+            config,
+            runtime_factory,
+            metadata_store,
+            user_metadata_store,
+        )
+        .await
     }
 
+    #[cfg(test)]
     async fn with_runtime_factory_and_metadata_store(
+        config: CooldisAppServerConfig,
+        runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
+        metadata_store: SqliteMetadataStore,
+    ) -> CooldisResult<Self> {
+        let user_metadata_store = open_and_seed_metadata_store(config.user_metadata_store_path())?;
+        Self::with_runtime_factory_and_metadata_stores(
+            config,
+            runtime_factory,
+            metadata_store,
+            user_metadata_store,
+        )
+        .await
+    }
+
+    async fn with_runtime_factory_and_metadata_stores(
         mut config: CooldisAppServerConfig,
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
         metadata_store: SqliteMetadataStore,
+        user_metadata_store: SqliteMetadataStore,
     ) -> CooldisResult<Self> {
         normalize_registry_roots(&mut config);
         let provider_surface =
@@ -518,6 +581,7 @@ impl CooldisAppServer {
         ensure_cooldis_notify_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_default_manifest_published(&config, provider_surface.supports_streaming)?;
         let metadata_store_path = config.metadata_store_path();
+        let user_metadata_store_path = config.user_metadata_store_path();
         let supervisor = CooldisSupervisor::new();
         let tenant_context = TenantRuntimeContext::local(
             config.tenant_id.clone(),
@@ -542,11 +606,14 @@ impl CooldisAppServer {
                 provider: config.provider,
                 capsule_bindings: config.capsule_bindings,
                 agent_registry_root: config.agent_registry_root,
+                console_assets: config.console_assets,
                 cwd: config.cwd,
                 codex_home,
                 metadata_store_path,
+                user_metadata_store_path,
                 session_store_path,
                 metadata_store,
+                user_metadata_store,
                 process_manager: AsyncExecutionManager::default(),
                 subscriptions: Mutex::new(AppServerSubscriptions::default()),
                 state: RwLock::new(AppServerState::default()),
@@ -627,16 +694,21 @@ impl CooldisAppServer {
     }
 
     async fn serve_websocket(&self, addr: SocketAddr) -> CooldisResult<()> {
+        let listener = bind_websocket_listener(addr).await?;
+        self.serve_websocket_listener(listener).await
+    }
+
+    pub async fn serve_websocket_listener(&self, listener: TcpListener) -> CooldisResult<()> {
+        let addr = listener.local_addr().map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to inspect Cooldis app-server websocket listener: {err}"
+            ))
+        })?;
         if !addr.ip().is_loopback() {
             return Err(CooldisError::RuntimeFactory(format!(
                 "app-server websocket listen address {addr} is not loopback; configure websocket auth before binding non-loopback addresses"
             )));
         }
-        let listener = TcpListener::bind(addr).await.map_err(|err| {
-            CooldisError::RuntimeFactory(format!(
-                "failed to bind Cooldis app-server websocket listener {addr}: {err}"
-            ))
-        })?;
 
         loop {
             let (stream, peer) = listener.accept().await.map_err(|err| {
@@ -667,7 +739,10 @@ impl CooldisAppServer {
 
     async fn handle_tcp_stream(&self, stream: TcpStream) -> CooldisResult<()> {
         let mut stream = stream;
-        if handle_http_health_request(&mut stream).await? {
+        if self.handle_http_request(&mut stream).await? {
+            return Ok(());
+        }
+        if !self.authorize_console_websocket(&mut stream).await? {
             return Ok(());
         }
         let websocket = accept_async_with_config(stream, Some(websocket_config()))
@@ -679,6 +754,96 @@ impl CooldisAppServer {
             })?;
         self.handle_websocket(websocket).await
     }
+
+    async fn handle_http_request(&self, stream: &mut TcpStream) -> CooldisResult<bool> {
+        let Some(request) = peek_http_request(stream).await? else {
+            return Ok(false);
+        };
+        if request.method != "GET" && request.method != "HEAD" {
+            return Ok(false);
+        }
+
+        if matches!(request.path.as_str(), "/healthz" | "/readyz") {
+            consume_http_request_headers(stream).await?;
+            write_http_response(
+                stream,
+                "200 OK",
+                "application/json",
+                APP_SERVER_HEALTH_RESPONSE_BODY.as_bytes(),
+            )
+            .await?;
+            return Ok(true);
+        }
+
+        let Some(console) = &self.inner.console_assets else {
+            return Ok(false);
+        };
+        if request.path == "/rpc" {
+            return Ok(false);
+        }
+
+        consume_http_request_headers(stream).await?;
+        let Some(relative_path) = console_asset_relative_path(&request.path) else {
+            write_http_response(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"not found",
+            )
+            .await?;
+            return Ok(true);
+        };
+        let asset_path = console.root.join(relative_path);
+        let Ok(mut body) = tokio::fs::read(&asset_path).await else {
+            write_http_response(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"not found",
+            )
+            .await?;
+            return Ok(true);
+        };
+        if asset_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "index.html")
+        {
+            let html = String::from_utf8(body).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "console index.html is not valid UTF-8 at {}: {err}",
+                    asset_path.display()
+                ))
+            })?;
+            body = inject_console_config(&html, &console.session_token).into_bytes();
+        }
+        write_http_response(stream, "200 OK", content_type_for_path(&asset_path), &body).await?;
+        Ok(true)
+    }
+
+    async fn authorize_console_websocket(&self, stream: &mut TcpStream) -> CooldisResult<bool> {
+        let Some(console) = &self.inner.console_assets else {
+            return Ok(true);
+        };
+        let Some(request) = peek_http_request(stream).await? else {
+            return Ok(true);
+        };
+        if request.path != "/rpc" {
+            return Ok(true);
+        }
+        if console_request_has_token(&request, &console.session_token) {
+            return Ok(true);
+        }
+        consume_http_request_headers(stream).await?;
+        write_http_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            HTTP_UNAUTHORIZED_BODY.as_bytes(),
+        )
+        .await?;
+        Ok(false)
+    }
 }
 
 struct ResolvedCatalogOpenAIChatCompletionsProvider {
@@ -686,8 +851,9 @@ struct ResolvedCatalogOpenAIChatCompletionsProvider {
     endpoint: ProviderEndpoint,
 }
 
-fn resolve_catalog_openai_chat_completions_provider<S>(
-    store: &S,
+fn resolve_catalog_openai_chat_completions_provider<C, A>(
+    provider_store: &C,
+    auth_store: &A,
     auth_context: &LlmProviderAuthContext,
     provider_id: &str,
     model: Option<&str>,
@@ -695,9 +861,10 @@ fn resolve_catalog_openai_chat_completions_provider<S>(
     stream: bool,
 ) -> CooldisResult<ResolvedCatalogOpenAIChatCompletionsProvider>
 where
-    S: LlmProviderCatalogStore + LlmProviderAuthStore,
+    C: LlmProviderCatalogStore,
+    A: LlmProviderAuthStore,
 {
-    let provider = store
+    let provider = provider_store
         .get_provider(provider_id)
         .map_err(provider_store_error)?
         .ok_or_else(|| {
@@ -721,8 +888,8 @@ where
     let base_url = model_record
         .and_then(|model| model.base_url.clone())
         .unwrap_or_else(|| provider.base_url.clone());
-    let resolved_auth =
-        resolve_llm_provider_auth(store, &provider, auth_context).map_err(provider_store_error)?;
+    let resolved_auth = resolve_llm_provider_auth(auth_store, &provider, auth_context)
+        .map_err(provider_store_error)?;
     if provider.auth_header && resolved_auth.is_none() {
         return Err(CooldisError::RuntimeFactory(format!(
             "catalog provider {provider_id:?} requires an API key but none was configured"
@@ -940,6 +1107,7 @@ fn sync_catalog_provider_identity(
 async fn runtime_factory_from_config(
     config: &CooldisAppServerConfig,
     provider_store: &SqliteMetadataStore,
+    auth_store: &SqliteMetadataStore,
 ) -> CooldisResult<Arc<dyn crate::AgentRuntimeFactory>> {
     match &config.provider {
         AppServerProviderConfig::LocalOffline => {
@@ -1123,6 +1291,7 @@ async fn runtime_factory_from_config(
         } => {
             let resolved = resolve_catalog_openai_chat_completions_provider(
                 provider_store,
+                auth_store,
                 &LlmProviderAuthContext::from_process_env(),
                 provider_id,
                 model.as_deref(),
@@ -1181,6 +1350,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -1199,6 +1369,7 @@ fn runtime_factory_from_provider_parts_with_app_paths(
         capsule_bindings,
         secret_resolver,
         Some(config.metadata_store_path()),
+        Some(config.user_metadata_store_path()),
         Some(config.state_home.join("session_history.sqlite3")),
         Some(config.agent_registry_root.clone()),
         Some(config.cwd.clone()),
@@ -1212,6 +1383,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     capsule_bindings: CapsuleBindingsConfig,
     secret_resolver: Option<Arc<dyn SecretResolver>>,
     metadata_store_path: Option<PathBuf>,
+    secret_store_path: Option<PathBuf>,
     session_store_path: Option<PathBuf>,
     agent_registry_root: Option<PathBuf>,
     cwd: Option<PathBuf>,
@@ -1224,6 +1396,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         capsule_bindings,
         secret_resolver,
         metadata_store_path,
+        secret_store_path,
         session_store_path,
         agent_registry_root,
         cwd,
@@ -1234,7 +1407,7 @@ fn secret_resolver_from_config(
     config: &CooldisAppServerConfig,
 ) -> CooldisResult<Option<Arc<dyn SecretResolver>>> {
     let store =
-        SqliteSecretStore::open(config.metadata_store_path()).map_err(secret_store_error)?;
+        SqliteSecretStore::open(config.user_metadata_store_path()).map_err(secret_store_error)?;
     Ok(Some(Arc::new(store)))
 }
 
@@ -1244,37 +1417,169 @@ fn websocket_config() -> WebSocketConfig {
         .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_SIZE))
 }
 
-async fn handle_http_health_request(stream: &mut TcpStream) -> CooldisResult<bool> {
-    let mut request = [0_u8; 512];
+async fn bind_websocket_listener(addr: SocketAddr) -> CooldisResult<TcpListener> {
+    if !addr.ip().is_loopback() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "app-server websocket listen address {addr} is not loopback; configure websocket auth before binding non-loopback addresses"
+        )));
+    }
+    TcpListener::bind(addr).await.map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to bind Cooldis app-server websocket listener {addr}: {err}"
+        ))
+    })
+}
+
+#[derive(Debug)]
+struct HttpRequestHead {
+    method: String,
+    path: String,
+    query: Option<String>,
+    headers: Vec<(String, String)>,
+}
+
+async fn peek_http_request(stream: &TcpStream) -> CooldisResult<Option<HttpRequestHead>> {
+    let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
     let len = stream.peek(&mut request).await.map_err(|err| {
         CooldisError::RuntimeFactory(format!(
             "failed to inspect Cooldis app-server tcp request: {err}"
         ))
     })?;
     if len == 0 {
-        return Ok(false);
+        return Ok(None);
     }
-    let request = &request[..len];
-    let is_health = request.starts_with(b"GET /healthz ")
-        || request.starts_with(b"GET /readyz ")
-        || request.starts_with(b"GET /healthz\r")
-        || request.starts_with(b"GET /readyz\r");
-    if !is_health {
-        return Ok(false);
+    Ok(parse_http_request_head(&request[..len]))
+}
+
+fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let header_end = text.find("\r\n\r\n").unwrap_or(text.len());
+    let mut lines = text[..header_end].split("\r\n");
+    let request_line = lines.next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?;
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path.to_string(), Some(query.to_string())),
+        None => (target.to_string(), None),
+    };
+    let headers = lines
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
+    Some(HttpRequestHead {
+        method,
+        path,
+        query,
+        headers,
+    })
+}
+
+fn console_asset_relative_path(path: &str) -> Option<PathBuf> {
+    if matches!(path, "/" | "/index.html") {
+        return Some(PathBuf::from("index.html"));
     }
 
-    consume_http_request_headers(stream).await?;
+    let mut relative = PathBuf::new();
+    let path = path.strip_prefix('/')?;
+    for segment in path.split('/') {
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment.contains('\\')
+            || segment.contains('%')
+        {
+            return None;
+        }
+        relative.push(segment);
+    }
+    if relative.as_os_str().is_empty() {
+        None
+    } else {
+        Some(relative)
+    }
+}
+
+fn inject_console_config(html: &str, session_token: &str) -> String {
+    let token = serde_json::to_string(session_token).unwrap_or_else(|_| "\"\"".to_string());
+    let script =
+        format!("<script>window.__COOLDIS_CONSOLE_CONFIG__={{sessionToken:{token}}};</script>");
+    if let Some(index) = html.find("</head>") {
+        let mut injected = String::with_capacity(html.len() + script.len());
+        injected.push_str(&html[..index]);
+        injected.push_str(&script);
+        injected.push_str(&html[index..]);
+        injected
+    } else {
+        format!("{script}{html}")
+    }
+}
+
+fn console_request_has_token(request: &HttpRequestHead, expected: &str) -> bool {
+    request
+        .query
+        .as_deref()
+        .is_some_and(|query| query_parameter_matches(query, "token", expected))
+        || request
+            .headers
+            .iter()
+            .filter(|(name, _)| name == "sec-websocket-protocol")
+            .flat_map(|(_, value)| value.split(',').map(str::trim))
+            .any(|protocol| {
+                protocol == expected
+                    || protocol
+                        .strip_prefix("cooldis-console-token.")
+                        .is_some_and(|token| token == expected)
+            })
+}
+
+fn query_parameter_matches(query: &str, key: &str, expected: &str) -> bool {
+    query.split('&').any(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        name == key && value == expected
+    })
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("webp") => "image/webp",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> CooldisResult<()> {
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        APP_SERVER_HEALTH_RESPONSE_BODY.len(),
-        APP_SERVER_HEALTH_RESPONSE_BODY
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     );
     stream.write_all(response.as_bytes()).await.map_err(|err| {
         CooldisError::RuntimeFactory(format!(
-            "failed to write Cooldis app-server health response: {err}"
+            "failed to write Cooldis app-server HTTP response: {err}"
         ))
     })?;
-    Ok(true)
+    stream.write_all(body).await.map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to write Cooldis app-server HTTP response body: {err}"
+        ))
+    })?;
+    Ok(())
 }
 
 async fn consume_http_request_headers(stream: &mut TcpStream) -> CooldisResult<()> {
@@ -1283,7 +1588,7 @@ async fn consume_http_request_headers(stream: &mut TcpStream) -> CooldisResult<(
     loop {
         let len = stream.read(&mut chunk).await.map_err(|err| {
             CooldisError::RuntimeFactory(format!(
-                "failed to read Cooldis app-server health request: {err}"
+                "failed to read Cooldis app-server HTTP request: {err}"
             ))
         })?;
         if len == 0 {

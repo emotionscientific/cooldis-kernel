@@ -55,6 +55,7 @@ PACKAGE_DIR="${entries[0]}"
 COOLDIS="$PACKAGE_DIR/cooldis"
 ACP_AGENT="$PACKAGE_DIR/cooldis-acp-agent"
 MCP_SERVER="$PACKAGE_DIR/cooldis-mcp-server"
+CONSOLE_DIR="$PACKAGE_DIR/share/cooldis/console"
 
 for bin in "$COOLDIS" "$ACP_AGENT" "$MCP_SERVER"; do
   if [[ ! -x "$bin" ]]; then
@@ -63,8 +64,14 @@ for bin in "$COOLDIS" "$ACP_AGENT" "$MCP_SERVER"; do
   fi
 done
 
+if [[ ! -f "$CONSOLE_DIR/index.html" || ! -d "$CONSOLE_DIR/assets" ]]; then
+  echo "missing console assets in archive: $CONSOLE_DIR" >&2
+  exit 1
+fi
+
 run_quiet "$COOLDIS" --version
 run_quiet "$COOLDIS" --help
+run_quiet "$COOLDIS" console --help
 run_quiet "$COOLDIS" agent --help
 run_quiet "$COOLDIS" agent init --help
 run_quiet "$COOLDIS" agent plan --help

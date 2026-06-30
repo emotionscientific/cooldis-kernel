@@ -99,6 +99,123 @@ agents = "{}"
 }
 
 #[test]
+fn discovers_project_root_from_nearest_config_then_dot_cooldis() {
+    let root = temp_root("project-discovery");
+    let workspace = root.join("workspace");
+    let nested = workspace.join("src/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(workspace.join(".cooldis")).unwrap();
+
+    let discovered = discover_cooldis_project(&nested).unwrap();
+    assert_eq!(discovered.root, workspace);
+    assert_eq!(discovered.config_path, None);
+
+    let configured = root.join("configured");
+    let configured_nested = configured.join("a/b");
+    std::fs::create_dir_all(&configured_nested).unwrap();
+    std::fs::write(configured.join("cooldis.toml"), "").unwrap();
+
+    let discovered = discover_cooldis_project(&configured_nested).unwrap();
+    assert_eq!(discovered.root, configured);
+    assert_eq!(
+        discovered.config_path,
+        Some(discovered.root.join("cooldis.toml"))
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn layered_toml_config_preserves_earlier_values_until_overridden() {
+    let root = temp_root("layered");
+    let user_root = root.join("user");
+    let project_root = root.join("project");
+    let explicit_root = root.join("explicit");
+    std::fs::create_dir_all(&user_root).unwrap();
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&explicit_root).unwrap();
+    let user_config = user_root.join("config.toml");
+    let project_config = project_root.join("cooldis.toml");
+    let explicit_config = explicit_root.join("override.toml");
+    std::fs::write(
+        &user_config,
+        r#"
+[daemon.runtime]
+state_home = "user-state"
+
+[daemon.provider]
+provider = "openai_compatible"
+model = "user-model"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &project_config,
+        r#"
+[daemon.runtime]
+runtime_home = ".cooldis/runtime"
+
+[daemon.registries]
+agents = ".cooldis/agents"
+
+[daemon.provider]
+model = "project-model"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &explicit_config,
+        r#"
+[daemon.runtime]
+cwd = "explicit-work"
+
+[daemon.provider]
+stream = true
+"#,
+    )
+    .unwrap();
+
+    let loaded = load_cooldis_daemon_config_layers(
+        &[
+            user_config.clone(),
+            project_config.clone(),
+            explicit_config.clone(),
+        ],
+        root.clone(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        loaded.config.runtime.cwd,
+        Some(explicit_root.join("explicit-work"))
+    );
+    assert_eq!(
+        loaded.config.runtime.runtime_home,
+        Some(project_root.join(".cooldis/runtime"))
+    );
+    assert_eq!(
+        loaded.config.runtime.state_home,
+        Some(user_root.join("user-state"))
+    );
+    assert_eq!(
+        loaded.config.registries.agents,
+        Some(project_root.join(".cooldis/agents"))
+    );
+    assert_eq!(
+        loaded.config.provider.provider.as_deref(),
+        Some("openai_compatible")
+    );
+    assert_eq!(
+        loaded.config.provider.model.as_deref(),
+        Some("project-model")
+    );
+    assert_eq!(loaded.config.provider.stream, Some(true));
+    assert_eq!(loaded.path.as_deref(), Some(explicit_config.as_path()));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn loads_toml_daemon_operations_config() {
     let root = temp_root("operations");
     std::fs::create_dir_all(&root).unwrap();

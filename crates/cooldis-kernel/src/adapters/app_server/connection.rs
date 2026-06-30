@@ -1295,7 +1295,7 @@ impl CooldisAppServer {
     }
 
     fn mcp_secret_store(&self) -> Result<SqliteSecretStore, JsonRpcErrorError> {
-        SqliteSecretStore::open(&self.inner.metadata_store_path)
+        SqliteSecretStore::open(&self.inner.user_metadata_store_path)
             .map_err(|err| internal_error(secret_store_error(err)))
     }
 
@@ -1417,7 +1417,7 @@ impl CooldisAppServer {
         }
         let provider = self.model_provider_record(&params.provider_id)?;
         self.inner
-            .metadata_store
+            .user_metadata_store
             .set_credential(
                 &provider.provider_id,
                 crate::LlmProviderCredential::ApiKey {
@@ -1434,7 +1434,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let provider = self.model_provider_record(&params.provider_id)?;
         self.inner
-            .metadata_store
+            .user_metadata_store
             .delete_credential(&provider.provider_id)
             .map_err(|err| internal_error(provider_store_error(err)))?;
         Ok(json!({ "auth": self.model_provider_auth_json(&provider)? }))
@@ -1461,7 +1461,7 @@ impl CooldisAppServer {
         provider: &LlmProviderRecord,
     ) -> Result<Value, JsonRpcErrorError> {
         let status = crate::llm_provider_auth_status(
-            &self.inner.metadata_store,
+            &self.inner.user_metadata_store,
             provider,
             &LlmProviderAuthContext::from_process_env(),
         )
@@ -2014,8 +2014,8 @@ impl CooldisAppServer {
     pub(super) fn tool_universe_discoverer(&self) -> CooldisResult<McpToolUniverseDiscoverer> {
         let registry = SqliteMcpSourceRegistry::open(&self.inner.metadata_store_path)
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
-        let secret_store =
-            SqliteSecretStore::open(&self.inner.metadata_store_path).map_err(secret_store_error)?;
+        let secret_store = SqliteSecretStore::open(&self.inner.user_metadata_store_path)
+            .map_err(secret_store_error)?;
         Ok(McpToolUniverseDiscoverer::new(
             registry,
             Some(Arc::new(secret_store)),

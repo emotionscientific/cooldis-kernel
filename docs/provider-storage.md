@@ -37,20 +37,23 @@ ThreadMetadataStore
   thread lifecycle records and topology for central control-plane lookup
 ```
 
-The first concrete implementation is `SqliteMetadataStore`. It wraps the local
-SQLite connection used for provider records, credential records, and thread
-lifecycle/topology records. `SqliteLlmProviderStore` remains the provider table
-implementation, but app-server boot uses the shared metadata store handle.
+The first concrete implementation is `SqliteMetadataStore`. App-server boot
+opens one project-local SQLite store for provider catalog records and thread
+lifecycle/topology records, plus one user-global SQLite store for credential
+records. `SqliteLlmProviderStore` remains the provider table implementation,
+but browser provider auth writes use the user auth store.
 
-The app-server opens and seeds this store during startup at:
+The public console defaults to:
 
 ```text
-state_home/metadata.sqlite3
+<project_root>/.cooldis/state/metadata.sqlite3
+~/.cooldis/state/metadata.sqlite3
 ```
 
 Seeding is idempotent and does not overwrite stored credentials, so a daemon or
-app-server restart reloads the provider catalog from durable metadata before it
-constructs the provider runtime.
+app-server restart reloads the provider catalog from durable project metadata
+before it constructs the provider runtime, then resolves credentials from the
+user auth store.
 
 ## Built-In Seeds
 
@@ -94,7 +97,7 @@ than silently re-authenticating.
 
 Thread topology is small, coordination-critical control-plane state. Locally,
 `thread/start` persists `ThreadLifecycleRecord` rows through
-`ThreadMetadataStore` into the same database used by provider auth:
+`ThreadMetadataStore` into the project metadata database:
 
 ```text
 thread_id
@@ -118,21 +121,24 @@ resident runtime handle when one is already loaded, or loads the handle from thi
 metadata record plus the session/history store when only durable state remains.
 `thread/loaded/list` is residency introspection, not the durable thread index.
 
-Future provider-per-thread metadata should be stored in this same control-plane
-database, but actual credentials stay in the auth table. Conversation context
-can use the session/history store locally and may move to a different backend
-when the deployment shape needs it.
+Future provider-per-thread metadata should be stored in this project
+control-plane database, but actual credentials stay in the user auth table.
+Conversation context can use the session/history store locally and may move to a
+different backend when the deployment shape needs it.
 
 ## Backend Direction
 
 Local:
 
 ```text
-state_home/metadata.sqlite3
+<project_root>/.cooldis/state/metadata.sqlite3
   llm_provider_records
-  llm_provider_credentials
   thread_lifecycle_records
   future config/grant/capsule binding tables
+
+~/.cooldis/state/metadata.sqlite3
+  llm_provider_credentials
+  named secret values
 ```
 
 Remote:

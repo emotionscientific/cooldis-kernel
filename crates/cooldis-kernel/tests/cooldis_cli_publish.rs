@@ -47,12 +47,18 @@ fn cooldis_cli_uses_console_rpc_and_dev_entrypoints() {
     assert!(root.contains("cooldis tool"));
     assert!(root.contains("cooldis secret"));
     assert!(root.contains("cooldis rpc"));
+    assert!(root.contains("cooldis console"));
     assert!(root.contains("cooldis dev chat"));
     assert!(!root.contains("cooldis [PROMPT]"));
 
     let rpc = run_cooldis(["rpc", "--help"]);
     assert!(rpc.contains("cooldis rpc"));
     assert!(rpc.contains("--listen"));
+
+    let console = run_cooldis(["console", "--help"]);
+    assert!(console.contains("local browser console"));
+    assert!(console.contains("--no-open"));
+    assert!(console.contains("--port"));
 
     let dev = run_cooldis(["dev", "--help"]);
     assert!(dev.contains("cooldis dev chat"));

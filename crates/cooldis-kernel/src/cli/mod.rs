@@ -4,23 +4,24 @@ use crate::{
     APP_SERVER_BIFROST_PROVIDER, APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentManifestRefStatus, AppServerListenAddr,
     AppServerProviderConfig, CapsuleBindingsConfig, CodexTuiConnectConfig, CodexTuiEvent,
-    CodexTuiTestClient, CooldisAppServer, CooldisAppServerConfig, CooldisDaemonIoBridge,
-    CooldisDaemonQueueWorker, CooldisDaemonServiceSpec, CooldisDaemonServiceTarget, CooldisError,
-    CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProviderConfig,
-    CooldisResult, CooldisVfs, EventKind, EventStore, EventStreamId, HostFileSystem,
-    HostFileSystemMode, JsonRpcNotification, LlmProviderAuthStore, LlmProviderCatalogStore,
-    LoadedCooldisDaemonConfig, LocalAgentRegistry, LocalOperationRegistry, McpRemoteServerConfig,
-    McpRemoteToolProvider, McpRemoteTransport, PublishOperationRequest, PublishedAgentRecord,
-    PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
-    RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore,
-    SqliteSecretStore, SqliteSessionStore, TelegramWebhookServer, TelegramWebhookServerConfig,
-    ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun, ToolInterfaceContract,
-    ToolManualExitStatus, ToolOperationManual, ToolPackageSource, WasmOperationManifest,
-    WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+    CodexTuiTestClient, ConsoleAssetConfig, CooldisAppServer, CooldisAppServerConfig,
+    CooldisDaemonIoBridge, CooldisDaemonQueueWorker, CooldisDaemonServiceSpec,
+    CooldisDaemonServiceTarget, CooldisError, CooldisIngressConfig, CooldisIoConfig,
+    CooldisIoRouteConfig, CooldisProviderConfig, CooldisResult, CooldisVfs, EventKind, EventStore,
+    EventStreamId, HostFileSystem, HostFileSystemMode, JsonRpcNotification, LlmProviderAuthStore,
+    LlmProviderCatalogStore, LoadedCooldisDaemonConfig, LocalAgentRegistry, LocalOperationRegistry,
+    McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, PublishOperationRequest,
+    PublishedAgentRecord, PublishedOperationRecord, PublishedOperationSource, RegisteredOperation,
+    RouteIngressSink, RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry,
+    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, TelegramWebhookServer,
+    TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun,
+    ToolInterfaceContract, ToolManualExitStatus, ToolOperationManual, ToolPackageSource,
+    WasmOperationManifest, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
     agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
     default_operations_registry_root, discover_cooldis_daemon_config_path,
-    install_cooldis_daemon_service, load_cooldis_daemon_config, render_cooldis_daemon_service,
-    required_secret_names, resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
+    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
+    load_cooldis_daemon_config_layers, render_cooldis_daemon_service, required_secret_names,
+    resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
 };
 use bashkit::InMemoryFs;
 use cooldis_io_core::{IngressPersistenceMode, IngressSink};
@@ -35,9 +36,9 @@ use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -77,6 +78,7 @@ pub async fn run() -> CooldisResult<()> {
         )),
         "thread" => run_thread(args).await,
         "operator" => run_operator(args).await,
+        "console" => run_console(args).await,
         "dev" => run_dev(args).await,
         "daemon" => run_daemon(args).await,
         "rpc" => run_rpc(args).await,
@@ -910,6 +912,63 @@ async fn run_rpc(args: Vec<OsString>) -> CooldisResult<()> {
     server.serve(options.listen).await
 }
 
+async fn run_console(args: Vec<OsString>) -> CooldisResult<()> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_console_help();
+        return Ok(());
+    }
+    let options = parse_console_args(args)?;
+    if options.help {
+        print_console_help();
+        return Ok(());
+    }
+
+    let listener = TcpListener::bind(options.listen).await.map_err(|err| {
+        usage_error(format!(
+            "failed to bind Cooldis console listener {}: {err}",
+            options.listen
+        ))
+    })?;
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|err| usage_error(format!("failed to inspect Cooldis console listener: {err}")))?;
+    let listen = AppServerListenAddr::WebSocket(bound_addr);
+    let assets = resolve_console_asset_root()?;
+    let session_token = generate_console_session_token();
+    let resolved = resolve_console_app_server_config(&options, listen.clone())?;
+    let project_root = resolved.project_root.clone();
+    let config_path = resolved.config_path.clone();
+    let mut config = resolved.config;
+    let state_home = config.state_home.clone();
+    config.console_assets = Some(ConsoleAssetConfig {
+        root: assets,
+        session_token,
+    });
+    prepare_console_project_storage(&config)?;
+
+    let server = CooldisAppServer::new_local(config).await?;
+    let ui_url = format!("http://{bound_addr}/");
+    let rpc_url = format!("ws://{bound_addr}/rpc");
+    println!("cooldis console UI  {ui_url}");
+    println!("cooldis console RPC {rpc_url}");
+    println!("cooldis console Project {}", project_root.display());
+    if let Some(config_path) = config_path {
+        println!("cooldis console Config {}", config_path.display());
+    } else {
+        println!("cooldis console Config <defaults>");
+    }
+    println!("cooldis console State {}", state_home.display());
+    if options.open {
+        if let Err(err) = open_browser_url(&ui_url) {
+            eprintln!("cooldis console could not open the browser: {err}");
+        }
+    }
+    server.serve_websocket_listener(listener).await
+}
+
 async fn run_daemon(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
@@ -998,6 +1057,242 @@ fn daemon_app_server_registry_root(path: PathBuf) -> CooldisResult<PathBuf> {
     Ok(std::env::current_dir()
         .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?
         .join(path))
+}
+
+#[cfg(test)]
+fn console_app_server_config(
+    options: &ConsoleArgs,
+    listen: AppServerListenAddr,
+) -> CooldisResult<CooldisAppServerConfig> {
+    resolve_console_app_server_config(options, listen).map(|resolved| resolved.config)
+}
+
+struct ResolvedConsoleAppServerConfig {
+    config: CooldisAppServerConfig,
+    project_root: PathBuf,
+    config_path: Option<PathBuf>,
+}
+
+struct ConsoleEnvironment {
+    selected_cwd: PathBuf,
+    project_root: PathBuf,
+    project_storage_root: PathBuf,
+    user_home: PathBuf,
+    config_paths: Vec<PathBuf>,
+}
+
+fn resolve_console_app_server_config(
+    options: &ConsoleArgs,
+    listen: AppServerListenAddr,
+) -> CooldisResult<ResolvedConsoleAppServerConfig> {
+    let env = resolve_console_environment(options)?;
+    let loaded = load_cooldis_daemon_config_layers(&env.config_paths, env.project_root.clone())?;
+    let mut config = CooldisAppServerConfig::local(listen.clone(), env.selected_cwd.clone());
+    config.runtime_home = env.project_storage_root.join("runtime");
+    config.state_home = env.project_storage_root.join("state");
+    config.user_state_home = env.user_home.join("state");
+    config.agent_registry_root = env.project_storage_root.join("agents");
+    config.capsule_bindings.registry_root = Some(env.project_storage_root.join("operations"));
+
+    if let Some(runtime_home) = loaded.config.runtime.runtime_home.clone() {
+        config.runtime_home = runtime_home;
+    }
+    if let Some(state_home) = loaded.config.runtime.state_home.clone() {
+        config.state_home = state_home;
+    }
+    if options.cwd_explicit {
+        config.cwd = env.selected_cwd;
+    } else if let Some(cwd) = loaded.config.runtime.cwd.clone() {
+        config.cwd = cwd;
+    }
+    if let Some(operations) = loaded.config.registries.operations.clone() {
+        config.capsule_bindings.registry_root = Some(daemon_app_server_registry_root(operations)?);
+    }
+    if let Some(agents) = loaded.config.registries.agents.clone() {
+        config.agent_registry_root = daemon_app_server_registry_root(agents)?;
+    }
+    config.capsule_bindings.global_operation_names =
+        loaded.config.operations.global_operation_names.clone();
+    config.capsule_bindings.load_all_active_when_unbound =
+        loaded.config.operations.load_all_active_when_unbound;
+    apply_chat_provider_config(
+        &mut config,
+        load_daemon_provider_config(&loaded.config.provider)?,
+    );
+    config.listen = listen;
+
+    Ok(ResolvedConsoleAppServerConfig {
+        config,
+        project_root: env.project_root,
+        config_path: loaded.path,
+    })
+}
+
+fn resolve_console_environment(options: &ConsoleArgs) -> CooldisResult<ConsoleEnvironment> {
+    let selected_cwd = absolute_path(&options.cwd)?;
+    let project = discover_cooldis_project(&selected_cwd)?;
+    let user_home = default_user_cooldis_home()?;
+    let project_storage_root = console_project_storage_root(&project.root, &user_home);
+    let mut config_paths = Vec::new();
+    let user_config = user_home.join("config.toml");
+    if user_config.is_file() {
+        config_paths.push(user_config);
+    }
+    if let Some(project_config) = project.config_path {
+        push_unique_path(&mut config_paths, project_config);
+    }
+    if let Some(config_path) = options.config_path.as_deref() {
+        push_unique_path(&mut config_paths, absolute_path(config_path)?);
+    }
+
+    Ok(ConsoleEnvironment {
+        selected_cwd,
+        project_root: project.root,
+        project_storage_root,
+        user_home,
+        config_paths,
+    })
+}
+
+fn console_project_storage_root(project_root: &Path, user_home: &Path) -> PathBuf {
+    let default_storage_root = project_root.join(".cooldis");
+    if default_storage_root == user_home {
+        return user_home.join("projects/home");
+    }
+    default_storage_root
+}
+
+fn prepare_console_project_storage(config: &CooldisAppServerConfig) -> CooldisResult<()> {
+    let mut roots = vec![
+        config.runtime_home.as_path(),
+        config.state_home.as_path(),
+        config.user_state_home.as_path(),
+        config.agent_registry_root.as_path(),
+    ];
+    if let Some(registry_root) = config.capsule_bindings.registry_root.as_deref() {
+        roots.push(registry_root);
+    }
+    for root in roots {
+        fs::create_dir_all(root).map_err(|err| {
+            io_error(format!(
+                "failed to prepare Cooldis console directory {}: {err}",
+                root.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn default_user_cooldis_home() -> CooldisResult<PathBuf> {
+    if let Some(home) = std::env::var_os("COOLDIS_HOME").map(PathBuf::from) {
+        return Ok(home);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".cooldis"))
+        .ok_or_else(|| usage_error("HOME is not set and COOLDIS_HOME was not provided"))
+}
+
+fn absolute_path(path: &Path) -> CooldisResult<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?
+        .join(path))
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn generate_console_session_token() -> String {
+    format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple())
+}
+
+fn resolve_console_asset_root() -> CooldisResult<PathBuf> {
+    if let Some(path) = std::env::var_os("COOLDIS_CONSOLE_ASSET_DIR").map(PathBuf::from) {
+        return console_asset_root_if_valid(path).ok_or_else(|| {
+            usage_error(
+                "COOLDIS_CONSOLE_ASSET_DIR must point at a built console directory containing index.html",
+            )
+        });
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(exe_asset_candidate(&exe));
+        candidates.push(
+            exe.parent()
+                .unwrap_or(Path::new("."))
+                .join("../share/cooldis/console"),
+        );
+        if let Ok(link) = std::fs::read_link(&exe) {
+            let target = if link.is_absolute() {
+                link
+            } else {
+                exe.parent().unwrap_or(Path::new(".")).join(link)
+            };
+            candidates.push(exe_asset_candidate(&target));
+        }
+    }
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/console/dist"));
+
+    candidates
+        .into_iter()
+        .find_map(console_asset_root_if_valid)
+        .ok_or_else(|| {
+            usage_error(
+                "Cooldis console assets were not found; run `scripts/build-console-assets.sh` or set COOLDIS_CONSOLE_ASSET_DIR",
+            )
+        })
+}
+
+fn exe_asset_candidate(exe: &Path) -> PathBuf {
+    exe.parent()
+        .unwrap_or(Path::new("."))
+        .join("share/cooldis/console")
+}
+
+fn console_asset_root_if_valid(path: PathBuf) -> Option<PathBuf> {
+    path.join("index.html").is_file().then_some(path)
+}
+
+fn open_browser_url(url: &str) -> CooldisResult<()> {
+    browser_open_command(url)?
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| usage_error(format!("failed to open browser: {err}")))
+}
+
+#[cfg(target_os = "macos")]
+fn browser_open_command(url: &str) -> CooldisResult<std::process::Command> {
+    let mut command = std::process::Command::new("open");
+    command.arg(url);
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn browser_open_command(url: &str) -> CooldisResult<std::process::Command> {
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(url);
+    Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+fn browser_open_command(url: &str) -> CooldisResult<std::process::Command> {
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", "start", "", url]);
+    Ok(command)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn browser_open_command(_url: &str) -> CooldisResult<std::process::Command> {
+    Err(usage_error(
+        "automatic browser open is not supported on this platform",
+    ))
 }
 
 async fn start_daemon_io(
@@ -2582,6 +2877,16 @@ struct RpcArgs {
 }
 
 #[derive(Debug)]
+struct ConsoleArgs {
+    listen: std::net::SocketAddr,
+    cwd: PathBuf,
+    cwd_explicit: bool,
+    config_path: Option<PathBuf>,
+    open: bool,
+    help: bool,
+}
+
+#[derive(Debug)]
 struct DaemonRunArgs {
     config_path: Option<PathBuf>,
 }
@@ -3608,6 +3913,52 @@ fn parse_rpc_args(args: Vec<OsString>) -> CooldisResult<RpcArgs> {
     })
 }
 
+fn parse_console_args(args: Vec<OsString>) -> CooldisResult<ConsoleArgs> {
+    let mut listen = "127.0.0.1:0"
+        .parse::<std::net::SocketAddr>()
+        .expect("default console listen address is valid");
+    let mut cwd = std::env::current_dir()
+        .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?;
+    let mut cwd_explicit = false;
+    let mut config_path = None;
+    let mut open = true;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--no-open" => open = false,
+            "--cwd" => {
+                cwd = PathBuf::from(required_string_value(&mut iter, "--cwd")?);
+                cwd_explicit = true;
+            }
+            "--config" => config_path = Some(required_path_value(&mut iter, "--config")?),
+            "--port" => {
+                let port = required_string_value(&mut iter, "--port")?
+                    .parse::<u16>()
+                    .map_err(|_| usage_error("--port must be an integer from 0 to 65535"))?;
+                listen = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!("unknown console argument {other:?}")));
+            }
+            other => {
+                return Err(usage_error(format!(
+                    "cooldis console does not accept positional argument {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(ConsoleArgs {
+        listen,
+        cwd,
+        cwd_explicit,
+        config_path,
+        open,
+        help,
+    })
+}
+
 fn parse_daemon_run_args(args: Vec<OsString>) -> CooldisResult<DaemonRunArgs> {
     let mut config_path = None;
     let mut iter = args.into_iter();
@@ -3861,30 +4212,46 @@ fn default_registry_root() -> PathBuf {
     PathBuf::from(".cooldis").join("operations")
 }
 
-fn default_state_home() -> PathBuf {
+fn default_project_state_home() -> PathBuf {
     PathBuf::from(".cooldis").join("state")
 }
 
-fn metadata_store_path_for_state_home(state_home: Option<PathBuf>) -> PathBuf {
+fn default_user_state_home() -> CooldisResult<PathBuf> {
+    Ok(default_user_cooldis_home()?.join("state"))
+}
+
+fn metadata_store_path_for_state_home(
+    state_home: Option<PathBuf>,
+    default_state_home: PathBuf,
+) -> PathBuf {
     state_home
-        .unwrap_or_else(default_state_home)
+        .unwrap_or(default_state_home)
         .join("metadata.sqlite3")
 }
 
 fn open_secret_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteSecretStore> {
-    SqliteSecretStore::open(metadata_store_path_for_state_home(state_home))
-        .map_err(secret_cli_error)
+    SqliteSecretStore::open(metadata_store_path_for_state_home(
+        state_home,
+        default_user_state_home()?,
+    ))
+    .map_err(secret_cli_error)
 }
 
 fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetadataStore> {
-    let store = SqliteMetadataStore::open(metadata_store_path_for_state_home(state_home))
-        .map_err(provider_cli_error)?;
+    let store = SqliteMetadataStore::open(metadata_store_path_for_state_home(
+        state_home,
+        default_user_state_home()?,
+    ))
+    .map_err(provider_cli_error)?;
     crate::seed_default_llm_providers(&store).map_err(provider_cli_error)?;
     Ok(store)
 }
 
 fn open_mcp_source_registry(state_home: Option<PathBuf>) -> CooldisResult<SqliteMcpSourceRegistry> {
-    SqliteMcpSourceRegistry::open(metadata_store_path_for_state_home(state_home))
+    SqliteMcpSourceRegistry::open(metadata_store_path_for_state_home(
+        state_home,
+        default_project_state_home(),
+    ))
 }
 
 fn secret_cli_error(err: impl std::fmt::Display) -> CooldisError {
@@ -5521,13 +5888,14 @@ Usage:\n\
   cooldis tool source list [--json] [--state-home .cooldis/state]\n\
   cooldis tool source show <name> [--json] [--state-home .cooldis/state]\n\
   cooldis tool source remove <name> [--state-home .cooldis/state]\n\
-  cooldis secret import <name> --from-env <ENV> [--state-home .cooldis/state]\n\
-  cooldis secret set <name> --value-stdin [--state-home .cooldis/state]\n\
-  cooldis secret list [--state-home .cooldis/state]\n\
-  cooldis secret status <name> [--state-home .cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
+  cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]\n\
+  cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis secret list [--state-home ~/.cooldis/state]\n\
+  cooldis secret status <name> [--state-home ~/.cooldis/state]\n\
+  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
   cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]\n\
+  cooldis console [--no-open] [--cwd <path>] [--config <cooldis.toml>] [--port <port>]\n\
   cooldis dev chat [PROMPT] [--cwd <path>]\n\
   cooldis operator [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]\n\
   cooldis dev tui [PROMPT] [--cwd <path>]   alias for cooldis operator\n\
@@ -5537,8 +5905,8 @@ Usage:\n\
   cooldis daemon service uninstall --target launchd [--label com.cooldis.daemon]\n\
   cooldis daemon run [--config cooldis.toml]\n\
 \n\
-Cooldis is the runtime command console. `cooldis operator` is the default local\n\
-terminal console; remote operation is exposed through `cooldis rpc`.\n"
+Cooldis is the runtime command console. `cooldis console` opens the bundled local\n\
+browser console; `cooldis operator` is the local terminal console.\n"
     );
 }
 
@@ -5802,11 +6170,11 @@ fn print_secret_help() {
         "cooldis secret\n\
 \n\
 Usage:\n\
-  cooldis secret import <name> --from-env <ENV> [--state-home .cooldis/state]\n\
-  cooldis secret set <name> --value-stdin [--state-home .cooldis/state]\n\
-  cooldis secret list [--state-home .cooldis/state]\n\
-  cooldis secret status <name> [--state-home .cooldis/state]\n\
-  cooldis secret delete <name> [--state-home .cooldis/state]\n\
+  cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]\n\
+  cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis secret list [--state-home ~/.cooldis/state]\n\
+  cooldis secret status <name> [--state-home ~/.cooldis/state]\n\
+  cooldis secret delete <name> [--state-home ~/.cooldis/state]\n\
 \n\
 Stores local secret refs for host-mediated tool calls. List and status output\n\
 redact values; tool runtimes receive only manifest-declared secret names.\n"
@@ -5818,7 +6186,7 @@ fn print_secret_import_help() {
         "cooldis secret import\n\
 \n\
 Usage:\n\
-  cooldis secret import <name> --from-env <ENV> [--state-home .cooldis/state]\n\
+  cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]\n\
 \n\
 Imports a local environment variable into the Cooldis secret store under a\n\
 stable secret name such as EXAMPLE_API_KEY.\n"
@@ -5830,7 +6198,7 @@ fn print_secret_set_help() {
         "cooldis secret set\n\
 \n\
 Usage:\n\
-  cooldis secret set <name> --value-stdin [--state-home .cooldis/state]\n\
+  cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]\n\
 \n\
 Stores a secret value read from stdin. The stored value is never printed.\n"
     );
@@ -5841,7 +6209,7 @@ fn print_secret_list_help() {
         "cooldis secret list\n\
 \n\
 Usage:\n\
-  cooldis secret list [--state-home .cooldis/state]\n\
+  cooldis secret list [--state-home ~/.cooldis/state]\n\
 \n\
 Lists configured secret refs without printing secret values.\n"
     );
@@ -5852,7 +6220,7 @@ fn print_secret_status_help() {
         "cooldis secret status\n\
 \n\
 Usage:\n\
-  cooldis secret status <name> [--state-home .cooldis/state]\n\
+  cooldis secret status <name> [--state-home ~/.cooldis/state]\n\
 \n\
 Prints redacted metadata for one secret ref.\n"
     );
@@ -5863,7 +6231,7 @@ fn print_secret_delete_help() {
         "cooldis secret delete\n\
 \n\
 Usage:\n\
-  cooldis secret delete <name> [--state-home .cooldis/state]\n\
+  cooldis secret delete <name> [--state-home ~/.cooldis/state]\n\
 \n\
 Deletes a local secret ref.\n"
     );
@@ -5874,9 +6242,9 @@ fn print_provider_help() {
         "cooldis provider\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
-  cooldis provider auth delete <provider-id> [--state-home .cooldis/state]\n\
+  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
+  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis provider auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Manages model-provider credentials in the local metadata store. Values are read\n\
 from stdin and never printed.\n"
@@ -5888,9 +6256,9 @@ fn print_provider_auth_help() {
         "cooldis provider auth\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
-  cooldis provider auth delete <provider-id> [--state-home .cooldis/state]\n\
+  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
+  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis provider auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Stores redacted model-provider credentials for daemon/app-server provider calls.\n"
     );
@@ -5901,7 +6269,7 @@ fn print_provider_auth_status_help() {
         "cooldis provider auth status\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
+  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Prints redacted provider auth status.\n"
     );
@@ -5912,7 +6280,7 @@ fn print_provider_auth_set_help() {
         "cooldis provider auth set\n\
 \n\
 Usage:\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
+  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
 \n\
 Stores a model-provider API key read from stdin. The stored value is never printed.\n"
     );
@@ -5923,7 +6291,7 @@ fn print_provider_auth_delete_help() {
         "cooldis provider auth delete\n\
 \n\
 Usage:\n\
-  cooldis provider auth delete <provider-id> [--state-home .cooldis/state]\n\
+  cooldis provider auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Deletes a stored model-provider credential.\n"
     );
@@ -5938,6 +6306,19 @@ Usage:\n\
 \n\
 Starts the Cooldis control-plane RPC endpoint. This is the public entrypoint for\n\
 remote operation when Cooldis is running in a sandbox, daemon, or managed host.\n"
+    );
+}
+
+fn print_console_help() {
+    println!(
+        "cooldis console\n\
+\n\
+Usage:\n\
+  cooldis console [--no-open] [--cwd <path>] [--config <cooldis.toml>] [--port <port>]\n\
+\n\
+Starts the bundled local browser console on 127.0.0.1. The command serves the\n\
+console UI and the /rpc WebSocket endpoint from one loopback listener, prints\n\
+the UI and RPC URLs, and opens the browser unless --no-open is set.\n"
     );
 }
 

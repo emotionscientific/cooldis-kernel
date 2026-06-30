@@ -54,6 +54,7 @@ inputs, durable effects, or output semantics.
 | `cooldis daemon service install` | [Cooldis Daemon](daemon.md) | `cooldis daemon --help` | partial | Document filesystem writes and non-starting behavior. |
 | `cooldis daemon service uninstall` | [Cooldis Daemon](daemon.md) | `cooldis daemon --help` | partial | Document target selection, labels, and idempotency. |
 | `cooldis thread` | [RPC Control Plane And Dev Chat](app-server.md) | `cooldis thread --help` | reserved | CLI commands are not implemented in the V1 surface yet. |
+| `cooldis console` | [RPC Control Plane And Dev Chat](app-server.md) | `cooldis console --help` | partial | Bundled local browser console served by the kernel app-server with static assets and token-gated `/rpc`; generated command manual remains follow-up work. |
 | `cooldis operator` | [Operator Console](operator.md), [RPC Control Plane And Dev Chat](app-server.md) | `cooldis operator --help` | partial | Bundled local terminal console over app-server RPC; known deferred terminal features remain documented. |
 
 ## Runtime Contracts And Projections

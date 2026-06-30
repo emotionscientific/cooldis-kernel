@@ -41,6 +41,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,${{ matrix.target }}
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Package release binary
         run: scripts/package-release-binary.sh --out-dir dist --target "${{ matrix.target }}"
 

@@ -81,9 +81,9 @@ pub use adapters::app_server::{
     APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
     APP_SERVER_BIFROST_PROVIDER, APP_SERVER_LOCAL_MODEL, APP_SERVER_LOCAL_PROVIDER,
     APP_SERVER_OPENAI_COMPATIBLE_MODEL, APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AppServerListenAddr,
-    AppServerProviderConfig, CapsuleBindingsConfig, CooldisAppServer, CooldisAppServerConfig,
-    JsonRpcError, JsonRpcErrorError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, RequestId,
+    AppServerProviderConfig, CapsuleBindingsConfig, ConsoleAssetConfig, CooldisAppServer,
+    CooldisAppServerConfig, JsonRpcError, JsonRpcErrorError, JsonRpcMessage, JsonRpcNotification,
+    JsonRpcRequest, JsonRpcResponse, RequestId,
 };
 pub use adapters::codex_adapter::{CodexCliRuntimeFactory, CodexRuntimeConfig};
 pub use adapters::codex_tui::{
@@ -235,12 +235,13 @@ pub use capabilities::wasm_runner::{
 pub use daemon::daemon_config::{
     CooldisDaemonAppServerConfig, CooldisDaemonConfig, CooldisDaemonOperationsConfig,
     CooldisDaemonRegistriesConfig, CooldisDaemonServiceSpec, CooldisDaemonServiceTarget,
-    CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProviderConfig,
-    CooldisQueueConfig, CooldisRuntimeConfig, CooldisTelegramRouteConfig,
+    CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProjectDiscovery,
+    CooldisProviderConfig, CooldisQueueConfig, CooldisRuntimeConfig, CooldisTelegramRouteConfig,
     LoadedCooldisDaemonConfig, cooldis_daemon_service_file_name,
     cooldis_daemon_service_install_path, cooldis_daemon_service_install_path_for_home,
     default_cooldis_daemon_socket_path, discover_cooldis_daemon_config_path,
-    install_cooldis_daemon_service, load_cooldis_daemon_config, render_cooldis_daemon_service,
+    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
+    load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
     uninstall_cooldis_daemon_service,
 };
 pub use daemon::daemon_io::{

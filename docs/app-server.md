@@ -40,6 +40,12 @@ The direct app-server command currently uses the deterministic local/offline
 provider. The TCP WebSocket listener also serves `GET /healthz` and `GET
 /readyz` with a small JSON `200 OK` response.
 
+`cooldis console` starts the same loopback app-server shape for local browser
+operation, binds `127.0.0.1:<port>`, serves the bundled Svelte console from `/`,
+and keeps JSON-RPC on `/rpc`. Each console process generates a session token,
+injects it into `index.html`, and rejects `/rpc` WebSocket upgrades that do not
+present the token in the query string or `Sec-WebSocket-Protocol`.
+
 `cooldis dev chat` starts a private app server on a temporary Unix socket and
 connects Cooldis' owned Codex-shaped test client to it:
 
@@ -190,13 +196,13 @@ Provider config resolution is:
 Keep real secrets in the environment or a local ignored env file, not in
 committed `cooldis.json`.
 
-The app-server also opens the internal metadata store at
-`state_home/metadata.sqlite3` on startup. It seeds provider catalog records,
-resolves catalog-backed provider credentials, and persists thread
-lifecycle/topology records for local `thread/start`, fork paths, and
-kernel-spawned child threads created through `cooldis-threads`. Plain OpenAI Compatible
-config can use that catalog-backed provider path instead of requiring the
-endpoint shape to be rebuilt from config each time.
+The app-server opens project metadata at `state_home/metadata.sqlite3` and user
+metadata at `user_state_home/metadata.sqlite3` on startup. Project metadata owns
+provider catalog rows, MCP source records, and thread lifecycle/topology records
+for local `thread/start`, fork paths, and kernel-spawned child threads created
+through `cooldis-threads`. User metadata owns provider credentials and named
+secret values. Plain OpenAI Compatible config can use the catalog-backed
+provider path while resolving API keys from the user auth store.
 
 ## Thread Residency
 

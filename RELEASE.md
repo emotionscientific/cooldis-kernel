@@ -59,6 +59,11 @@ Build the host target:
 scripts/package-release-binary.sh --out-dir dist
 ```
 
+Packaging builds the bundled Svelte console with Bun and includes
+`share/cooldis/console/*` in the release archive. Use
+`scripts/build-console-assets.sh` to rebuild only the UI assets during local
+iteration.
+
 Build a specific target:
 
 ```sh

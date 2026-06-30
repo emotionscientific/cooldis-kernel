@@ -74,6 +74,9 @@ Release packaging is target-aware:
 scripts/package-release-binary.sh --target x86_64-unknown-linux-gnu
 ```
 
+Each archive includes the public binaries and the bundled browser console under
+`share/cooldis/console`; the installed user-facing command is `cooldis console`.
+
 See [Release Process](../RELEASE.md) for the supported target matrix and publish
 flow.
 

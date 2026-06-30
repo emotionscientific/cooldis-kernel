@@ -116,7 +116,21 @@ impl CooldisAppServer {
                     .supervisor
                     .shutdown_thread_at(&handle.context().coordinates)
                     .await;
-                return Err(err);
+                eprintln!(
+                    "cooldis app-server skipped unavailable thread {}: agent_ref={}, stored_hash={}, error={err}",
+                    record.coordinates.thread_id,
+                    record
+                        .metadata
+                        .get(THREAD_AGENT_REF_METADATA)
+                        .map(String::as_str)
+                        .unwrap_or("<none>"),
+                    record
+                        .metadata
+                        .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+                        .map(String::as_str)
+                        .unwrap_or("<none>")
+                );
+                continue;
             }
             let thread_state = self
                 .thread_state_from_lifecycle(&record, handle.status())
@@ -1261,6 +1275,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) capsule_bindings: CapsuleBindingsConfig,
     pub(super) secret_resolver: Option<Arc<dyn SecretResolver>>,
     pub(super) metadata_store_path: Option<PathBuf>,
+    pub(super) secret_store_path: Option<PathBuf>,
     pub(super) session_store_path: Option<PathBuf>,
     pub(super) agent_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
@@ -1325,6 +1340,7 @@ struct AppServerThreadSpawnAgentResolver {
     agent_registry_root: PathBuf,
     operation_registry_root: Option<PathBuf>,
     metadata_store_path: Option<PathBuf>,
+    secret_store_path: Option<PathBuf>,
     cwd: PathBuf,
     provider_surface: AgentManifestProviderSurface,
 }
@@ -1397,8 +1413,12 @@ impl AppServerThreadSpawnAgentResolver {
         };
         let registry = SqliteMcpSourceRegistry::open(metadata_store_path)
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
+        let secret_store_path = self
+            .secret_store_path
+            .as_ref()
+            .unwrap_or(metadata_store_path);
         let secret_store =
-            SqliteSecretStore::open(metadata_store_path).map_err(secret_store_error)?;
+            SqliteSecretStore::open(secret_store_path).map_err(secret_store_error)?;
         Ok(Some(McpToolUniverseDiscoverer::new(
             registry,
             Some(Arc::new(secret_store)),
@@ -1414,6 +1434,7 @@ impl CapsuleBindingRuntimeFactory {
             agent_registry_root,
             operation_registry_root: self.capsule_bindings.registry_root.clone(),
             metadata_store_path: self.metadata_store_path.clone(),
+            secret_store_path: self.secret_store_path.clone(),
             cwd,
             provider_surface: provider_surface_for_runtime_config(&self.config),
         })

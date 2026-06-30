@@ -16,6 +16,12 @@ pub struct LoadedCooldisDaemonConfig {
     pub base_dir: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CooldisProjectDiscovery {
+    pub root: PathBuf,
+    pub config_path: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CooldisDaemonConfig {
     #[serde(default)]
@@ -539,48 +545,60 @@ impl CooldisDaemonServiceSpec {
 }
 
 pub fn load_cooldis_daemon_config(path: Option<&Path>) -> CooldisResult<LoadedCooldisDaemonConfig> {
-    let (path, base_dir, text) = match path {
-        Some(path) => {
-            let text = read_config_text(path)?;
-            let base = path
-                .parent()
+    match path {
+        Some(path) => load_cooldis_daemon_config_layers(
+            &[path.to_path_buf()],
+            path.parent()
                 .unwrap_or_else(|| Path::new("."))
-                .to_path_buf();
-            (Some(path.to_path_buf()), base, text)
-        }
-        None => match discover_cooldis_daemon_config_path()? {
-            Some(path) => {
-                let text = read_config_text(&path)?;
-                let base = path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_path_buf();
-                (Some(path), base, text)
-            }
-            None => {
-                let base_dir = std::env::current_dir().map_err(|err| {
-                    CooldisError::RuntimeFactory(format!(
-                        "failed to read current working directory: {err}"
-                    ))
-                })?;
-                return Ok(LoadedCooldisDaemonConfig {
+                .to_path_buf(),
+        ),
+        None => {
+            let cwd = std::env::current_dir().map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read current working directory: {err}"
+                ))
+            })?;
+            let project = discover_cooldis_project(&cwd)?;
+            match project.config_path {
+                Some(path) => load_cooldis_daemon_config_layers(&[path], project.root),
+                None => Ok(LoadedCooldisDaemonConfig {
                     config: CooldisDaemonConfig::default(),
                     path: None,
-                    base_dir,
-                });
+                    base_dir: project.root,
+                }),
             }
-        },
-    };
+        }
+    }
+}
 
-    validate_config_extension(path.as_deref())?;
-    let mut config = decode_daemon_config(&text)?;
-    config.resolve_paths(&base_dir);
+pub fn load_cooldis_daemon_config_layers(
+    paths: &[PathBuf],
+    fallback_base_dir: PathBuf,
+) -> CooldisResult<LoadedCooldisDaemonConfig> {
+    let mut config = CooldisDaemonConfig::default();
+    let mut loaded_path = None;
+    let mut loaded_base_dir = fallback_base_dir;
+
+    for path in paths {
+        validate_config_extension(Some(path.as_path()))?;
+        let text = read_config_text(path)?;
+        let base_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let presence = daemon_config_presence(&text)?;
+        let mut layer = decode_daemon_config(&text)?;
+        layer.resolve_paths(&base_dir);
+        merge_daemon_config_layer(&mut config, layer, presence);
+        loaded_path = Some(path.clone());
+        loaded_base_dir = base_dir;
+    }
+
     config.validate()?;
-
     Ok(LoadedCooldisDaemonConfig {
         config,
-        path,
-        base_dir,
+        path: loaded_path,
+        base_dir: loaded_base_dir,
     })
 }
 
@@ -589,11 +607,230 @@ pub fn default_cooldis_daemon_socket_path() -> PathBuf {
 }
 
 pub fn discover_cooldis_daemon_config_path() -> CooldisResult<Option<PathBuf>> {
-    let path = PathBuf::from("cooldis.toml");
-    if path.exists() {
-        return Ok(Some(path));
+    let cwd = std::env::current_dir().map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to read current working directory: {err}"))
+    })?;
+    discover_cooldis_project(&cwd).map(|project| project.config_path)
+}
+
+pub fn discover_cooldis_project(start: &Path) -> CooldisResult<CooldisProjectDiscovery> {
+    let mut start = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read current working directory: {err}"
+                ))
+            })?
+            .join(start)
+    };
+    if start.is_file() {
+        start = start
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
     }
-    Ok(None)
+
+    for dir in start.ancestors() {
+        let candidate = dir.join("cooldis.toml");
+        if candidate.is_file() {
+            return Ok(CooldisProjectDiscovery {
+                root: dir.to_path_buf(),
+                config_path: Some(candidate),
+            });
+        }
+    }
+
+    for dir in start.ancestors() {
+        if dir.join(".cooldis").is_dir() {
+            return Ok(CooldisProjectDiscovery {
+                root: dir.to_path_buf(),
+                config_path: None,
+            });
+        }
+    }
+
+    Ok(CooldisProjectDiscovery {
+        root: start,
+        config_path: None,
+    })
+}
+
+#[derive(Default)]
+struct DaemonConfigPresence {
+    runtime: RuntimePresence,
+    app_server: AppServerPresence,
+    registries: RegistriesPresence,
+    operations: OperationsPresence,
+    provider: ProviderPresence,
+    io: bool,
+}
+
+#[derive(Default)]
+struct RuntimePresence {
+    cwd: bool,
+    runtime_home: bool,
+    state_home: bool,
+}
+
+#[derive(Default)]
+struct AppServerPresence {
+    listen: bool,
+}
+
+#[derive(Default)]
+struct RegistriesPresence {
+    operations: bool,
+    agents: bool,
+}
+
+#[derive(Default)]
+struct OperationsPresence {
+    global_operation_names: bool,
+    load_all_active_when_unbound: bool,
+}
+
+#[derive(Default)]
+struct ProviderPresence {
+    provider: bool,
+    base_url: bool,
+    api_key: bool,
+    api_key_env: bool,
+    region: bool,
+    aws_access_key_id: bool,
+    aws_secret_access_key: bool,
+    aws_session_token: bool,
+    model: bool,
+    max_tokens: bool,
+    stream: bool,
+    env_file: bool,
+}
+
+fn daemon_config_presence(text: &str) -> CooldisResult<DaemonConfigPresence> {
+    let root: toml::Table = toml::from_str(text).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to parse Cooldis daemon config: {err}"))
+    })?;
+    let table = root
+        .get("daemon")
+        .and_then(toml::Value::as_table)
+        .unwrap_or(&root);
+
+    Ok(DaemonConfigPresence {
+        runtime: RuntimePresence {
+            cwd: section_has_key(table, "runtime", "cwd"),
+            runtime_home: section_has_key(table, "runtime", "runtime_home"),
+            state_home: section_has_key(table, "runtime", "state_home"),
+        },
+        app_server: AppServerPresence {
+            listen: section_has_key(table, "app_server", "listen"),
+        },
+        registries: RegistriesPresence {
+            operations: section_has_key(table, "registries", "operations"),
+            agents: section_has_key(table, "registries", "agents"),
+        },
+        operations: OperationsPresence {
+            global_operation_names: section_has_key(table, "operations", "global_operation_names"),
+            load_all_active_when_unbound: section_has_key(
+                table,
+                "operations",
+                "load_all_active_when_unbound",
+            ),
+        },
+        provider: ProviderPresence {
+            provider: section_has_key(table, "provider", "provider"),
+            base_url: section_has_key(table, "provider", "base_url"),
+            api_key: section_has_key(table, "provider", "api_key"),
+            api_key_env: section_has_key(table, "provider", "api_key_env"),
+            region: section_has_key(table, "provider", "region"),
+            aws_access_key_id: section_has_key(table, "provider", "aws_access_key_id"),
+            aws_secret_access_key: section_has_key(table, "provider", "aws_secret_access_key"),
+            aws_session_token: section_has_key(table, "provider", "aws_session_token"),
+            model: section_has_key(table, "provider", "model"),
+            max_tokens: section_has_key(table, "provider", "max_tokens"),
+            stream: section_has_key(table, "provider", "stream"),
+            env_file: section_has_key(table, "provider", "env_file"),
+        },
+        io: table.contains_key("io"),
+    })
+}
+
+fn section_has_key(table: &toml::Table, section: &str, key: &str) -> bool {
+    table
+        .get(section)
+        .and_then(toml::Value::as_table)
+        .is_some_and(|section| section.contains_key(key))
+}
+
+fn merge_daemon_config_layer(
+    config: &mut CooldisDaemonConfig,
+    mut layer: CooldisDaemonConfig,
+    presence: DaemonConfigPresence,
+) {
+    if presence.runtime.cwd {
+        config.runtime.cwd = layer.runtime.cwd.take();
+    }
+    if presence.runtime.runtime_home {
+        config.runtime.runtime_home = layer.runtime.runtime_home.take();
+    }
+    if presence.runtime.state_home {
+        config.runtime.state_home = layer.runtime.state_home.take();
+    }
+    if presence.app_server.listen {
+        config.app_server.listen = layer.app_server.listen;
+    }
+    if presence.registries.operations {
+        config.registries.operations = layer.registries.operations.take();
+    }
+    if presence.registries.agents {
+        config.registries.agents = layer.registries.agents.take();
+    }
+    if presence.operations.global_operation_names {
+        config.operations.global_operation_names = layer.operations.global_operation_names;
+    }
+    if presence.operations.load_all_active_when_unbound {
+        config.operations.load_all_active_when_unbound =
+            layer.operations.load_all_active_when_unbound;
+    }
+    if presence.provider.provider {
+        config.provider.provider = layer.provider.provider.take();
+    }
+    if presence.provider.base_url {
+        config.provider.base_url = layer.provider.base_url.take();
+    }
+    if presence.provider.api_key {
+        config.provider.api_key = layer.provider.api_key.take();
+    }
+    if presence.provider.api_key_env {
+        config.provider.api_key_env = layer.provider.api_key_env.take();
+    }
+    if presence.provider.region {
+        config.provider.region = layer.provider.region.take();
+    }
+    if presence.provider.aws_access_key_id {
+        config.provider.aws_access_key_id = layer.provider.aws_access_key_id.take();
+    }
+    if presence.provider.aws_secret_access_key {
+        config.provider.aws_secret_access_key = layer.provider.aws_secret_access_key.take();
+    }
+    if presence.provider.aws_session_token {
+        config.provider.aws_session_token = layer.provider.aws_session_token.take();
+    }
+    if presence.provider.model {
+        config.provider.model = layer.provider.model.take();
+    }
+    if presence.provider.max_tokens {
+        config.provider.max_tokens = layer.provider.max_tokens.take();
+    }
+    if presence.provider.stream {
+        config.provider.stream = layer.provider.stream;
+    }
+    if presence.provider.env_file {
+        config.provider.env_file = layer.provider.env_file.take();
+    }
+    if presence.io {
+        config.io = layer.io;
+    }
 }
 
 pub fn render_cooldis_daemon_service(
