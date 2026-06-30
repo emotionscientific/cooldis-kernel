@@ -16,7 +16,7 @@ The app-server remains the canonical control plane. Manifest binding, grants,
 operation registry state, provider configuration, thread durability, topology,
 placement, and lifecycle records remain Cooldis-owned.
 
-See [Cooldis RPC Control Plane And Dev Chat](app-server.md) for the app-server
+See [Cooldis RPC Control Plane](app-server.md) for the app-server
 contract and [Command Contracts](command-contracts.md) for the existing
 projection law.
 

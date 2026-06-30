@@ -17,11 +17,12 @@ const TEST_OPERATION_HASH: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[test]
-fn cooldis_cli_tool_help_is_canonical_and_op_is_removed() {
+fn cooldis_cli_tool_help_is_canonical() {
     let help = run_cooldis(["tool", "--help"]);
     assert!(help.contains("cooldis tool"));
     assert!(help.contains("cooldis tool list"));
     assert!(help.contains("cooldis tool publish"));
+    assert!(help.contains("cooldis tool manual"));
 
     let list_help = run_cooldis(["tool", "list", "--help"]);
     assert!(list_help.contains("cooldis tool list"));
@@ -35,21 +36,54 @@ fn cooldis_cli_tool_help_is_canonical_and_op_is_removed() {
     let run_help = run_cooldis(["tool", "run", "--help"]);
     assert!(run_help.contains("cooldis tool run"));
 
-    let old = run_cooldis_failed(["op", "--help"]);
-    assert!(stderr(&old).contains("cooldis op has been removed"));
+    let manual_help = run_cooldis(["tool", "manual", "--help"]);
+    assert!(manual_help.contains("cooldis tool manual <published-name>"));
+
+    let unknown = run_cooldis_failed(["hello"]);
+    assert!(stderr(&unknown).contains("unknown command"));
 }
 
 #[test]
-fn cooldis_cli_uses_console_rpc_and_dev_entrypoints() {
+fn cooldis_cli_uses_clean_public_entrypoints() {
     let root = run_cooldis([]);
     assert!(root.contains("cooldis init"));
     assert!(root.contains("cooldis agent"));
     assert!(root.contains("cooldis tool"));
+    assert!(root.contains("cooldis auth"));
     assert!(root.contains("cooldis secret"));
     assert!(root.contains("cooldis rpc"));
     assert!(root.contains("cooldis console"));
-    assert!(root.contains("cooldis dev chat"));
+    assert!(root.contains("cooldis chat"));
+    assert!(root.contains("cooldis commands"));
+    assert!(root.contains("cooldis help"));
+    assert!(root.contains("cooldis debug rpc"));
+    assert_no_command(&root, &["dev"]);
+    assert_no_command(&root, &["operator"]);
     assert!(!root.contains("cooldis [PROMPT]"));
+
+    let commands = run_cooldis(["commands"]);
+    assert!(commands.contains("cooldis chat [PROMPT]"));
+    assert!(commands.contains("cooldis debug rpc call"));
+    assert!(commands.contains("cooldis tool manual"));
+    assert!(commands.contains("cooldis auth set"));
+    assert_no_command(&commands, &["dev"]);
+    assert_no_command(&commands, &["operator"]);
+
+    let chat_help = run_cooldis(["chat", "--help"]);
+    assert!(chat_help.contains("cooldis chat"));
+    assert!(chat_help.contains("bundled local terminal console"));
+
+    let help_chat = run_cooldis(["help", "chat"]);
+    assert!(help_chat.contains("cooldis chat"));
+
+    let help_auth = run_cooldis(["help", "auth"]);
+    assert!(help_auth.contains("cooldis auth"));
+
+    let help_tool_manual = run_cooldis(["help", "tool", "manual"]);
+    assert!(help_tool_manual.contains("cooldis tool manual"));
+
+    let help_debug_rpc = run_cooldis(["help", "debug", "rpc"]);
+    assert!(help_debug_rpc.contains("cooldis debug rpc"));
 
     let rpc = run_cooldis(["rpc", "--help"]);
     assert!(rpc.contains("cooldis rpc"));
@@ -60,33 +94,15 @@ fn cooldis_cli_uses_console_rpc_and_dev_entrypoints() {
     assert!(console.contains("--no-open"));
     assert!(console.contains("--port"));
 
-    let dev = run_cooldis(["dev", "--help"]);
-    assert!(dev.contains("cooldis dev chat"));
-    assert!(dev.contains("cooldis dev tui"));
+    let auth = run_cooldis(["auth", "--help"]);
+    assert!(auth.contains("cooldis auth set"));
+    assert!(auth.contains("cooldis auth status"));
 
-    let chat = run_cooldis(["dev", "chat", "--help"]);
-    assert!(chat.contains("cooldis dev chat"));
-
-    let operator = run_cooldis(["operator", "--help"]);
-    assert!(operator.contains("bundled local terminal console"));
-
-    let naked_prompt = run_cooldis_failed(["hello"]);
-    assert!(stderr(&naked_prompt).contains("unknown command"));
-
-    let old_chat = run_cooldis_failed(["chat", "--help"]);
-    assert!(stderr(&old_chat).contains("cooldis chat has moved"));
-
-    let old_tui = run_cooldis_failed(["tui", "--help"]);
-    assert!(stderr(&old_tui).contains("cooldis tui has moved"));
-
-    let old_app_server = run_cooldis_failed(["app-server", "--help"]);
-    assert!(stderr(&old_app_server).contains("cooldis app-server has been removed"));
+    let debug_rpc = run_cooldis(["debug", "rpc", "--help"]);
+    assert!(debug_rpc.contains("Protocol-level debug client"));
 
     let old_tool_plan = run_cooldis_failed(["tool", "plan", "--help"]);
     assert!(stderr(&old_tool_plan).contains("unknown tool subcommand"));
-
-    let thread_subcommand = run_cooldis_failed(["thread", "start"]);
-    assert!(stderr(&thread_subcommand).contains("use rpc thread/* methods"));
 }
 
 #[test]
@@ -242,12 +258,11 @@ fn cooldis_cli_tool_run_reports_missing_registered_operation_secret_refs() {
 }
 
 #[test]
-fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
-    let state_home = temp_dir("provider-auth-state");
+fn cooldis_cli_auth_set_status_and_delete_redact_values() {
+    let state_home = temp_dir("auth-state");
 
     let set = run_cooldis_with_stdin(
         [
-            "provider",
             "auth",
             "set",
             "openai_compatible",
@@ -261,7 +276,6 @@ fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
     assert!(!set.contains("fixture-provider-key"));
 
     let status = run_cooldis([
-        "provider",
         "auth",
         "status",
         "openai_compatible",
@@ -274,7 +288,6 @@ fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
     assert!(!status.contains("fixture-provider-key"));
 
     let delete = run_cooldis([
-        "provider",
         "auth",
         "delete",
         "openai_compatible",
@@ -284,7 +297,6 @@ fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
     assert!(delete.contains("deleted provider credential openai_compatible"));
 
     let status = run_cooldis([
-        "provider",
         "auth",
         "status",
         "openai_compatible",
@@ -623,28 +635,30 @@ expect = "fixtures/basic.expect.json"
     assert_eq!(manual.summary, "Profile a CSV string.");
     assert!(!manual.generated);
 
-    let man = run_cooldis([
-        "man",
+    let manual_text = run_cooldis([
+        "tool",
+        "manual",
         "data",
         "csv_profile",
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    assert!(man.contains("NAME"));
-    assert!(man.contains("data csv_profile - Profile a CSV string."));
-    assert!(man.contains("USAGE"));
-    assert!(man.contains("cooldis tool run data csv_profile"));
-    assert!(man.contains("EXIT STATUS"));
+    assert!(manual_text.contains("NAME"));
+    assert!(manual_text.contains("data csv_profile - Profile a CSV string."));
+    assert!(manual_text.contains("USAGE"));
+    assert!(manual_text.contains("cooldis tool run data csv_profile"));
+    assert!(manual_text.contains("EXIT STATUS"));
 
-    let man_json = run_cooldis([
-        "man",
+    let manual_json = run_cooldis([
+        "tool",
+        "manual",
         "data",
         "csv_profile",
         "--json",
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    let manuals: Vec<Value> = serde_json::from_str(&man_json).unwrap();
+    let manuals: Vec<Value> = serde_json::from_str(&manual_json).unwrap();
     assert_eq!(manuals[0]["tool_name"], "data");
     assert_eq!(manuals[0]["operation_name"], "csv_profile");
     assert_eq!(manuals[0]["generated"], false);
@@ -1538,6 +1552,16 @@ fn seed_operation_record(
 
 fn agent_record(root: &Path, name: &str) -> PublishedAgentRecord {
     LocalAgentRegistry::new(root).load_record(name).unwrap()
+}
+
+fn assert_no_command(output: &str, path: &[&str]) {
+    let needle = format!("cooldis {}", path.join(" "));
+    assert!(
+        !output
+            .lines()
+            .any(|line| line.trim_start().starts_with(&needle)),
+        "unexpected legacy command in output: {needle}\n{output}"
+    );
 }
 
 fn run_cooldis<const N: usize>(args: [&str; N]) -> String {

@@ -430,8 +430,8 @@ agents = ".cooldis/agents"
     let app_config = daemon_app_server_config_from_loaded(&loaded).unwrap();
 
     assert_eq!(app_config.cwd, root.join("work"));
-    // lexicon-allow: capsule - existing app-server config field
     assert_eq!(
+        // lexicon-allow: capsule - existing app-server config field
         app_config.capsule_bindings.registry_root,
         Some(root.join(".cooldis/operations"))
     );
@@ -451,13 +451,13 @@ fn daemon_app_server_config_from_loaded_applies_operations_policy() {
     let app_config =
         daemon_app_server_config_from_loaded(&loaded_daemon_config(daemon_config)).unwrap();
 
-    // lexicon-allow: capsule - existing app-server config field
     assert_eq!(
+        // lexicon-allow: capsule - existing app-server config field
         app_config.capsule_bindings.registry_root,
         Some(PathBuf::from(".cooldis/operations"))
     );
-    // lexicon-allow: capsule - existing app-server config field
     assert_eq!(
+        // lexicon-allow: capsule - existing app-server config field
         app_config.capsule_bindings.global_operation_names,
         vec!["http_fetch", "json_query"]
     );
@@ -599,7 +599,7 @@ async fn daemon_operations_load_all_uses_default_registry_for_default_manifest()
 }
 
 #[test]
-fn parse_dev_rpc_call_accepts_method_params_and_url() {
+fn parse_debug_rpc_call_accepts_method_params_and_url() {
     let args = vec![
         "thread/read",
         r#"{"threadId":"abc","includeTurns":false}"#,
@@ -610,7 +610,7 @@ fn parse_dev_rpc_call_accepts_method_params_and_url() {
     .map(OsString::from)
     .collect();
 
-    let parsed = parse_dev_rpc_call_args(args).unwrap();
+    let parsed = parse_debug_rpc_call_args(args).unwrap();
 
     assert_eq!(parsed.method, "thread/read");
     assert_eq!(parsed.params["threadId"].as_str(), Some("abc"));
@@ -622,7 +622,7 @@ fn parse_dev_rpc_call_accepts_method_params_and_url() {
 }
 
 #[test]
-fn parse_dev_rpc_rejects_conflicting_endpoint_flags() {
+fn parse_debug_rpc_rejects_conflicting_endpoint_flags() {
     let args = vec![
         "thread/list",
         "--url",
@@ -634,25 +634,25 @@ fn parse_dev_rpc_rejects_conflicting_endpoint_flags() {
     .map(OsString::from)
     .collect();
 
-    let err = parse_dev_rpc_call_args(args).unwrap_err().to_string();
+    let err = parse_debug_rpc_call_args(args).unwrap_err().to_string();
 
     assert!(err.contains("--url or --config"));
 }
 
 #[test]
-fn parse_dev_rpc_call_rejects_invalid_params_json() {
+fn parse_debug_rpc_call_rejects_invalid_params_json() {
     let args = vec!["thread/list", "{not-json"]
         .into_iter()
         .map(OsString::from)
         .collect();
 
-    let err = parse_dev_rpc_call_args(args).unwrap_err().to_string();
+    let err = parse_debug_rpc_call_args(args).unwrap_err().to_string();
 
     assert!(err.contains("invalid PARAMS_JSON"));
 }
 
 #[test]
-fn parse_dev_rpc_turn_requires_one_thread_selector_and_text() {
+fn parse_debug_rpc_turn_requires_one_thread_selector_and_text() {
     let both = vec!["--thread", "abc", "--new", "hello"]
         .into_iter()
         .map(OsString::from)
@@ -660,13 +660,13 @@ fn parse_dev_rpc_turn_requires_one_thread_selector_and_text() {
     let missing = vec!["--new"].into_iter().map(OsString::from).collect();
 
     assert!(
-        parse_dev_rpc_turn_args(both)
+        parse_debug_rpc_turn_args(both)
             .unwrap_err()
             .to_string()
             .contains("exactly one of --thread or --new")
     );
     assert!(
-        parse_dev_rpc_turn_args(missing)
+        parse_debug_rpc_turn_args(missing)
             .unwrap_err()
             .to_string()
             .contains("requires <text>")
@@ -674,7 +674,7 @@ fn parse_dev_rpc_turn_requires_one_thread_selector_and_text() {
 }
 
 #[test]
-fn parse_dev_rpc_turn_collects_json_thread_and_text() {
+fn parse_debug_rpc_turn_collects_json_thread_and_text() {
     let args = vec![
         "--thread",
         "thread-1",
@@ -689,11 +689,11 @@ fn parse_dev_rpc_turn_collects_json_thread_and_text() {
     .map(OsString::from)
     .collect();
 
-    let parsed = parse_dev_rpc_turn_args(args).unwrap();
+    let parsed = parse_debug_rpc_turn_args(args).unwrap();
 
     match parsed.target {
-        DevRpcThreadTarget::Existing(thread_id) => assert_eq!(thread_id, "thread-1"),
-        DevRpcThreadTarget::New => panic!("expected existing thread target"),
+        DebugRpcThreadTarget::Existing(thread_id) => assert_eq!(thread_id, "thread-1"),
+        DebugRpcThreadTarget::New => panic!("expected existing thread target"),
     }
     assert!(parsed.json);
     assert_eq!(parsed.text, "hello from rpc");

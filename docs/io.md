@@ -140,7 +140,7 @@ secret_token_env = "TELEGRAM_WEBHOOK_SECRET"
 bot_token_env = "TELEGRAM_BOT_TOKEN"
 
 [[daemon.io.routes]]
-id = "operator-tui"
+id = "chat-tui"
 kind = "websocket.tui"
 enabled = true
 policy = "steer_when_active"

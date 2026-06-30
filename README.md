@@ -72,6 +72,7 @@ stateful product harnesses are future direction. See
 - [Docs index](docs/README.md): documentation map.
 - [Overview](docs/index.md): product category and current status.
 - [Getting started](docs/getting-started.md): local run and inspection path.
+- [CLI](docs/cli.md): canonical commands and help model.
 - [Runtime primitives](docs/developers/runtime-primitives.md): kernel-owned
   surfaces and boundaries.
 - [ABI](docs/abi.md): operation boundary and host/guest contract.
@@ -80,6 +81,8 @@ stateful product harnesses are future direction. See
   and deferred fields.
 - [Command contracts](docs/command-contracts.md): command/manual projection
   rules.
+- [Chat console](docs/chat.md): local terminal console over the app-server RPC
+  boundary.
 - [Provider adapters](docs/provider-adapters.md): provider runtime boundary.
 - [Daemon and RPC](docs/app-server.md): app-server control plane.
 - [Testing guidelines](docs/testing-guidelines.md): runtime test expectations.

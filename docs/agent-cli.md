@@ -6,7 +6,6 @@ Status: V1 publish and local run slice.
 is distinct from:
 
 - `cooldis tool`, which builds and publishes capability artifacts;
-- `cooldis thread`, which will address live execution instances;
 - `cooldis rpc`, which exposes the control plane to clients and sandboxes.
 
 ## Commands

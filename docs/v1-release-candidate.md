@@ -22,6 +22,8 @@ checks:
 - focused MCP server tests;
 - manifest-backed `thread/start` end-to-end smoke;
 - release binary package build and archive smoke;
+- packaged-binary canonical CLI help smoke for `console`, `chat`, `auth`,
+  `tool manual`, `rpc`, and `debug rpc`;
 - packaged-binary secret import, set, list, status, delete redaction smoke;
 - deterministic AX blind-test prompt bundle;
 - packaged-binary folder-first init, operation publish, and agent publish
@@ -85,3 +87,4 @@ flow.
 A V1 candidate is releasable only when the deterministic default gate passes,
 the tag matches the crate version, and every included public surface has either
 canonical docs or an explicit gap in [Public API Coverage](public-api-coverage.md).
+The public command surface starts at [Cooldis CLI](cli.md).

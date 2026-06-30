@@ -162,11 +162,11 @@ a gateway compatibility path. OpenAI Compatible/OpenAI-compatible MODEL smokes r
 separate Chat Completions-compatible lane and do not count as OpenAI Responses
 or Anthropic Messages protocol evidence.
 
-`cooldis dev chat` can route its private Codex-shaped app-server through any
+`cooldis chat` can route its private Codex-shaped app-server through any
 wire-compatible provider endpoint. These paths use the same provider adapter
 boundary: gateways remain wire-compatible endpoints, and Cooldis still stores
 canonical provider-neutral history rather than provider-native JSON. See
-[Cooldis RPC Control Plane And Dev Chat](app-server.md) for the local config shape and
+[Cooldis RPC Control Plane](app-server.md) for the local config shape and
 command-line flags.
 
 `LocalOfflineProviderClient` is the deterministic local provider shape for tests

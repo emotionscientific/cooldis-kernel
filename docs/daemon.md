@@ -2,7 +2,7 @@
 
 `cooldis daemon` is the foreground shape for the future `cooldisd` service. It
 does not install launchd or systemd units implicitly; service files are printed
-or installed only through explicit operator commands.
+or installed only through explicit user commands.
 
 The daemon config format is TOML:
 
@@ -44,7 +44,7 @@ visibility_timeout_secs = 30
 sqlite_path = ".cooldis/queue/ingress.sqlite"
 
 [[daemon.io.routes]]
-id = "operator-tui"
+id = "chat-tui"
 kind = "websocket.tui"
 enabled = true
 policy = "steer_when_active"
@@ -152,12 +152,12 @@ token is configured.
 The app-server runs in three shapes. They share one implementation; they
 differ in who owns the process, the socket, and the state directories.
 
-1. **Ephemeral, per-command** — `cooldis dev chat` / `cooldis dev tui` spawn
-   a private in-process app-server on a throwaway Unix socket under `/tmp`
+1. **Ephemeral, per-command** — `cooldis chat` starts a private in-process
+   app-server on a throwaway Unix socket under `/tmp`
    and tear it down on exit. Nothing outside the command should attach to
    it; its socket path is not stable.
 2. **Standalone control plane** — `cooldis rpc --listen ...` runs the
-   app-server in the foreground on an operator-chosen Unix socket or
+   app-server in the foreground on a user-chosen Unix socket or
    loopback WebSocket address, with no IO routes. This is the shape a local
    client (the workbench, a script, the smoke bins) attaches to during
    development. The process owns the socket for its lifetime; stopping it
@@ -171,7 +171,7 @@ The boundary rules for V1:
 
 - **One writer per state home.** Exactly one app-server process may own a
   given runtime/state home at a time. Running two shapes against the same
-  state directories is unsupported; the ephemeral dev shapes avoid this by
+  state directories is unsupported; the ephemeral chat shape avoids this by
   using isolated temp state.
 - **State outlives the process; subscriptions do not.** Threads, turns, and
   events persist in the state home (published agent records live in the
@@ -181,7 +181,7 @@ The boundary rules for V1:
   client must re-list state and re-subscribe; there is no notification
   replay.
 - **Lifecycle ownership is explicit.** Most local clients attach to a socket
-  that an operator (or the OS service manager) already started. Connection
+  that a user (or the OS service manager) already started. Connection
   refused means "start the daemon", and those clients should say so rather
   than spawning processes themselves. A desktop client may offer an explicit
   user-level managed profile that starts `cooldis daemon run`/`cooldis rpc`

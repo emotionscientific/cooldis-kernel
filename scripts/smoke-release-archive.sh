@@ -71,7 +71,10 @@ fi
 
 run_quiet "$COOLDIS" --version
 run_quiet "$COOLDIS" --help
+run_quiet "$COOLDIS" commands
+run_quiet "$COOLDIS" help chat
 run_quiet "$COOLDIS" console --help
+run_quiet "$COOLDIS" chat --help
 run_quiet "$COOLDIS" agent --help
 run_quiet "$COOLDIS" agent init --help
 run_quiet "$COOLDIS" agent plan --help
@@ -83,17 +86,12 @@ run_quiet "$COOLDIS" tool --help
 run_quiet "$COOLDIS" tool build --help
 run_quiet "$COOLDIS" tool publish --help
 run_quiet "$COOLDIS" tool run --help
+run_quiet "$COOLDIS" tool manual --help
+run_quiet "$COOLDIS" auth --help
 run_quiet "$COOLDIS" rpc --help
-run_quiet "$COOLDIS" dev --help
-run_quiet "$COOLDIS" dev chat --help
-run_quiet "$COOLDIS" dev tui --help
-run_quiet "$COOLDIS" operator --help
-run_quiet "$COOLDIS" thread --help
+run_quiet "$COOLDIS" debug --help
+run_quiet "$COOLDIS" debug rpc --help
 
-run_fails "$COOLDIS" op --help
-run_fails "$COOLDIS" app-server --help
-run_fails "$COOLDIS" chat --help
-run_fails "$COOLDIS" tui --help
 run_fails "$COOLDIS" hello
 
 run_quiet "$ACP_AGENT" --version

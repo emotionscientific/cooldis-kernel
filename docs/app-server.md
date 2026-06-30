@@ -1,4 +1,4 @@
-# Cooldis RPC Control Plane And Dev Chat
+# Cooldis RPC Control Plane
 
 Cooldis owns an app-server control plane with a Codex-shaped transport so local
 clients can exercise the Cooldis kernel without importing Codex as a runtime
@@ -46,34 +46,28 @@ and keeps JSON-RPC on `/rpc`. Each console process generates a session token,
 injects it into `index.html`, and rejects `/rpc` WebSocket upgrades that do not
 present the token in the query string or `Sec-WebSocket-Protocol`.
 
-`cooldis dev chat` starts a private app server on a temporary Unix socket and
-connects Cooldis' owned Codex-shaped test client to it:
+`cooldis chat` starts the bundled terminal console. It launches a private app
+server on a temporary Unix socket by default, or attaches to an existing
+endpoint with `--attach`:
 
 ```sh
-cargo run --bin cooldis -- dev chat
+cargo run --bin cooldis -- chat
+cargo run --bin cooldis -- chat --attach unix:///tmp/cooldis.sock
 ```
 
-With no prompt, `cooldis dev chat` opens a small line REPL:
-
-```text
-Cooldis chat. Type /quit to exit.
-> hello
-assistant> ...
-```
-
-With a prompt argument, it sends one turn and exits:
+With a prompt argument, it opens the terminal console and submits that prompt:
 
 ```sh
-cargo run --bin cooldis -- dev chat "hello from cooldis"
+cargo run --bin cooldis -- chat "hello from cooldis"
 ```
 
-`cooldis dev rpc` connects to a running daemon's WebSocket app server instead
+`cooldis debug rpc` connects to a running daemon's WebSocket app server instead
 of starting a private one. It is useful for protocol debugging and for checking
 the live daemon state from scripts:
 
 ```sh
-cargo run --bin cooldis -- dev rpc call thread/list
-cargo run --bin cooldis -- dev rpc call thread/read '{"threadId":"...","includeTurns":false}'
+cargo run --bin cooldis -- debug rpc call thread/list
+cargo run --bin cooldis -- debug rpc call thread/read '{"threadId":"...","includeTurns":false}'
 ```
 
 By default it connects to `ws://127.0.0.1:49200/rpc`. Pass `--url` for another
@@ -81,14 +75,14 @@ running WebSocket endpoint, or `--config` to read `daemon.app_server.listen`
 from a `cooldis.toml`:
 
 ```sh
-cargo run --bin cooldis -- dev rpc turn --new "hello from the daemon"
-cargo run --bin cooldis -- dev rpc turn --thread <thread-id> --json "resume here"
-cargo run --bin cooldis -- dev rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
+cargo run --bin cooldis -- debug rpc turn --new "hello from the daemon"
+cargo run --bin cooldis -- debug rpc turn --thread <thread-id> --json "resume here"
+cargo run --bin cooldis -- debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 ```
 
 ## Provider Config
 
-The dev chat command can point its private app-server runtime at a live
+The chat command can point its private app-server runtime at a live
 provider endpoint. Put non-secret settings in a local `cooldis.json`:
 
 ```json
@@ -107,13 +101,13 @@ provider endpoint. Put non-secret settings in a local `cooldis.json`:
 Then run interactive chat:
 
 ```sh
-cargo run --bin cooldis -- dev chat
+cargo run --bin cooldis -- chat
 ```
 
 Or pass the provider config on the command line:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider openai \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -562,7 +556,7 @@ JSON keys such as `api_key`, `token`, `secret`, `authorization`, `password`, and
 bearer credentials. The `redaction.redactedKeys` array records which key names
 were redacted in the bundle.
 
-This method is the V1 operator evidence bundle surface. It is not a browser-safe
+This method is the V1 support evidence bundle surface. It is not a browser-safe
 subscription stream and does not replace the authority stream store.
 
 ### `thread/read`
@@ -659,13 +653,13 @@ cargo run --bin cooldis-live-smoke
 Run a one-shot local/offline chat proof:
 
 ```sh
-cargo run --bin cooldis -- dev chat "hello from local chat"
+cargo run --bin cooldis -- chat "hello from local chat"
 ```
 
 Run an OpenAI Responses-compatible chat proof with a local env file:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider openai \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -683,7 +677,7 @@ COOL_CHAT_OPENAI_OK
 Run an OpenAI Chat Completions-compatible proof:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider openai_chat_completions \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -694,7 +688,7 @@ cargo run --bin cooldis -- dev chat \
 Run an Anthropic Messages proof:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider anthropic \
   --api-key-env ANTHROPIC_API_KEY \
   --model claude-sonnet-4-5-20250929 \
@@ -704,7 +698,7 @@ cargo run --bin cooldis -- dev chat \
 Run an Anthropic Bedrock proof:
 
 ```sh
-scripts/with-bedrock-env.sh cargo run --bin cooldis -- dev chat \
+scripts/with-bedrock-env.sh cargo run --bin cooldis -- chat \
   --provider anthropic_bedrock \
   --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
   --no-stream \

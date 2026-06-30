@@ -47,8 +47,14 @@ curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/latest/d
 Install a release candidate directly:
 
 ```sh
-curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/download/v0.1.0-rc.1/install.sh \
-  | sh -s -- --version 0.1.0-rc.1
+curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/download/v0.1.0-rc.N/install.sh \
+  | sh -s -- --version 0.1.0-rc.N
+```
+
+After installation, the normal local entrypoint is:
+
+```sh
+cooldis console
 ```
 
 ## Local Packaging
@@ -79,6 +85,10 @@ archive="$(find dist -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
 scripts/smoke-release-archive.sh "$archive"
 scripts/smoke-install.sh "$archive"
 ```
+
+The package smoke verifies the canonical CLI help surface, including
+`cooldis commands`, `cooldis chat --help`, `cooldis auth --help`,
+`cooldis tool manual --help`, and `cooldis debug rpc --help`.
 
 ## Publishing
 

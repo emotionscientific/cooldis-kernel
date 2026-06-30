@@ -11,7 +11,7 @@ crates/cooldis-kernel/src/adapters/provider_runtime/tests.rs observation_store 1
 crates/cooldis-kernel/src/agent/hooks.rs hook 24
 crates/cooldis-kernel/src/agent/tool_interceptor.rs hook 1
 crates/cooldis-kernel/src/capabilities/execution/tests.rs capsule 1
-crates/cooldis-kernel/src/cli/mod.rs capsule 20
+crates/cooldis-kernel/src/cli/mod.rs capsule 19
 crates/cooldis-kernel/src/cli/tests.rs capsule 4
 crates/cooldis-kernel/src/kernel/context_compiler.rs hook 1
 crates/cooldis-kernel/src/lib.rs capsule 6

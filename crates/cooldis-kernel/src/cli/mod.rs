@@ -32,17 +32,15 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(unix)]
-use tokio::net::UnixStream;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-mod operator;
+mod chat;
 
 pub async fn run() -> CooldisResult<()> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -67,63 +65,177 @@ pub async fn run() -> CooldisResult<()> {
 
     let command = args.remove(0);
     match command.to_string_lossy().as_ref() {
+        "commands" => {
+            print_commands_help();
+            Ok(())
+        }
+        "help" => run_help(args),
         "init" => agent_init(args).await,
         "agent" => run_agent(args).await,
         "tool" => run_tool(args).await,
-        "man" => run_man(args).await,
         "secret" => run_secret(args).await,
-        "provider" => run_provider(args).await,
-        "op" => Err(usage_error(
-            "cooldis op has been removed; use cooldis tool instead",
-        )),
-        "thread" => run_thread(args).await,
-        "operator" => run_operator(args).await,
+        "auth" => run_auth(args).await,
         "console" => run_console(args).await,
-        "dev" => run_dev(args).await,
+        "chat" => run_chat(args).await,
+        "debug" => run_debug(args).await,
         "daemon" => run_daemon(args).await,
         "rpc" => run_rpc(args).await,
-        "app-server" => Err(usage_error(
-            "cooldis app-server has been removed; use cooldis rpc instead",
-        )),
-        "chat" => Err(usage_error("cooldis chat has moved to cooldis dev chat")),
-        "tui" => Err(usage_error("cooldis tui has moved to cooldis dev tui")),
         other => Err(usage_error(format!(
             "unknown command {other:?}; use `cooldis --help`"
         ))),
     }
 }
 
-async fn run_dev(mut args: Vec<OsString>) -> CooldisResult<()> {
+fn run_help(args: Vec<OsString>) -> CooldisResult<()> {
+    let path = args
+        .into_iter()
+        .filter(|arg| arg != "--help" && arg != "-h")
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    if path.is_empty() {
+        print_help();
+        return Ok(());
+    }
+    print_command_help(&path)
+}
+
+fn print_command_help(path: &[String]) -> CooldisResult<()> {
+    match path {
+        [command] if command == "commands" => print_commands_help(),
+        [command] if command == "help" => print_help_help(),
+        [command] if command == "console" => print_console_help(),
+        [command] if command == "chat" => print_chat_help(),
+        [command] if command == "init" => print_agent_init_help(),
+        [command] if command == "agent" => print_agent_help(),
+        [command, subcommand] if command == "agent" && subcommand == "init" => {
+            print_agent_init_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "plan" => {
+            print_agent_plan_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "publish" => {
+            print_agent_publish_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "list" => {
+            print_agent_list_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "show" => {
+            print_agent_show_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "run" => {
+            print_agent_run_help()
+        }
+        [command] if command == "tool" => print_tool_help(),
+        [command, subcommand] if command == "tool" && subcommand == "build" => {
+            print_tool_build_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "list" => {
+            print_tool_list_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "publish" => {
+            print_tool_publish_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "run" => print_tool_run_help(),
+        [command, subcommand] if command == "tool" && subcommand == "manual" => {
+            print_tool_manual_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "source" => {
+            print_tool_source_help()
+        }
+        [command, subcommand, action] if command == "tool" && subcommand == "source" => {
+            match action.as_str() {
+                "add" => print_tool_source_add_help(),
+                "discover" => print_tool_source_discover_help(),
+                "list" => print_tool_source_list_help(),
+                "show" => print_tool_source_show_help(),
+                "remove" => print_tool_source_remove_help(),
+                other => {
+                    return Err(usage_error(format!(
+                        "unknown tool source help command {other:?}"
+                    )));
+                }
+            }
+        }
+        [command] if command == "auth" => print_auth_help(),
+        [command, subcommand] if command == "auth" && subcommand == "status" => {
+            print_auth_status_help()
+        }
+        [command, subcommand] if command == "auth" && subcommand == "set" => print_auth_set_help(),
+        [command, subcommand] if command == "auth" && subcommand == "delete" => {
+            print_auth_delete_help()
+        }
+        [command] if command == "secret" => print_secret_help(),
+        [command, subcommand] if command == "secret" && subcommand == "import" => {
+            print_secret_import_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "set" => {
+            print_secret_set_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "list" => {
+            print_secret_list_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "status" => {
+            print_secret_status_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "delete" => {
+            print_secret_delete_help()
+        }
+        [command] if command == "rpc" => print_rpc_help(),
+        [command] if command == "debug" => print_debug_help(),
+        [command, subcommand] if command == "debug" && subcommand == "rpc" => {
+            print_debug_rpc_help()
+        }
+        [command] if command == "daemon" => print_daemon_help(),
+        [command, subcommand] if command == "daemon" && subcommand == "run" => print_daemon_help(),
+        [command, subcommand, action]
+            if command == "daemon" && subcommand == "config" && action == "validate" =>
+        {
+            print_daemon_help()
+        }
+        [command, subcommand, _action] if command == "daemon" && subcommand == "service" => {
+            print_daemon_help()
+        }
+        _ => {
+            return Err(usage_error(format!(
+                "unknown help command {:?}; use `cooldis commands`",
+                path.join(" ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn run_debug(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
             .first()
             .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        print_dev_help();
+        print_debug_help();
         return Ok(());
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "chat" => run_dev_chat(args).await,
-        "tui" => run_dev_tui(args).await,
-        "rpc" => run_dev_rpc(args).await,
-        other => Err(usage_error(format!("unknown dev subcommand {other:?}"))),
+        "rpc" => run_debug_rpc(args).await,
+        other => Err(usage_error(format!(
+            "unknown debug subcommand {other:?}; use `cooldis debug --help`"
+        ))),
     }
 }
 
-async fn run_operator(args: Vec<OsString>) -> CooldisResult<()> {
-    operator::run(args, operator::OperatorInvocation::Public).await
+async fn run_chat(args: Vec<OsString>) -> CooldisResult<()> {
+    chat::run(args, chat::ChatInvocation::Chat).await
 }
 
-async fn run_man(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_man_args(args)?;
+async fn tool_manual(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_tool_manual_args(args)?;
     if options.help {
-        print_man_help();
+        print_tool_manual_help();
         return Ok(());
     }
     let tool_name = options
         .tool_name
-        .ok_or_else(|| usage_error("man requires <published-tool>"))?;
+        .ok_or_else(|| usage_error("tool manual requires <published-tool>"))?;
     let registry_root = options.registry_root.unwrap_or_else(default_registry_root);
     let registry = LocalOperationRegistry::new(registry_root);
     let record = registry.load_record(&tool_name)?;
@@ -157,10 +269,6 @@ async fn run_agent(mut args: Vec<OsString>) -> CooldisResult<()> {
         "run" => agent_run(args).await,
         other => Err(usage_error(format!("unknown agent subcommand {other:?}"))),
     }
-}
-
-async fn run_dev_tui(args: Vec<OsString>) -> CooldisResult<()> {
-    operator::run(args, operator::OperatorInvocation::DevAlias).await
 }
 
 async fn agent_init(args: Vec<OsString>) -> CooldisResult<()> {
@@ -377,121 +485,82 @@ async fn agent_run(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-async fn run_dev_chat(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_chat_args(args)?;
-    if options.help {
-        print_dev_chat_help();
-        return Ok(());
-    }
-    if options.attach.is_some() {
-        return Err(usage_error(
-            "--attach is only supported by cooldis operator and cooldis dev tui",
-        ));
-    }
-
-    let launched = PrivateAppServer::start(&options).await?;
-    let socket_path = launched.socket_path().to_path_buf();
-    let mut client = CodexTuiTestClient::connect_unix(
-        socket_path,
-        CodexTuiConnectConfig {
-            client_name: "cooldis-cli".to_string(),
-            ..CodexTuiConnectConfig::default()
-        },
-    )
-    .await?;
-    bootstrap_chat_client(&mut client).await?;
-
-    match options.prompt {
-        Some(prompt) => {
-            let thread = client.thread_start(json!({})).await?;
-            let turn = client.turn_start_text(&thread.id, &prompt).await?;
-            stream_turn_to_stdout(&mut client, &thread.id, &turn.id).await?;
-        }
-        None => run_chat_repl(&mut client).await?,
-    }
-
-    client.close().await?;
-    launched.shutdown();
-    Ok(())
-}
-
-/// `cooldis dev rpc` — protocol-level debug client for a RUNNING daemon's
-/// app-server websocket (unlike `dev chat`/`dev tui`, which launch a private
-/// in-process app-server). Connects with `CodexTuiTestClient::connect_websocket`,
+/// `cooldis debug rpc` — protocol-level debug client for a RUNNING daemon's
+/// app-server websocket. Connects with `CodexTuiTestClient::connect_websocket`,
 /// performs the initialize handshake, then dispatches a subcommand.
-async fn run_dev_rpc(mut args: Vec<OsString>) -> CooldisResult<()> {
+async fn run_debug_rpc(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
             .first()
             .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        print_dev_rpc_help();
+        print_debug_rpc_help();
         return Ok(());
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "call" => run_dev_rpc_call(args).await,
-        "turn" => run_dev_rpc_turn(args).await,
-        "tail" => run_dev_rpc_tail(args).await,
+        "call" => run_debug_rpc_call(args).await,
+        "turn" => run_debug_rpc_turn(args).await,
+        "tail" => run_debug_rpc_tail(args).await,
         other => Err(usage_error(format!(
-            "unknown dev rpc subcommand {other:?}; use `cooldis dev rpc --help`"
+            "unknown debug rpc subcommand {other:?}; use `cooldis debug rpc --help`"
         ))),
     }
 }
 
-/// Endpoint selection shared by all `dev rpc` subcommands:
+/// Endpoint selection shared by all `debug rpc` subcommands:
 /// `--url <ws://…>` wins; else `--config <cooldis.toml>` reads
 /// `daemon.app_server.listen`; else default `ws://127.0.0.1:49200/rpc`.
 /// `--url` and `--config` together is a usage error.
 #[derive(Debug)]
-struct DevRpcEndpointArgs {
+struct DebugRpcEndpointArgs {
     url: Option<String>,
     config: Option<PathBuf>,
 }
 
 #[derive(Debug)]
-struct DevRpcCallArgs {
+struct DebugRpcCallArgs {
     method: String,
     params: Value,
-    endpoint: DevRpcEndpointArgs,
+    endpoint: DebugRpcEndpointArgs,
 }
 
 #[derive(Debug)]
-enum DevRpcThreadTarget {
+enum DebugRpcThreadTarget {
     New,
     Existing(String),
 }
 
 #[derive(Debug)]
-struct DevRpcTurnArgs {
-    target: DevRpcThreadTarget,
+struct DebugRpcTurnArgs {
+    target: DebugRpcThreadTarget,
     json: bool,
     text: String,
-    endpoint: DevRpcEndpointArgs,
+    endpoint: DebugRpcEndpointArgs,
 }
 
 #[derive(Debug)]
-struct DevRpcTailArgs {
+struct DebugRpcTailArgs {
     thread_id: String,
-    endpoint: DevRpcEndpointArgs,
+    endpoint: DebugRpcEndpointArgs,
 }
 
-enum DevRpcTurnStreamResult {
+enum DebugRpcTurnStreamResult {
     Completed,
     TurnError(String),
 }
 
-const DEV_RPC_DEFAULT_URL: &str = "ws://127.0.0.1:49200/rpc";
-const DEV_RPC_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+const DEBUG_RPC_DEFAULT_URL: &str = "ws://127.0.0.1:49200/rpc";
+const DEBUG_RPC_TURN_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// One-shot JSON-RPC request: `cooldis dev rpc call <method> [PARAMS_JSON]`.
+/// One-shot JSON-RPC request: `cooldis debug rpc call <method> [PARAMS_JSON]`.
 /// PARAMS_JSON is an inline JSON object (omitted = no params). Prints the
 /// result pretty-printed to stdout. A JSON-RPC error response prints the error
 /// to stderr and exits 1 (transport failures likewise).
-async fn run_dev_rpc_call(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_dev_rpc_call_args(args)?;
-    let url = resolve_dev_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_dev_rpc_client(&url).await?;
+async fn run_debug_rpc_call(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_debug_rpc_call_args(args)?;
+    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&url).await?;
     let result = client.request(&options.method, options.params).await?;
     serde_json::to_writer_pretty(std::io::stdout(), &result)
         .map_err(|err| usage_error(format!("failed to encode JSON-RPC result: {err}")))?;
@@ -500,24 +569,24 @@ async fn run_dev_rpc_call(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-/// Run one turn and stream it: `cooldis dev rpc turn (--thread <id> | --new) [--json] <text>`.
+/// Run one turn and stream it: `cooldis debug rpc turn (--thread <id> | --new) [--json] <text>`.
 /// `--thread` resumes the existing thread (thread/resume, excludeTurns true);
 /// `--new` starts a fresh one and prints its id to stderr. Default output mode
 /// streams agent-message delta text to stdout as it arrives (flushed per
 /// delta), terminated by a newline at turn completion. `--json` instead emits
 /// every notification scoped to the thread as one JSON object per line.
 /// Exit codes: 0 turn completed, 2 turn error, 1 transport/protocol failure.
-async fn run_dev_rpc_turn(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_dev_rpc_turn_args(args)?;
-    let url = resolve_dev_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_dev_rpc_client(&url).await?;
+async fn run_debug_rpc_turn(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_debug_rpc_turn_args(args)?;
+    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&url).await?;
     let thread_id = match &options.target {
-        DevRpcThreadTarget::New => {
+        DebugRpcThreadTarget::New => {
             let thread = client.thread_start(json!({})).await?;
             eprintln!("{}", thread.id);
             thread.id
         }
-        DevRpcThreadTarget::Existing(thread_id) => {
+        DebugRpcThreadTarget::Existing(thread_id) => {
             client
                 .request(
                     "thread/resume",
@@ -532,24 +601,24 @@ async fn run_dev_rpc_turn(args: Vec<OsString>) -> CooldisResult<()> {
     };
     let turn = client.turn_start_text(&thread_id, &options.text).await?;
     let stream_result =
-        stream_dev_rpc_turn(&mut client, &thread_id, &turn.id, options.json).await?;
+        stream_debug_rpc_turn(&mut client, &thread_id, &turn.id, options.json).await?;
     let _ = client.close().await;
     match stream_result {
-        DevRpcTurnStreamResult::Completed => Ok(()),
-        DevRpcTurnStreamResult::TurnError(message) => {
+        DebugRpcTurnStreamResult::Completed => Ok(()),
+        DebugRpcTurnStreamResult::TurnError(message) => {
             eprintln!("{message}");
             std::process::exit(2);
         }
     }
 }
 
-/// Subscribe and watch: `cooldis dev rpc tail --thread <id>`.
+/// Subscribe and watch: `cooldis debug rpc tail --thread <id>`.
 /// Resumes the thread for the subscription, then prints every received
 /// notification as one JSON object per line until Ctrl-C/EOF.
-async fn run_dev_rpc_tail(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_dev_rpc_tail_args(args)?;
-    let url = resolve_dev_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_dev_rpc_client(&url).await?;
+async fn run_debug_rpc_tail(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_debug_rpc_tail_args(args)?;
+    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&url).await?;
     client
         .request(
             "thread/resume",
@@ -577,14 +646,14 @@ async fn run_dev_rpc_tail(args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
-fn print_dev_rpc_help() {
+fn print_debug_rpc_help() {
     println!(
-        "cooldis dev rpc\n\
+        "cooldis debug rpc\n\
 \n\
 Usage:\n\
-  cooldis dev rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]\n\
-  cooldis dev rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]\n\
-  cooldis dev rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]\n\
+  cooldis debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]\n\
+  cooldis debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]\n\
+  cooldis debug rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]\n\
 \n\
 Protocol-level debug client for a running daemon's app-server websocket.\n\
 Defaults to ws://127.0.0.1:49200/rpc when neither --url nor --config is given.\n\
@@ -593,8 +662,8 @@ notifications as JSONL with --json); tail prints notifications until Ctrl-C.\n"
     );
 }
 
-fn parse_dev_rpc_call_args(args: Vec<OsString>) -> CooldisResult<DevRpcCallArgs> {
-    let mut endpoint = DevRpcEndpointArgs {
+fn parse_debug_rpc_call_args(args: Vec<OsString>) -> CooldisResult<DebugRpcCallArgs> {
+    let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
     };
@@ -605,43 +674,43 @@ fn parse_dev_rpc_call_args(args: Vec<OsString>) -> CooldisResult<DevRpcCallArgs>
             "--url" => endpoint.url = Some(required_string_value(&mut iter, "--url")?),
             "--config" => endpoint.config = Some(required_path_value(&mut iter, "--config")?),
             other if other.starts_with('-') => {
-                return Err(dev_rpc_usage_error(format!(
-                    "unknown dev rpc call argument {other:?}"
+                return Err(debug_rpc_usage_error(format!(
+                    "unknown debug rpc call argument {other:?}"
                 )));
             }
             _ => positionals.push(arg.to_string_lossy().to_string()),
         }
     }
-    validate_dev_rpc_endpoint_args(&endpoint)?;
+    validate_debug_rpc_endpoint_args(&endpoint)?;
     let method = positionals
         .first()
         .cloned()
-        .ok_or_else(|| dev_rpc_usage_error("cooldis dev rpc call requires <method>"))?;
+        .ok_or_else(|| debug_rpc_usage_error("cooldis debug rpc call requires <method>"))?;
     if positionals.len() > 2 {
-        return Err(dev_rpc_usage_error(
-            "cooldis dev rpc call accepts at most one PARAMS_JSON argument",
+        return Err(debug_rpc_usage_error(
+            "cooldis debug rpc call accepts at most one PARAMS_JSON argument",
         ));
     }
     let params = match positionals.get(1) {
         Some(raw) => serde_json::from_str(raw).map_err(|err| {
-            dev_rpc_usage_error(format!("invalid PARAMS_JSON for dev rpc call: {err}"))
+            debug_rpc_usage_error(format!("invalid PARAMS_JSON for debug rpc call: {err}"))
         })?,
         None => json!({}),
     };
     if !params.is_object() {
-        return Err(dev_rpc_usage_error(
-            "PARAMS_JSON for dev rpc call must be a JSON object",
+        return Err(debug_rpc_usage_error(
+            "PARAMS_JSON for debug rpc call must be a JSON object",
         ));
     }
-    Ok(DevRpcCallArgs {
+    Ok(DebugRpcCallArgs {
         method,
         params,
         endpoint,
     })
 }
 
-fn parse_dev_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DevRpcTurnArgs> {
-    let mut endpoint = DevRpcEndpointArgs {
+fn parse_debug_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DebugRpcTurnArgs> {
+    let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
     };
@@ -658,32 +727,34 @@ fn parse_dev_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DevRpcTurnArgs>
             "--new" => new_thread = true,
             "--json" => json = true,
             other if other.starts_with('-') => {
-                return Err(dev_rpc_usage_error(format!(
-                    "unknown dev rpc turn argument {other:?}"
+                return Err(debug_rpc_usage_error(format!(
+                    "unknown debug rpc turn argument {other:?}"
                 )));
             }
             _ => positionals.push(arg.to_string_lossy().to_string()),
         }
     }
-    validate_dev_rpc_endpoint_args(&endpoint)?;
+    validate_debug_rpc_endpoint_args(&endpoint)?;
     let target = match (thread_id, new_thread) {
         (Some(_), true) => {
-            return Err(dev_rpc_usage_error(
-                "cooldis dev rpc turn requires exactly one of --thread or --new",
+            return Err(debug_rpc_usage_error(
+                "cooldis debug rpc turn requires exactly one of --thread or --new",
             ));
         }
-        (Some(thread_id), false) => DevRpcThreadTarget::Existing(thread_id),
-        (None, true) => DevRpcThreadTarget::New,
+        (Some(thread_id), false) => DebugRpcThreadTarget::Existing(thread_id),
+        (None, true) => DebugRpcThreadTarget::New,
         (None, false) => {
-            return Err(dev_rpc_usage_error(
-                "cooldis dev rpc turn requires exactly one of --thread or --new",
+            return Err(debug_rpc_usage_error(
+                "cooldis debug rpc turn requires exactly one of --thread or --new",
             ));
         }
     };
     if positionals.is_empty() {
-        return Err(dev_rpc_usage_error("cooldis dev rpc turn requires <text>"));
+        return Err(debug_rpc_usage_error(
+            "cooldis debug rpc turn requires <text>",
+        ));
     }
-    Ok(DevRpcTurnArgs {
+    Ok(DebugRpcTurnArgs {
         target,
         json,
         text: positionals.join(" "),
@@ -691,8 +762,8 @@ fn parse_dev_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DevRpcTurnArgs>
     })
 }
 
-fn parse_dev_rpc_tail_args(args: Vec<OsString>) -> CooldisResult<DevRpcTailArgs> {
-    let mut endpoint = DevRpcEndpointArgs {
+fn parse_debug_rpc_tail_args(args: Vec<OsString>) -> CooldisResult<DebugRpcTailArgs> {
+    let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
     };
@@ -704,31 +775,32 @@ fn parse_dev_rpc_tail_args(args: Vec<OsString>) -> CooldisResult<DevRpcTailArgs>
             "--config" => endpoint.config = Some(required_path_value(&mut iter, "--config")?),
             "--thread" => thread_id = Some(required_string_value(&mut iter, "--thread")?),
             other => {
-                return Err(dev_rpc_usage_error(format!(
-                    "unknown dev rpc tail argument {other:?}"
+                return Err(debug_rpc_usage_error(format!(
+                    "unknown debug rpc tail argument {other:?}"
                 )));
             }
         }
     }
-    validate_dev_rpc_endpoint_args(&endpoint)?;
-    Ok(DevRpcTailArgs {
-        thread_id: thread_id
-            .ok_or_else(|| dev_rpc_usage_error("cooldis dev rpc tail requires --thread <id>"))?,
+    validate_debug_rpc_endpoint_args(&endpoint)?;
+    Ok(DebugRpcTailArgs {
+        thread_id: thread_id.ok_or_else(|| {
+            debug_rpc_usage_error("cooldis debug rpc tail requires --thread <id>")
+        })?,
         endpoint,
     })
 }
 
-fn validate_dev_rpc_endpoint_args(endpoint: &DevRpcEndpointArgs) -> CooldisResult<()> {
+fn validate_debug_rpc_endpoint_args(endpoint: &DebugRpcEndpointArgs) -> CooldisResult<()> {
     if endpoint.url.is_some() && endpoint.config.is_some() {
-        return Err(dev_rpc_usage_error(
-            "cooldis dev rpc accepts --url or --config, not both",
+        return Err(debug_rpc_usage_error(
+            "cooldis debug rpc accepts --url or --config, not both",
         ));
     }
     Ok(())
 }
 
-fn resolve_dev_rpc_endpoint(endpoint: &DevRpcEndpointArgs) -> CooldisResult<String> {
-    validate_dev_rpc_endpoint_args(endpoint)?;
+fn resolve_debug_rpc_endpoint(endpoint: &DebugRpcEndpointArgs) -> CooldisResult<String> {
+    validate_debug_rpc_endpoint_args(endpoint)?;
     if let Some(url) = &endpoint.url {
         return Ok(url.clone());
     }
@@ -741,27 +813,27 @@ fn resolve_dev_rpc_endpoint(endpoint: &DevRpcEndpointArgs) -> CooldisResult<Stri
             }
         }
     }
-    Ok(DEV_RPC_DEFAULT_URL.to_string())
+    Ok(DEBUG_RPC_DEFAULT_URL.to_string())
 }
 
-async fn connect_dev_rpc_client(url: &str) -> CooldisResult<CodexTuiTestClient<TcpStream>> {
+async fn connect_debug_rpc_client(url: &str) -> CooldisResult<CodexTuiTestClient<TcpStream>> {
     CodexTuiTestClient::connect_websocket(
         url,
         CodexTuiConnectConfig {
-            client_name: "cooldis-dev-rpc".to_string(),
+            client_name: "cooldis-debug-rpc".to_string(),
             ..CodexTuiConnectConfig::default()
         },
     )
     .await
 }
 
-async fn stream_dev_rpc_turn(
+async fn stream_debug_rpc_turn(
     client: &mut CodexTuiTestClient<TcpStream>,
     thread_id: &str,
     turn_id: &str,
     json_output: bool,
-) -> CooldisResult<DevRpcTurnStreamResult> {
-    let deadline = tokio::time::sleep(DEV_RPC_TURN_TIMEOUT);
+) -> CooldisResult<DebugRpcTurnStreamResult> {
+    let deadline = tokio::time::sleep(DEBUG_RPC_TURN_TIMEOUT);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -771,7 +843,7 @@ async fn stream_dev_rpc_turn(
                 }
                 return Err(usage_error(format!(
                     "timed out after {}s waiting for turn {turn_id}",
-                    DEV_RPC_TURN_TIMEOUT.as_secs()
+                    DEBUG_RPC_TURN_TIMEOUT.as_secs()
                 )));
             }
             event = client.next_event() => {
@@ -792,7 +864,7 @@ async fn stream_dev_rpc_turn(
                             if !json_output {
                                 println!();
                             }
-                            return Ok(DevRpcTurnStreamResult::TurnError(
+                            return Ok(DebugRpcTurnStreamResult::TurnError(
                                 notification_turn_error_message(&notification),
                             ));
                         }
@@ -802,7 +874,7 @@ async fn stream_dev_rpc_turn(
                             if !json_output {
                                 println!();
                             }
-                            return Ok(DevRpcTurnStreamResult::Completed);
+                            return Ok(DebugRpcTurnStreamResult::Completed);
                         }
                     }
                     CodexTuiEvent::Error(error) => {
@@ -879,8 +951,11 @@ fn notification_turn_error_message(notification: &JsonRpcNotification) -> String
         .unwrap_or_else(|| notification_error_message(notification))
 }
 
-fn dev_rpc_usage_error(message: impl Into<String>) -> CooldisError {
-    usage_error(format!("{}\nUsage: cooldis dev rpc --help", message.into()))
+fn debug_rpc_usage_error(message: impl Into<String>) -> CooldisError {
+    usage_error(format!(
+        "{}\nUsage: cooldis debug rpc --help",
+        message.into()
+    ))
 }
 
 async fn run_rpc(args: Vec<OsString>) -> CooldisResult<()> {
@@ -1521,6 +1596,7 @@ async fn run_tool(mut args: Vec<OsString>) -> CooldisResult<()> {
             "list" => print_tool_list_help(),
             "publish" => print_tool_publish_help(),
             "run" => print_tool_run_help(),
+            "manual" => print_tool_manual_help(),
             "source" => print_tool_source_help(),
             other => return Err(usage_error(format!("unknown tool subcommand {other:?}"))),
         }
@@ -1531,6 +1607,7 @@ async fn run_tool(mut args: Vec<OsString>) -> CooldisResult<()> {
         "list" => tool_list(args).await,
         "publish" => tool_publish(args).await,
         "run" => tool_run(args).await,
+        "manual" => tool_manual(args).await,
         "source" => tool_source(args).await,
         _ => Err(usage_error(format!(
             "unknown tool subcommand {subcommand:?}"
@@ -1574,72 +1651,24 @@ async fn run_secret(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
-async fn run_provider(mut args: Vec<OsString>) -> CooldisResult<()> {
+async fn run_auth(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
             .first()
             .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        print_provider_help();
+        print_auth_help();
         return Ok(());
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "auth" => run_provider_auth(args).await,
+        "status" => auth_status(args).await,
+        "set" => auth_set(args).await,
+        "delete" => auth_delete(args).await,
         other => Err(usage_error(format!(
-            "unknown provider subcommand {other:?}"
+            "unknown auth subcommand {other:?}; use `cooldis auth --help`"
         ))),
     }
-}
-
-async fn run_provider_auth(mut args: Vec<OsString>) -> CooldisResult<()> {
-    if args.is_empty()
-        || args
-            .first()
-            .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        print_provider_auth_help();
-        return Ok(());
-    }
-    let subcommand = args.remove(0);
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        match subcommand.to_string_lossy().as_ref() {
-            "status" => print_provider_auth_status_help(),
-            "set" => print_provider_auth_set_help(),
-            "delete" => print_provider_auth_delete_help(),
-            other => {
-                return Err(usage_error(format!(
-                    "unknown provider auth subcommand {other:?}"
-                )));
-            }
-        }
-        return Ok(());
-    }
-    match subcommand.to_string_lossy().as_ref() {
-        "status" => provider_auth_status(args).await,
-        "set" => provider_auth_set(args).await,
-        "delete" => provider_auth_delete(args).await,
-        other => Err(usage_error(format!(
-            "unknown provider auth subcommand {other:?}"
-        ))),
-    }
-}
-
-async fn run_thread(args: Vec<OsString>) -> CooldisResult<()> {
-    if args.is_empty()
-        || args
-            .first()
-            .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        print_thread_help();
-        return Ok(());
-    }
-    Err(usage_error(
-        "cooldis thread CLI is not implemented yet; use rpc thread/* methods",
-    ))
 }
 
 async fn tool_build(args: Vec<OsString>) -> CooldisResult<()> {
@@ -2582,15 +2611,15 @@ async fn secret_delete(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-async fn provider_auth_status(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_provider_auth_name_args(args, "provider auth status")?;
+async fn auth_status(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_auth_name_args(args, "auth status")?;
     if options.help {
-        print_provider_auth_status_help();
+        print_auth_status_help();
         return Ok(());
     }
     let provider_id = options
         .provider_id
-        .ok_or_else(|| usage_error("provider auth status requires <provider-id>"))?;
+        .ok_or_else(|| usage_error("auth status requires <provider-id>"))?;
     let store = open_provider_store(options.state_home)?;
     let provider = store
         .get_provider(&provider_id)
@@ -2609,23 +2638,23 @@ async fn provider_auth_status(args: Vec<OsString>) -> CooldisResult<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(|err| {
-            CooldisError::RuntimeFactory(format!("failed to encode provider auth status: {err}"))
+            CooldisError::RuntimeFactory(format!("failed to encode auth status: {err}"))
         })?
     );
     Ok(())
 }
 
-async fn provider_auth_set(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_provider_auth_set_args(args)?;
+async fn auth_set(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_auth_set_args(args)?;
     if options.help {
-        print_provider_auth_set_help();
+        print_auth_set_help();
         return Ok(());
     }
     let provider_id = options
         .provider_id
-        .ok_or_else(|| usage_error("provider auth set requires <provider-id>"))?;
+        .ok_or_else(|| usage_error("auth set requires <provider-id>"))?;
     if !options.api_key_stdin {
-        return Err(usage_error("provider auth set requires --api-key-stdin"));
+        return Err(usage_error("auth set requires --api-key-stdin"));
     }
     let mut value = String::new();
     std::io::stdin()
@@ -2633,9 +2662,7 @@ async fn provider_auth_set(args: Vec<OsString>) -> CooldisResult<()> {
         .map_err(io_error)?;
     let value = trim_stdin_secret_value(value);
     if value.is_empty() {
-        return Err(usage_error(
-            "provider auth set requires a non-empty API key",
-        ));
+        return Err(usage_error("auth set requires a non-empty API key"));
     }
     let store = open_provider_store(options.state_home)?;
     if store
@@ -2657,15 +2684,15 @@ async fn provider_auth_set(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-async fn provider_auth_delete(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_provider_auth_name_args(args, "provider auth delete")?;
+async fn auth_delete(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_auth_name_args(args, "auth delete")?;
     if options.help {
-        print_provider_auth_delete_help();
+        print_auth_delete_help();
         return Ok(());
     }
     let provider_id = options
         .provider_id
-        .ok_or_else(|| usage_error("provider auth delete requires <provider-id>"))?;
+        .ok_or_else(|| usage_error("auth delete requires <provider-id>"))?;
     let store = open_provider_store(options.state_home)?;
     store
         .delete_credential(&provider_id)
@@ -2721,7 +2748,7 @@ struct RunArgs {
 }
 
 #[derive(Debug)]
-struct ManArgs {
+struct ToolManualArgs {
     tool_name: Option<String>,
     operation: Option<String>,
     registry_root: Option<PathBuf>,
@@ -2795,7 +2822,7 @@ struct SecretListArgs {
 }
 
 #[derive(Debug)]
-struct ProviderAuthSetArgs {
+struct AuthSetArgs {
     provider_id: Option<String>,
     api_key_stdin: bool,
     state_home: Option<PathBuf>,
@@ -2803,7 +2830,7 @@ struct ProviderAuthSetArgs {
 }
 
 #[derive(Debug)]
-struct ProviderAuthNameArgs {
+struct AuthNameArgs {
     provider_id: Option<String>,
     state_home: Option<PathBuf>,
     help: bool,
@@ -3509,7 +3536,7 @@ fn parse_run_args(args: Vec<OsString>) -> CooldisResult<RunArgs> {
     })
 }
 
-fn parse_man_args(args: Vec<OsString>) -> CooldisResult<ManArgs> {
+fn parse_tool_manual_args(args: Vec<OsString>) -> CooldisResult<ToolManualArgs> {
     let mut registry_root = None;
     let mut json = false;
     let mut help = false;
@@ -3523,17 +3550,19 @@ fn parse_man_args(args: Vec<OsString>) -> CooldisResult<ManArgs> {
             "--json" => json = true,
             "--help" | "-h" => help = true,
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown man argument {other:?}")));
+                return Err(usage_error(format!(
+                    "unknown tool manual argument {other:?}"
+                )));
             }
             _ => positionals.push(arg.to_string_lossy().to_string()),
         }
     }
     if positionals.len() > 2 {
         return Err(usage_error(
-            "man accepts <published-tool> and optional <operation>",
+            "tool manual accepts <published-tool> and optional <operation>",
         ));
     }
-    Ok(ManArgs {
+    Ok(ToolManualArgs {
         tool_name: positionals.first().cloned(),
         operation: positionals.get(1).cloned(),
         registry_root,
@@ -3805,7 +3834,7 @@ fn parse_secret_list_args(args: Vec<OsString>, command: &str) -> CooldisResult<S
     Ok(SecretListArgs { state_home, help })
 }
 
-fn parse_provider_auth_set_args(args: Vec<OsString>) -> CooldisResult<ProviderAuthSetArgs> {
+fn parse_auth_set_args(args: Vec<OsString>) -> CooldisResult<AuthSetArgs> {
     let mut provider_id = None;
     let mut api_key_stdin = false;
     let mut state_home = None;
@@ -3817,21 +3846,17 @@ fn parse_provider_auth_set_args(args: Vec<OsString>) -> CooldisResult<ProviderAu
             "--api-key-stdin" => api_key_stdin = true,
             "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
-                    "unknown provider auth set argument {other:?}"
-                )));
+                return Err(usage_error(format!("unknown auth set argument {other:?}")));
             }
             _ => {
                 if provider_id.is_some() {
-                    return Err(usage_error(
-                        "provider auth set accepts exactly one <provider-id>",
-                    ));
+                    return Err(usage_error("auth set accepts exactly one <provider-id>"));
                 }
                 provider_id = Some(arg.to_string_lossy().to_string());
             }
         }
     }
-    Ok(ProviderAuthSetArgs {
+    Ok(AuthSetArgs {
         provider_id,
         api_key_stdin,
         state_home,
@@ -3839,10 +3864,7 @@ fn parse_provider_auth_set_args(args: Vec<OsString>) -> CooldisResult<ProviderAu
     })
 }
 
-fn parse_provider_auth_name_args(
-    args: Vec<OsString>,
-    command: &str,
-) -> CooldisResult<ProviderAuthNameArgs> {
+fn parse_auth_name_args(args: Vec<OsString>, command: &str) -> CooldisResult<AuthNameArgs> {
     let mut provider_id = None;
     let mut state_home = None;
     let mut help = false;
@@ -3864,7 +3886,7 @@ fn parse_provider_auth_name_args(
             }
         }
     }
-    Ok(ProviderAuthNameArgs {
+    Ok(AuthNameArgs {
         provider_id,
         state_home,
         help,
@@ -5256,6 +5278,7 @@ fn load_chat_config_file(
         max_tokens: file.max_tokens,
         stream: file.stream,
         env_file: file.env_file,
+        // lexicon-allow: capsule - existing app-server operation binding API name
         capsule_bindings: file.capsule_bindings,
     });
     Ok((config, path.parent().map(|base| base.to_path_buf())))
@@ -5368,6 +5391,7 @@ impl PrivateAppServer {
         let root = PathBuf::from("/tmp").join(format!("cdis-chat-{}", Uuid::now_v7().simple()));
         let listen = AppServerListenAddr::Unix(root.join("app-server.sock"));
         let provider = load_chat_provider_config(options)?;
+        // lexicon-allow: capsule - existing app-server operation binding API name
         let capsule_bindings = load_chat_capsule_bindings_config(options)?;
         let mut config = CooldisAppServerConfig::local(listen.clone(), options.cwd.clone());
         config.runtime_home = options
@@ -5378,6 +5402,7 @@ impl PrivateAppServer {
             .state_home
             .clone()
             .unwrap_or_else(|| root.join("state"));
+        // lexicon-allow: capsule - existing app-server operation binding API name
         config.capsule_bindings = capsule_bindings;
         apply_chat_provider_config(&mut config, provider);
 
@@ -5422,19 +5447,6 @@ async fn wait_for_private_socket(path: &Path) -> CooldisResult<()> {
         "timed out waiting for private app-server socket {}",
         path.display()
     )))
-}
-
-async fn bootstrap_chat_client(client: &mut CodexTuiTestClient<UnixStream>) -> CooldisResult<()> {
-    client.account_read().await?;
-    let models = client.model_list().await?;
-    if models
-        .get("data")
-        .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty)
-    {
-        return Err(usage_error("private app-server returned no models"));
-    }
-    Ok(())
 }
 
 async fn manifest_receipt_event_ids(
@@ -5518,97 +5530,6 @@ async fn run_local_app_turn(
                 return Err(usage_error(format!("turn failed: {message}")));
             }
             _ => {}
-        }
-    }
-}
-
-async fn run_chat_repl(client: &mut CodexTuiTestClient<UnixStream>) -> CooldisResult<()> {
-    println!("Cooldis chat. Type /quit to exit.");
-    let thread = client.thread_start(json!({})).await?;
-    let stdin = std::io::stdin();
-    let mut stdin = stdin.lock();
-    loop {
-        print!("> ");
-        flush_stdout()?;
-
-        let mut input = String::new();
-        let bytes = stdin
-            .read_line(&mut input)
-            .map_err(|err| usage_error(format!("failed to read stdin: {err}")))?;
-        if bytes == 0 {
-            break;
-        }
-        let input = input.trim_end();
-        match input {
-            "" => continue,
-            "/quit" | "/q" | "exit" => break,
-            "/help" => {
-                println!("Enter a message, or /quit to exit.");
-                continue;
-            }
-            _ => {}
-        }
-
-        let turn = client.turn_start_text(&thread.id, input).await?;
-        print!("assistant> ");
-        flush_stdout()?;
-        stream_turn_to_stdout(client, &thread.id, &turn.id).await?;
-    }
-    Ok(())
-}
-
-async fn stream_turn_to_stdout(
-    client: &mut CodexTuiTestClient<UnixStream>,
-    thread_id: &str,
-    turn_id: &str,
-) -> CooldisResult<()> {
-    let deadline = tokio::time::sleep(Duration::from_secs(120));
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            _ = &mut deadline => {
-                println!();
-                return Err(usage_error(format!("timed out waiting for turn {turn_id}")));
-            }
-            event = client.next_event() => {
-                match event? {
-                    CodexTuiEvent::Notification(notification) => {
-                        if notification.method == "item/agentMessage/delta"
-                            && notification_matches_thread_turn(&notification, thread_id, turn_id)
-                        {
-                            if let Some(delta) = notification
-                                .params
-                                .as_ref()
-                                .and_then(|params| params.get("delta"))
-                                .and_then(Value::as_str)
-                            {
-                                print!("{delta}");
-                                flush_stdout()?;
-                            }
-                        } else if notification.method == "turn/completed"
-                            && notification_turn_id(&notification) == Some(turn_id)
-                        {
-                            println!();
-                            return Ok(());
-                        } else if notification.method == "error" {
-                            println!();
-                            return Err(usage_error(format!(
-                                "app-server error: {}",
-                                notification_error_message(&notification)
-                            )));
-                        }
-                    }
-                    CodexTuiEvent::Error(error) => {
-                        println!();
-                        return Err(usage_error(format!(
-                            "JSON-RPC error {}: {}",
-                            error.error.code,
-                            error.error.message
-                        )));
-                    }
-                    CodexTuiEvent::Request(_) | CodexTuiEvent::Response(_) => {}
-                }
-            }
         }
     }
 }
@@ -5863,64 +5784,110 @@ fn io_error(err: impl std::fmt::Display) -> CooldisError {
     CooldisError::RuntimeFactory(err.to_string())
 }
 
+const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
+    "cooldis console",
+    "cooldis chat [PROMPT]",
+    "cooldis init <name>",
+    "cooldis agent plan <manifest>",
+    "cooldis agent publish <manifest>",
+    "cooldis tool build --package cooldis.tool.toml",
+    "cooldis tool publish --package cooldis.tool.toml",
+    "cooldis auth status <provider-id>",
+    "cooldis secret list",
+];
+
+const ADVANCED_COMMANDS: &[&str] = &[
+    "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]>",
+    "cooldis debug rpc call <method> [PARAMS_JSON]",
+    "cooldis daemon run [--config cooldis.toml]",
+];
+
+const CANONICAL_COMMANDS: &[&str] = &[
+    "cooldis",
+    "cooldis commands",
+    "cooldis help [COMMAND...]",
+    "cooldis init <name> [--out <dir|manifest.toml>] [--force]",
+    "cooldis console [--no-open] [--cwd <path>] [--config <cooldis.toml>] [--port <port>]",
+    "cooldis chat [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]",
+    "cooldis auth status <provider-id> [--state-home ~/.cooldis/state]",
+    "cooldis auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]",
+    "cooldis auth delete <provider-id> [--state-home ~/.cooldis/state]",
+    "cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]",
+    "cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]",
+    "cooldis secret list [--state-home ~/.cooldis/state]",
+    "cooldis secret status <name> [--state-home ~/.cooldis/state]",
+    "cooldis secret delete <name> [--state-home ~/.cooldis/state]",
+    "cooldis agent init <name> [--out <dir|manifest.toml>] [--force]",
+    "cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
+    "cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
+    "cooldis agent list [--registry-root .cooldis/agents]",
+    "cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]",
+    "cooldis agent run <agent-ref> --input <text> [--registry-root .cooldis/agents]",
+    "cooldis tool build --package cooldis.tool.toml",
+    "cooldis tool build --module-path <dir|Cargo.toml> [--name <name>] [--config cooldis.json]",
+    "cooldis tool list [--registry-root .cooldis/operations]",
+    "cooldis tool publish --package cooldis.tool.toml [--registry-root .cooldis/operations]",
+    "cooldis tool run --module-path <dir|Cargo.toml> <operation> --input <text> [--mount /guest=/host]",
+    "cooldis tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]",
+    "cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]",
+    "cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]",
+    "cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <secret-name>] [--include-tool <tool>] [--state-home .cooldis/state]",
+    "cooldis tool source discover <name> [--state-home .cooldis/state]",
+    "cooldis tool source list [--json] [--state-home .cooldis/state]",
+    "cooldis tool source show <name> [--json] [--state-home .cooldis/state]",
+    "cooldis tool source remove <name> [--state-home .cooldis/state]",
+    "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]",
+    "cooldis debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]",
+    "cooldis debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]",
+    "cooldis debug rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]",
+    "cooldis daemon run [--config cooldis.toml]",
+    "cooldis daemon config validate [--config cooldis.toml]",
+    "cooldis daemon service print [--target launchd|systemd] --config cooldis.toml [--label com.cooldis.daemon]",
+    "cooldis daemon service install [--target launchd|systemd] --config cooldis.toml [--label com.cooldis.daemon]",
+    "cooldis daemon service uninstall [--target launchd|systemd] [--label com.cooldis.daemon]",
+];
+
 fn print_help() {
+    println!("cooldis\n");
+    println!("Usage:");
+    println!("  cooldis <command> [args]");
+    println!("  cooldis help [COMMAND...]");
+    println!("  cooldis commands");
+    println!();
+    print_command_group("Example usage:", ROOT_EXAMPLE_COMMANDS);
+    println!();
+    print_command_group("Advanced:", ADVANCED_COMMANDS);
+    println!();
+    println!("Further help:");
+    println!("  cooldis commands");
+    println!("  cooldis help <command>");
+    println!("  cooldis <command> --help");
+}
+
+fn print_help_help() {
     println!(
-        "cooldis\n\
+        "cooldis help\n\
 \n\
 Usage:\n\
-  cooldis\n\
-  cooldis init <name> [--out <dir|manifest.toml>]\n\
-  cooldis agent init <name> [--out <dir|manifest.toml>]\n\
-  cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
-  cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
-  cooldis agent list [--registry-root .cooldis/agents]\n\
-  cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]\n\
-  cooldis tool build --module-path <dir|Cargo.toml> [--name <name>]\n\
-  cooldis tool build --module-path <dir|Cargo.toml> [--debug] [--config cooldis.json]\n\
-  cooldis tool list [--registry-root .cooldis/operations]\n\
-  cooldis tool publish --package cooldis.tool.toml [--registry-root .cooldis/operations]\n\
-  cooldis tool run --module-path <dir|Cargo.toml> <operation> --input <text> [--mount /guest=/host]\n\
-  cooldis tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]\n\
-  cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]\n\
-  cooldis man <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
-  cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <name>]\n\
-  cooldis tool source discover <name> [--state-home .cooldis/state]\n\
-  cooldis tool source list [--json] [--state-home .cooldis/state]\n\
-  cooldis tool source show <name> [--json] [--state-home .cooldis/state]\n\
-  cooldis tool source remove <name> [--state-home .cooldis/state]\n\
-  cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]\n\
-  cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]\n\
-  cooldis secret list [--state-home ~/.cooldis/state]\n\
-  cooldis secret status <name> [--state-home ~/.cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
-  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
-  cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]\n\
-  cooldis console [--no-open] [--cwd <path>] [--config <cooldis.toml>] [--port <port>]\n\
-  cooldis dev chat [PROMPT] [--cwd <path>]\n\
-  cooldis operator [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]\n\
-  cooldis dev tui [PROMPT] [--cwd <path>]   alias for cooldis operator\n\
-  cooldis daemon config validate [--config cooldis.toml]\n\
-  cooldis daemon service print --target launchd --config cooldis.toml\n\
-  cooldis daemon service install --target launchd --config cooldis.toml\n\
-  cooldis daemon service uninstall --target launchd [--label com.cooldis.daemon]\n\
-  cooldis daemon run [--config cooldis.toml]\n\
+  cooldis help [COMMAND...]\n\
 \n\
-Cooldis is the runtime command console. `cooldis console` opens the bundled local\n\
-browser console; `cooldis operator` is the local terminal console.\n"
+Prints root help or the help page for a canonical Cooldis command path.\n"
     );
 }
 
-fn print_man_help() {
-    println!(
-        "cooldis man\n\
-\n\
-Usage:\n\
-  cooldis man <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
-\n\
-Shows the caller-facing contract for a published tool operation. This is the\n\
-manual surface agents should read before invoking a tool; operator details such\n\
-as source paths, transports, and secret refs belong in tool config/show output.\n"
-    );
+fn print_commands_help() {
+    println!("cooldis commands\n");
+    println!("Usage:");
+    println!("  cooldis commands");
+    println!();
+    print_command_group("Commands:", CANONICAL_COMMANDS);
+}
+
+fn print_command_group(title: &str, commands: &[&str]) {
+    println!("{title}");
+    for command in commands {
+        println!("  {command}");
+    }
 }
 
 fn print_agent_help() {
@@ -6025,6 +5992,7 @@ Usage:\n\
   cooldis tool run --module-path <dir|Cargo.toml> <operation> --input <text> [--mount /guest=/host]\n\
   cooldis tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]\n\
   cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]\n\
+  cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
   cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <secret-name>]\n\
   cooldis tool source discover <name> [--state-home .cooldis/state]\n\
   cooldis tool source list [--json] [--state-home .cooldis/state]\n\
@@ -6165,6 +6133,19 @@ Runs an operation from source, a Wasm artifact, or a published tool record.\n"
     );
 }
 
+fn print_tool_manual_help() {
+    println!(
+        "cooldis tool manual\n\
+\n\
+Usage:\n\
+  cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
+\n\
+Shows the caller-facing contract for a published tool operation. This is the\n\
+manual surface agents should read before invoking a tool; implementation details such\n\
+as source paths, transports, and secret refs belong in tool source/show output.\n"
+    );
+}
+
 fn print_secret_help() {
     println!(
         "cooldis secret\n\
@@ -6237,61 +6218,48 @@ Deletes a local secret ref.\n"
     );
 }
 
-fn print_provider_help() {
+fn print_auth_help() {
     println!(
-        "cooldis provider\n\
+        "cooldis auth\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
-  cooldis provider auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
+  cooldis auth status <provider-id> [--state-home ~/.cooldis/state]\n\
+  cooldis auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Manages model-provider credentials in the local metadata store. Values are read\n\
 from stdin and never printed.\n"
     );
 }
 
-fn print_provider_auth_help() {
+fn print_auth_status_help() {
     println!(
-        "cooldis provider auth\n\
+        "cooldis auth status\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
-  cooldis provider auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
+  cooldis auth status <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
-Stores redacted model-provider credentials for daemon/app-server provider calls.\n"
+Prints redacted model-provider credential status.\n"
     );
 }
 
-fn print_provider_auth_status_help() {
+fn print_auth_set_help() {
     println!(
-        "cooldis provider auth status\n\
+        "cooldis auth set\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home ~/.cooldis/state]\n\
-\n\
-Prints redacted provider auth status.\n"
-    );
-}
-
-fn print_provider_auth_set_help() {
-    println!(
-        "cooldis provider auth set\n\
-\n\
-Usage:\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
 \n\
 Stores a model-provider API key read from stdin. The stored value is never printed.\n"
     );
 }
 
-fn print_provider_auth_delete_help() {
+fn print_auth_delete_help() {
     println!(
-        "cooldis provider auth delete\n\
+        "cooldis auth delete\n\
 \n\
 Usage:\n\
-  cooldis provider auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
+  cooldis auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Deletes a stored model-provider credential.\n"
     );
@@ -6322,31 +6290,15 @@ the UI and RPC URLs, and opens the browser unless --no-open is set.\n"
     );
 }
 
-fn print_dev_help() {
+fn print_debug_help() {
     println!(
-        "cooldis dev\n\
+        "cooldis debug\n\
 \n\
 Usage:\n\
-  cooldis dev chat [PROMPT] [--config <file>] [--cwd <path>]\n\
-  cooldis dev tui [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]\n\
-  cooldis dev rpc (call|turn|tail) ...   debug client for a running daemon (see `cooldis dev rpc --help`)\n\
+  cooldis debug rpc (call|turn|tail) ...   debug client for a running daemon (see `cooldis debug rpc --help`)\n\
 \n\
-Developer surfaces for manually exercising the local provider loop. `dev tui`\n\
-is retained as an alias for the default operator console.\n"
-    );
-}
-
-fn print_dev_tui_help() {
-    println!(
-        "cooldis dev tui\n\
-\n\
-Usage:\n\
-  cooldis dev tui [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]\n\
-  cooldis dev tui [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
-\n\
-Alias for `cooldis operator`. Starts a private local app-server by default, or\n\
-attaches to an existing app-server with --attach. Enter sends input; modified\n\
-Enter inserts a newline; Esc/Ctrl-C interrupt active turns or exit when idle.\n"
+Maintainer and protocol inspection tools. These commands are not the public\n\
+local console flow; use `cooldis console` or `cooldis chat` for normal operation.\n"
     );
 }
 
@@ -6366,44 +6318,18 @@ user-level launchd/systemd service file without starting it automatically.\n"
     );
 }
 
-fn print_thread_help() {
+fn print_chat_help() {
     println!(
-        "cooldis thread\n\
-\n\
-Thread CLI commands are not part of this V1 surface yet. Use the rpc thread/*\n\
-JSON-RPC methods through Cooldis-owned clients, MCP, or tests.\n"
-    );
-}
-
-fn print_operator_help() {
-    println!(
-        "cooldis operator\n\
+        "cooldis chat\n\
 \n\
 Usage:\n\
-  cooldis operator [PROMPT] [--config <file>] [--cwd <path>]\n\
-  cooldis operator [PROMPT] --attach <unix://path|ws://host:port[/rpc]>\n\
-  cooldis operator [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
+  cooldis chat [PROMPT] [--config <file>] [--cwd <path>]\n\
+  cooldis chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>\n\
+  cooldis chat [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
 \n\
 Starts the bundled local terminal console over the app-server RPC boundary. By\n\
 default it launches a private local app-server; --attach connects to an existing\n\
 endpoint. In the TUI, use /help for session commands.\n"
-    );
-}
-
-fn print_dev_chat_help() {
-    println!(
-        "cooldis dev chat\n\
-\n\
-Usage:\n\
-  cooldis dev chat [PROMPT] [--config <file>] [--cwd <path>]\n\
-  cooldis dev chat [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
-  cooldis dev chat [PROMPT] --provider openai_compatible --api-key-env OPENAI_COMPATIBLE_API_KEY [--model example-chat-model]\n\
-  cooldis dev chat [PROMPT] --provider anthropic --api-key-env ANTHROPIC_API_KEY [--model claude-sonnet-4-5-20250929]\n\
-  cooldis dev chat [PROMPT] --provider anthropic_bedrock --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 --no-stream\n\
-\n\
-Starts a private Cooldis app-server on a temporary Unix socket and connects the\n\
-owned Codex-shaped client to it. With no prompt, opens a small line REPL.\n\
-When no config is given, cooldis reads chat settings from ./cooldis.json if it exists.\n"
     );
 }
 

@@ -19,12 +19,17 @@ The current public CLI surfaces are:
 
 ```sh
 cooldis --help
+cooldis commands
+cooldis console --help
+cooldis chat --help
 cooldis agent --help
 cooldis tool --help
+cooldis auth --help
 cooldis rpc --help
 cooldis daemon --help
-cooldis dev chat --help
 ```
+
+For the canonical command list and command grouping, see [Cooldis CLI](cli.md).
 
 `cooldis agent plan`, `publish`, `list`, and `show` are the first manifest
 authoring slice. `cooldis tool build`, `publish`, and `run` are the local

@@ -34,7 +34,7 @@ env_file = ".env"
 mode = "best_effort_direct"
 
 [[daemon.io.routes]]
-id = "operator-tui"
+id = "chat-tui"
 kind = "websocket.tui"
 policy = "steer_when_active"
 threading = "selected_thread"
@@ -55,7 +55,7 @@ threading = "selected_thread"
         loaded.config.io.ingress.persistence.mode,
         IngressPersistenceMode::BestEffortDirect
     );
-    assert_eq!(loaded.config.io.routes[0].id, "operator-tui");
+    assert_eq!(loaded.config.io.routes[0].id, "chat-tui");
 
     let _ = std::fs::remove_dir_all(root);
 }

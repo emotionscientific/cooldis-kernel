@@ -79,9 +79,10 @@ published HTTP Wasm operation
 Provider-specific live proofs belong in maintainer-private harnesses and are not
 part of the default release gate.
 
-This belongs beside provider auth storage, but it is not provider auth. Provider
-auth resolves credentials for LLM provider calls. Secret Broker resolves named
-runtime secrets for tools, capsules, MCP clients, and future resource adapters.
+This belongs beside provider credential storage, but it is not provider
+credentials. Provider credentials resolve LLM provider calls. Secret Broker
+resolves named runtime secrets for tools, capsules, MCP clients, and future
+resource adapters.
 
 ## OpenAI-Compatible
 
@@ -112,7 +113,7 @@ max_tokens = 4096
 
 Gateway deployments can use the same shapes with their own `base_url`,
 `api_key_env`, and model id. Keep gateway-specific secret names in local
-operator docs or ignored env files, not in committed public docs.
+maintainer docs or ignored env files, not in committed public docs.
 
 ## Anthropic-Compatible
 

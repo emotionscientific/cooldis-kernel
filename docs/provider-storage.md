@@ -41,7 +41,7 @@ The first concrete implementation is `SqliteMetadataStore`. App-server boot
 opens one project-local SQLite store for provider catalog records and thread
 lifecycle/topology records, plus one user-global SQLite store for credential
 records. `SqliteLlmProviderStore` remains the provider table implementation,
-but browser provider auth writes use the user auth store.
+but browser credential writes use the user auth store.
 
 The public console defaults to:
 
