@@ -13,15 +13,17 @@ use crate::agent::manifest::{AgentAliasResolutionReceipt, PublishedAgentRecord};
 use crate::agent::manifest_schema::{
     AgentManifestCoupling, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
     AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestModelProfile,
-    AgentManifestProtocolToolImport, AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey,
-    AgentManifestSchema, AgentManifestTool, AgentManifestToolSurface,
+    AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
+    AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey, AgentManifestSchema,
+    AgentManifestTool, AgentManifestToolSurface, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::agent::tool_universe::{
     PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
 };
 use crate::{
     COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, EventKind, LlmProviderRecord,
-    LocalOperationRegistry, ProviderCapabilityRecord, THREADS_SPAWN_CAPABILITY,
+    LocalOperationRegistry, LocalSkillRegistry, ProviderCapabilityRecord, SkillPackageRef,
+    THREADS_SPAWN_CAPABILITY,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -36,6 +38,9 @@ pub const MANIFEST_COMPILER_DISCHARGED_BY: &str = "projection:manifest-compiler"
 pub const MANIFEST_COMPILER_FUNCTION: &str = "manifest_schema/v1";
 pub const MANIFEST_BINDER_DISCHARGED_BY: &str = "binder:manifest";
 pub const MANIFEST_BINDER_FUNCTION: &str = "bind/v1";
+pub const THREAD_AGENT_SKILL_PACKAGES_METADATA: &str = "cooldis.agent.skill_packages";
+pub const THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA: &str =
+    "cooldis.agent.skill_context_segments";
 
 /// Caller-supplied runtime overrides at `thread/start`. Every populated
 /// field is checked against the manifest's override allowlist
@@ -149,6 +154,8 @@ pub struct AgentManifestBoundThread {
     pub couplings: Vec<BoundCoupling>,
     pub operation_names: Vec<String>,
     pub operation_bindings: Vec<AgentManifestOperationBinding>,
+    pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
+    pub skill_context_segments: Vec<AgentManifestStaticContextSegment>,
     /// Witnessed universe bindings for the thread's protocol tool imports;
     /// the runtime factory mounts these as the search surface (plus direct
     /// rows for pins).
@@ -186,6 +193,7 @@ pub async fn bind_published_agent_record(
     alias: Option<AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
     operation_registry_root: Option<&Path>,
+    skill_registry_root: Option<&Path>,
     configured_mcp_server_refs: &BTreeSet<String>,
     tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
     model_selection: &AgentManifestModelProfileSelection,
@@ -230,6 +238,7 @@ pub async fn bind_published_agent_record(
         tool_universe_discoverer,
     )
     .await?;
+    let bound_skills = bind_skill_resources(&manifest.resources, skill_registry_root)?;
     let couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
     enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings)?;
     let operation_names = bound_tools
@@ -254,6 +263,7 @@ pub async fn bind_published_agent_record(
         model_id,
         tool_ids: bound_tools.tool_ids,
         operation_bindings: bound_tools.operation_bindings.clone(),
+        skill_packages: bound_skills.package_bindings.clone(),
         tool_universes: bound_tools
             .tool_universes
             .iter()
@@ -272,6 +282,8 @@ pub async fn bind_published_agent_record(
         couplings,
         operation_names,
         operation_bindings: bound_tools.operation_bindings,
+        skill_packages: bound_skills.package_bindings,
+        skill_context_segments: bound_skills.context_segments,
         tool_universes: bound_tools.tool_universes,
     })
 }
@@ -288,6 +300,11 @@ struct BoundTools {
     granted: Vec<String>,
     operation_bindings: Vec<AgentManifestOperationBinding>,
     tool_universes: Vec<ToolUniverseBinding>,
+}
+
+struct BoundSkills {
+    package_bindings: Vec<AgentManifestSkillPackageBinding>,
+    context_segments: Vec<AgentManifestStaticContextSegment>,
 }
 
 /// Role inferred from the coupling's resolved sink relation. Manifest
@@ -397,6 +414,81 @@ impl OperationBindingAccumulator {
 }
 
 type OperationBindingMap = BTreeMap<(String, String), OperationBindingAccumulator>;
+
+fn bind_skill_resources(
+    resources: &[AgentManifestResource],
+    skill_registry_root: Option<&Path>,
+) -> CooldisResult<BoundSkills> {
+    let skill_resources = resources
+        .iter()
+        .filter(|resource| resource.kind == AgentManifestResourceKind::Skill)
+        .collect::<Vec<_>>();
+    if skill_resources.is_empty() {
+        return Ok(BoundSkills {
+            package_bindings: Vec::new(),
+            context_segments: Vec::new(),
+        });
+    }
+    let registry_root = skill_registry_root.ok_or_else(|| {
+        CooldisError::RuntimeFactory(
+            "skill resources require an app-server skill registry root".to_string(),
+        )
+    })?;
+    let registry = LocalSkillRegistry::new(registry_root);
+    let mut package_bindings = Vec::new();
+    let mut context_segments = Vec::new();
+    let mut mounted_skill_names = BTreeSet::new();
+    for resource in skill_resources {
+        let parsed = SkillPackageRef::parse(&resource.reference).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "skill resource {:?} ref {:?} is invalid: {err}",
+                resource.name, resource.reference
+            ))
+        })?;
+        let record = registry
+            .load_version_record(&parsed.name, &parsed.artifact_hash)
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "skill resource {:?} ref {:?} was not found in the local skill registry: {err}; publish the skill package or replace the ref with a hash from the registry",
+                    resource.name, resource.reference
+                ))
+            })?;
+        for skill in &record.package.skills {
+            if !mounted_skill_names.insert(skill.name.clone()) {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "skill resource {:?} package {:?} would mount duplicate /skills/{}.md; skill names must be unique across bound packages",
+                    resource.name, record.name, skill.name
+                )));
+            }
+        }
+        let index = record.package.render_index();
+        let index_sha256 = sha256_prefixed(index.as_bytes());
+        let ref_uri = record.ref_uri();
+        context_segments.push(AgentManifestStaticContextSegment {
+            id: format!("skill-index:{}", resource.name),
+            assembler: KERNEL_ASSEMBLER_STATIC.to_string(),
+            input: resource.name.clone(),
+            pinned: true,
+            budget_share: None,
+            ref_uri: ref_uri.clone(),
+            content_sha256: index_sha256.clone(),
+            content: index,
+        });
+        package_bindings.push(AgentManifestSkillPackageBinding {
+            resource_name: resource.name.clone(),
+            package_name: record.name.clone(),
+            ref_uri,
+            artifact_hash: record.active_artifact_hash.clone(),
+            package_digest: format!("sha256:{}", parsed.artifact_hash),
+            skill_count: record.package.skills.len(),
+            index_sha256,
+        });
+    }
+    Ok(BoundSkills {
+        package_bindings,
+        context_segments,
+    })
+}
 
 fn bind_couplings(
     couplings: &[AgentManifestCoupling],
@@ -520,6 +612,11 @@ pub(crate) fn coupling_config_hash(value: &JsonValue) -> CooldisResult<String> {
     write_canonical_json(value, &mut canonical)?;
     let digest = Sha256::digest(&canonical);
     Ok(format!("sha256:{digest:x}"))
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{digest:x}")
 }
 
 fn write_canonical_json(value: &JsonValue, output: &mut Vec<u8>) -> CooldisResult<()> {
@@ -1181,6 +1278,9 @@ pub struct AgentManifestBindReceipt {
     /// Exact operation artifacts mounted for this manifest-backed thread.
     #[serde(default)]
     pub operation_bindings: Vec<AgentManifestOperationBinding>,
+    /// Exact skill packages mounted for this manifest-backed thread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
     /// Witnessed tool universes mounted on the search surface: server ref,
     /// discovery hash, in-scope contracts, and pinned rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1195,6 +1295,32 @@ pub struct AgentManifestBindReceipt {
     pub effective_runtime: AgentManifestRuntimeDefaults,
     /// Which override keys the caller actually exercised.
     pub overridden_keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestSkillPackageBinding {
+    pub resource_name: String,
+    pub package_name: String,
+    pub ref_uri: String,
+    pub artifact_hash: String,
+    pub package_digest: String,
+    pub skill_count: usize,
+    pub index_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestStaticContextSegment {
+    pub id: String,
+    pub assembler: String,
+    pub input: String,
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_share: Option<f64>,
+    pub ref_uri: String,
+    pub content_sha256: String,
+    pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

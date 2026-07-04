@@ -9,12 +9,13 @@ use super::*;
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
     COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND, LocalOperationRegistry,
-    NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND, PROCESS_EXEC_OPERATION,
-    PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, ProviderError,
-    PublishedOperationSource, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
-    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
-    THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL,
-    TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig, ThinkingEffort,
+    LocalSkillRegistry, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
+    PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
+    PROCESS_WRITE_OPERATION, ProviderError, PublishSkillPackageRequest, PublishedOperationSource,
+    THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION,
+    THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, THREADS_CONTROL_CAPABILITY,
+    THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL, TOOL_DESCRIBE_TOOL,
+    TOOL_SEARCH_TOOL, ThinkingConfig, ThinkingEffort,
 };
 
 #[test]
@@ -2167,6 +2168,173 @@ streaming = false
     let names = tool_names(&requests[0]);
     assert!(!names.iter().any(|name| name.starts_with("thread_")));
     assert!(!names.iter().any(|name| name == "bash"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn skill_resource_static_index_and_bodies_are_available_in_live_turn() {
+    let root = unique_test_root("app-server-skill-resource");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let agent_registry_root = root.join("agents");
+    let skill_registry_root = root.join("skills");
+    let package_dir = root.join("skill-src").join("karl-skills");
+    write_skill_fixture(
+        &package_dir,
+        "alpha",
+        r#"---
+name: alpha
+description: Alpha description.
+---
+# Alpha
+
+Alpha body marker.
+"#,
+    );
+    let skill_record = LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    let manifest_path = root.join("skill-runner.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "skill-runner"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[resources]]
+name = "karl_skills"
+kind = "skill"
+ref = "{}"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            skill_record.ref_uri()
+        ),
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+
+    let client = Arc::new(SkillResourceClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-skill-resource-{}.sock", Uuid::now_v7())),
+    );
+    let mut config = CooldisAppServerConfig::local(listen, &workspace);
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = agent_registry_root;
+    config.skill_registry_root = skill_registry_root.clone();
+    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    runtime_config.max_tokens = 128;
+    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
+        runtime_config,
+        provider_client,
+        config.capsule_bindings.clone(),
+        None,
+        &config,
+    );
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let app = CooldisAppServer::with_runtime_factory_and_metadata_store(
+        config,
+        runtime_factory,
+        metadata_store,
+    )
+    .await
+    .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({ "agentRef": "agent://skill-runner@latest" })),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn = app
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "read skill body", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    wait_for_provider_requests(&client, 2).await;
+    wait_for_turn_completed_notification(
+        &mut outbound_rx,
+        &thread_id,
+        turn["turn"]["id"].as_str().unwrap(),
+    )
+    .await;
+
+    let context_page =
+        wait_for_event_kind(&app, &connection, &thread_id, "context.compile.completed").await;
+    let segment = &context_page["data"][0]["payload"]["static_context_segments"][0];
+    assert_eq!(segment["id"].as_str(), Some("skill-index:karl_skills"));
+    assert_eq!(
+        segment["assembler"].as_str(),
+        Some("kernel://assembler/static")
+    );
+    assert_eq!(segment["input"].as_str(), Some("karl_skills"));
+    assert_eq!(segment["pinned"].as_bool(), Some(true));
+    assert_eq!(segment["budget_share"], Value::Null);
+    assert_eq!(
+        segment["ref_uri"].as_str(),
+        Some(skill_record.ref_uri().as_str())
+    );
+    assert!(
+        segment["content_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+
+    let bind_page = app
+        .dispatch_request(
+            &connection,
+            "thread/events/list",
+            Some(json!({
+                "threadId": thread_id,
+                "kinds": ["manifest.bind.completed"],
+            })),
+        )
+        .await
+        .unwrap();
+    let binding = &bind_page["data"][0]["payload"]["skill_packages"][0];
+    assert_eq!(binding["resource_name"].as_str(), Some("karl_skills"));
+    let expected_package_digest = format!("sha256:{}", skill_record.active_artifact_hash);
+    assert_eq!(
+        binding["package_digest"].as_str(),
+        Some(expected_package_digest.as_str())
+    );
+    assert_eq!(
+        binding["index_sha256"].as_str(),
+        segment["content_sha256"].as_str()
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -6657,8 +6825,9 @@ async fn app_server_websocket_query_methods_are_callable() {
     let addr = unused_loopback_addr();
     let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
     let mut config = CooldisAppServerConfig::local(listen.clone(), &workspace)
-        // lexicon-allow: capsule - existing app-server config method and type.
+        // lexicon-allow: capsule - existing app-server config method.
         .with_capsule_bindings(
+            // lexicon-allow: capsule - existing app-server config type.
             CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
         );
     config.runtime_home = root.join("runtime");
@@ -8053,6 +8222,12 @@ streaming = false
         .unwrap()
 }
 
+fn write_skill_fixture(package_dir: &Path, name: &str, body: &str) {
+    let dir = package_dir.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
 async fn app_server_with_tool_client<T>(
     root: &Path,
     workspace: &Path,
@@ -8083,6 +8258,7 @@ where
         Some(config.metadata_store_path()),
         None,
         Some(config.state_home.join("session_history.sqlite3")),
+        None,
         None,
         None,
     );
@@ -8803,6 +8979,56 @@ impl ProviderClient for FailingProviderClient {
     }
 }
 
+#[derive(Default)]
+struct SkillResourceClient {
+    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for SkillResourceClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let text = text_from_canonical_messages(&request.messages);
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+        if !has_tool_result {
+            assert!(
+                text.contains("alpha — Alpha description."),
+                "provider request did not include skill index: {text}"
+            );
+            let names = tool_names(request);
+            assert!(names.contains(&"bash".to_string()));
+            return Ok(ProviderResponse {
+                content: vec![CanonicalContent::tool_call(
+                    "call_bash_skill",
+                    "bash",
+                    json!({
+                        "command": "cat /skills/alpha.md; printf '\\nWRITE:\\n'; echo nope > /skills/alpha.md"
+                    }),
+                )],
+                usage: CanonicalUsage::default(),
+                stop_reason: CanonicalStopReason::ToolUse,
+            });
+        }
+
+        assert!(
+            text.contains("Alpha body marker."),
+            "bash result did not include skill body: {text}"
+        );
+        assert!(
+            text.contains("read-only") || text.contains("denied"),
+            "bash result did not include read-only denial: {text}"
+        );
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text("skill read completed")],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
 // lexicon-allow: capsule - existing test client name
 struct BashCallingCapsuleClient {
     requests: std::sync::Mutex<Vec<ProviderRequest>>,
@@ -9500,6 +9726,12 @@ impl ProviderRequestRecorder for SequencedStreamCapsuleClient {
 }
 
 impl ProviderRequestRecorder for FailingProviderClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+impl ProviderRequestRecorder for SkillResourceClient {
     fn recorded_request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }

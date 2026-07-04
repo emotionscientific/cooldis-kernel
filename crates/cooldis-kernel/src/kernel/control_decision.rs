@@ -1246,6 +1246,7 @@ mod tests {
                 model_id: "model".to_string(),
                 tool_ids: Vec::new(),
                 operation_bindings: Vec::new(),
+                skill_packages: Vec::new(),
                 tool_universes: Vec::new(),
                 couplings,
                 granted: Vec::new(),

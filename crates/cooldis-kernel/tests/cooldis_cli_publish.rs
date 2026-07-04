@@ -1,7 +1,7 @@
 use cooldis::{
-    LocalAgentRegistry, LocalOperationRegistry, PublishedAgentRecord, PublishedOperationBuild,
-    PublishedOperationRecord, PublishedOperationSource, RegisteredOperation,
-    WasmOperationDefinition, WasmOperationManifest, WasmOperationValueKind,
+    LocalAgentRegistry, LocalOperationRegistry, LocalSkillRegistry, PublishedAgentRecord,
+    PublishedOperationBuild, PublishedOperationRecord, PublishedOperationSource,
+    RegisteredOperation, WasmOperationDefinition, WasmOperationManifest, WasmOperationValueKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,6 +49,7 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(root.contains("cooldis init"));
     assert!(root.contains("cooldis agent"));
     assert!(root.contains("cooldis tool"));
+    assert!(root.contains("cooldis skill"));
     assert!(root.contains("cooldis auth"));
     assert!(root.contains("cooldis secret"));
     assert!(root.contains("cooldis rpc"));
@@ -65,6 +66,7 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(commands.contains("cooldis chat [PROMPT]"));
     assert!(commands.contains("cooldis debug rpc call"));
     assert!(commands.contains("cooldis tool manual"));
+    assert!(commands.contains("cooldis skill publish"));
     assert!(commands.contains("cooldis auth set"));
     assert_no_command(&commands, &["dev"]);
     assert_no_command(&commands, &["operator"]);
@@ -81,6 +83,13 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
 
     let help_tool_manual = run_cooldis(["help", "tool", "manual"]);
     assert!(help_tool_manual.contains("cooldis tool manual"));
+
+    let skill_help = run_cooldis(["skill", "--help"]);
+    assert!(skill_help.contains("cooldis skill publish"));
+
+    let skill_publish_help = run_cooldis(["skill", "publish", "--help"]);
+    assert!(skill_publish_help.contains("cooldis skill publish <dir>"));
+    assert!(skill_publish_help.contains("--registry-root"));
 
     let help_debug_rpc = run_cooldis(["help", "debug", "rpc"]);
     assert!(help_debug_rpc.contains("cooldis debug rpc"));
@@ -225,6 +234,78 @@ fn cooldis_cli_secret_import_list_and_status_redact_values() {
     assert!(status.contains(r#""name": "EXAMPLE_API_KEY""#));
     assert!(status.contains(r#""redacted": true"#));
     assert!(!status.contains("fixture-secret"));
+}
+
+#[test]
+fn cooldis_cli_skill_publish_writes_deterministic_package() {
+    let root = temp_dir("skill-publish-cli");
+    let package_dir = root.join("karl-skills");
+    write_skill_fixture(
+        &package_dir,
+        "frontmatter",
+        r#"---
+name: frontmatter-skill
+description: Uses declared metadata.
+trigger_hint: when metadata matters
+---
+# Frontmatter Skill
+
+Body with metadata.
+"#,
+    );
+    write_skill_fixture(
+        &package_dir,
+        "plain",
+        r#"# Plain Skill
+
+First plain description line.
+
+More body.
+"#,
+    );
+    write_skill_fixture(
+        &package_dir,
+        "設計",
+        r#"# 設計
+
+Unicode description line.
+"#,
+    );
+    let registry_root = root.join("skills-registry");
+
+    let first = run_cooldis([
+        "skill",
+        "publish",
+        package_dir.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let second = run_cooldis([
+        "skill",
+        "publish",
+        package_dir.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let first_hash = skill_artifact_hash(&first);
+    let second_hash = skill_artifact_hash(&second);
+
+    assert_eq!(first_hash, second_hash);
+    assert!(first.contains("published karl-skills"));
+    assert!(first.contains("skill frontmatter-skill"));
+    assert!(first.contains("skill plain"));
+    assert!(first.contains("skill 設計"));
+    assert!(first.contains(&format!("ref skill://karl-skills@sha256:{first_hash}")));
+
+    let record = LocalSkillRegistry::new(&registry_root)
+        .load_record("karl-skills")
+        .unwrap();
+    assert_eq!(record.active_artifact_hash, first_hash);
+    assert_eq!(
+        record.package.render_index(),
+        "frontmatter-skill — Uses declared metadata.\nplain — First plain description line.\n設計 — Unicode description line.\n"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1475,6 +1556,20 @@ fn fixture_mount(module_path: &Path) -> String {
         "/workspace={}",
         module_path.join("testdata").to_string_lossy()
     )
+}
+
+fn write_skill_fixture(package_dir: &Path, name: &str, body: &str) {
+    let dir = package_dir.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
+fn skill_artifact_hash(output: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("artifact "))
+        .unwrap_or_else(|| panic!("skill publish output did not contain artifact hash:\n{output}"))
+        .to_string()
 }
 
 fn registry_record(root: &Path, name: &str) -> PublishedOperationRecord {

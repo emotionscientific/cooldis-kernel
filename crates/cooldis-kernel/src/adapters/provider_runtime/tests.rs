@@ -2546,6 +2546,7 @@ async fn append_tool_controller_bind_receipt(
         model_id: "model".to_string(),
         tool_ids: Vec::new(),
         operation_bindings: Vec::new(),
+        skill_packages: Vec::new(),
         tool_universes: Vec::new(),
         couplings: vec![AgentManifestCouplingBinding {
             id: "tool_gate".to_string(),

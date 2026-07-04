@@ -1,24 +1,25 @@
 use crate::agent::contracts::sha256_hex;
 use crate::{
-    AgentContextCompileInput, AgentContextCompilePolicy, AgentContextCompiler, AgentRuntime,
-    AgentRuntimeFactory, AgentToolRouter, AllowAllToolPermissionGate, BashToolProvider,
-    COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent,
-    CanonicalMessage, CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError,
-    CooldisResult, EventKind, EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec,
-    HookPipeline, HookRunRecord, KernelNotifyOperationProvider, KernelOperationDispatcher,
-    KernelProcessOperationProvider, KernelThreadOperationProvider, KernelThreadSpawnAgentResolver,
-    NewEventRecord, OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi,
-    ProviderClient, ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
+    AgentContextCompileInput, AgentContextCompilePolicy, AgentContextCompiler,
+    AgentManifestStaticContextSegment, AgentRuntime, AgentRuntimeFactory, AgentToolRouter,
+    AllowAllToolPermissionGate, BashToolProvider, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
+    COOLDIS_THREADS_PACKAGE, CanonicalContent, CanonicalMessage, CompactionPolicy,
+    CompactionTrigger, CompiledAgentContext, CooldisError, CooldisResult, EventKind,
+    EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec, HookPipeline, HookRunRecord,
+    KernelNotifyOperationProvider, KernelOperationDispatcher, KernelProcessOperationProvider,
+    KernelThreadOperationProvider, KernelThreadSpawnAgentResolver, NewEventRecord,
+    OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient,
+    ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
     ReplayTransformCounts, RuntimeEventKind, RuntimeModelRequestErrorClass,
     RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
     RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
     SessionEntryId, SessionEntryKind, SessionStartHookRequest, StopHookRequest, SystemBlock,
-    ThinkingConfig, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
-    ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload, ToolCallSubject,
-    ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor, ToolExecutionRequest,
-    ToolPermissionDecision, ToolPermissionGate, TurnBudget, TurnContext, TurnInput,
-    TurnSubmissionMode, UserPromptSubmitHookRequest, VirtualBashRuntimeConfig,
-    active_manifest_bind_receipt, active_tool_controller_for_request,
+    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, ThinkingConfig, ThreadCommand, ThreadContext,
+    ThreadEvent, ThreadSignal, ThreadStatus, ToolCallCompletedPayload, ToolCallDecision,
+    ToolCallRequestedPayload, ToolCallSubject, ToolDecisionRequest, ToolDefinition,
+    ToolExecutionInterceptor, ToolExecutionRequest, ToolPermissionDecision, ToolPermissionGate,
+    TurnBudget, TurnContext, TurnInput, TurnSubmissionMode, UserPromptSubmitHookRequest,
+    VirtualBashRuntimeConfig, active_manifest_bind_receipt, active_tool_controller_for_request,
     compile_provider_request_context, decide_tool_call, deterministic_compaction_summary,
     emit_runtime_event, normalize_history_for_target,
 };
@@ -555,8 +556,11 @@ impl CanonicalProviderRuntime {
         let instruction_contexts = services
             .build_instruction_read_plan_contexts(coordinates)
             .await?;
-        let environment_contexts = memory_contexts
-            .into_iter()
+        let skill_context_segments = skill_context_segments_from_thread(&turn_context.thread)?;
+        let environment_contexts = skill_context_segments
+            .iter()
+            .map(|segment| segment.content.clone())
+            .chain(memory_contexts)
             .chain(instruction_contexts)
             .collect::<Vec<_>>();
         let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
@@ -611,6 +615,7 @@ impl CanonicalProviderRuntime {
         let receipt_payload = context_compile_receipt_payload(
             &session_entries,
             &compiled_context,
+            &skill_context_segments,
             &agent_diagnostics,
             &replay_transform,
             provider_dropped_messages,
@@ -895,8 +900,11 @@ async fn run_auto_compaction_if_needed(
     let instruction_contexts = services
         .build_instruction_read_plan_contexts(coordinates)
         .await?;
-    let environment_contexts = memory_contexts
-        .into_iter()
+    let skill_context_segments = skill_context_segments_from_thread(thread_context)?;
+    let environment_contexts = skill_context_segments
+        .iter()
+        .map(|segment| segment.content.clone())
+        .chain(memory_contexts)
         .chain(instruction_contexts)
         .collect::<Vec<_>>();
     let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
@@ -1872,9 +1880,37 @@ fn tool_calls_from_message(message: &CanonicalMessage) -> Vec<ProviderToolCall> 
     }
 }
 
+fn skill_context_segments_from_thread(
+    thread: &ThreadContext,
+) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    let Some(raw) = thread
+        .metadata
+        .get(THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+    else {
+        return Ok(Vec::new());
+    };
+    let segments =
+        serde_json::from_str::<Vec<AgentManifestStaticContextSegment>>(raw).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "thread manifest skill context segments are invalid: {err}"
+            ))
+        })?;
+    for segment in &segments {
+        let expected = sha256_hex(segment.content.as_bytes());
+        if segment.content_sha256 != expected {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "thread manifest skill context segment {:?} content hash mismatch: expected {}, got {}",
+                segment.id, expected, segment.content_sha256
+            )));
+        }
+    }
+    Ok(segments)
+}
+
 fn context_compile_receipt_payload(
     session_entries: &[SessionEntry],
     compiled_context: &CompiledAgentContext,
+    static_context_segments: &[AgentManifestStaticContextSegment],
     diagnostics: &crate::AgentContextCompilationDiagnostics,
     replay_transform: &ReplayTransformCounts,
     provider_dropped_messages: usize,
@@ -1887,6 +1923,20 @@ fn context_compile_receipt_payload(
         .map_err(|err| CooldisError::History(format!("context receipt codec failed: {err}")))?;
     let replay_transform = serde_json::to_value(replay_transform)
         .map_err(|err| CooldisError::History(format!("context receipt codec failed: {err}")))?;
+    let static_context_segments = static_context_segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "id": &segment.id,
+                "assembler": &segment.assembler,
+                "input": &segment.input,
+                "pinned": segment.pinned,
+                "budget_share": segment.budget_share,
+                "ref_uri": &segment.ref_uri,
+                "content_sha256": &segment.content_sha256,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "strategy": "naive_assembly",
         "strategy_version": "v1",
@@ -1898,6 +1948,7 @@ fn context_compile_receipt_payload(
         "system_block_count": compiled_context.system.len(),
         "message_count": compiled_context.messages.len(),
         "tool_count": compiled_context.tools.len(),
+        "static_context_segments": static_context_segments,
         "diagnostics": diagnostics,
         "replay_transform": replay_transform,
         "provider_dropped_messages": provider_dropped_messages,
