@@ -1438,6 +1438,7 @@ fn permission_tool_decision_result(
         subject: requested.subject.clone(),
         snapshot_id: request.activation.snapshot_id.clone(),
         outcome,
+        admissible: None,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
         CooldisError::RuntimeFactory(format!(

@@ -2637,6 +2637,7 @@ async fn append_witnessed_tool_decision(
                     },
                     snapshot_id: snapshot_id.to_string(),
                     outcome,
+                    admissible: None,
                 })
                 .unwrap(),
             )],

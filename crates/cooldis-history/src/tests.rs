@@ -442,7 +442,17 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "coupling.run.completed",
         "coupling.run.failed",
         "placement.decision",
+        "thread.spawned",
+        "thread.joined",
+        "policy.bound",
+        "grant.petitioned",
+        "timer.fired",
+        "io.ingress.received",
+        "io.egress.delivered",
+        "io.egress.failed",
+        "admission.decided",
     ];
+    assert_eq!(EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.2");
     let kinds = EventKind::all();
     assert_eq!(
         kinds.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
@@ -474,6 +484,298 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         EventKind::ContextReadPlanSet.payload_schema_id(),
         "cooldis.event.context.read_plan.set/1"
     );
+    assert_eq!(
+        EventKind::ThreadSpawned.payload_schema_id(),
+        "cooldis.event.thread.spawned/1"
+    );
+    assert_eq!(
+        EventKind::ThreadJoined.payload_schema_id(),
+        "cooldis.event.thread.joined/1"
+    );
+    assert_eq!(
+        EventKind::PolicyBound.payload_schema_id(),
+        "cooldis.event.policy.bound/1"
+    );
+    assert_eq!(
+        EventKind::GrantPetitioned.payload_schema_id(),
+        "cooldis.event.grant.petitioned/1"
+    );
+    assert_eq!(
+        EventKind::TimerFired.payload_schema_id(),
+        "cooldis.event.timer.fired/1"
+    );
+    assert_eq!(
+        EventKind::IoIngressReceived.payload_schema_id(),
+        "cooldis.event.io.ingress.received/1"
+    );
+    assert_eq!(
+        EventKind::IoEgressDelivered.payload_schema_id(),
+        "cooldis.event.io.egress.delivered/1"
+    );
+    assert_eq!(
+        EventKind::IoEgressFailed.payload_schema_id(),
+        "cooldis.event.io.egress.failed/1"
+    );
+    assert_eq!(
+        EventKind::AdmissionDecided.payload_schema_id(),
+        "cooldis.event.admission.decided/1"
+    );
+}
+
+#[test]
+fn events_0_2_payload_fixtures_round_trip_and_validate() {
+    let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
+    let child_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000002").unwrap();
+    let spawned_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap(),
+    );
+    let mandate_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000004").unwrap(),
+    );
+    let ingress_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000005").unwrap(),
+    );
+    let registry = stream_schema_registry_v1().unwrap();
+
+    let cases = [
+        (
+            EventKind::ThreadSpawned,
+            serde_json::to_value(ThreadSpawnedPayload {
+                parent_thread_id,
+                parent_turn_id: Some("turn-parent".to_string()),
+                child_thread_id,
+                child_manifest_hash: "sha256:child-manifest".to_string(),
+                child_policy_hash: Some("sha256:child-policy".to_string()),
+                granted: vec![
+                    "threads.spawn".to_string(),
+                    "stream.write:control".to_string(),
+                ],
+                inputs_hash: "sha256:inputs".to_string(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::ThreadJoined,
+            serde_json::to_value(ThreadJoinedPayload {
+                child_thread_id,
+                spawned_event_id,
+                terminal_state: ThreadTerminalState::Completed,
+                result_digest: Some("sha256:result".to_string()),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::PolicyBound,
+            serde_json::to_value(PolicyBoundPayload {
+                policy_kind: PolicyKind::AdmissionRoute,
+                policy_id: "route:telegram".to_string(),
+                content_hash: "sha256:policy".to_string(),
+                valid_from_note: "valid until next policy.bound of same policy_id".to_string(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::GrantPetitioned,
+            serde_json::to_value(GrantPetitionedPayload {
+                thread_id: child_thread_id,
+                requested: vec!["net:https://api.example.test".to_string()],
+                reason: "tool needs outbound API access".to_string(),
+                evidence_event_ids: Some(vec![spawned_event_id]),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::TimerFired,
+            serde_json::to_value(TimerFiredPayload {
+                mandate_event_id,
+                scheduled_for: "2026-07-04T12:00:00Z".to_string(),
+                occurrence_index: 3,
+                catch_up: true,
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::IoIngressReceived,
+            serde_json::to_value(IoIngressReceivedPayload {
+                route_id: Some("route:telegram".to_string()),
+                dedupe_key: Some("telegram:42".to_string()),
+                external_conversation_id: Some("chat-1".to_string()),
+                external_actor_id: Some("actor-1".to_string()),
+                external_message_id: Some("message-1".to_string()),
+                envelope_digest: "sha256:ingress".to_string(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::IoEgressDelivered,
+            serde_json::to_value(IoEgressDeliveredPayload {
+                route_id: "route:telegram".to_string(),
+                egress_kind: "telegram.reply".to_string(),
+                external_message_id: Some("message-2".to_string()),
+                attempts: 2,
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::IoEgressFailed,
+            serde_json::to_value(IoEgressFailedPayload {
+                route_id: "route:telegram".to_string(),
+                egress_kind: "telegram.reply".to_string(),
+                attempts: 3,
+                error_class: "rate_limited".to_string(),
+                dead_lettered: true,
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::AdmissionDecided,
+            serde_json::to_value(AdmissionDecidedPayload {
+                route_id: "route:telegram".to_string(),
+                policy_hash: "sha256:admission-policy".to_string(),
+                decision: AdmissionDecision::Coalesce,
+                admissible: Some(vec![
+                    AdmissionDecision::Queue,
+                    AdmissionDecision::Coalesce,
+                    AdmissionDecision::Reject,
+                ]),
+                source_ingress_event_ids: vec![ingress_event_id],
+            })
+            .unwrap(),
+        ),
+    ];
+
+    for (kind, payload) in cases {
+        let json = serde_json::to_string(&payload).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, payload);
+        registry
+            .validate(kind.payload_schema_id(), &decoded)
+            .unwrap();
+    }
+}
+
+#[test]
+fn events_0_2_optional_fields_deserialize_when_absent() {
+    let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000011").unwrap();
+    let child_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000012").unwrap();
+    let spawned_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000013").unwrap(),
+    );
+    let ingress_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000014").unwrap(),
+    );
+
+    let spawned: ThreadSpawnedPayload = serde_json::from_value(serde_json::json!({
+        "schema": EventKind::ThreadSpawned.payload_schema_id(),
+        "parent_thread_id": parent_thread_id,
+        "child_thread_id": child_thread_id,
+        "child_manifest_hash": "sha256:child-manifest",
+        "granted": [],
+        "inputs_hash": "sha256:inputs"
+    }))
+    .unwrap();
+    assert_eq!(spawned.parent_turn_id, None);
+    assert_eq!(spawned.child_policy_hash, None);
+
+    let joined: ThreadJoinedPayload = serde_json::from_value(serde_json::json!({
+        "schema": EventKind::ThreadJoined.payload_schema_id(),
+        "child_thread_id": child_thread_id,
+        "spawned_event_id": spawned_event_id,
+        "terminal_state": "budget_exhausted"
+    }))
+    .unwrap();
+    assert_eq!(joined.result_digest, None);
+
+    let ingress: IoIngressReceivedPayload = serde_json::from_value(serde_json::json!({
+        "schema": EventKind::IoIngressReceived.payload_schema_id(),
+        "envelope_digest": "sha256:ingress"
+    }))
+    .unwrap();
+    assert_eq!(ingress.route_id, None);
+    assert_eq!(ingress.external_message_id, None);
+
+    let admission: AdmissionDecidedPayload = serde_json::from_value(serde_json::json!({
+        "schema": EventKind::AdmissionDecided.payload_schema_id(),
+        "route_id": "route:telegram",
+        "policy_hash": "sha256:admission-policy",
+        "decision": "queue",
+        "source_ingress_event_ids": [ingress_event_id]
+    }))
+    .unwrap();
+    assert_eq!(admission.admissible, None);
+}
+
+#[test]
+fn events_0_1_style_stream_record_still_parses_and_unknown_kind_fails_closed() {
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let record = serde_json::json!({
+        "schema": STREAM_RECORD_SCHEMA_V1,
+        "event_id": "018f0000-0000-7000-8000-000000000101",
+        "stream_id": EventStreamId::for_thread(&coordinates),
+        "sequence": 1,
+        "coordinates": coordinates,
+        "created_at_ms": 1_772_640_000_000i64,
+        "kind": "turn.completed",
+        "origin": "discharged",
+        "payload_schema": EventKind::TurnCompleted.payload_schema_id(),
+        "provenance": {"source_event_ids": ["018f0000-0000-7000-8000-000000000100"]},
+        "payload": {"turn_id": "turn-1"}
+    });
+    let parsed: StreamRecordEnvelopeV1 = serde_json::from_value(record).unwrap();
+    assert_eq!(
+        parsed.kind.parse::<EventKind>().unwrap(),
+        EventKind::TurnCompleted
+    );
+    stream_schema_registry_v1()
+        .unwrap()
+        .validate(
+            STREAM_RECORD_SCHEMA_V1,
+            &serde_json::to_value(parsed).unwrap(),
+        )
+        .unwrap();
+
+    let unknown = serde_json::json!({
+        "kind": "unknown.event.kind"
+    });
+    let err = serde_json::from_value::<EventKind>(unknown["kind"].clone()).unwrap_err();
+    assert!(err.to_string().contains("unknown event kind"));
+}
+
+#[test]
+fn canonical_usage_survives_assistant_session_entry_stream_record() {
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let usage = CanonicalUsage {
+        input_tokens: 11,
+        output_tokens: 7,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: 5,
+    };
+    let entry = SessionEntry::new(
+        coordinates.clone(),
+        None,
+        SessionEntryKind::Message {
+            message: CanonicalMessage::assistant_with_usage(
+                "test-provider",
+                ProviderApi::OpenAIResponses,
+                "model-1",
+                vec![CanonicalContent::text("hello")],
+                usage.clone(),
+                CanonicalStopReason::EndTurn,
+            ),
+        },
+    );
+    let event = EventRecord::from_new(
+        EventStreamId::for_thread(&coordinates),
+        EventSequence::new(1),
+        session_entry_event(&entry),
+    );
+    let envelope = event.to_stream_record_v1();
+    assert_eq!(envelope.kind, EventKind::SessionEntryAppended.as_str());
+    assert_eq!(
+        envelope.payload["usage"],
+        serde_json::to_value(usage).unwrap()
+    );
+    event.validate_stream_record_v1().unwrap();
 }
 
 #[test]
