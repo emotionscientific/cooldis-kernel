@@ -56,6 +56,7 @@ kind = "telegram.bot"
 enabled = true
 policy = "queue_per_conversation"
 threading = "per_conversation"
+egress_retry = { max_attempts = 5, base_backoff_ms = 500 }
 
 [daemon.io.routes.telegram]
 listen = "127.0.0.1:9000"
@@ -143,9 +144,14 @@ does not load, enable, start, or stop the service automatically.
 `daemon run` starts the Cooldis app-server with the configured
 provider and starts enabled IO routes. Telegram routes bind the configured HTTP
 webhook listener, normalize updates through `cooldis-io-telegram`, submit them
-to either the durable pgqrs/SQLite queue or the direct runtime bridge, and can
-deliver visible assistant messages through Telegram `sendMessage` when a bot
-token is configured.
+to either the durable pgqrs/SQLite queue or the direct runtime bridge, and
+start a per-route egress projector. The projector reads bound thread streams
+from a persisted cursor, delivers visible assistant messages through Telegram
+`sendMessage` when a bot token is configured, records delivered/failed receipts
+in the journal, and stores exhausted envelopes in
+`cooldis_daemon_egress_dead_letters` in the route's queue SQLite database.
+`egress_retry.max_attempts` and `egress_retry.base_backoff_ms` configure the
+bounded exponential retry loop; the defaults are `5` and `500`.
 
 ## Lifecycle Boundary For Local V1 Use
 

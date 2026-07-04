@@ -367,6 +367,8 @@ pub struct CooldisIoRouteConfig {
     pub egress_projection: Vec<CooldisEgressProjectionRuleConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typing_simulation: Option<CooldisTypingSimulationConfig>,
+    #[serde(default, skip_serializing_if = "CooldisEgressRetryConfig::is_default")]
+    pub egress_retry: CooldisEgressRetryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<CooldisTelegramRouteConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -403,6 +405,12 @@ impl CooldisIoRouteConfig {
                 self.id
             ));
         }
+        if self.egress_retry.max_attempts == 0 {
+            errors.push(format!(
+                "io.routes.{}.egress_retry.max_attempts must be greater than zero",
+                self.id
+            ));
+        }
         if self.kind == "telegram.bot" {
             match &self.telegram {
                 Some(telegram) => {
@@ -433,6 +441,29 @@ pub struct CooldisEgressProjectionRuleConfig {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CooldisTypingSimulationConfig {
     pub chars_per_second: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisEgressRetryConfig {
+    #[serde(default = "default_egress_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_egress_base_backoff_ms")]
+    pub base_backoff_ms: u64,
+}
+
+impl CooldisEgressRetryConfig {
+    fn is_default(value: &Self) -> bool {
+        *value == Self::default()
+    }
+}
+
+impl Default for CooldisEgressRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_egress_max_attempts(),
+            base_backoff_ms: default_egress_base_backoff_ms(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1108,6 +1139,14 @@ fn default_app_server_listen() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_egress_max_attempts() -> u32 {
+    5
+}
+
+fn default_egress_base_backoff_ms() -> u64 {
+    500
 }
 
 fn default_telegram_webhook_path() -> String {

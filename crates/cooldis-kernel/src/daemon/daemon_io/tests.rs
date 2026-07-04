@@ -1,12 +1,13 @@
 use super::*;
-use crate::{AppServerListenAddr, CooldisAppServerConfig};
+use crate::{AppServerListenAddr, CooldisAppServerConfig, EventKind, StreamCursorV1};
 use cooldis_io_core::{
     ConversationKind, DeliveryReceipt, IngressContent, IoConversation, IoProtocolAdapter,
     IoProtocolCapabilities, IoSource, IoTarget,
 };
-use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig};
+use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig, sqlite_dsn};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 #[derive(Clone)]
@@ -51,6 +52,68 @@ impl EgressAdapter for CaptureEgress {
     }
 }
 
+#[derive(Clone)]
+struct ScriptedEgress {
+    calls: Arc<TokioMutex<Vec<EgressEnvelope>>>,
+    failures: Arc<TokioMutex<VecDeque<String>>>,
+    external_ids: Arc<TokioMutex<VecDeque<String>>>,
+}
+
+impl ScriptedEgress {
+    fn new(failures: impl IntoIterator<Item = impl Into<String>>, external_ids: &[&str]) -> Self {
+        Self {
+            calls: Arc::new(TokioMutex::new(Vec::new())),
+            failures: Arc::new(TokioMutex::new(
+                failures.into_iter().map(Into::into).collect(),
+            )),
+            external_ids: Arc::new(TokioMutex::new(
+                external_ids.iter().map(|id| id.to_string()).collect(),
+            )),
+        }
+    }
+
+    async fn calls(&self) -> Vec<EgressEnvelope> {
+        self.calls.lock().await.clone()
+    }
+}
+
+impl IoProtocolAdapter for ScriptedEgress {
+    fn kind(&self) -> &'static str {
+        "telegram.bot"
+    }
+
+    fn capabilities(&self) -> IoProtocolCapabilities {
+        IoProtocolCapabilities {
+            ingress: false,
+            egress: true,
+            streaming: false,
+            durable_offsets: false,
+            attachments: false,
+        }
+    }
+}
+
+#[async_trait]
+impl EgressAdapter for ScriptedEgress {
+    async fn deliver(&self, envelope: EgressEnvelope) -> IoResult<DeliveryReceipt> {
+        self.calls.lock().await.push(envelope.clone());
+        if let Some(error) = self.failures.lock().await.pop_front() {
+            return Err(IoError::Delivery(error));
+        }
+        let fallback_id = {
+            let calls = self.calls.lock().await;
+            format!("message-{}", calls.len())
+        };
+        let external_id = self
+            .external_ids
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or(fallback_id);
+        Ok(DeliveryReceipt::delivered(&envelope, external_id))
+    }
+}
+
 fn test_envelope(text: &str) -> IngressEnvelope {
     IngressEnvelope::new(
         IoSource::new("telegram.bot", "main"),
@@ -83,6 +146,18 @@ fn route_with_egress(
     egress_projection: Vec<crate::CooldisEgressProjectionRuleConfig>,
     typing_simulation: Option<crate::CooldisTypingSimulationConfig>,
 ) -> CooldisIoRouteConfig {
+    route_with_egress_and_retry(
+        egress_projection,
+        typing_simulation,
+        crate::CooldisEgressRetryConfig::default(),
+    )
+}
+
+fn route_with_egress_and_retry(
+    egress_projection: Vec<crate::CooldisEgressProjectionRuleConfig>,
+    typing_simulation: Option<crate::CooldisTypingSimulationConfig>,
+    egress_retry: crate::CooldisEgressRetryConfig,
+) -> CooldisIoRouteConfig {
     CooldisIoRouteConfig {
         id: "main".to_string(),
         kind: "telegram.bot".to_string(),
@@ -92,26 +167,41 @@ fn route_with_egress(
         ingress: None,
         egress_projection,
         typing_simulation,
+        egress_retry,
         telegram: None,
         metadata: BTreeMap::new(),
     }
+}
+
+fn test_root(name: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!("{name}-{}", uuid::Uuid::now_v7()))
 }
 
 async fn test_bridge() -> (
     CooldisDaemonIoBridge,
     mpsc::UnboundedReceiver<EgressEnvelope>,
 ) {
-    let fixture_id = uuid::Uuid::now_v7().to_string();
-    let fixture_root = std::env::temp_dir()
-        .join("cooldis-daemon-io-tests")
-        .join(&fixture_id);
+    let fixture_root = test_root("bridge");
+    let (_server, bridge, rx) = test_bridge_at_root(&fixture_root).await;
+    (bridge, rx)
+}
+
+async fn test_bridge_at_root(
+    fixture_root: &Path,
+) -> (
+    CooldisAppServer,
+    CooldisDaemonIoBridge,
+    mpsc::UnboundedReceiver<EgressEnvelope>,
+) {
     let socket_path = fixture_root.join("app-server.sock");
     let listen = AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
     let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
     config.runtime_home = fixture_root.join("runtime");
     config.state_home = fixture_root.join("state");
-    config.tenant_id = format!("app-server-{fixture_id}");
-    config.user_id = format!("local-user-{fixture_id}");
+    config.user_state_home = fixture_root.join("user-state");
+    apply_test_identity(&mut config, fixture_root);
     let server = CooldisAppServer::new_local(config).await.unwrap();
     let bridge = CooldisDaemonIoBridge::from_app_server(&server);
     let (tx, rx) = mpsc::unbounded_channel();
@@ -122,7 +212,146 @@ async fn test_bridge() -> (
             Arc::new(CaptureEgress { sender: tx }),
         )
         .await;
-    (bridge, rx)
+    (server, bridge, rx)
+}
+
+async fn restarted_bridge_at_root(
+    fixture_root: &Path,
+) -> (
+    CooldisAppServer,
+    CooldisDaemonIoBridge,
+    mpsc::UnboundedReceiver<EgressEnvelope>,
+) {
+    let socket_path = fixture_root.join("app-server-restarted.sock");
+    let listen = AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = fixture_root.join("runtime");
+    config.state_home = fixture_root.join("state");
+    config.user_state_home = fixture_root.join("user-state");
+    apply_test_identity(&mut config, fixture_root);
+    let server = CooldisAppServer::new_local(config).await.unwrap();
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let (tx, rx) = mpsc::unbounded_channel();
+    bridge
+        .register_egress_adapter(
+            "telegram.bot",
+            "main",
+            Arc::new(CaptureEgress { sender: tx }),
+        )
+        .await;
+    (server, bridge, rx)
+}
+
+fn apply_test_identity(config: &mut CooldisAppServerConfig, fixture_root: &Path) {
+    let suffix = fixture_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("daemon-io");
+    config.tenant_id = format!("app-server-{suffix}");
+    config.user_id = format!("local-user-{suffix}");
+}
+
+async fn register_route_state(
+    bridge: &CooldisDaemonIoBridge,
+    route: &CooldisIoRouteConfig,
+    db: &Path,
+) {
+    bridge
+        .register_egress_route_config("telegram.bot", "main", route)
+        .await
+        .unwrap();
+    bridge
+        .register_egress_state_sqlite_dsn("telegram.bot", "main", sqlite_dsn(db))
+        .await
+        .unwrap();
+}
+
+async fn submit_and_wait_for_assistant_event(
+    bridge: &CooldisDaemonIoBridge,
+    text: &str,
+) -> (String, String) {
+    let receipt = bridge.submit_envelope(test_envelope(text)).await.unwrap();
+    let thread_id = receipt.thread_id.expect("receipt should include thread id");
+    let expected = format!("local:{text}");
+    wait_for_assistant_text(bridge, &thread_id, &expected).await;
+    (thread_id, expected)
+}
+
+async fn wait_for_assistant_text(bridge: &CooldisDaemonIoBridge, thread_id: &str, expected: &str) {
+    let parsed = ThreadId::parse_str(thread_id).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let handle = bridge
+            .supervisor
+            .get_thread(&bridge.tenant_id, parsed)
+            .await
+            .unwrap();
+        let context = handle.session_context().await.unwrap();
+        if context.entries.iter().any(|entry| {
+            matches!(
+                assistant_text_from_entry(entry).as_deref(),
+                Some(text) if text == expected
+            )
+        }) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for assistant text {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn egress_receipts(
+    bridge: &CooldisDaemonIoBridge,
+    thread_id: &str,
+    kind: EventKind,
+) -> Vec<crate::EventRecord> {
+    let parsed = ThreadId::parse_str(thread_id).unwrap();
+    let handle = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, parsed)
+        .await
+        .unwrap();
+    handle
+        .read_thread_events(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == kind)
+        .collect()
+}
+
+async fn egress_cursor(bridge: &CooldisDaemonIoBridge, thread_id: &str) -> Option<StreamCursorV1> {
+    bridge
+        .egress_cursor_for_thread("telegram.bot", "main", thread_id)
+        .await
+        .unwrap()
+}
+
+async fn drain_until_egress(
+    bridge: &CooldisDaemonIoBridge,
+    protocol: &str,
+    instance_id: &str,
+    expected: usize,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut drained = 0;
+    loop {
+        drained += bridge
+            .drain_egress_once(protocol, instance_id)
+            .await
+            .unwrap();
+        if drained >= expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} egress source(s), drained {drained}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]
@@ -256,6 +485,8 @@ async fn typing_simulation_is_off_by_default() {
 #[tokio::test]
 async fn direct_sink_submits_ingress_to_runtime_and_emits_egress() {
     let (bridge, mut rx) = test_bridge().await;
+    let db = test_root("direct-egress").join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &db).await;
 
     let ack = bridge
         .direct_sink()
@@ -264,6 +495,7 @@ async fn direct_sink_submits_ingress_to_runtime_and_emits_egress() {
         .unwrap();
 
     assert!(ack.accepted);
+    drain_until_egress(&bridge, "telegram.bot", "main", 1).await;
     let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
         .unwrap()
@@ -277,6 +509,8 @@ async fn direct_sink_submits_ingress_to_runtime_and_emits_egress() {
 #[tokio::test]
 async fn queue_worker_processes_sqlite_backed_envelope() {
     let (bridge, mut rx) = test_bridge().await;
+    let egress_db = test_root("queue-egress").join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     let db = std::env::temp_dir()
         .join("cooldis-daemon-io-tests")
         .join(format!("queue-{}.sqlite", uuid::Uuid::now_v7()));
@@ -289,6 +523,7 @@ async fn queue_worker_processes_sqlite_backed_envelope() {
 
     let worker = CooldisDaemonQueueWorker::new(queue, bridge, "worker-test", 30);
     assert_eq!(worker.drain_once().await.unwrap(), 1);
+    drain_until_egress(&worker.bridge, "telegram.bot", "main", 1).await;
 
     let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
@@ -318,6 +553,8 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
     drop(queue);
 
     let (bridge, mut rx) = test_bridge().await;
+    let egress_db = test_root("queue-restart-egress").join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     let reopened = Arc::new(
         PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
             .await
@@ -326,6 +563,7 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
 
     let worker = CooldisDaemonQueueWorker::new(reopened, bridge, "worker-restart", 30);
     assert_eq!(worker.drain_once().await.unwrap(), 1);
+    drain_until_egress(&worker.bridge, "telegram.bot", "main", 1).await;
 
     let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
@@ -336,6 +574,184 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         EgressKind::AssistantMessage { ref text } if text.contains("hello after restart")
     ));
     let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() {
+    let root = test_root("egress-restart");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+
+    let (server, bridge, mut first_rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "after restart").await;
+    assert!(first_rx.try_recv().is_err());
+    drop(bridge);
+    drop(server);
+
+    let (_restarted_server, restarted, mut rx) = restarted_bridge_at_root(&root).await;
+    register_route_state(&restarted, &route, &db).await;
+
+    assert_eq!(
+        restarted
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        egress.kind,
+        EgressKind::AssistantMessage { ref text } if text == "local:after restart"
+    ));
+    assert_eq!(
+        restarted
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+
+    let delivered = egress_receipts(&restarted, &thread_id, EventKind::IoEgressDelivered).await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0]
+            .payload
+            .get("external_message_id")
+            .and_then(serde_json::Value::as_str),
+        Some("capture")
+    );
+    assert!(egress_cursor(&restarted, &thread_id).await.is_some());
+}
+
+#[tokio::test]
+async fn egress_projector_retries_transient_failures_and_records_attempts() {
+    let root = test_root("egress-retry");
+    let db = root.join("io.sqlite");
+    let adapter = Arc::new(ScriptedEgress::new(
+        ["telegram 500", "telegram 500"],
+        &["telegram-message-3"],
+    ));
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    bridge
+        .register_egress_adapter("telegram.bot", "main", adapter.clone())
+        .await;
+    let route = route_with_egress_and_retry(
+        Vec::new(),
+        None,
+        crate::CooldisEgressRetryConfig {
+            max_attempts: 5,
+            base_backoff_ms: 0,
+        },
+    );
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "retry me").await;
+
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+
+    assert_eq!(adapter.calls().await.len(), 3);
+    let delivered = egress_receipts(&bridge, &thread_id, EventKind::IoEgressDelivered).await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload["attempts"].as_u64(), Some(3));
+    assert_eq!(
+        delivered[0].payload["external_message_id"].as_str(),
+        Some("telegram-message-3")
+    );
+}
+
+#[tokio::test]
+async fn egress_projector_dead_letters_after_max_attempts() {
+    let root = test_root("egress-dead-letter");
+    let db = root.join("io.sqlite");
+    let adapter = Arc::new(ScriptedEgress::new(
+        ["telegram 500", "telegram 500", "telegram 500"],
+        &[],
+    ));
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    bridge
+        .register_egress_adapter("telegram.bot", "main", adapter.clone())
+        .await;
+    let route = route_with_egress_and_retry(
+        Vec::new(),
+        None,
+        crate::CooldisEgressRetryConfig {
+            max_attempts: 3,
+            base_backoff_ms: 0,
+        },
+    );
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "dead letter").await;
+
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+
+    assert_eq!(adapter.calls().await.len(), 3);
+    let failed = egress_receipts(&bridge, &thread_id, EventKind::IoEgressFailed).await;
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].payload["attempts"].as_u64(), Some(3));
+    assert_eq!(failed[0].payload["dead_lettered"].as_bool(), Some(true));
+    assert_eq!(
+        bridge
+            .egress_dead_letter_count("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn egress_projector_witnesses_silence_without_wire_call() {
+    let root = test_root("egress-silence");
+    let db = root.join("io.sqlite");
+    let adapter = Arc::new(ScriptedEgress::new(std::iter::empty::<&str>(), &[]));
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    bridge
+        .register_egress_adapter("telegram.bot", "main", adapter.clone())
+        .await;
+    let route = route_with_egress_and_retry(
+        vec![crate::CooldisEgressProjectionRuleConfig {
+            pattern: r"local:\[no_response\]".to_string(),
+            action: "silence".to_string(),
+        }],
+        None,
+        crate::CooldisEgressRetryConfig {
+            max_attempts: 5,
+            base_backoff_ms: 0,
+        },
+    );
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "[no_response]").await;
+
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+
+    assert!(adapter.calls().await.is_empty());
+    let delivered = egress_receipts(&bridge, &thread_id, EventKind::IoEgressDelivered).await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0].payload["egress_kind"].as_str(),
+        Some("silence")
+    );
+    assert_eq!(delivered[0].payload["attempts"].as_u64(), Some(1));
 }
 
 #[tokio::test]

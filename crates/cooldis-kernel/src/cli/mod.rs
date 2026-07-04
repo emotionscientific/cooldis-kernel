@@ -1381,8 +1381,9 @@ async fn start_daemon_io(
         match route.kind.as_str() {
             "telegram.bot" => {
                 let ingress = route.ingress.as_ref().unwrap_or(&io.ingress);
+                let egress_state_dsn = ingress.effective_queue_dsn();
                 let sink = route_sink_for_ingress(route, ingress, &bridge, &mut tasks).await?;
-                start_telegram_route(route, sink, &bridge, &mut tasks).await?;
+                start_telegram_route(route, sink, &bridge, egress_state_dsn, &mut tasks).await?;
             }
             other => {
                 eprintln!(
@@ -1440,6 +1441,7 @@ async fn start_telegram_route(
     route: &CooldisIoRouteConfig,
     sink: Arc<dyn IngressSink>,
     bridge: &CooldisDaemonIoBridge,
+    egress_state_dsn: String,
     tasks: &mut Vec<JoinHandle<()>>,
 ) -> CooldisResult<()> {
     let telegram = route.telegram.as_ref().ok_or_else(|| {
@@ -1464,6 +1466,11 @@ async fn start_telegram_route(
             )
             .await;
     }
+    let projector = bridge
+        .start_egress_projector_sqlite_dsn(TELEGRAM_PROTOCOL, route.id.clone(), egress_state_dsn)
+        .await
+        .map_err(io_error)?;
+    tasks.push(projector);
     let listen = telegram.listen.clone().ok_or_else(|| {
         usage_error(format!(
             "telegram route {} requires telegram.listen",
