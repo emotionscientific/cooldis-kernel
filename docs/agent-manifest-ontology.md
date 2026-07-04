@@ -19,8 +19,8 @@ start path.
 
 ```text
 AgentManifest
-  versioned declaration of composition, powers, context, resources, hooks,
-  policies, and runtime defaults
+  versioned declaration of composition, powers, context, resources, couplings,
+  reserved hooks, policies, and runtime defaults
 
 Thread
   live or persisted execution state: turns, history, event log, checkpoints,
@@ -42,7 +42,6 @@ op://data/csv_profile@sha256:...
 skill://cooldis/release-review@1
 prompt://someone.cool/release-system@sha256:...
 assembler://cooldis/naive-assembly@0
-hook://cooldis/pre-tool-policy@sha256:...
 resource://artifact/sha256:...
 agent://release-verifier@0.3.1
 ```
@@ -121,7 +120,7 @@ resources
 skills
 context pipelines
 couplings
-hooks
+hooks (reserved; host debug only)
 policies and grants
 topology
 IO
@@ -248,8 +247,9 @@ on_thread_start
 on_thread_resume
 ```
 
-Hooks should be versioned artifacts or built-in host policies. Hook execution
-requires explicit grants.
+Hooks are host-scope debug tooling, not a manifest authority surface. The
+manifest `[hooks]` table remains reserved; runtime control that must be replayed
+or audited belongs in witnessed couplings.
 
 ### Policies And Grants
 
@@ -267,7 +267,7 @@ child-thread creation rules
 ```
 
 The model cannot grant itself new powers. Publish and start must validate that
-declared tools, resources, hooks, and effects are allowed.
+declared tools, resources, couplings, and effects are allowed.
 
 ### Topology And Delegation
 
@@ -434,9 +434,7 @@ assembler = "kernel://assembler/anchored-window"
 select = { stream = "thread", read_plan = "history.default", fallback = "start" }
 budget_share = "rest"
 
-[hooks]
-pre_tool_use = "hook://cooldis/pre-tool-policy@sha256:def456"
-post_tool_use = "hook://cooldis/post-tool-recorder@sha256:789abc"
+# [hooks] is reserved. Use witnessed couplings for replayable control.
 
 [policies]
 network = "deny"

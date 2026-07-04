@@ -7210,6 +7210,12 @@ async fn local_ui_affordance_methods_return_safe_shapes() {
         json!({ "data": [], "nextCursor": null })
     );
     assert_eq!(
+        app.dispatch_request(&connection, "hooks/list", None)
+            .await
+            .unwrap(),
+        json!({ "data": [], "witnessing": true })
+    );
+    assert_eq!(
         app.dispatch_request(
             &connection,
             "experimentalFeature/enablement/set",

@@ -1,11 +1,12 @@
 use crate::{
     AgentToolRouter, CanonicalContent, CanonicalMessage, CooldisResult, HookHandlerSpec,
-    HookPipeline, HookRunRecord, PostToolUseHookRequest, PreToolUseHookRequest, TurnContext,
-    TurnContextSnapshot,
+    HookMutationWitness, HookPipeline, HookRunRecord, PostToolUseHookRequest,
+    PreToolUseHookRequest, TurnContext, TurnContextSnapshot,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::future::{Future, ready};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -86,8 +87,22 @@ impl ToolExecutionInterceptor {
     pub async fn execute(
         &self,
         request: ToolExecutionRequest<'_>,
-        mut on_hook_started: impl FnMut(&HookHandlerSpec),
+        on_hook_started: impl FnMut(&HookHandlerSpec),
     ) -> CooldisResult<ToolExecutionOutcome> {
+        self.execute_with_witnessing(request, on_hook_started, |_| ready(Ok(())))
+            .await
+    }
+
+    pub async fn execute_with_witnessing<W, Fut>(
+        &self,
+        request: ToolExecutionRequest<'_>,
+        mut on_hook_started: impl FnMut(&HookHandlerSpec),
+        mut witness_hook_mutations: W,
+    ) -> CooldisResult<ToolExecutionOutcome>
+    where
+        W: FnMut(Vec<HookMutationWitness>) -> Fut,
+        Fut: Future<Output = CooldisResult<()>>,
+    {
         let started_at = Instant::now();
         let mut hook_records = Vec::new();
         let mut pre_model_contexts = Vec::new();
@@ -108,6 +123,9 @@ impl ToolExecutionInterceptor {
                 )
                 .await;
             hook_records.extend(outcome.records);
+            if !outcome.mutation_witnesses.is_empty() {
+                witness_hook_mutations(outcome.mutation_witnesses).await?;
+            }
             pre_model_contexts.extend(outcome.additional_contexts);
             if outcome.should_block {
                 let reason = outcome
@@ -193,6 +211,9 @@ impl ToolExecutionInterceptor {
                 )
                 .await;
             hook_records.extend(outcome.records);
+            if !outcome.mutation_witnesses.is_empty() {
+                witness_hook_mutations(outcome.mutation_witnesses).await?;
+            }
             post_model_contexts.extend(outcome.additional_contexts);
             if let Some(feedback) = outcome.feedback {
                 post_model_contexts.push(feedback);

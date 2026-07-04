@@ -72,6 +72,12 @@ turn/environment context, attachments, and tool definitions. It returns the
 compiled model-visible context plus diagnostics for dropped entries, retained
 text bytes, and truncated text bytes.
 
+Hooks are host-scope debug tooling. They are not declared through agent
+manifests; manifest `[hooks]` remains reserved, and replayable control should be
+modeled as witnessed couplings. While host hooks still exist, mutating hook
+outcomes are recorded as secret-free mutation witness observations before the
+runtime applies them.
+
 Provider-specific context policy still runs after that kernel compilation in
 `CanonicalProviderRuntimeFactory` when the client exposes capabilities.
 The runtime emits a `context_compiled` event after both compilation passes so

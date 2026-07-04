@@ -603,6 +603,9 @@ The V1 app-server implements the Codex TUI-critical request subset:
 Schema-valid friendly stubs keep the client calm for catalog/config surfaces
 such as `skills/list`, `plugin/list`, `hooks/list`,
 `account/rateLimits/read`, `config/read`, and `configRequirements/read`.
+`hooks/list` returns `witnessing: true` to report that mutating host debug hook
+outcomes are witnessed before they take effect; it does not expose a manifest
+hook catalog.
 `mcpServerStatus/list` remains as a compatibility alias for `mcpSource/list`.
 `config/read` additionally reports the app-server's
 absolute working directory as `config.cwd`, so clients can discover a real

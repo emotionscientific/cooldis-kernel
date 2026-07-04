@@ -40,7 +40,7 @@ agent declaration
 + capability bindings
 + resources
 + context pipeline
-+ hooks and grants
++ couplings and grants
 + placement requirements
 -> governed agent runtime
 ```

@@ -5,10 +5,11 @@ use crate::{
     COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent,
     CanonicalMessage, CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError,
     CooldisResult, EventKind, EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec,
-    HookPipeline, HookRunRecord, KernelNotifyOperationProvider, KernelOperationDispatcher,
-    KernelProcessOperationProvider, KernelThreadOperationProvider, KernelThreadSpawnAgentResolver,
-    NewEventRecord, OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi,
-    ProviderClient, ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
+    HookMutationWitness, HookPipeline, HookRunRecord, KernelNotifyOperationProvider,
+    KernelOperationDispatcher, KernelProcessOperationProvider, KernelThreadOperationProvider,
+    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationProvenance,
+    OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient,
+    ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
     ReplayTransformCounts, RuntimeEventKind, RuntimeModelRequestErrorClass,
     RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
     RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
@@ -33,6 +34,9 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 const MAX_TOOL_ROUTER_ROUNDS: usize = 8;
+const HOOK_MUTATION_WITNESS_OBSERVATION_KIND: &str = "host.hook.mutation_witnessed";
+const HOOK_MUTATION_WITNESS_OBSERVATION_SCHEMA_V1: &str =
+    "cooldis.observation.host_hook_mutation/1";
 
 fn default_process_dispatcher_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -212,6 +216,7 @@ impl CanonicalProviderRuntimeFactory {
         self
     }
 
+    // lexicon-allow: hook - existing host debug hook API name retained for compatibility.
     pub fn with_hook_pipeline(mut self, hook_pipeline: Arc<HookPipeline>) -> Self {
         self.hook_pipeline = Some(hook_pipeline);
         self
@@ -508,6 +513,7 @@ impl CanonicalProviderRuntime {
             )
             .await;
         emit_hook_records(events, coordinates, &outcome.records);
+        append_hook_mutation_witnesses(services, coordinates, outcome.mutation_witnesses).await?;
         append_hook_contexts(
             services,
             coordinates,
@@ -957,6 +963,12 @@ async fn run_compaction(
             )
             .await;
         emit_hook_records(events, turn_context.coordinates(), &outcome.records);
+        append_hook_mutation_witnesses(
+            services,
+            turn_context.coordinates(),
+            outcome.mutation_witnesses,
+        )
+        .await?;
         if outcome.should_stop {
             emit_runtime_event(
                 events,
@@ -1018,6 +1030,12 @@ async fn run_compaction(
             )
             .await;
         emit_hook_records(events, turn_context.coordinates(), &outcome.records);
+        append_hook_mutation_witnesses(
+            services,
+            turn_context.coordinates(),
+            outcome.mutation_witnesses,
+        )
+        .await?;
         if outcome.should_stop {
             emit_runtime_event(
                 events,
@@ -1456,6 +1474,19 @@ async fn run_provider_turn(
             )
             .await;
         emit_hook_records(events, coordinates, &outcome.records);
+        if let Err(err) =
+            append_hook_mutation_witnesses(services, coordinates, outcome.mutation_witnesses).await
+        {
+            fail_provider_turn(
+                coordinates,
+                thread_id,
+                events,
+                status,
+                "hook_pipeline",
+                err.to_string(),
+            );
+            return true;
+        }
         if let Err(err) = append_hook_contexts(
             services,
             coordinates,
@@ -2203,17 +2234,25 @@ async fn execute_tool_call_with_interceptor(
     arguments: Value,
     snapshot_id: String,
 ) -> CooldisResult<()> {
-    let outcome = interceptor
-        .execute(
-            ToolExecutionRequest {
-                turn_context,
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-                arguments,
-            },
-            |spec| emit_hook_started(events, turn_context.coordinates(), spec),
-        )
-        .await?;
+    let witness_coordinates = turn_context.coordinates().clone();
+    let outcome =
+        interceptor
+            .execute_with_witnessing(
+                ToolExecutionRequest {
+                    turn_context,
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    arguments,
+                },
+                |spec| emit_hook_started(events, turn_context.coordinates(), spec),
+                |witnesses| {
+                    let coordinates = witness_coordinates.clone();
+                    async move {
+                        append_hook_mutation_witnesses(services, &coordinates, witnesses).await
+                    }
+                },
+            )
+            .await?;
     emit_hook_records(events, turn_context.coordinates(), &outcome.hook_records);
     if let Some(permission_decision) = &outcome.permission_decision {
         let (decision, reason) = match permission_decision {
@@ -2730,6 +2769,43 @@ async fn append_hook_contexts(
     Ok(())
 }
 
+async fn append_hook_mutation_witnesses(
+    services: &RuntimeServices,
+    coordinates: &crate::ThreadCoordinates,
+    witnesses: Vec<HookMutationWitness>,
+) -> CooldisResult<()> {
+    if witnesses.is_empty() {
+        return Ok(());
+    }
+    let store = services.runtime_store();
+    for witness in witnesses {
+        let mut payload = serde_json::to_value(&witness)
+            .map_err(|err| CooldisError::History(format!("hook witness codec failed: {err}")))?;
+        if let Some(payload) = payload.as_object_mut() {
+            payload.insert(
+                "schema".to_string(),
+                serde_json::json!(HOOK_MUTATION_WITNESS_OBSERVATION_SCHEMA_V1),
+            );
+            payload.insert("witnessing".to_string(), serde_json::json!(true));
+        }
+        let record = NewObservationRecord::new(
+            HOOK_MUTATION_WITNESS_OBSERVATION_KIND,
+            coordinates.clone(),
+            payload,
+        )
+        .with_provenance(ObservationProvenance {
+            derivation_strategy: "host.hook.mutation_witnessing".to_string(),
+            derivation_version: "v1".to_string(),
+            ..ObservationProvenance::default()
+        });
+        store
+            .append_observation(record)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+    }
+    Ok(())
+}
+
 fn steering_context(turn_id: &str, input: &TurnInput) -> Option<String> {
     let text = input.text_projection();
     if text.trim().is_empty() {
@@ -2761,6 +2837,12 @@ async fn run_stop_hooks(
         )
         .await;
     emit_hook_records(events, turn_context.coordinates(), &outcome.records);
+    append_hook_mutation_witnesses(
+        services,
+        turn_context.coordinates(),
+        outcome.mutation_witnesses,
+    )
+    .await?;
     append_hook_contexts(
         services,
         turn_context.coordinates(),
