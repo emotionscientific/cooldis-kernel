@@ -664,13 +664,13 @@ fn validate_discharges(
         && discharges.len() > limit as usize
     {
         return Err(format!(
-            "coupling {:?} exceeded max_discharge_events budget",
+            "budget: coupling {:?} exceeded max_discharge_events budget",
             coupling.id
         ));
     }
     if discharges.len() > remaining_discharge_budget as usize {
         return Err(format!(
-            "coupling {:?} exceeded scheduler discharge budget",
+            "budget: coupling {:?} exceeded scheduler discharge budget",
             coupling.id
         ));
     }
@@ -684,13 +684,13 @@ fn validate_discharges(
     for discharge in discharges {
         if discharge.stream != coupling.sink.stream {
             return Err(format!(
-                "coupling {:?} cannot discharge to sink stream {:?}; bound sink is {:?}",
+                "sink-violation: coupling {:?} cannot discharge to sink stream {:?}; bound sink is {:?}",
                 coupling.id, discharge.stream, coupling.sink.stream
             ));
         }
         if !coupling.sink.kinds.contains(&discharge.kind) {
             return Err(format!(
-                "coupling {:?} cannot discharge sink kind {:?}",
+                "sink-violation: coupling {:?} cannot discharge sink kind {:?}",
                 coupling.id, discharge.kind
             ));
         }

@@ -189,6 +189,44 @@ same instructions. End-user distribution should come later through the npx
 wrapper, the release binary, or a quick-start/template init helper that installs
 the skill into the user's dev environment.
 
+## Custom Coupling Guests
+
+Custom coupling guests are normal Cooldis Wasm operations with a narrower
+contract:
+
+```text
+input:  cooldis.coupling.invocation/0.1
+output: cooldis.coupling.discharge/0.1
+```
+
+The invocation JSON contains the trigger event, the selected source events,
+manifest config, and invocation metadata (`coupling_id`, `thread_id`, `depth`).
+The discharge JSON contains proposed events only:
+
+```json
+{
+  "abi": "cooldis.coupling.discharge/0.1",
+  "events": [
+    {
+      "stream": "derived:counter",
+      "kind": "placement.decision",
+      "payload": { "count": 3 }
+    }
+  ]
+}
+```
+
+The kernel, not the guest, stamps origin and provenance and rejects undeclared
+sink streams/kinds without partial appends. Coupling guests run as pure compute:
+no HTTP, VFS, secrets, or other effectful imports are available. Put effectful
+work behind tools and let couplings fold event streams into deterministic
+derived events.
+
+The minimal Rust example is `examples/wasm-counter-coupling`. It uses
+`cooldis-guest-sdk::read_coupling_invocation` and
+`write_coupling_discharge` to emit one derived event every `config.every`
+matching source events.
+
 ## First No-Key Example: `data.csv_profile`
 
 Use a CSV profiler instead of a network search wrapper. It is useful, exact, and

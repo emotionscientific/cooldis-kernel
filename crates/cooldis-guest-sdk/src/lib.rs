@@ -8,9 +8,12 @@
 //! the `cat` / `tail` fixture.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 pub const OPERATION_ABI: &str = "cooldis.operation/0.1";
 pub const HTTP_ABI: &str = "cooldis.net.http/0.1";
+pub const COUPLING_INVOCATION_ABI: &str = "cooldis.coupling.invocation/0.1";
+pub const COUPLING_DISCHARGE_ABI: &str = "cooldis.coupling.discharge/0.1";
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_INVALID_ARGUMENT: i32 = 1;
 pub const STATUS_NOT_FOUND: i32 = 2;
@@ -106,6 +109,71 @@ pub struct OperationDefinition {
     pub mode: OperationMode,
     #[serde(default)]
     pub required_capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingInvocation {
+    pub abi: String,
+    pub trigger_event: CouplingInvocationEvent,
+    #[serde(default)]
+    pub selected_events: Vec<CouplingInvocationEvent>,
+    #[serde(default)]
+    pub config: JsonValue,
+    pub invocation_meta: CouplingInvocationMeta,
+}
+
+impl CouplingInvocation {
+    pub fn from_json_slice(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingInvocationEvent {
+    pub id: String,
+    pub stream_id: String,
+    pub sequence: i64,
+    pub kind: String,
+    pub origin: String,
+    #[serde(default)]
+    pub payload: JsonValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CouplingInvocationMeta {
+    pub coupling_id: String,
+    pub thread_id: String,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingDischarge {
+    pub abi: String,
+    #[serde(default)]
+    pub events: Vec<CouplingDischargeEvent>,
+}
+
+impl CouplingDischarge {
+    pub fn new(events: Vec<CouplingDischargeEvent>) -> Self {
+        Self {
+            abi: COUPLING_DISCHARGE_ABI.to_string(),
+            events,
+        }
+    }
+
+    pub fn to_json_vec(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingDischargeEvent {
+    pub stream: String,
+    pub kind: String,
+    #[serde(default)]
+    pub payload: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<JsonValue>,
 }
 
 impl OperationDefinition {
@@ -260,8 +328,39 @@ pub fn read_source(source: Source, buffer: &mut [u8]) -> Result<usize, StatusCod
     call_source_read(source, buffer)
 }
 
+pub fn read_source_to_end(source: Source) -> Result<Vec<u8>, StatusCode> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let n = read_source(source, &mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..n]);
+        if n < buffer.len() {
+            break;
+        }
+    }
+    Ok(bytes)
+}
+
+pub fn read_coupling_invocation(source: Source) -> Result<CouplingInvocation, StatusCode> {
+    let bytes = read_source_to_end(source)?;
+    CouplingInvocation::from_json_slice(&bytes).map_err(|_| StatusCode::InvalidArgument)
+}
+
 pub fn write_sink(sink: Sink, bytes: &[u8]) -> Result<usize, StatusCode> {
     call_sink_write(sink, bytes)
+}
+
+pub fn write_coupling_discharge(
+    sink: Sink,
+    discharge: &CouplingDischarge,
+) -> Result<usize, StatusCode> {
+    let bytes = discharge
+        .to_json_vec()
+        .map_err(|_| StatusCode::InvalidArgument)?;
+    write_sink(sink, &bytes)
 }
 
 pub fn emit_event(
@@ -523,6 +622,22 @@ mod tests {
         assert_eq!(value["method"], "POST");
         assert_eq!(value["headers"][0][0], "content-type");
         assert_eq!(value["secret_headers"][0][1], "EXAMPLE_API_KEY");
+    }
+
+    #[test]
+    fn coupling_discharge_serializes_to_cooldis_coupling_abi() {
+        let discharge = CouplingDischarge::new(vec![CouplingDischargeEvent {
+            stream: "derived:counter".to_string(),
+            kind: "placement.decision".to_string(),
+            payload: serde_json::json!({"count": 3}),
+            provenance: Some(serde_json::json!({"guest": "ignored"})),
+        }]);
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&discharge.to_json_vec().unwrap()).unwrap();
+        assert_eq!(value["abi"], COUPLING_DISCHARGE_ABI);
+        assert_eq!(value["events"][0]["stream"], "derived:counter");
+        assert_eq!(value["events"][0]["provenance"]["guest"], "ignored");
     }
 
     #[test]

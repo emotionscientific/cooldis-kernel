@@ -775,12 +775,10 @@ fn coupling_config_hash_is_canonical_for_object_key_order() {
 }
 
 #[tokio::test]
-async fn manifest_coupling_custom_id_fails_closed_at_bind() {
+async fn manifest_coupling_custom_id_binds_to_wasm_executor() {
     let root = temp_dir("manifest-bind-custom-coupling-id");
     let operation_root = root.join("operations");
-    let operation =
-        publish_multi_operation_record(&operation_root, "custom_policy", &[("check", vec![])])
-            .await;
+    let operation = publish_json_operation_record(&operation_root, "custom_policy", "check").await;
     let record = publish_agent_manifest(
         &root,
         &manifest_with_coupling(
@@ -802,7 +800,7 @@ async fn manifest_coupling_custom_id_fails_closed_at_bind() {
     let surface = AgentManifestProviderSurface::single("local_offline", "echo")
         .with_supports_streaming(false);
 
-    let err = bind_published_agent_record(
+    let bound = bind_published_agent_record(
         &record,
         None,
         &surface,
@@ -813,12 +811,17 @@ async fn manifest_coupling_custom_id_fails_closed_at_bind() {
         &AgentManifestBindOverrides::default(),
     )
     .await
-    .unwrap_err();
-    let diagnostic = err.to_string();
+    .unwrap();
 
-    assert!(diagnostic.contains("org.example.custom_policy"));
-    assert!(diagnostic.contains("no registered executor"));
-    assert!(diagnostic.contains("custom coupling execution is not yet available"));
+    assert_eq!(bound.couplings.len(), 1);
+    let coupling = &bound.couplings[0];
+    assert_eq!(coupling.id, "org.example.custom_policy");
+    assert_eq!(coupling.function.name, "custom_policy");
+    assert_eq!(coupling.function.operation_name.as_deref(), Some("check"));
+    assert_eq!(
+        coupling.function.artifact_hash,
+        operation.active_artifact_hash
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -965,10 +968,6 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
         assert!(diagnostic.contains(&template.id), "{diagnostic}");
         assert!(
             diagnostic.contains("no registered executor"),
-            "{diagnostic}"
-        );
-        assert!(
-            diagnostic.contains("custom coupling execution is not yet available"),
             "{diagnostic}"
         );
     }
@@ -1580,6 +1579,73 @@ async fn publish_multi_operation_record(
         })
         .await
         .unwrap()
+}
+
+async fn publish_json_operation_record(
+    root: &Path,
+    record_name: &str,
+    operation_name: &str,
+) -> crate::PublishedOperationRecord {
+    fs::create_dir_all(root).unwrap();
+    let registry = LocalOperationRegistry::new(root);
+    let wasm = wat::parse_str(json_operation_guest(operation_name)).unwrap();
+    let artifact = root.join(format!("{record_name}.wasm"));
+    fs::write(&artifact, wasm).unwrap();
+    registry
+        .publish_artifact(crate::PublishOperationRequest {
+            name: record_name.to_string(),
+            artifact_path: artifact.clone(),
+            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
+            interface: None,
+            capability_grants: Default::default(),
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap()
+}
+
+fn json_operation_guest(operation_name: &str) -> String {
+    let manifest = serde_json::json!({
+        "abi": "cooldis.operation/0.1",
+        "operations": [{
+            "id": 1,
+            "name": operation_name,
+            "input": "json",
+            "output": "json",
+            "events": "none",
+            "mode": "sync",
+            "required_capabilities": []
+        }]
+    })
+    .to_string();
+    format!(
+        r#"
+            (module
+              (import "cooldis_0.1" "sink_write" (func $sink_write (param i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 4096) "{manifest}")
+              (func (export "__cooldis_describe_module__") (param $sink i32) (result i32)
+                i32.const 0
+                i32.const {manifest_len}
+                i32.store
+                local.get $sink
+                i32.const 4096
+                i32.const 0
+                call $sink_write
+                drop
+                i32.const 0)
+              (func (export "__cooldis_call_operation__")
+                (param $op i32)
+                (param $invocation i32)
+                (param $source i32)
+                (param $output i32)
+                (param $events i32)
+                (result i32)
+                i32.const 0))
+            "#,
+        manifest = wat_bytes(manifest.as_bytes()),
+        manifest_len = manifest.len(),
+    )
 }
 
 fn multi_operation_guest_with_required_capabilities(operations: &[(&str, Vec<&str>)]) -> String {

@@ -62,6 +62,7 @@ pub mod kernel {
     pub mod secret_store;
     pub mod stdlib_couplings;
     pub mod supervisor;
+    pub mod wasm_couplings;
 }
 
 #[doc(hidden)]
@@ -311,12 +312,13 @@ pub use kernel::runtime_host::{
     RuntimeHostSnapshot, RuntimeKernelControl, RuntimeModelRequestErrorClass,
     RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
     RuntimeServices, RuntimeTerminalState, RuntimeThreadHandle, RuntimeToolLogLevel, RuntimeUsage,
-    THREAD_BOUND_COUPLING_SET_METADATA, ThreadCheckpoint, ThreadCheckpointId, ThreadCommand,
-    ThreadContext, ThreadCoordinates, ThreadEvent, ThreadId, ThreadInitiationSource,
-    ThreadInteractionKind, ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus,
-    ThreadLineage, ThreadScope, ThreadSignal, ThreadSignalId, ThreadSignalKind,
-    ThreadSpawnAttribution, ThreadStatus, ThreadTopology, TurnBudget, TurnContent, TurnContext,
-    TurnContextSnapshot, TurnInput, TurnSubmissionMode, emit_runtime_event,
+    THREAD_BOUND_COUPLING_SET_METADATA, THREAD_OPERATION_REGISTRY_ROOT_METADATA, ThreadCheckpoint,
+    ThreadCheckpointId, ThreadCommand, ThreadContext, ThreadCoordinates, ThreadEvent, ThreadId,
+    ThreadInitiationSource, ThreadInteractionKind, ThreadLifecycleRecord, ThreadLifecycleSink,
+    ThreadLifecycleStatus, ThreadLineage, ThreadScope, ThreadSignal, ThreadSignalId,
+    ThreadSignalKind, ThreadSpawnAttribution, ThreadStatus, ThreadTopology, TurnBudget,
+    TurnContent, TurnContext, TurnContextSnapshot, TurnInput, TurnSubmissionMode,
+    emit_runtime_event,
 };
 pub use kernel::secret_store::{
     ManifestSecretResolution, RedactedSecretValue, ResolvedSecret, SecretResolver,
@@ -340,6 +342,7 @@ pub use kernel::supervisor::{
     TenantLifecycleSnapshot, TenantRegistration, TenantRuntimeConfig, TenantRuntimeContext,
     TenantRuntimeContextDescriptor, TenantSnapshot, ThreadStartRequest,
 };
+pub use kernel::wasm_couplings::WasmCouplingExecutor;
 pub use operations::kernel_packages::{
     CHANNEL_EMIT_CAPABILITY, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE,
     COOLDIS_PROCESS_PACKAGE, COOLDIS_THREADS_PACKAGE, KERNEL_RUNTIME_KIND,

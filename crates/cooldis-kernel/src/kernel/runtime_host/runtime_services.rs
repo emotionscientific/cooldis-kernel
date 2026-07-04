@@ -8,7 +8,9 @@ use super::context_read_plan::{
 use super::runtime_utils::unix_timestamp_ms;
 use super::{CooldisError, CooldisResult, RuntimeKernelControl, TurnInput};
 use crate::agent::manifest_bind::BoundCouplingSet;
-use crate::kernel::coupling_executor_registry::registered_coupling_executor_supports_template;
+use crate::kernel::coupling_executor_registry::{
+    CouplingExecutorRegistry, registered_coupling_executor_supports_template,
+};
 use crate::kernel::coupling_scheduler::CouplingScheduler;
 use crate::kernel::history::{
     CONTEXT_READ_PLAN_SCHEMA_V1, CanonicalMessage, EventKind, EventProvenance, EventRecord,
@@ -16,10 +18,10 @@ use crate::kernel::history::{
     RuntimeStore, SessionContext, SessionContextSourceCut, SessionEntry, SessionEntryId,
     SessionEntryKind,
 };
-use crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
 use cooldis_runtime_contracts::ThreadCoordinates;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -69,6 +71,7 @@ pub struct RuntimeServices {
     execution_policy: RuntimeExecutionPolicy,
     kernel_control: Option<RuntimeKernelControl>,
     bound_coupling_set: Option<BoundCouplingSet>,
+    operation_registry_root: Option<PathBuf>,
 }
 
 impl RuntimeServices {
@@ -81,6 +84,7 @@ impl RuntimeServices {
             execution_policy,
             kernel_control: None,
             bound_coupling_set: None,
+            operation_registry_root: None,
         }
     }
 
@@ -91,6 +95,11 @@ impl RuntimeServices {
 
     pub fn with_bound_coupling_set(mut self, coupling_set: BoundCouplingSet) -> Self {
         self.bound_coupling_set = Some(coupling_set);
+        self
+    }
+
+    pub fn with_operation_registry_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.operation_registry_root = Some(root.into());
         self
     }
 
@@ -185,32 +194,31 @@ impl RuntimeServices {
             .into_iter()
             .next()
             .ok_or_else(|| CooldisError::History("event append returned no record".to_string()))?;
-        self.run_bound_stdlib_couplings(vec![appended.clone()])
-            .await?;
+        self.run_bound_couplings(vec![appended.clone()]).await?;
         Ok(appended)
     }
 
-    async fn run_bound_stdlib_couplings(&self, appended: Vec<EventRecord>) -> CooldisResult<()> {
+    async fn run_bound_couplings(&self, appended: Vec<EventRecord>) -> CooldisResult<()> {
         if appended.is_empty() {
             return Ok(());
         }
         let Some(coupling_set) = &self.bound_coupling_set else {
             return Ok(());
         };
-        let stdlib_couplings = coupling_set
+        let executable_couplings = coupling_set
             .couplings
             .iter()
             .filter(|coupling| registered_coupling_executor_supports_template(&coupling.id))
             .cloned()
             .collect::<Vec<_>>();
-        if stdlib_couplings.is_empty() {
+        if executable_couplings.is_empty() {
             return Ok(());
         }
-        let executor = StdlibCouplingExecutor;
+        let executor = CouplingExecutorRegistry::new(self.operation_registry_root.clone());
         let scheduler = CouplingScheduler::new(self.runtime_store.as_ref(), &executor);
         scheduler
             .run_batch(
-                &BoundCouplingSet::new(coupling_set.snapshot_id.clone(), stdlib_couplings),
+                &BoundCouplingSet::new(coupling_set.snapshot_id.clone(), executable_couplings),
                 appended,
             )
             .await?;

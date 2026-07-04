@@ -19,10 +19,17 @@ use crate::agent::manifest_schema::{
 use crate::agent::tool_universe::{
     PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
 };
-use crate::kernel::coupling_executor_registry::registered_coupling_executor_supports_template;
+use crate::kernel::coupling_executor_registry::{
+    RegisteredCouplingExecutorKind, registered_coupling_executor_for_id,
+};
 use crate::{
     COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, EventKind, LlmProviderRecord,
-    LocalOperationRegistry, ProviderCapabilityRecord, THREADS_SPAWN_CAPABILITY,
+    LocalOperationRegistry, ProviderCapabilityRecord, PublishedOperationSource,
+    THREADS_SPAWN_CAPABILITY,
+};
+use cooldis_abi::{
+    COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, WasmOperationDefinition,
+    WasmOperationValueKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -413,10 +420,18 @@ fn bind_coupling(
     coupling: &AgentManifestCoupling,
     operation_registry_root: Option<&Path>,
 ) -> CooldisResult<BoundCoupling> {
-    if !registered_coupling_executor_supports_template(&coupling.id) {
-        return Err(CooldisError::RuntimeFactory(format!(
-            "no registered executor for coupling id {:?}; custom coupling execution is not yet available",
+    let executor_kind = registered_coupling_executor_for_id(&coupling.id).ok_or_else(|| {
+        CooldisError::RuntimeFactory(format!(
+            "no registered executor for coupling id {:?}",
             coupling.id
+        ))
+    })?;
+    if executor_kind == RegisteredCouplingExecutorKind::Wasm
+        && !coupling.function_ref.starts_with("op://")
+    {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {:?} function_ref {:?} must be an op:// Wasm operation ref",
+            coupling.id, coupling.function_ref
         )));
     }
     let registry_root = operation_registry_root.ok_or_else(|| {
@@ -456,6 +471,12 @@ fn bind_coupling(
         &coupling.grants,
         registry_root,
     )?;
+    let operation_name = match executor_kind {
+        RegisteredCouplingExecutorKind::Stdlib => verification.operation.clone(),
+        RegisteredCouplingExecutorKind::Wasm => {
+            wasm_coupling_operation_name(&coupling.id, &coupling.function_ref, &verification)?
+        }
+    };
     let config_hash = coupling_config_hash(&coupling.config)?;
     Ok(BoundCoupling {
         id: coupling.id.clone(),
@@ -469,13 +490,76 @@ fn bind_coupling(
         function: BoundCouplingFunction {
             name: verification.name,
             artifact_hash: verification.artifact_hash,
-            operation_name: verification.operation,
+            operation_name,
         },
         grants: verification.grants.into_iter().collect(),
         budget: coupling.budget.clone(),
         config: coupling.config.clone(),
         config_hash,
     })
+}
+
+fn wasm_coupling_operation_name(
+    coupling_id: &str,
+    function_ref: &str,
+    verification: &VerifiedOperationRef,
+) -> CooldisResult<Option<String>> {
+    if !matches!(
+        verification.record.source,
+        PublishedOperationSource::Wasm { .. }
+    ) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} must resolve to a Wasm operation record"
+        )));
+    }
+    let operation = selected_wasm_coupling_operation(coupling_id, function_ref, verification)?;
+    if operation.input != WasmOperationValueKind::Json {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} must declare json input for {COUPLING_INVOCATION_ABI}",
+            operation.name
+        )));
+    }
+    if operation.output != WasmOperationValueKind::Json {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} must declare json output for {COUPLING_DISCHARGE_ABI}",
+            operation.name
+        )));
+    }
+    if !operation.required_capabilities.is_empty() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} declares effect capabilities; couplings are pure compute and must use config, selected events, and stream grants only",
+            operation.name
+        )));
+    }
+    Ok(Some(operation.name.clone()))
+}
+
+fn selected_wasm_coupling_operation<'a>(
+    coupling_id: &str,
+    function_ref: &str,
+    verification: &'a VerifiedOperationRef,
+) -> CooldisResult<&'a WasmOperationDefinition> {
+    if let Some(operation_name) = verification.operation.as_deref() {
+        return verification
+            .record
+            .manifest
+            .operation(operation_name)
+            .ok_or_else(|| {
+                unknown_operation_ref_error(
+                    "coupling",
+                    coupling_id,
+                    function_ref,
+                    &verification.record.name,
+                    &verification.record,
+                )
+            });
+    }
+    if verification.record.manifest.operations.len() == 1 {
+        return Ok(&verification.record.manifest.operations[0]);
+    }
+    Err(CooldisError::RuntimeFactory(format!(
+        "custom coupling {coupling_id:?} function_ref {function_ref:?} must select one operation with op://<record>/<operation>@sha256:<hash>"
+    )))
 }
 
 fn bind_coupling_source_selector(

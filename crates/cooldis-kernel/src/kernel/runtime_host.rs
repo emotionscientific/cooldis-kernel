@@ -8,6 +8,7 @@ use cooldis_process::CooldisProcessError;
 use cooldis_vbash::CooldisVirtualBashError;
 use cooldis_wasm::CooldisWasmError;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -58,6 +59,7 @@ pub use cooldis_runtime_contracts::{
 pub type CooldisResult<T> = Result<T, CooldisError>;
 
 pub const THREAD_BOUND_COUPLING_SET_METADATA: &str = "cooldis.agent.bound_coupling_set";
+pub const THREAD_OPERATION_REGISTRY_ROOT_METADATA: &str = "cooldis.agent.operation_registry_root";
 
 #[derive(Debug, Error)]
 pub enum CooldisError {
@@ -176,6 +178,13 @@ fn bound_coupling_set_from_metadata(
         .map_err(|err| {
             CooldisError::RuntimeFactory(format!("thread bound coupling set is invalid: {err}"))
         })
+}
+
+fn operation_registry_root_from_metadata(metadata: &BTreeMap<String, String>) -> Option<PathBuf> {
+    metadata
+        .get(THREAD_OPERATION_REGISTRY_ROOT_METADATA)
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Clone)]
@@ -339,6 +348,9 @@ impl RuntimeHost {
         .with_kernel_control(self.kernel_control());
         if let Some(coupling_set) = bound_coupling_set_from_metadata(&context.metadata)? {
             services = services.with_bound_coupling_set(coupling_set);
+        }
+        if let Some(root) = operation_registry_root_from_metadata(&context.metadata) {
+            services = services.with_operation_registry_root(root);
         }
         let runtime_services = services.clone();
 

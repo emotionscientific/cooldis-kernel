@@ -2072,6 +2072,7 @@ impl CooldisAppServer {
             &mut metadata,
             &bound_agent,
             params.runtime_overrides.as_ref(),
+            self.inner.capsule_bindings.registry_root.as_deref(),
         )?;
         let handle = self
             .inner
@@ -2450,6 +2451,7 @@ impl CooldisAppServer {
             &mut child_metadata,
             &bound_agent,
             params.runtime_overrides.as_ref(),
+            self.inner.capsule_bindings.registry_root.as_deref(),
         )?;
         child_metadata.insert(
             THREAD_REBIND_FORK_REASON_METADATA.to_string(),
@@ -2872,11 +2874,13 @@ impl CooldisAppServer {
         &self,
         params: CapsuleBindingResolveParams,
     ) -> Result<Value, JsonRpcErrorError> {
+        // lexicon-allow: capsule - preserves existing app-server operation binding API.
         let registry = LocalOperationRegistry::new(self.capsule_registry_root()?);
         let tenant_id = params
             .tenant_id
             .unwrap_or_else(|| self.inner.tenant_id.clone());
         let request = if let Some(thread_id) = params.thread_id {
+            // lexicon-allow: capsule - preserves existing app-server operation binding API.
             CapsuleBindingResolutionRequest::for_thread(tenant_id, thread_id)
         } else {
             // lexicon-allow: capsule - preserves existing app-server operation binding API.

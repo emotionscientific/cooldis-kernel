@@ -67,9 +67,9 @@ what you approve, and run it under policy.
 ## Current Status
 
 Cooldis is experimental. The repository is focused on V1 runtime primitives:
-agent manifests, operation publishing, ABI contracts, local runtime execution,
-provider adapters, virtual bash, VFS, daemon/RPC surfaces, and the proof path for
-packageable local agents.
+agent manifests, operation publishing, ABI contracts, custom Wasm couplings,
+local runtime execution, provider adapters, virtual bash, VFS, daemon/RPC
+surfaces, and the proof path for packageable local agents.
 
 The managed cloud, public package registry, private marketplace, and stateful
 harness product layer are V2 direction.

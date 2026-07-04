@@ -4,7 +4,8 @@ use cooldis::{
     CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, LocalOperationRegistry,
     LocalPluginCatalog, LocalPluginCatalogConfig, ProviderApi, PublishOperationRequest,
     PublishedOperationSource, RuntimeEventKind, RuntimeHost, RustWasmBuildOptions,
-    ThreadCoordinates, ThreadTopology, build_rust_wasm_module,
+    ThreadCoordinates, ThreadTopology, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+    build_rust_wasm_module,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -149,6 +150,54 @@ async fn agent_authored_wasm_operation_is_published_and_provider_invoked() {
     host.shutdown_thread(thread.context().coordinates.thread_id)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn example_counter_coupling_builds_and_emits_discharge() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let example_module = repo.join("../../examples/wasm-counter-coupling");
+    let build = build_rust_wasm_module(RustWasmBuildOptions::new(&example_module)).unwrap();
+    let factory = WasmRuntimeFactory::new(WasmRuntimeConfig::new(WasmRuntimeArtifact::path(
+        build.artifact_path,
+    )))
+    .unwrap();
+    let invocation = json!({
+        "abi": "cooldis.coupling.invocation/0.1",
+        "trigger_event": {
+            "id": "event-3",
+            "stream_id": "thread:session",
+            "sequence": 3,
+            "kind": "turn.completed",
+            "origin": "witnessed",
+            "payload": {}
+        },
+        "selected_events": [
+            {"id": "event-1", "stream_id": "thread:session", "sequence": 1, "kind": "turn.completed", "origin": "witnessed", "payload": {}},
+            {"id": "event-2", "stream_id": "thread:session", "sequence": 2, "kind": "turn.completed", "origin": "witnessed", "payload": {}},
+            {"id": "event-3", "stream_id": "thread:session", "sequence": 3, "kind": "turn.completed", "origin": "witnessed", "payload": {}}
+        ],
+        "config": {
+            "every": 3,
+            "sink_stream": "derived:counter",
+            "sink_kind": "placement.decision"
+        },
+        "invocation_meta": {
+            "coupling_id": "org.example.counter",
+            "thread_id": "session",
+            "depth": 0
+        }
+    });
+
+    let output = factory
+        .invoke_operation_bytes("fold_counter", serde_json::to_vec(&invocation).unwrap())
+        .await
+        .unwrap();
+    let discharge: Value = serde_json::from_slice(&output.output).unwrap();
+
+    assert_eq!(discharge["abi"], "cooldis.coupling.discharge/0.1");
+    assert_eq!(discharge["events"][0]["stream"], "derived:counter");
+    assert_eq!(discharge["events"][0]["kind"], "placement.decision");
+    assert_eq!(discharge["events"][0]["payload"]["count"], 3);
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {
