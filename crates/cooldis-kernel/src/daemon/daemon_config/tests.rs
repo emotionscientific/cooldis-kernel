@@ -109,6 +109,7 @@ fn invalid_egress_projection_regex_reports_rule_index() {
         enabled: true,
         policy: None,
         threading: None,
+        coalesce_bursts: None,
         ingress: None,
         egress_projection: vec![CooldisEgressProjectionRuleConfig {
             pattern: "[bad".to_string(),
@@ -127,6 +128,33 @@ fn invalid_egress_projection_regex_reports_rule_index() {
             error.contains("io.routes.telegram-main.egress_projection[0].pattern")
         })
     );
+}
+
+#[test]
+fn validates_coalesce_bursts_route_config() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "coalesce-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: Some("steer_when_active".to_string()),
+        threading: None,
+        coalesce_bursts: Some(CooldisCoalesceBurstsConfig {
+            window_ms: 0,
+            max_batch: 0,
+        }),
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(errors.iter().any(|error| error.contains("window_ms")));
+    assert!(errors.iter().any(|error| error.contains("max_batch")));
 }
 
 #[test]
@@ -421,6 +449,7 @@ fn validates_bad_queue_and_route_config() {
         enabled: true,
         policy: None,
         threading: None,
+        coalesce_bursts: None,
         ingress: None,
         egress_projection: Vec::new(),
         typing_simulation: None,
@@ -511,6 +540,7 @@ fn validates_telegram_route_shape() {
         enabled: true,
         policy: None,
         threading: None,
+        coalesce_bursts: None,
         ingress: None,
         egress_projection: Vec::new(),
         typing_simulation: None,
@@ -541,6 +571,7 @@ fn validates_single_clock_tick_route() {
             enabled: true,
             policy: None,
             threading: None,
+            coalesce_bursts: None,
             ingress: None,
             egress_projection: Vec::new(),
             typing_simulation: None,

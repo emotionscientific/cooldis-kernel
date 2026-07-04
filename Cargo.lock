@@ -600,6 +600,7 @@ name = "cooldis-io-pgqrs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "cooldis-io-core",
  "pgqrs",
  "rusqlite",

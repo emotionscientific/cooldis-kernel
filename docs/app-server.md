@@ -240,9 +240,9 @@ child store. Its result also includes `fork.sourceCut`, with
 
 `parentThreadId` remains the topology/control parent. `forkedFromId` is kept as
 a compatibility lineage alias on thread objects. New clients should use
-`fork.sourceCut` as the exact split point. Policy-level
-`AdmissionDecision::Fork` is still not wired through the daemon bridge in this
-release.
+`fork.sourceCut` as the exact split point. Daemon IO routes can also select
+`fork_on_new_dm`; the bridge uses the same checkpoint fork lineage and records
+the fork with `thread.spawned`.
 
 ## Manifest Starts
 

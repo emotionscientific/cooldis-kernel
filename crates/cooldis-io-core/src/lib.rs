@@ -821,6 +821,8 @@ pub trait IngressQueueStore: IngressSink {
 
     async fn complete_ingress(&self, message_id: &str) -> IoResult<()>;
 
+    async fn hold_ingress_until(&self, message_id: &str, visible_at_ms: u64) -> IoResult<()>;
+
     async fn retry_ingress(&self, message_id: &str, reason: &str) -> IoResult<()>;
 }
 

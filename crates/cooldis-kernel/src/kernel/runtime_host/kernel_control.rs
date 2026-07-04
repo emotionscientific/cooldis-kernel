@@ -93,6 +93,7 @@ async fn append_thread_spawned_event(
         child_policy_hash,
         granted,
         inputs_hash,
+        fork: None,
     };
     let mut value = serde_json::to_value(payload).map_err(|err| {
         CooldisError::History(format!("thread.spawned payload codec failed: {err}"))

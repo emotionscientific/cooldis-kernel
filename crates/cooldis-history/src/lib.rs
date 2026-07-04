@@ -528,6 +528,25 @@ pub struct ThreadSpawnedPayload {
     /// Serialized grant set as recorded at spawn.
     pub granted: Vec<String>,
     pub inputs_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ThreadSpawnedForkPayload>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThreadSpawnedForkPayload {
+    pub mode: String,
+    #[serde(rename = "sourceCut")]
+    pub source_cut: ThreadSpawnedForkSourceCutPayload,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSpawnedForkSourceCutPayload {
+    pub thread_id: ThreadId,
+    pub checkpoint_id: ThreadCheckpointId,
+    pub leaf_entry_id: Option<SessionEntryId>,
+    pub stream_id: EventStreamId,
+    pub stream_to_sequence: Option<EventSequence>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1533,7 +1552,33 @@ fn thread_spawned_payload_schema_v1() -> Value {
             "child_manifest_hash": {"type": "string"},
             "child_policy_hash": {"type": "string"},
             "granted": grant_set_schema_v1(),
-            "inputs_hash": {"type": "string"}
+            "inputs_hash": {"type": "string"},
+            "fork": {
+                "type": "object",
+                "required": ["mode", "sourceCut"],
+                "additionalProperties": true,
+                "properties": {
+                    "mode": {"type": "string"},
+                    "sourceCut": {
+                        "type": "object",
+                        "required": [
+                            "threadId",
+                            "checkpointId",
+                            "leafEntryId",
+                            "streamId",
+                            "streamToSequence"
+                        ],
+                        "additionalProperties": true,
+                        "properties": {
+                            "threadId": {"type": "string"},
+                            "checkpointId": {"type": "string"},
+                            "leafEntryId": {"type": ["string", "null"]},
+                            "streamId": {"type": "string"},
+                            "streamToSequence": {"type": ["integer", "null"]}
+                        }
+                    }
+                }
+            }
         }
     })
 }

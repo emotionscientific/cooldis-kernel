@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     AppServerListenAddr, CooldisAppServerConfig, CooldisDaemonClockRoute, DaemonClock, EventKind,
     EventStore, MandateCatchUpPolicy, MandateSchedulePayload, MandateStartRequest, StreamCursorV1,
-    TimerFiredPayload, control_stream_id, revoke_mandate, start_mandate,
+    ThreadSpawnedPayload, TimerFiredPayload, control_stream_id, revoke_mandate, start_mandate,
 };
 use chrono::{DateTime, TimeZone, Utc};
 use cooldis_io_core::{
@@ -130,6 +130,10 @@ fn test_envelope(text: &str) -> IngressEnvelope {
 }
 
 fn telegram_queue_envelope(text: &str) -> IngressEnvelope {
+    telegram_queue_envelope_with_update(text, "999")
+}
+
+fn telegram_queue_envelope_with_update(text: &str, update_id: &str) -> IngressEnvelope {
     let source = IoSource::new("telegram.bot", "main");
     IngressEnvelope::new(
         source.clone(),
@@ -138,10 +142,50 @@ fn telegram_queue_envelope(text: &str) -> IngressEnvelope {
         now_ms(),
     )
     .with_actor(IoActor::new("telegram:user:42"))
-    .with_dedupe_key(IoDedupeKey::for_source(&source, "update:999"))
+    .with_dedupe_key(IoDedupeKey::for_source(
+        &source,
+        format!("update:{update_id}"),
+    ))
     .with_metadata("cooldis_route_id", "main")
     .with_metadata("cooldis_route_policy", "queue_per_conversation")
     .with_metadata("telegram_message_id", "555")
+}
+
+fn coalesce_envelope(
+    text: &str,
+    update_id: &str,
+    window_ms: u64,
+    max_batch: usize,
+) -> IngressEnvelope {
+    telegram_queue_envelope_with_update(text, update_id)
+        .with_metadata("cooldis_route_policy", "coalesce_bursts")
+        .with_metadata("cooldis_coalesce_window_ms", window_ms.to_string())
+        .with_metadata("cooldis_coalesce_max_batch", max_batch.to_string())
+}
+
+fn expired_coalesce_envelope(
+    text: &str,
+    update_id: &str,
+    window_ms: u64,
+    max_batch: usize,
+) -> IngressEnvelope {
+    let mut envelope = coalesce_envelope(text, update_id, window_ms, max_batch);
+    envelope.received_at_ms = now_ms().saturating_sub(window_ms + 10);
+    envelope
+}
+
+fn steer_coalesce_envelope(
+    text: &str,
+    update_id: &str,
+    window_ms: u64,
+    max_batch: usize,
+) -> IngressEnvelope {
+    let mut envelope = expired_coalesce_envelope(text, update_id, window_ms, max_batch)
+        .with_metadata("cooldis_route_policy", "steer_when_active");
+    envelope
+        .metadata
+        .insert("cooldis_coalesce_bursts".to_string(), "true".to_string());
+    envelope
 }
 
 fn observe_only_envelope(text: &str) -> IngressEnvelope {
@@ -189,6 +233,7 @@ fn route_with_egress_and_retry(
         enabled: true,
         policy: None,
         threading: None,
+        coalesce_bursts: None,
         ingress: None,
         egress_projection,
         typing_simulation,
@@ -363,6 +408,92 @@ async fn egress_cursor(bridge: &CooldisDaemonIoBridge, thread_id: &str) -> Optio
         .egress_cursor_for_thread("telegram.bot", "main", thread_id)
         .await
         .unwrap()
+}
+
+async fn only_thread_coordinates(bridge: &CooldisDaemonIoBridge) -> ThreadCoordinates {
+    bridge
+        .threads
+        .lock()
+        .await
+        .values()
+        .next()
+        .cloned()
+        .expect("admission should create a target thread")
+}
+
+async fn control_events_for(
+    session_store_path: &Path,
+    coordinates: &ThreadCoordinates,
+) -> Vec<crate::EventRecord> {
+    let session_store = crate::SqliteSessionStore::open(session_store_path).unwrap();
+    session_store
+        .read_events(&control_stream_id(coordinates), None)
+        .await
+        .unwrap()
+}
+
+async fn thread_events_for(
+    session_store_path: &Path,
+    coordinates: &ThreadCoordinates,
+) -> Vec<crate::EventRecord> {
+    let session_store = crate::SqliteSessionStore::open(session_store_path).unwrap();
+    session_store
+        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .await
+        .unwrap()
+}
+
+async fn user_texts_for(
+    bridge: &CooldisDaemonIoBridge,
+    coordinates: &ThreadCoordinates,
+) -> Vec<String> {
+    let handle = bridge.supervisor.get_thread_at(coordinates).await.unwrap();
+    handle
+        .session_context()
+        .await
+        .unwrap()
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            SessionEntryKind::Message {
+                message: CanonicalMessage::User { content, .. },
+            }
+            | SessionEntryKind::CustomContextMessage {
+                message: CanonicalMessage::User { content, .. },
+            } => Some(text_from_canonical_content(content)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn wait_for_user_text(
+    bridge: &CooldisDaemonIoBridge,
+    coordinates: &ThreadCoordinates,
+    expected: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if user_texts_for(bridge, coordinates)
+            .await
+            .contains(&expected.to_string())
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for user text {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn admission_source_ids(event: &crate::EventRecord) -> Vec<String> {
+    event.payload["source_ingress_event_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect()
 }
 
 async fn drain_until_egress(
@@ -650,6 +781,348 @@ async fn queue_worker_processes_sqlite_backed_envelope() {
         EgressKind::AssistantMessage { ref text } if text.contains("hello queue")
     ));
     let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn queue_worker_coalesces_window_expired_batch_into_one_turn_and_source_list() {
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!("queue-coalesce-{}.sqlite", uuid::Uuid::now_v7()));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    queue
+        .submit(expired_coalesce_envelope("one", "1001", 20, 10))
+        .await
+        .unwrap();
+    queue
+        .submit(expired_coalesce_envelope("two", "1002", 20, 10))
+        .await
+        .unwrap();
+    queue
+        .submit(expired_coalesce_envelope("three", "1003", 20, 10))
+        .await
+        .unwrap();
+
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-coalesce", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 3);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let ingress_events: Vec<_> = control_events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .collect();
+    let admission_events: Vec<_> = control_events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .collect();
+    assert_eq!(ingress_events.len(), 3);
+    assert_eq!(admission_events.len(), 1);
+    assert_eq!(
+        admission_events[0].payload["decision"].as_str(),
+        Some("coalesce")
+    );
+    assert_eq!(
+        admission_source_ids(admission_events[0]),
+        ingress_events
+            .iter()
+            .map(|event| event.id.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .count(),
+        1
+    );
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .count(),
+        1
+    );
+    assert!(
+        user_texts_for(&bridge, &coordinates)
+            .await
+            .contains(&"one\ntwo\nthree".to_string())
+    );
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn queue_worker_flushes_coalesce_batch_when_max_batch_is_reached() {
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!(
+            "queue-coalesce-max-{}.sqlite",
+            uuid::Uuid::now_v7()
+        ));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    queue
+        .submit(coalesce_envelope("first", "2001", 60_000, 2))
+        .await
+        .unwrap();
+    queue
+        .submit(coalesce_envelope("second", "2002", 60_000, 2))
+        .await
+        .unwrap();
+
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-coalesce-max", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 2);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let admission = control_events
+        .iter()
+        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .unwrap();
+    assert_eq!(admission.payload["decision"].as_str(), Some("coalesce"));
+    assert_eq!(admission_source_ids(admission).len(), 2);
+    assert!(
+        user_texts_for(&bridge, &coordinates)
+            .await
+            .contains(&"first\nsecond".to_string())
+    );
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
+    let fixture_root = test_root("queue-coalesce-restart");
+    let db = fixture_root.join("queue.sqlite");
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    queue
+        .submit(coalesce_envelope("before", "3001", 1_000, 10))
+        .await
+        .unwrap();
+    queue
+        .submit(coalesce_envelope("restart", "3002", 1_000, 10))
+        .await
+        .unwrap();
+
+    let (_server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-coalesce-hold", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 2);
+    assert!(
+        bridge.threads.lock().await.is_empty(),
+        "held coalesce batches should not submit before the window expires"
+    );
+    drop(worker);
+    drop(queue);
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let (restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    let reopened = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    let worker = CooldisDaemonQueueWorker::new(
+        reopened.clone(),
+        restarted_bridge.clone(),
+        "worker-coalesce-restart",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 2);
+
+    let coordinates = only_thread_coordinates(&restarted_bridge).await;
+    let control_events =
+        control_events_for(restarted_server.session_store_path(), &coordinates).await;
+    let admission = control_events
+        .iter()
+        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .unwrap();
+    assert_eq!(admission.payload["decision"].as_str(), Some("coalesce"));
+    assert_eq!(admission_source_ids(admission).len(), 2);
+    assert!(
+        user_texts_for(&restarted_bridge, &coordinates)
+            .await
+            .contains(&"before\nrestart".to_string())
+    );
+    let _ = std::fs::remove_file(db);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let active = bridge
+        .submit_envelope(telegram_queue_envelope_with_update("active", "4000"))
+        .await
+        .unwrap();
+    let thread_id = active.thread_id.as_deref().unwrap();
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!(
+            "queue-coalesce-steer-{}.sqlite",
+            uuid::Uuid::now_v7()
+        ));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    queue
+        .submit(steer_coalesce_envelope("steer one", "4001", 20, 10))
+        .await
+        .unwrap();
+    queue
+        .submit(steer_coalesce_envelope("steer two", "4002", 20, 10))
+        .await
+        .unwrap();
+
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-coalesce-steer", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 2);
+
+    let coordinates = bridge
+        .threads
+        .lock()
+        .await
+        .values()
+        .find(|coordinates| coordinates.thread_id.to_string() == thread_id)
+        .cloned()
+        .unwrap();
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let latest_admission = control_events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .last()
+        .unwrap();
+    assert_eq!(
+        latest_admission.payload["decision"].as_str(),
+        Some("coalesce")
+    );
+    assert!(
+        latest_admission.payload["admissible"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("steer"))
+    );
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .count(),
+        2
+    );
+    let latest_ingress_context = thread_events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .last()
+        .unwrap();
+    assert_eq!(
+        latest_ingress_context.payload["ingress_metadata"]["cooldis_coalesced_batch_size"].as_str(),
+        Some("2")
+    );
+    assert_eq!(admission_source_ids(latest_admission).len(), 2);
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let receipt = bridge
+        .submit_envelope(
+            telegram_queue_envelope_with_update("fork me", "5001")
+                .with_metadata("cooldis_route_policy", "fork_on_new_dm"),
+        )
+        .await
+        .unwrap();
+    assert!(receipt.thread_id.is_some());
+
+    let child_thread_id = receipt.thread_id.as_deref().unwrap();
+    let child_coordinates = bridge
+        .threads
+        .lock()
+        .await
+        .values()
+        .find(|coordinates| coordinates.thread_id.to_string() == child_thread_id)
+        .cloned()
+        .expect("fork admission should bind the route to the child thread");
+    let child_thread_events = thread_events_for(&session_store_path, &child_coordinates).await;
+    assert_eq!(
+        child_thread_events
+            .iter()
+            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .count(),
+        1
+    );
+    wait_for_user_text(&bridge, &child_coordinates, "fork me").await;
+
+    let session_store = crate::SqliteSessionStore::open(&session_store_path).unwrap();
+    let child_handle = bridge
+        .supervisor
+        .get_thread_at(&child_coordinates)
+        .await
+        .unwrap();
+    let parent_thread_id = child_handle
+        .context()
+        .parent_thread_id
+        .expect("fork child should record parent thread id");
+    let parent_coordinates = ThreadCoordinates {
+        tenant_id: child_coordinates.tenant_id.clone(),
+        user_id: child_coordinates.user_id.clone(),
+        session_id: child_coordinates.session_id.clone(),
+        thread_id: parent_thread_id,
+    };
+    let spawned_events = session_store
+        .read_events(&control_stream_id(&parent_coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+        .collect::<Vec<_>>();
+    assert_eq!(spawned_events.len(), 1);
+    let spawned = &spawned_events[0];
+    let spawned_payload: ThreadSpawnedPayload =
+        serde_json::from_value(spawned.payload.clone()).unwrap();
+    assert_eq!(
+        spawned.payload["child_thread_id"].as_str(),
+        Some(child_thread_id)
+    );
+    assert_eq!(
+        spawned_payload.child_thread_id.to_string(),
+        child_thread_id.to_string()
+    );
+    let fork = spawned_payload
+        .fork
+        .expect("thread.spawned fork provenance should be typed");
+    assert_eq!(fork.mode, "clone");
+    assert_eq!(fork.source_cut.thread_id, spawned_payload.parent_thread_id);
+    assert_eq!(spawned.payload["fork"]["mode"].as_str(), Some("clone"));
+    assert_eq!(
+        spawned.payload["fork"]["sourceCut"]["threadId"].as_str(),
+        spawned.payload["parent_thread_id"].as_str()
+    );
+    assert!(
+        spawned.payload["inputs_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
 }
 
 #[tokio::test]

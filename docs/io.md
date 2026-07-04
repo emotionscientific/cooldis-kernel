@@ -156,6 +156,7 @@ kind = "websocket.tui"
 enabled = true
 policy = "steer_when_active"
 threading = "selected_thread"
+coalesce_bursts = { window_ms = 750, max_batch = 8 }
 
 [daemon.io.routes.ingress.persistence]
 mode = "best_effort_direct"
@@ -322,16 +323,39 @@ but before the delivered receipt is appended, the recovered projector cannot
 distinguish that accepted send from a never-sent envelope and may send that one
 envelope again.
 
-## Policy Examples
+## Admission Policies
 
 - `queue_per_conversation`: every event appends behind the active turn.
 - `steer_when_active`: if a turn is running, new user text becomes steering;
   otherwise it starts a queued turn.
 - `interrupt_on_new_dm`: new direct messages cancel the active turn and replace
   it.
+- `fork_on_new_dm`: new direct messages fork the resolved source thread through
+  `thread/fork`, then submit the incoming text to the child thread. The parent
+  control stream witnesses lineage with `thread.spawned` and the existing
+  `fork.sourceCut` shape.
+- `coalesce_bursts`: durable queue workers batch inbound messages from the same
+  route/source/external conversation before admission. Configure it per route
+  with `coalesce_bursts = { window_ms = 750, max_batch = 8 }`. The first
+  message starts the window, later messages in the same window join in arrival
+  order, and the worker admits one merged text envelope when `window_ms`
+  expires or `max_batch` is reached.
 - `observe_system_events`: record webhook/cron events without waking the model.
 - `reject_when_dedupe_seen`: acknowledge repeated protocol updates without
   touching the runtime.
+
+`coalesce_bursts` is a queue-worker hold, so it runs before the route's normal
+admission action. A route can set `policy = "steer_when_active"` and
+`coalesce_bursts = { ... }`; the worker first admits one merged envelope, then
+`steer_when_active` decides whether that merged envelope queues or steers. If
+the daemon exits while a batch is held, pgqrs visibility expiry makes the held
+messages visible again and the recovered worker admits them once as a batch.
+
+Every admitted path emits `admission.decided`. Coalesced admissions use
+`decision = "coalesce"` and list every source `io.ingress.received` event in
+`source_ingress_event_ids`; the thread stream still receives exactly one
+`io.ingress.received` context record for the merged envelope so egress
+projection pairs one inbound context with the eventual assistant entry.
 
 Product deployments can add richer resolvers and policies for auth, billing,
 quotas, frontend ledger projection, model routing, and durable queue semantics
