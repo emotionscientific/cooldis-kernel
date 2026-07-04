@@ -237,8 +237,13 @@ retrieval selectors
 
 Observations carry provenance back to their source events and resources.
 They never replace or rewrite the append-only event stream they were
-produced from. The declared-coupling surface itself is deferred past V1;
-V1 ships built-in couplings only, with this shape documented.
+produced from. Declared couplings may use built-in `std::` executors or custom
+Wasm operations referenced by pinned `op://<record>/<operation>@sha256:<hash>`
+refs. Custom coupling capsules are pure compute: the invocation carries trigger
+and selected source events plus config, and the guest may only propose discharge
+events. The kernel validates the declared sink, applies stream grants, enforces
+budgets/depth, and stamps discharged provenance. HTTP, VFS, secrets, and other
+effectful imports stay tool capabilities rather than coupling authority.
 
 ### Hooks
 

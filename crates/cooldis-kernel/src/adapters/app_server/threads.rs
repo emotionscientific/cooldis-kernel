@@ -1004,6 +1004,7 @@ pub(super) fn append_bound_agent_metadata(
     metadata: &mut BTreeMap<String, String>,
     bound: &AgentManifestBoundThread,
     overrides: Option<&AgentManifestBindOverrides>,
+    operation_registry_root: Option<&Path>,
 ) -> Result<(), JsonRpcErrorError> {
     metadata.insert(
         THREAD_AGENT_REF_METADATA.to_string(),
@@ -1100,6 +1101,12 @@ pub(super) fn append_bound_agent_metadata(
             )
         })?;
         metadata.insert(THREAD_BOUND_COUPLING_SET_METADATA.to_string(), encoded);
+        if let Some(root) = operation_registry_root {
+            metadata.insert(
+                THREAD_OPERATION_REGISTRY_ROOT_METADATA.to_string(),
+                root.display().to_string(),
+            );
+        }
     }
     if let Some(overrides) = overrides {
         let encoded = serde_json::to_string(overrides).map_err(|err| {
@@ -1422,8 +1429,13 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             Some(bound.bind_receipt.effective_runtime.default_cwd.as_str()),
         );
         let mut metadata = app_server_thread_metadata(&cwd, &bound.bind_receipt.provider_id, false);
-        append_bound_agent_metadata(&mut metadata, &bound, None)
-            .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
+        append_bound_agent_metadata(
+            &mut metadata,
+            &bound,
+            None,
+            self.operation_registry_root.as_deref(),
+        )
+        .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
         let compile_receipt = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
             CooldisError::RuntimeFactory(format!(
                 "failed to encode manifest compile receipt: {err}"

@@ -1,6 +1,6 @@
 use crate::{
-    CooldisWasmError, CooldisWasmResult, WasmHttpRequest, WasmHttpResponse, WasmRuntimeArtifact,
-    WasmRuntimeConfig,
+    CooldisWasmError, CooldisWasmResult, WasmHostImportPolicy, WasmHttpRequest, WasmHttpResponse,
+    WasmRuntimeArtifact, WasmRuntimeConfig,
 };
 use bashkit::{Error as BashkitError, FileSystem};
 use cooldis_abi::{InvocationContext, WasmOperationManifest};
@@ -73,7 +73,7 @@ impl WasmRuntimeFactory {
 
     pub async fn validate_operation_artifact(&self) -> CooldisWasmResult<WasmOperationManifest> {
         let module = self.load_module().await?;
-        validate_module_imports(&module)?;
+        validate_module_imports(&module, self.config.host_import_policy)?;
         let manifest = load_operation_manifest(&self.engine, &module, &self.config)
             .await?
             .ok_or_else(|| {
@@ -409,12 +409,12 @@ fn validate_manifest(manifest: &WasmOperationManifest) -> CooldisWasmResult<()> 
     Ok(())
 }
 
-fn validate_module_imports(module: &Module) -> CooldisWasmResult<()> {
+fn validate_module_imports(module: &Module, policy: WasmHostImportPolicy) -> CooldisWasmResult<()> {
     let mut unsupported = Vec::new();
     for import in module.imports() {
         let module_name = import.module();
         let name = import.name();
-        if allowed_import(module_name, name, import.ty()) {
+        if allowed_import(module_name, name, import.ty(), policy) {
             continue;
         }
         let diagnostic = import_diagnostic(module_name, name);
@@ -430,25 +430,44 @@ fn validate_module_imports(module: &Module) -> CooldisWasmResult<()> {
     }
 }
 
-fn allowed_import(module_name: &str, name: &str, ty: ExternType) -> bool {
+fn allowed_import(
+    module_name: &str,
+    name: &str,
+    ty: ExternType,
+    policy: WasmHostImportPolicy,
+) -> bool {
     let is_function = matches!(ty, ExternType::Func(_));
     is_function
-        && matches!(
-            (module_name, name),
-            ("cooldis", "input_len")
-                | ("cooldis", "input_read")
-                | ("cooldis", "output_write")
-                | ("cooldis", "log")
-                | ("cooldis_0.1", "source_read")
-                | ("cooldis_0.1", "sink_write")
-                | ("cooldis_0.1", "event_emit")
-                | ("cooldis_0.1", "http_request")
-                | ("cooldis_0.1", "check_cancelled")
-                | ("cooldis_0.1", "fs_open")
-                | ("cooldis_0.1", "fs_read")
-                | ("cooldis_0.1", "fs_close")
-                | ("cooldis_0.1", "log")
-        )
+        && match policy {
+            WasmHostImportPolicy::Operation => matches!(
+                (module_name, name),
+                ("cooldis", "input_len")
+                    | ("cooldis", "input_read")
+                    | ("cooldis", "output_write")
+                    | ("cooldis", "log")
+                    | ("cooldis_0.1", "source_read")
+                    | ("cooldis_0.1", "sink_write")
+                    | ("cooldis_0.1", "event_emit")
+                    | ("cooldis_0.1", "http_request")
+                    | ("cooldis_0.1", "check_cancelled")
+                    | ("cooldis_0.1", "fs_open")
+                    | ("cooldis_0.1", "fs_read")
+                    | ("cooldis_0.1", "fs_close")
+                    | ("cooldis_0.1", "log")
+            ),
+            WasmHostImportPolicy::PureCompute => matches!(
+                (module_name, name),
+                ("cooldis", "input_len")
+                    | ("cooldis", "input_read")
+                    | ("cooldis", "output_write")
+                    | ("cooldis", "log")
+                    | ("cooldis_0.1", "source_read")
+                    | ("cooldis_0.1", "sink_write")
+                    | ("cooldis_0.1", "event_emit")
+                    | ("cooldis_0.1", "check_cancelled")
+                    | ("cooldis_0.1", "log")
+            ),
+        }
 }
 
 fn import_diagnostic(module_name: &str, name: &str) -> &'static str {
