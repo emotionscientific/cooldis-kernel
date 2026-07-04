@@ -282,6 +282,32 @@ pub(super) struct ModelProviderAuthDeleteParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct MandateStartParams {
+    pub(super) thread_id: String,
+    pub(super) schedule: MandateSchedulePayload,
+    #[serde(default)]
+    pub(super) max_occurrences: Option<u32>,
+    #[serde(default)]
+    pub(super) catch_up: Option<MandateCatchUpPolicy>,
+    #[serde(default)]
+    pub(super) input_template: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MandateRevokeParams {
+    pub(super) thread_id: String,
+    pub(super) mandate_event_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MandateListParams {
+    pub(super) thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct McpSourceReadParams {
     pub(super) name: String,
 }
@@ -945,6 +971,18 @@ impl CooldisAppServer {
             "approval/resolve" => {
                 let params: ApprovalResolveParams = parse_params(params)?;
                 self.approval_resolve(params).await
+            }
+            "mandate/start" => {
+                let params: MandateStartParams = parse_params(params)?;
+                self.mandate_start(params).await
+            }
+            "mandate/revoke" => {
+                let params: MandateRevokeParams = parse_params(params)?;
+                self.mandate_revoke(params).await
+            }
+            "mandate/list" => {
+                let params: MandateListParams = parse_params(params)?;
+                self.mandate_list(params).await
             }
             "thread/debug/export" => {
                 let params: ThreadDebugExportParams = parse_params(params)?;
@@ -1939,6 +1977,74 @@ impl CooldisAppServer {
             &record,
             &payload,
         ))
+    }
+
+    pub(super) async fn mandate_start(
+        &self,
+        params: MandateStartParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
+        let receipt = crate::start_mandate(
+            &store,
+            &lifecycle.coordinates,
+            crate::MandateStartRequest {
+                schedule: params.schedule,
+                max_occurrences: params.max_occurrences,
+                catch_up: params.catch_up,
+                input_template: params.input_template,
+                snapshot_id: lifecycle
+                    .metadata
+                    .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+                    .cloned(),
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(mandate_jsonrpc_error)?;
+        Ok(json!({
+            "mandateEventId": receipt.event.id.to_string(),
+            "streamId": receipt.event.stream_id.as_str(),
+            "sequence": receipt.event.sequence.get(),
+        }))
+    }
+
+    pub(super) async fn mandate_revoke(
+        &self,
+        params: MandateRevokeParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let mandate_event_id = crate::parse_mandate_event_id(&params.mandate_event_id)
+            .map_err(mandate_jsonrpc_error)?;
+        let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
+        let receipt = crate::revoke_mandate(&store, &lifecycle.coordinates, mandate_event_id)
+            .await
+            .map_err(mandate_jsonrpc_error)?;
+        Ok(json!({
+            "status": receipt.status.as_str(),
+            "mandateEventId": mandate_event_id.to_string(),
+            "revokedEventId": receipt.revoke_event.id.to_string(),
+            "streamId": receipt.revoke_event.stream_id.as_str(),
+            "sequence": receipt.revoke_event.sequence.get(),
+        }))
+    }
+
+    pub(super) async fn mandate_list(
+        &self,
+        params: MandateListParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
+        let data = crate::list_active_mandates(&store, &lifecycle.coordinates)
+            .await
+            .map_err(mandate_jsonrpc_error)?
+            .iter()
+            .map(active_mandate_json)
+            .collect::<Vec<_>>();
+        Ok(json!({ "data": data, "nextCursor": null }))
     }
 
     pub(super) async fn thread_debug_export(
@@ -4639,6 +4745,33 @@ pub(super) fn approval_resolution_json(
         "sequence": record.sequence.get(),
         "createdAtMs": record.created_at_ms,
     })
+}
+
+pub(super) fn active_mandate_json(mandate: &crate::ActiveMandate) -> Value {
+    json!({
+        "mandateEventId": mandate.event.id.to_string(),
+        "mandateId": mandate.payload.mandate_id.clone(),
+        "threadId": mandate
+            .payload
+            .subject
+            .thread_id
+            .as_deref()
+            .or(mandate.payload.thread_id.as_deref()),
+        "schedule": mandate.payload.schedule.clone(),
+        "maxOccurrences": mandate.payload.max_occurrences,
+        "catchUp": mandate.payload.catch_up,
+        "inputTemplate": mandate.payload.input_template.clone(),
+        "createdAtMs": mandate.event.created_at_ms,
+        "streamId": mandate.event.stream_id.as_str(),
+        "sequence": mandate.event.sequence.get(),
+    })
+}
+
+pub(super) fn mandate_jsonrpc_error(err: CooldisError) -> JsonRpcErrorError {
+    match err {
+        CooldisError::RuntimeExecution(_) => jsonrpc_error(-32602, err.to_string()),
+        _ => internal_error(err),
+    }
 }
 
 pub(super) fn pending_tool_approval_json(suspension: &crate::PendingToolCallSuspension) -> Value {

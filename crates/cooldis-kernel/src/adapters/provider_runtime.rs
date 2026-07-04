@@ -2,14 +2,16 @@ use crate::agent::contracts::sha256_hex;
 use crate::{
     AgentContextCompileInput, AgentContextCompilePolicy, AgentContextCompiler, AgentRuntime,
     AgentRuntimeFactory, AgentToolRouter, AllowAllToolPermissionGate, BashToolProvider,
-    COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent,
-    CanonicalMessage, CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError,
-    CooldisResult, EventKind, EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec,
-    HookMutationWitness, HookPipeline, HookRunRecord, KernelNotifyOperationProvider,
-    KernelOperationDispatcher, KernelProcessOperationProvider, KernelThreadOperationProvider,
-    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationProvenance,
-    OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient,
-    ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
+    COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, COOLDIS_SCHEDULE_PACKAGE,
+    COOLDIS_THREADS_PACKAGE, CanonicalContent, CanonicalMessage, CompactionPolicy,
+    CompactionTrigger, CompiledAgentContext, CooldisError, CooldisResult, EventKind,
+    EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec, HookMutationWitness,
+    HookPipeline, HookRunRecord, KernelNotifyOperationProvider, KernelOperationDispatcher,
+    KernelProcessOperationProvider, KernelScheduleOperationProvider,
+    KernelThreadOperationProvider, KernelThreadSpawnAgentResolver, NewEventRecord,
+    NewObservationRecord, ObservationProvenance, OperationRegistry, PostCompactHookRequest,
+    PreCompactHookRequest, ProviderApi, ProviderClient, ProviderError, ProviderRequest,
+    ProviderRequestMode, ProviderStreamEvent,
     ReplayTransformCounts, RuntimeEventKind, RuntimeModelRequestErrorClass,
     RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
     RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
@@ -431,7 +433,7 @@ impl CanonicalProviderRuntime {
             self.strict_tool_router_unknowns = false;
         }
         if let Some(control) = control.clone() {
-            let mut provider = KernelThreadOperationProvider::new(control, context.clone());
+            let mut provider = KernelThreadOperationProvider::new(control.clone(), context.clone());
             if let Some(resolver) = &self.thread_spawn_agent_resolver {
                 provider = provider.with_agent_resolver(Arc::clone(resolver));
             }
@@ -445,6 +447,23 @@ impl CanonicalProviderRuntime {
             {
                 let _ = registry
                     .set_kernel_dispatcher(COOLDIS_THREADS_PACKAGE, Arc::clone(&dispatcher))
+                    .await;
+            }
+            let schedule_dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
+                KernelScheduleOperationProvider::new(control, context.clone()),
+            );
+            let _ = router
+                .operation_registry()
+                .set_kernel_dispatcher(COOLDIS_SCHEDULE_PACKAGE, Arc::clone(&schedule_dispatcher))
+                .await;
+            if let Some(config) = &self.bash_tool_config
+                && let Some(registry) = &config.operation_registry
+            {
+                let _ = registry
+                    .set_kernel_dispatcher(
+                        COOLDIS_SCHEDULE_PACKAGE,
+                        Arc::clone(&schedule_dispatcher),
+                    )
                     .await;
             }
         }

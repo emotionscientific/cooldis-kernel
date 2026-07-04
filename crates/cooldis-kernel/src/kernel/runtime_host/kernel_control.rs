@@ -11,7 +11,13 @@ use crate::agent::contracts::{
     ThreadPropagatorSelection, ThreadReceiptSet, sha256_hex,
 };
 use crate::agent::manifest_bind::{BoundCouplingSet, coupling_set_content_hash};
-use crate::kernel::history::{EventKind, EventRecord, NewEventRecord, ThreadSpawnedPayload};
+use crate::kernel::history::{
+    EventKind, EventRecord, EventRecordId, NewEventRecord, ThreadSpawnedPayload,
+};
+use crate::kernel::mandate_lifecycle::{
+    ActiveMandate, MandateRevokeReceipt, MandateStartReceipt, MandateStartRequest,
+    list_active_mandates, revoke_mandate, start_mandate,
+};
 use crate::kernel::runtime_host::{
     THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
     THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA,
@@ -703,6 +709,56 @@ impl RuntimeKernelControl {
         target
             .record_manifest_receipts(compile_payload, bind_payload)
             .await
+    }
+
+    pub async fn start_mandate(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+        mut request: MandateStartRequest,
+    ) -> CooldisResult<MandateStartReceipt> {
+        let host = self.host()?;
+        let target = self.scoped_thread(caller, target_thread_id).await?;
+        if request.snapshot_id.is_none() {
+            request.snapshot_id = target
+                .context()
+                .metadata
+                .get("cooldis.agent.manifest_hash")
+                .cloned();
+        }
+        start_mandate(
+            host.runtime_store().as_ref(),
+            &target.context().coordinates,
+            request,
+            chrono::Utc::now(),
+        )
+        .await
+    }
+
+    pub async fn revoke_mandate(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+        mandate_event_id: EventRecordId,
+    ) -> CooldisResult<MandateRevokeReceipt> {
+        let host = self.host()?;
+        let target = self.scoped_thread(caller, target_thread_id).await?;
+        revoke_mandate(
+            host.runtime_store().as_ref(),
+            &target.context().coordinates,
+            mandate_event_id,
+        )
+        .await
+    }
+
+    pub async fn list_mandates(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+    ) -> CooldisResult<Vec<ActiveMandate>> {
+        let host = self.host()?;
+        let target = self.scoped_thread(caller, target_thread_id).await?;
+        list_active_mandates(host.runtime_store().as_ref(), &target.context().coordinates).await
     }
 
     async fn scoped_thread(
