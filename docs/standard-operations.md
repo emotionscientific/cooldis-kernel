@@ -417,7 +417,7 @@ Optional executable reference templates:
 | `std::prompt.dynamic_instructions` | projection | reference_only | yes | Project versioned instruction checkpoints into context assembly. |
 | `std::permission.approval_gate` | controller | reference_only | yes | Emit paired `approval.requested` and `tool.call.suspended` facts for abstract approval. |
 | `std::permission.tool_gate` | controller | kernel_backed | yes | Emit allow/rewrite/deny/wait control facts for tool calls. |
-| `std::schedule.cron` | controller | reference_only | yes | Convert witnessed schedule mandates into bounded continuation or budget-exhausted facts. |
+| `std::schedule.cron` | controller | reference_only | yes | Convert witnessed `timer.fired` occurrences for schedule mandates into bounded continuation or budget-exhausted facts. |
 | `std::supervisor.child_completion` | controller | kernel_backed | yes | Join a routed child-completion fact into a parent continuation or terminal fact. |
 | `std::retry.with_budget` | controller | reference_only | yes | Convert typed failure facts into explicit continuation or budget-exhausted control facts. |
 | `std::failure.deadletter` | projection | reference_only | yes | Project failed or blocked control facts into `derived:deadletter` for inspection. |

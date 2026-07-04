@@ -97,6 +97,9 @@ into durable ingress envelopes. The queue worker admits those envelopes as
 witnessed `timer.fired` control-stream events with a payload that names the
 source `mandate_event_id`, `scheduled_for`, deterministic `occurrence_index`,
 and whether the fire was a recovery `catch_up`.
+`std::schedule.cron` renders the mandate `input_template` as a plain string for
+the continuation turn input; the only supported substitution is
+`{scheduled_for}`.
 
 `crates/cooldis-io-pgqrs` wraps `pgqrs` behind the core queue traits. The spike
 uses a local SQLite DSN for restart/resume proof. Managed deployments can enable

@@ -733,7 +733,7 @@ fn mandate_start_input_schema() -> Value {
                 "description": "Optional maximum number of occurrences."
             },
             "catch_up": catch_up_schema(),
-            "input_template": string_schema("Optional continuation turn input template.")
+            "input_template": string_schema("Optional continuation turn input template. Rendered as a plain string; only {scheduled_for} is substituted.")
         }),
         &["schedule"],
     )
