@@ -443,6 +443,7 @@ async fn manifest_coupling_binds_controller_receipt() {
         &root,
         &manifest_with_coupling(
             "controller_agent",
+            "std::permission.approval_gate",
             &format!(
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
@@ -474,7 +475,7 @@ async fn manifest_coupling_binds_controller_receipt() {
 
     assert_eq!(bound.couplings.len(), 1);
     let coupling = &bound.couplings[0];
-    assert_eq!(coupling.id, "bash_regex_gate");
+    assert_eq!(coupling.id, "std::permission.approval_gate");
     assert_eq!(coupling.role, CouplingRole::Controller);
     assert_eq!(coupling.trigger_kind, EventKind::ToolCallRequested);
     assert_eq!(
@@ -506,7 +507,7 @@ async fn manifest_coupling_binds_controller_receipt() {
     assert_eq!(
         bound.bind_receipt.couplings[0],
         AgentManifestCouplingBinding {
-            id: "bash_regex_gate".to_string(),
+            id: "std::permission.approval_gate".to_string(),
             role: CouplingRole::Controller,
             trigger_kind: "tool.call.requested".to_string(),
             trigger_match: BTreeMap::from([("tool".to_string(), serde_json::json!("bash"))]),
@@ -548,6 +549,7 @@ async fn manifest_coupling_infers_projection_for_distinct_derived_sink() {
         &root,
         &manifest_with_coupling(
             "projection_agent",
+            "std::memory.extract",
             &format!(
                 "op://memory_writer/extract@sha256:{}",
                 operation.active_artifact_hash
@@ -596,6 +598,7 @@ async fn manifest_coupling_requires_content_addressed_function_ref() {
         &root,
         &manifest_with_coupling(
             "unpinned_agent",
+            "std::permission.approval_gate",
             "op://hitl_gate/pre_tool_gate",
             "thread.pause",
             "tool.call.requested",
@@ -640,6 +643,7 @@ async fn manifest_coupling_requires_declared_function_grants() {
         &root,
         &manifest_with_coupling(
             "grantless_agent",
+            "std::permission.approval_gate",
             &format!(
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
@@ -687,6 +691,7 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
         &root,
         &manifest_with_coupling(
             "unknown_kind_agent",
+            "std::permission.approval_gate",
             &format!(
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
@@ -725,7 +730,7 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
 fn manifest_coupling_source_sink_identity_fails_closed_at_bind() {
     let root = temp_dir("manifest-bind-coupling-identity");
     let coupling = AgentManifestCoupling {
-        id: "identity_gate".to_string(),
+        id: "std::prompt.steer".to_string(),
         function_ref: format!("op://gate/check@sha256:{}", "a".repeat(64)),
         grants: Vec::new(),
         trigger: AgentManifestCouplingTrigger {
@@ -767,6 +772,207 @@ fn coupling_config_hash_is_canonical_for_object_key_order() {
         coupling_config_hash(&left).unwrap(),
         coupling_config_hash(&right).unwrap()
     );
+}
+
+#[tokio::test]
+async fn manifest_coupling_custom_id_fails_closed_at_bind() {
+    let root = temp_dir("manifest-bind-custom-coupling-id");
+    let operation_root = root.join("operations");
+    let operation =
+        publish_multi_operation_record(&operation_root, "custom_policy", &[("check", vec![])])
+            .await;
+    let record = publish_agent_manifest(
+        &root,
+        &manifest_with_coupling(
+            "custom_policy_agent",
+            "org.example.custom_policy",
+            &format!(
+                "op://custom_policy/check@sha256:{}",
+                operation.active_artifact_hash
+            ),
+            "",
+            "turn.completed",
+            "thread",
+            "turn.completed",
+            "control",
+            r#""turn.continue.requested""#,
+            "",
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let err = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap_err();
+    let diagnostic = err.to_string();
+
+    assert!(diagnostic.contains("org.example.custom_policy"));
+    assert!(diagnostic.contains("no registered executor"));
+    assert!(diagnostic.contains("custom coupling execution is not yet available"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
+    let root = temp_dir("manifest-bind-runtime-stdlib-couplings");
+    let operation_root = root.join("operations");
+    let operation =
+        publish_multi_operation_record(&operation_root, "stdlib_policy", &[("run", vec![])]).await;
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    for template in crate::coupling_template_catalog_v1()
+        .templates
+        .into_iter()
+        .filter(|template| template.runtime_executable)
+    {
+        let source_stream = if template.source.stream == template.sink.stream {
+            "thread"
+        } else {
+            &template.source.stream
+        };
+        let record = publish_agent_manifest(
+            &root,
+            &manifest_with_coupling(
+                &format!(
+                    "runtime_{}",
+                    template.id.replace("std::", "").replace(['.', ':'], "_")
+                ),
+                &template.id,
+                &format!(
+                    "op://stdlib_policy/run@sha256:{}",
+                    operation.active_artifact_hash
+                ),
+                "",
+                &template.trigger_kinds[0].to_string(),
+                source_stream,
+                &template.source.kinds[0].to_string(),
+                &template.sink.stream,
+                &serde_json::to_string(
+                    &template
+                        .sink
+                        .kinds
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                "",
+            ),
+        );
+
+        let bound = bind_published_agent_record(
+            &record,
+            None,
+            &surface,
+            Some(&operation_root),
+            &BTreeSet::new(),
+            None,
+            &AgentManifestModelProfileSelection::default(),
+            &AgentManifestBindOverrides::default(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{} should bind: {err}", template.id));
+
+        assert_eq!(bound.couplings.len(), 1, "{}", template.id);
+        assert_eq!(bound.couplings[0].id, template.id);
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_bind() {
+    let root = temp_dir("manifest-bind-non-runtime-stdlib-couplings");
+    let operation_root = root.join("operations");
+    let operation =
+        publish_multi_operation_record(&operation_root, "reference_policy", &[("run", vec![])])
+            .await;
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let non_executable = crate::coupling_template_catalog_v1()
+        .templates
+        .into_iter()
+        .filter(|template| !template.runtime_executable)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        non_executable
+            .iter()
+            .map(|template| template.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "std::io.channel_ingress",
+            "std::io.channel_egress",
+            "std::supervisor.spawn",
+        ]
+    );
+
+    for template in non_executable {
+        let record = publish_agent_manifest(
+            &root,
+            &manifest_with_coupling(
+                &format!(
+                    "reference_{}",
+                    template.id.replace("std::", "").replace(['.', ':'], "_")
+                ),
+                &template.id,
+                &format!(
+                    "op://reference_policy/run@sha256:{}",
+                    operation.active_artifact_hash
+                ),
+                "",
+                &template.trigger_kinds[0].to_string(),
+                &template.source.stream,
+                &template.source.kinds[0].to_string(),
+                &template.sink.stream,
+                &serde_json::to_string(
+                    &template
+                        .sink
+                        .kinds
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                "",
+            ),
+        );
+
+        let err = bind_published_agent_record(
+            &record,
+            None,
+            &surface,
+            Some(&operation_root),
+            &BTreeSet::new(),
+            None,
+            &AgentManifestModelProfileSelection::default(),
+            &AgentManifestBindOverrides::default(),
+        )
+        .await
+        .unwrap_err();
+        let diagnostic = err.to_string();
+
+        assert!(diagnostic.contains(&template.id), "{diagnostic}");
+        assert!(
+            diagnostic.contains("no registered executor"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("custom coupling execution is not yet available"),
+            "{diagnostic}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -1247,6 +1453,7 @@ streaming = false
 #[allow(clippy::too_many_arguments)]
 fn manifest_with_coupling(
     name: &str,
+    coupling_id: &str,
     function_ref: &str,
     grant: &str,
     trigger_kind: &str,
@@ -1275,7 +1482,7 @@ fn manifest_with_coupling(
         r#"{}
 
 [[couplings]]
-id = "bash_regex_gate"
+id = "{coupling_id}"
 function_ref = "{function_ref}"
 grants = {grants}
 

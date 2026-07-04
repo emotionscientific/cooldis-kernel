@@ -8,6 +8,7 @@ use super::context_read_plan::{
 use super::runtime_utils::unix_timestamp_ms;
 use super::{CooldisError, CooldisResult, RuntimeKernelControl, TurnInput};
 use crate::agent::manifest_bind::BoundCouplingSet;
+use crate::kernel::coupling_executor_registry::registered_coupling_executor_supports_template;
 use crate::kernel::coupling_scheduler::CouplingScheduler;
 use crate::kernel::history::{
     CONTEXT_READ_PLAN_SCHEMA_V1, CanonicalMessage, EventKind, EventProvenance, EventRecord,
@@ -199,7 +200,7 @@ impl RuntimeServices {
         let stdlib_couplings = coupling_set
             .couplings
             .iter()
-            .filter(|coupling| StdlibCouplingExecutor::supports_template(&coupling.id))
+            .filter(|coupling| registered_coupling_executor_supports_template(&coupling.id))
             .cloned()
             .collect::<Vec<_>>();
         if stdlib_couplings.is_empty() {
