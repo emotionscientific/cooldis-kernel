@@ -516,6 +516,28 @@ fn parse_coupling_event_kind(
 }
 
 pub(crate) fn coupling_config_hash(value: &JsonValue) -> CooldisResult<String> {
+    canonical_json_hash(value)
+}
+
+pub(crate) fn coupling_set_content_hash(coupling_set: &BoundCouplingSet) -> CooldisResult<String> {
+    let mut couplings = coupling_set.couplings.iter().collect::<Vec<_>>();
+    couplings.sort_by(|left, right| left.id.cmp(&right.id));
+    let value = JsonValue::Array(
+        couplings
+            .into_iter()
+            .map(|coupling| {
+                serde_json::json!({
+                    "id": coupling.id,
+                    "function_ref": coupling.function_ref,
+                    "config": coupling.config,
+                })
+            })
+            .collect(),
+    );
+    canonical_json_hash(&value)
+}
+
+pub(crate) fn canonical_json_hash(value: &JsonValue) -> CooldisResult<String> {
     let mut canonical = Vec::new();
     write_canonical_json(value, &mut canonical)?;
     let digest = Sha256::digest(&canonical);

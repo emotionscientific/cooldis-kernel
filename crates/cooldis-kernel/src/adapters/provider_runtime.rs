@@ -14,10 +14,10 @@ use crate::{
     RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
     SessionEntryId, SessionEntryKind, SessionStartHookRequest, StopHookRequest, SystemBlock,
     ThinkingConfig, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
-    ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload, ToolCallSubject,
-    ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor, ToolExecutionRequest,
-    ToolPermissionDecision, ToolPermissionGate, TurnBudget, TurnContext, TurnInput,
-    TurnSubmissionMode, UserPromptSubmitHookRequest, VirtualBashRuntimeConfig,
+    ThreadTerminalState, ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload,
+    ToolCallSubject, ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor,
+    ToolExecutionRequest, ToolPermissionDecision, ToolPermissionGate, TurnBudget, TurnContext,
+    TurnInput, TurnSubmissionMode, UserPromptSubmitHookRequest, VirtualBashRuntimeConfig,
     active_manifest_bind_receipt, active_tool_controller_for_request,
     compile_provider_request_context, decide_tool_call, deterministic_compaction_summary,
     emit_runtime_event, normalize_history_for_target,
@@ -1778,7 +1778,9 @@ async fn run_provider_turn(
             );
             return true;
         }
-        if let Err(err) = append_turn_completed_event(services, coordinates, &turn_id).await {
+        if let Err(err) =
+            append_turn_completed_event(services, &turn_context.thread, &turn_id).await
+        {
             fail_provider_turn(
                 coordinates,
                 thread_id,
@@ -2342,11 +2344,12 @@ async fn existing_turn_submitted_event(
 
 async fn append_turn_completed_event(
     services: &RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    thread_context: &ThreadContext,
     turn_id: &str,
 ) -> CooldisResult<crate::EventRecord> {
+    let coordinates = &thread_context.coordinates;
     let latest_source_id = latest_thread_event_id(services, coordinates).await?;
-    services
+    let completed = services
         .append_thread_event(
             coordinates,
             NewEventRecord::discharged(
@@ -2364,7 +2367,16 @@ async fn append_turn_completed_event(
                 },
             ),
         )
-        .await
+        .await?;
+    services
+        .append_thread_joined_event_if_spawned(
+            thread_context,
+            ThreadTerminalState::Completed,
+            None,
+            Some(completed.id),
+        )
+        .await?;
+    Ok(completed)
 }
 
 async fn append_turn_resumed_event(
