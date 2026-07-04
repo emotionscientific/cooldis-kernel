@@ -1448,6 +1448,9 @@ async fn start_telegram_route(
             route.id
         ))
     })?;
+    bridge
+        .register_egress_route_config(TELEGRAM_PROTOCOL, route.id.clone(), route)
+        .await?;
     if let Some(bot_token) = telegram.bot_token_value()? {
         let client = match &telegram.api_base {
             Some(api_base) => TelegramBotClient::new(bot_token).with_api_base(api_base.clone()),

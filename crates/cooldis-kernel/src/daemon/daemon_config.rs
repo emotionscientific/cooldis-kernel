@@ -1,5 +1,6 @@
 use crate::{AppServerListenAddr, CooldisError, CooldisResult};
 use cooldis_io_core::{IngressPersistenceConfig, IngressPersistenceMode};
+use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -362,6 +363,10 @@ pub struct CooldisIoRouteConfig {
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<CooldisIngressConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_projection: Vec<CooldisEgressProjectionRuleConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing_simulation: Option<CooldisTypingSimulationConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<CooldisTelegramRouteConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -378,6 +383,25 @@ impl CooldisIoRouteConfig {
         }
         if let Some(ingress) = &self.ingress {
             ingress.validate(&format!("io.routes.{}", self.id), errors);
+        }
+        for (index, rule) in self.egress_projection.iter().enumerate() {
+            let scope = format!("io.routes.{}.egress_projection[{index}]", self.id);
+            if rule.pattern.trim().is_empty() {
+                errors.push(format!("{scope}.pattern cannot be empty"));
+            } else if let Err(err) = Regex::new(&rule.pattern) {
+                errors.push(format!("{scope}.pattern invalid regex: {err}"));
+            }
+            if rule.action.trim().is_empty() {
+                errors.push(format!("{scope}.action cannot be empty"));
+            }
+        }
+        if let Some(typing) = &self.typing_simulation
+            && typing.chars_per_second == 0
+        {
+            errors.push(format!(
+                "io.routes.{}.typing_simulation.chars_per_second must be greater than zero",
+                self.id
+            ));
         }
         if self.kind == "telegram.bot" {
             match &self.telegram {
@@ -398,6 +422,17 @@ impl CooldisIoRouteConfig {
             ingress.resolve_paths(base);
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisEgressProjectionRuleConfig {
+    pub pattern: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisTypingSimulationConfig {
+    pub chars_per_second: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

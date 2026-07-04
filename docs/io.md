@@ -187,6 +187,53 @@ EgressEnvelope {
 -> sendMessage / editMessage / sendDocument / sendChatAction
 ```
 
+`EgressKind::PlatformAction` carries protocol-neutral route actions:
+
+```text
+PlatformAction {
+  action = "typing" | "reaction" | "sticker" | ...
+  payload = <JSON object>
+}
+```
+
+Protocol adapters map known actions to their wire API and reject unknown actions.
+The Telegram adapter maps `typing` to `sendChatAction`, `reaction` with
+`message_id` and `emoji` to `setMessageReaction`, and `sticker` with `file_id`
+to `sendSticker`.
+
+`EgressKind::Silence { reason }` is a witnessed decline. It produces no wire
+call; receipt/event recording can still say the agent intentionally chose not to
+reply.
+
+Routes can project inline assistant text tags into platform actions before
+delivery. The tag grammar belongs in daemon TOML with the product route, not in
+the kernel:
+
+```toml
+[[daemon.io.routes]]
+id = "telegram-main"
+kind = "telegram.bot"
+egress_projection = [
+  { pattern = '\[reaction:(?P<emoji>[^\]]+)\]', action = "reaction" },
+  { pattern = '\[sticker:(?P<file_id>[^\]]+)\]', action = "sticker" },
+  { pattern = '\[no_response\]', action = "silence" },
+]
+typing_simulation = { chars_per_second = 25 }
+```
+
+Rules are regular expressions with named groups. Matched spans are stripped from
+the assistant text; named groups become the action payload. A message such as
+`hello[reaction:👍] friend` becomes an `AssistantMessage` with `hello friend`
+plus a `PlatformAction { action = "reaction", payload.emoji = "👍" }`. A message
+containing only `[sticker:<id>]` becomes a sticker action with `payload.file_id`.
+A message containing only `[no_response]` becomes one `Silence` envelope and no
+text envelope. Invalid regexes fail daemon config validation with the rule
+index.
+
+`typing_simulation` is off by default. When enabled, the daemon emits a
+`typing` platform action before a text envelope and sleeps by
+`text_length / chars_per_second`, capped at 8 seconds.
+
 ## Policy Examples
 
 - `queue_per_conversation`: every event appends behind the active turn.
