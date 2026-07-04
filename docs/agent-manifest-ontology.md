@@ -39,7 +39,7 @@ Examples:
 
 ```text
 op://data/csv_profile@sha256:...
-skill://cooldis/release-review@1
+skill://release-review@sha256:...
 prompt://someone.cool/release-system@sha256:...
 assembler://cooldis/naive-assembly@0
 resource://artifact/sha256:...
@@ -172,20 +172,32 @@ themselves make the resource model-visible or writable.
 
 ### Skills
 
-A skill is a resource package. It may contain prompts, procedures, examples,
-templates, scripts, schemas, or authoring guidance.
+A skill is a published markdown resource package. In V1 it is declared as a
+`[[resources]]` row with `kind = "skill"` and a content-addressed
+`skill://<package>@sha256:<hash>` ref. The `[skills]` manifest section remains
+reserved until skills need their own grants or executable entrypoints.
 
 ```text
-skill ref
-version/hash
-included files or entrypoints
-requested grants
-context fragments
-tool/resource dependencies
+publish lane: cooldis skill publish <dir>
+registry: .cooldis/skills
+package shape: <name>/SKILL.md files
+metadata: optional frontmatter name, description, trigger_hint
+fallbacks: name from dirname, description from first non-heading line
 ```
 
-Skills are parked under `resources`, then consumed by context pipelines, tools,
-or build steps according to policy.
+At bind, the skill package is loaded from the registry, the package digest is
+recorded in the bind receipt, and the kernel renders a deterministic static
+index:
+
+```text
+<skill name> — <description>
+```
+
+The index is materialized as a pinned `kernel://assembler/static` context
+segment. Skill bodies are not all pinned into model context; they are mounted
+read-only in the thread VFS at `/skills/<name>.md`, where existing virtual bash
+commands such as `cat` or `view` can read them. Skill resources grant no
+ambient host authority.
 
 ### Context
 
@@ -402,7 +414,7 @@ grants = []
 [[resources]]
 name = "release-review"
 kind = "skill"
-ref = "skill://cooldis/release-review@1"
+ref = "skill://release-review@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 mount = "context"
 mode = "read"
 
@@ -419,7 +431,7 @@ id = "default"
 [[context.pipelines.sources]]
 id = "playbook"
 assembler = "kernel://assembler/static"
-input = ["resource:release-review", "resource:release-playbook"]
+input = "release-playbook"
 pinned = true
 
 [[context.pipelines.sources]]

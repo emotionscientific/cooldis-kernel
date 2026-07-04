@@ -78,6 +78,8 @@ The V1 work is focused on runtime primitives:
 
 - agent manifest planning, publishing, listing, showing, and local running;
 - operation publication and ABI-backed invocation;
+- skill-package publication, manifest binding, static indexes, and read-only
+  VFS bodies;
 - local runtime execution through provider, virtual bash, and Wasm paths;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
 - release packaging for `cooldis`, `cooldis-acp-agent`, and

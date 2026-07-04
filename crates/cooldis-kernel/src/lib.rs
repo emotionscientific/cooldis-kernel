@@ -74,6 +74,7 @@ pub mod operations {
     pub mod operation_registry;
     pub mod operation_store;
     pub mod plugins;
+    pub mod skill_package;
     pub mod tool_package;
 }
 
@@ -161,9 +162,11 @@ pub use agent::manifest_bind::{
     AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBoundThread,
     AgentManifestCompileReceipt, AgentManifestCouplingBinding, AgentManifestDirectToolBinding,
     AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestProviderSurface, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,
+    AgentManifestProviderSurface, AgentManifestSkillPackageBinding,
+    AgentManifestStaticContextSegment, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,
     BoundCouplingSet, BoundCouplingSink, CouplingRole, MANIFEST_BINDER_DISCHARGED_BY,
     MANIFEST_BINDER_FUNCTION, MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION,
+    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_PACKAGES_METADATA,
     apply_runtime_overrides, bind_published_agent_record, compile_published_agent_record,
 };
 pub use agent::manifest_schema::{
@@ -385,6 +388,10 @@ pub use operations::operation_store::{
 };
 pub use operations::plugins::{
     LocalPluginCatalog, LocalPluginCatalogConfig, LocalPluginCatalogRecord, PluginMount,
+};
+pub use operations::skill_package::{
+    LocalSkillRegistry, PublishSkillPackageRequest, PublishedSkillPackageRecord, SkillPackage,
+    SkillPackageEntry, SkillPackageRef,
 };
 pub use operations::tool_package::{
     TOOL_BUILD_RECEIPT_KIND, TOOL_BUILD_RECEIPT_SCHEMA_VERSION, TOOL_PACKAGE_KIND,

@@ -10,13 +10,14 @@ use crate::{
     CooldisIoRouteConfig, CooldisProviderConfig, CooldisResult, CooldisVfs, EventKind, EventStore,
     EventStreamId, HostFileSystem, HostFileSystemMode, JsonRpcNotification, LlmProviderAuthStore,
     LlmProviderCatalogStore, LoadedCooldisDaemonConfig, LocalAgentRegistry, LocalOperationRegistry,
-    McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, PublishOperationRequest,
-    PublishedAgentRecord, PublishedOperationRecord, PublishedOperationSource, RegisteredOperation,
-    RouteIngressSink, RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry,
-    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, TelegramWebhookServer,
-    TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun,
-    ToolInterfaceContract, ToolManualExitStatus, ToolOperationManual, ToolPackageSource,
-    WasmOperationManifest, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+    LocalSkillRegistry, McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport,
+    PublishOperationRequest, PublishSkillPackageRequest, PublishedAgentRecord,
+    PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
+    RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore,
+    SqliteSecretStore, SqliteSessionStore, TelegramWebhookServer, TelegramWebhookServerConfig,
+    ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun, ToolInterfaceContract,
+    ToolManualExitStatus, ToolOperationManual, ToolPackageSource, WasmOperationManifest,
+    WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
     agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
     default_operations_registry_root, discover_cooldis_daemon_config_path,
     discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
@@ -73,6 +74,7 @@ pub async fn run() -> CooldisResult<()> {
         "init" => agent_init(args).await,
         "agent" => run_agent(args).await,
         "tool" => run_tool(args).await,
+        "skill" => run_skill(args).await,
         "secret" => run_secret(args).await,
         "auth" => run_auth(args).await,
         "console" => run_console(args).await,
@@ -126,6 +128,10 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
             print_agent_run_help()
         }
         [command] if command == "tool" => print_tool_help(),
+        [command] if command == "skill" => print_skill_help(),
+        [command, subcommand] if command == "skill" && subcommand == "publish" => {
+            print_skill_publish_help()
+        }
         [command, subcommand] if command == "tool" && subcommand == "build" => {
             print_tool_build_help()
         }
@@ -1618,6 +1624,34 @@ async fn run_tool(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
+async fn run_skill(mut args: Vec<OsString>) -> CooldisResult<()> {
+    if args.is_empty()
+        || args
+            .first()
+            .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_skill_help();
+        return Ok(());
+    }
+    let subcommand = args.remove(0);
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        match subcommand.to_string_lossy().as_ref() {
+            "publish" => print_skill_publish_help(),
+            other => return Err(usage_error(format!("unknown skill subcommand {other:?}"))),
+        }
+        return Ok(());
+    }
+    match subcommand.to_string_lossy().as_ref() {
+        "publish" => skill_publish(args).await,
+        _ => Err(usage_error(format!(
+            "unknown skill subcommand {subcommand:?}"
+        ))),
+    }
+}
+
 async fn run_secret(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
@@ -1791,6 +1825,31 @@ async fn tool_publish(args: Vec<OsString>) -> CooldisResult<()> {
     Err(usage_error(
         "tool publish requires a package proof gate; author cooldis.tool.toml and publish with `cooldis tool publish --package <cooldis.tool.toml>`",
     ))
+}
+
+async fn skill_publish(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_skill_publish_args(args)?;
+    if options.help {
+        print_skill_publish_help();
+        return Ok(());
+    }
+    let package_dir = options
+        .package_dir
+        .ok_or_else(|| usage_error("skill publish requires <dir>"))?;
+    let registry_root = skill_registry_root(options.registry_root);
+    let registry = LocalSkillRegistry::new(registry_root);
+    let record = registry.publish_directory(PublishSkillPackageRequest {
+        package_dir,
+        name: options.name,
+    })?;
+    println!("published {}", record.name);
+    println!("artifact {}", record.active_artifact_hash);
+    println!("ref {}", record.ref_uri());
+    println!("record {}", registry.record_path(&record.name)?.display());
+    for skill in record.package.skills {
+        println!("skill {}", skill.name);
+    }
+    Ok(())
 }
 
 fn manuals_for_record(
@@ -2730,6 +2789,14 @@ struct PublishArgs {
 }
 
 #[derive(Debug)]
+struct SkillPublishArgs {
+    package_dir: Option<PathBuf>,
+    name: Option<String>,
+    registry_root: Option<PathBuf>,
+    help: bool,
+}
+
+#[derive(Debug)]
 struct ToolRegistryArgs {
     registry_root: Option<PathBuf>,
     help: bool,
@@ -3440,6 +3507,40 @@ fn parse_publish_args(args: Vec<OsString>) -> CooldisResult<PublishArgs> {
         metadata,
         strict_conversion,
         conversion: has_conversion.then_some(conversion),
+    })
+}
+
+fn parse_skill_publish_args(args: Vec<OsString>) -> CooldisResult<SkillPublishArgs> {
+    let mut package_dir = None;
+    let mut name = None;
+    let mut registry_root = None;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--registry-root" => {
+                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown skill publish argument {other:?}"
+                )));
+            }
+            _ => {
+                if package_dir.is_some() {
+                    return Err(usage_error("skill publish accepts exactly one <dir>"));
+                }
+                package_dir = Some(PathBuf::from(arg));
+            }
+        }
+    }
+    Ok(SkillPublishArgs {
+        package_dir,
+        name,
+        registry_root,
+        help,
     })
 }
 
@@ -5574,6 +5675,10 @@ fn agent_operations_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
     registry_root.unwrap_or_else(default_operations_registry_root)
 }
 
+fn skill_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
+    registry_root.unwrap_or_else(|| PathBuf::from(".cooldis/skills"))
+}
+
 fn is_agent_manifest_file_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("toml")
 }
@@ -5785,6 +5890,7 @@ const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
     "cooldis agent publish <manifest>",
     "cooldis tool build --package cooldis.tool.toml",
     "cooldis tool publish --package cooldis.tool.toml",
+    "cooldis skill publish <dir>",
     "cooldis auth status <provider-id>",
     "cooldis secret list",
 ];
@@ -5824,6 +5930,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]",
     "cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]",
     "cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]",
+    "cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]",
     "cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <secret-name>] [--include-tool <tool>] [--state-home .cooldis/state]",
     "cooldis tool source discover <name> [--state-home .cooldis/state]",
     "cooldis tool source list [--json] [--state-home .cooldis/state]",
@@ -5995,6 +6102,33 @@ Usage:\n\
 Tools are the public capability surface. A published tool may contain one or\n\
 more ABI operations, and Cooldis can project those operations as model tools,\n\
 virtual-bash commands, HTTP routes, MCP exports, or other runtime surfaces.\n"
+    );
+}
+
+fn print_skill_help() {
+    println!(
+        "cooldis skill\n\
+\n\
+Usage:\n\
+  cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]\n\
+\n\
+Skills are markdown context resources. Publishing turns a directory of\n\
+<name>/SKILL.md files into one content-addressed skill:// package for agent\n\
+manifest resource rows.\n"
+    );
+}
+
+fn print_skill_publish_help() {
+    println!(
+        "cooldis skill publish\n\
+\n\
+Usage:\n\
+  cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]\n\
+\n\
+Publishes a deterministic skill package from <dir>/<skill>/SKILL.md files.\n\
+Optional frontmatter may declare name, description, and trigger_hint; without\n\
+frontmatter, the skill name is the directory name and the description is the\n\
+first non-heading markdown line.\n"
     );
 }
 

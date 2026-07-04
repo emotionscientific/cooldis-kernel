@@ -333,10 +333,7 @@ impl AgentManifestSchema {
                     validate_ref_scheme("blob resource ref", &resource.reference, "resource://")?;
                 }
                 AgentManifestResourceKind::Skill => {
-                    return Err(CooldisError::RuntimeFactory(
-                        "resource kind \"skill\" is deferred until skills-as-resource-packages land"
-                            .to_string(),
-                    ));
+                    validate_skill_resource_ref(&resource.reference)?;
                 }
             }
         }
@@ -611,9 +608,8 @@ pub struct AgentManifestResource {
 pub enum AgentManifestResourceKind {
     #[serde(rename = "blob")]
     Blob,
-    /// Accepted by the schema; compile rejects skill refs with an error
-    /// naming the skills-as-resource-packages deferral until skill packages
-    /// exist (audit section 6 is pending).
+    /// Published markdown skill package mounted into context as an index and
+    /// into VFS as read-only bodies.
     #[serde(rename = "skill")]
     Skill,
 }
@@ -1007,15 +1003,36 @@ fn validate_ref_scheme(label: &str, value: &str, scheme: &str) -> CooldisResult<
     Ok(())
 }
 
+fn validate_skill_resource_ref(value: &str) -> CooldisResult<()> {
+    let body = value.strip_prefix("skill://").ok_or_else(|| {
+        CooldisError::RuntimeFactory(format!(
+            "skill resource ref {value:?} must start with skill://"
+        ))
+    })?;
+    let (name, hash) = body.split_once("@sha256:").ok_or_else(|| {
+        CooldisError::RuntimeFactory(format!(
+            "skill resource ref {value:?} must be content-addressed as skill://<package>@sha256:<hash>"
+        ))
+    })?;
+    validate_record_name(name)?;
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "skill resource ref {value:?} has an invalid sha256 artifact hash"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_artifact_ref(value: &str) -> CooldisResult<()> {
     if (value.starts_with("op://") && value.len() > "op://".len())
         || (value.starts_with("mcp://") && value.len() > "mcp://".len())
         || (value.starts_with("resource://") && value.len() > "resource://".len())
+        || (value.starts_with("skill://") && value.len() > "skill://".len())
     {
         Ok(())
     } else {
         Err(CooldisError::RuntimeFactory(format!(
-            "agent artifact ref {value:?} must start with op://, mcp://, or resource://"
+            "agent artifact ref {value:?} must start with op://, mcp://, resource://, or skill://"
         )))
     }
 }

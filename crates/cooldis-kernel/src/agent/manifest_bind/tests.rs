@@ -1,8 +1,11 @@
 use super::*;
-use crate::agent::manifest_schema::{AgentManifestCouplingSource, AgentManifestCouplingTrigger};
+use crate::agent::manifest_schema::{
+    AgentManifestCouplingSource, AgentManifestCouplingTrigger, KERNEL_ASSEMBLER_STATIC,
+};
 use crate::{
     AgentManifestCompactionDefaults, AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol,
-    ToolDefinition, ToolUniverseDiscovery, WitnessedToolContract,
+    LocalSkillRegistry, PublishSkillPackageRequest, ToolDefinition, ToolUniverseDiscovery,
+    WitnessedToolContract,
 };
 use async_trait::async_trait;
 use std::fs;
@@ -184,6 +187,7 @@ streaming = true
         &record,
         None,
         &surface,
+        None,
         None,
         &BTreeSet::new(),
         None,
@@ -414,6 +418,7 @@ streaming = false
         None,
         &surface,
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -465,6 +470,7 @@ async fn manifest_coupling_binds_controller_receipt() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -571,6 +577,7 @@ async fn manifest_coupling_infers_projection_for_distinct_derived_sink() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -617,6 +624,7 @@ async fn manifest_coupling_requires_content_addressed_function_ref() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -665,6 +673,7 @@ async fn manifest_coupling_requires_declared_function_grants() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -713,6 +722,7 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -807,6 +817,7 @@ async fn manifest_coupling_custom_id_fails_closed_at_bind() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -876,6 +887,7 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
             None,
             &surface,
             Some(&operation_root),
+            None,
             &BTreeSet::new(),
             None,
             &AgentManifestModelProfileSelection::default(),
@@ -953,6 +965,7 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
             None,
             &surface,
             Some(&operation_root),
+            None,
             &BTreeSet::new(),
             None,
             &AgentManifestModelProfileSelection::default(),
@@ -987,6 +1000,7 @@ async fn manifest_without_couplings_binds_unchanged() {
         None,
         &surface,
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -997,6 +1011,115 @@ async fn manifest_without_couplings_binds_unchanged() {
 
     assert!(bound.couplings.is_empty());
     assert!(bound.bind_receipt.couplings.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn skill_resource_binds_package_digest_and_static_index() {
+    let root = temp_dir("manifest-bind-skill-resource");
+    let skill_root = root.join("skills");
+    let package_dir = root.join("skill-src").join("karl-skills");
+    write_skill_file(
+        &package_dir,
+        "alpha",
+        r#"---
+name: alpha
+description: Alpha description.
+---
+# Alpha
+
+Alpha body.
+"#,
+    );
+    write_skill_file(
+        &package_dir,
+        "設計",
+        r#"# 設計
+
+Unicode description.
+
+Unicode body.
+"#,
+    );
+    let package = LocalSkillRegistry::new(&skill_root)
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[[resources]]
+name = "karl_skills"
+kind = "skill"
+ref = "{}"
+"#,
+            minimal_manifest("skillful_agent"),
+            package.ref_uri()
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let first = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+    let second = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first.bind_receipt.skill_packages.len(), 1);
+    let binding = &first.bind_receipt.skill_packages[0];
+    assert_eq!(binding.resource_name, "karl_skills");
+    assert_eq!(binding.package_name, "karl-skills");
+    assert_eq!(binding.ref_uri, package.ref_uri());
+    assert_eq!(binding.artifact_hash, package.active_artifact_hash);
+    assert_eq!(
+        binding.package_digest,
+        format!("sha256:{}", package.active_artifact_hash)
+    );
+    assert_eq!(binding.skill_count, 2);
+
+    assert_eq!(first.skill_context_segments, second.skill_context_segments);
+    let segment = first.skill_context_segments.first().unwrap();
+    assert_eq!(segment.id, "skill-index:karl_skills");
+    assert_eq!(segment.assembler, KERNEL_ASSEMBLER_STATIC);
+    assert_eq!(segment.input, "karl_skills");
+    assert!(segment.pinned);
+    assert_eq!(segment.budget_share, None);
+    assert_eq!(segment.ref_uri, package.ref_uri());
+    assert_eq!(
+        segment.content,
+        "alpha — Alpha description.\n設計 — Unicode description.\n"
+    );
+    assert_eq!(segment.content_sha256, binding.index_sha256);
+    assert_eq!(
+        first.bind_receipt.skill_packages,
+        second.bind_receipt.skill_packages
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1448,6 +1571,12 @@ default_cwd = "."
 streaming = false
 "#
     )
+}
+
+fn write_skill_file(package_dir: &Path, name: &str, body: &str) {
+    let dir = package_dir.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), body).unwrap();
 }
 
 #[allow(clippy::too_many_arguments)]

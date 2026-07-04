@@ -105,6 +105,7 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 operation_bindings: Vec::new(),
                 tool_universes: Vec::new(),
                 couplings: Vec::new(),
+                skill_packages: Vec::new(),
                 granted: vec!["threads.read".to_string()],
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
@@ -3033,6 +3034,7 @@ async fn append_tool_controller_bind_receipt(
         model_id: "model".to_string(),
         tool_ids: Vec::new(),
         operation_bindings: Vec::new(),
+        skill_packages: Vec::new(),
         tool_universes: Vec::new(),
         couplings: vec![AgentManifestCouplingBinding {
             id: "tool_gate".to_string(),
