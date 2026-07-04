@@ -366,6 +366,54 @@ the configured default when the catalog omits it. Exactly one entry has
 A missing catalog provider or invalid provider metadata returns a JSON-RPC
 error during app-server setup or method handling.
 
+### `modelProvider/list`
+
+Params: none.
+
+Result: `{ "data": [...], "nextCursor": null }`. Each entry is a redacted model
+provider endpoint record: `providerId`, `api`, `baseUrl`, optional
+`displayName`, redacted `auth`, `authHeader`, redacted `headers`, `models`,
+`metadata`, timestamps, `configuredAuth` from the user auth store, and
+`isActiveProvider`. Model rows include `modelId`, optional model-level
+`api`/`baseUrl`, token limits, input modalities, redacted headers, metadata,
+and `isDefault` when it matches the runtime default model.
+
+### `modelProvider/read`
+
+Params: `{ "providerId": "wafer" }`.
+
+Result: `{ "provider": { ... } }` with the same redacted shape as
+`modelProvider/list`. Unknown provider ids fail with a JSON-RPC error.
+
+### `modelProvider/upsert`
+
+Params: `{ "provider": { "providerId": "...", "api": "open_ai_chat_completions",
+"baseUrl": "https://...", "displayName": "...", "auth": { "type": "env",
+"name": "PROVIDER_API_KEY" }, "authHeader": true, "headers": { "X-Provider":
+{ "type": "literal", "value": "..." } }, "models": [...], "metadata": {} } }`.
+
+Result: `{ "provider": { ... } }` with the redacted stored record. This method
+creates or replaces provider metadata only. It rejects inline API keys and
+command-backed auth or header values; use `modelProvider/auth/set` for stored
+credentials.
+
+### `modelProvider/delete`
+
+Params: `{ "providerId": "wafer" }`.
+
+Result: `{ "deleted": true, "providerId": "wafer" }`. Deleting a provider also
+removes any user-stored credential for the same provider id and clears stale
+project-store credential rows if present.
+
+### `modelProvider/auth/status`
+
+Params: `{ "providerId": "wafer" }`, or `{}` to list all provider auth statuses.
+
+Result: `{ "auth": { ... } | null, "data": [...], "nextCursor": null }`.
+Entries report `providerId`, optional `displayName`, whether a credential is
+configured, its non-secret source/label, and whether the provider uses an auth
+header. Credential values are never returned.
+
 ### `mcpSource/list`
 
 Params: none.

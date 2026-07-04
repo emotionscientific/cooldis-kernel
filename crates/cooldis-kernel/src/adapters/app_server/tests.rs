@@ -459,6 +459,346 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
 }
 
 #[tokio::test]
+async fn model_provider_list_and_read_return_redacted_endpoint_records() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-list-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-list");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let provider_id = "fixture-list";
+    let project_metadata_path = config.metadata_store_path();
+    let user_metadata_path = config.user_metadata_store_path();
+    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path).unwrap();
+    metadata_store
+        .upsert_provider(
+            LlmProviderRecord::new(
+                provider_id,
+                ProviderApi::OpenAIChatCompletions,
+                "https://example.invalid/v1",
+            )
+            .with_display_name("Fixture List")
+            .with_auth(crate::LlmProviderAuthConfig::Env {
+                name: "FIXTURE_API_KEY".to_string(),
+            })
+            .with_auth_header(true)
+            .with_header(
+                "x-fixture",
+                crate::LlmProviderConfigValue::literal("secret-header"),
+            )
+            .with_model(
+                crate::LlmProviderModelRecord::new("fixture-model")
+                    .with_display_name("Fixture Model")
+                    .with_context_window_tokens(4096),
+            ),
+        )
+        .unwrap();
+    drop(metadata_store);
+    crate::SqliteMetadataStore::open(&user_metadata_path)
+        .unwrap()
+        .set_credential(
+            provider_id,
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-list-key".to_string(),
+            },
+        )
+        .unwrap();
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let list = app
+        .dispatch_request(&connection, "modelProvider/list", None)
+        .await
+        .unwrap();
+    let provider = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"].as_str() == Some(provider_id))
+        .expect("expected fixture provider");
+    assert_eq!(provider["api"], "open_ai_chat_completions");
+    assert_eq!(provider["baseUrl"], "https://example.invalid/v1");
+    assert_eq!(provider["auth"]["type"], "env");
+    assert_eq!(provider["auth"]["name"], "FIXTURE_API_KEY");
+    assert_eq!(provider["headers"][0]["name"], "x-fixture");
+    assert_eq!(provider["headers"][0]["value"]["type"], "literal");
+    assert_eq!(provider["headers"][0]["value"]["value"]["redacted"], true);
+    assert_eq!(provider["models"][0]["modelId"], "fixture-model");
+    assert_eq!(provider["models"][0]["contextWindowTokens"], 4096);
+    assert_eq!(provider["configuredAuth"]["configured"], true);
+    assert_eq!(provider["configuredAuth"]["source"], "stored");
+    assert!(
+        !serde_json::to_string(&list)
+            .unwrap()
+            .contains("secret-header")
+    );
+    assert!(
+        !serde_json::to_string(&list)
+            .unwrap()
+            .contains("stored-list-key")
+    );
+
+    let read = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/read",
+            Some(json!({ "providerId": provider_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read["provider"]["providerId"], provider_id);
+
+    let unknown = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/read",
+            Some(json!({ "providerId": "missing-provider" })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code, -32602);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_upsert_creates_and_updates_endpoint_records() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-upsert-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-upsert");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let metadata_path = config.metadata_store_path();
+    let app = CooldisAppServer::new_local(config.clone()).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let created = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-upsert",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "displayName": "Fixture Upsert",
+                    "auth": { "type": "env", "name": "FIXTURE_UPSERT_KEY" },
+                    "authHeader": true,
+                    "headers": {
+                        "x-mode": { "type": "literal", "value": "secret-mode" },
+                        "x-env": { "type": "env", "name": "FIXTURE_HEADER" }
+                    },
+                    "metadata": { "owner": "tests" },
+                    "models": [{
+                        "modelId": "fixture-small",
+                        "displayName": "Fixture Small",
+                        "api": "open_ai_chat_completions",
+                        "baseUrl": "https://example.invalid/model-v1",
+                        "contextWindowTokens": 8192,
+                        "maxOutputTokens": 2048,
+                        "inputModalities": ["text", "image"],
+                        "headers": {
+                            "x-model": { "type": "literal", "value": "secret-model" }
+                        },
+                        "metadata": { "tier": "small" }
+                    }]
+                }
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created["provider"]["providerId"], "fixture-upsert");
+    assert_eq!(
+        created["provider"]["models"][0]["baseUrl"],
+        "https://example.invalid/model-v1"
+    );
+    assert_eq!(
+        created["provider"]["models"][0]["inputModalities"],
+        json!(["text", "image"])
+    );
+    assert_eq!(created["provider"]["metadata"]["owner"], "tests");
+    assert!(!created.to_string().contains("secret-mode"));
+    assert!(!created.to_string().contains("secret-model"));
+
+    let stored = crate::SqliteMetadataStore::open(&metadata_path)
+        .unwrap()
+        .get_provider("fixture-upsert")
+        .unwrap()
+        .expect("provider should be stored");
+    assert_eq!(stored.display_name.as_deref(), Some("Fixture Upsert"));
+    assert_eq!(stored.models[0].model_id, "fixture-small");
+    assert_eq!(stored.models[0].context_window_tokens, Some(8192));
+
+    let updated = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-upsert",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v2",
+                    "displayName": "Fixture Updated",
+                    "auth": { "type": "none" },
+                    "models": [{ "modelId": "fixture-large" }]
+                }
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated["provider"]["baseUrl"], "https://example.invalid/v2");
+    assert_eq!(updated["provider"]["displayName"], "Fixture Updated");
+    assert_eq!(updated["provider"]["models"][0]["modelId"], "fixture-large");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-reject-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-reject");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let inline = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-inline",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "auth": { "type": "inline_api_key", "key": "secret" }
+                }
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(inline.code, -32602);
+    assert!(inline.message.contains("inline API keys"));
+
+    let command_auth = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-command-auth",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "auth": { "type": "command", "command": "secret-helper" }
+                }
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(command_auth.code, -32602);
+    assert!(command_auth.message.contains("command-backed auth"));
+
+    let command_header = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-command-header",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "headers": {
+                        "x-command": { "type": "command", "command": "secret-helper" }
+                    }
+                }
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(command_header.code, -32602);
+    assert!(command_header.message.contains("command-backed header"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_delete_removes_record_and_stored_credential() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-delete-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-delete");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let metadata_path = config.metadata_store_path();
+    let user_metadata_path = config.user_metadata_store_path();
+    let metadata_store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
+    metadata_store
+        .upsert_provider(LlmProviderRecord::new(
+            "fixture-delete",
+            ProviderApi::OpenAIChatCompletions,
+            "https://example.invalid/v1",
+        ))
+        .unwrap();
+    metadata_store
+        .set_credential(
+            "fixture-delete",
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-delete-key".to_string(),
+            },
+        )
+        .unwrap();
+    drop(metadata_store);
+    crate::SqliteMetadataStore::open(&user_metadata_path)
+        .unwrap()
+        .set_credential(
+            "fixture-delete",
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-user-delete-key".to_string(),
+            },
+        )
+        .unwrap();
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let deleted = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/delete",
+            Some(json!({ "providerId": "fixture-delete" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(deleted["providerId"], "fixture-delete");
+
+    let store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
+    assert!(store.get_provider("fixture-delete").unwrap().is_none());
+    assert!(store.get_credential("fixture-delete").unwrap().is_none());
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path).unwrap();
+    assert!(
+        user_store
+            .get_credential("fixture-delete")
+            .unwrap()
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn app_server_mcp_status_lists_redacted_remote_sources() {
     let listen = AppServerListenAddr::Unix(
         std::env::temp_dir().join(format!("cooldis-mcp-source-{}.sock", Uuid::now_v7())),

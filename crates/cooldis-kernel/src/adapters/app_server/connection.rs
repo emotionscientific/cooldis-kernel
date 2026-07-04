@@ -200,6 +200,66 @@ pub(super) struct AgentDraftParams {
     pub(super) expected_latest_version: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderReadParams {
+    pub(super) provider_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderUpsertParams {
+    pub(super) provider: ModelProviderUpsertRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderDeleteParams {
+    pub(super) provider_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderUpsertRecord {
+    pub(super) provider_id: String,
+    pub(super) api: Value,
+    pub(super) base_url: String,
+    #[serde(default)]
+    pub(super) display_name: Option<String>,
+    #[serde(default)]
+    pub(super) auth: crate::LlmProviderAuthConfig,
+    #[serde(default)]
+    pub(super) headers: BTreeMap<String, LlmProviderConfigValue>,
+    #[serde(default)]
+    pub(super) auth_header: bool,
+    #[serde(default)]
+    pub(super) models: Vec<ModelProviderModelUpsertRecord>,
+    #[serde(default)]
+    pub(super) metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderModelUpsertRecord {
+    pub(super) model_id: String,
+    #[serde(default)]
+    pub(super) display_name: Option<String>,
+    #[serde(default)]
+    pub(super) api: Option<Value>,
+    #[serde(default)]
+    pub(super) base_url: Option<String>,
+    #[serde(default)]
+    pub(super) context_window_tokens: Option<u64>,
+    #[serde(default)]
+    pub(super) max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub(super) input_modalities: Vec<crate::LlmProviderInputModality>,
+    #[serde(default)]
+    pub(super) headers: BTreeMap<String, LlmProviderConfigValue>,
+    #[serde(default)]
+    pub(super) metadata: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ModelProviderAuthStatusParams {
@@ -800,6 +860,19 @@ impl CooldisAppServer {
                 "nextCursor": null,
             })),
             "modelProvider/capabilities/read" => Ok(self.model_provider_capabilities_json()),
+            "modelProvider/list" => self.model_provider_list(),
+            "modelProvider/read" => {
+                let params: ModelProviderReadParams = parse_params(params)?;
+                self.model_provider_read(params)
+            }
+            "modelProvider/upsert" => {
+                let params: ModelProviderUpsertParams = parse_params(params)?;
+                self.model_provider_upsert(params)
+            }
+            "modelProvider/delete" => {
+                let params: ModelProviderDeleteParams = parse_params(params)?;
+                self.model_provider_delete(params)
+            }
             "modelProvider/auth/status" => {
                 let params: ModelProviderAuthStatusParams = parse_params(params)?;
                 self.model_provider_auth_status(params)
@@ -1377,6 +1450,62 @@ impl CooldisAppServer {
             .unwrap_or_else(crate::default_operations_registry_root)
     }
 
+    pub(super) fn model_provider_list(&self) -> Result<Value, JsonRpcErrorError> {
+        let mut providers = self
+            .inner
+            .metadata_store
+            .list_providers()
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+        let data = providers
+            .iter()
+            .map(|provider| self.model_provider_json(provider))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({ "data": data, "nextCursor": null }))
+    }
+
+    pub(super) fn model_provider_read(
+        &self,
+        params: ModelProviderReadParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let provider = self.model_provider_record(&params.provider_id)?;
+        Ok(json!({ "provider": self.model_provider_json(&provider)? }))
+    }
+
+    pub(super) fn model_provider_upsert(
+        &self,
+        params: ModelProviderUpsertParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let provider = model_provider_record_from_rpc(params.provider)?;
+        self.inner
+            .metadata_store
+            .upsert_provider(provider.clone())
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        let provider = self.model_provider_record(&provider.provider_id)?;
+        Ok(json!({ "provider": self.model_provider_json(&provider)? }))
+    }
+
+    pub(super) fn model_provider_delete(
+        &self,
+        params: ModelProviderDeleteParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let provider_id = params.provider_id;
+        self.model_provider_record(&provider_id)?;
+        self.inner
+            .metadata_store
+            .delete_provider(&provider_id)
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        self.inner
+            .user_metadata_store
+            .delete_credential(&provider_id)
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        self.inner
+            .metadata_store
+            .delete_credential(&provider_id)
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        Ok(json!({ "deleted": true, "providerId": provider_id }))
+    }
+
     pub(super) fn model_provider_auth_status(
         &self,
         params: ModelProviderAuthStatusParams,
@@ -1473,6 +1602,39 @@ impl CooldisAppServer {
             "source": status.source,
             "label": status.label,
             "authHeader": provider.auth_header,
+        }))
+    }
+
+    fn model_provider_json(
+        &self,
+        provider: &LlmProviderRecord,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let status = crate::llm_provider_auth_status(
+            &self.inner.user_metadata_store,
+            provider,
+            &LlmProviderAuthContext::from_process_env(),
+        )
+        .map_err(|err| internal_error(provider_store_error(err)))?;
+        Ok(json!({
+            "providerId": provider.provider_id,
+            "api": provider_api_rpc_json(&provider.api),
+            "baseUrl": provider.base_url,
+            "displayName": provider.display_name,
+            "auth": redacted_model_provider_auth_config(&provider.auth),
+            "authHeader": provider.auth_header,
+            "headers": redacted_model_provider_config_values(&provider.headers),
+            "models": provider.models.iter().map(|model| {
+                model_provider_model_json(provider, model, model.model_id == self.inner.model)
+            }).collect::<Vec<_>>(),
+            "metadata": provider.metadata,
+            "createdAtMs": provider.created_at_ms,
+            "updatedAtMs": provider.updated_at_ms,
+            "configuredAuth": {
+                "configured": status.configured,
+                "source": status.source,
+                "label": status.label,
+            },
+            "isActiveProvider": provider.provider_id == self.inner.model_provider,
         }))
     }
 
@@ -4200,6 +4362,184 @@ pub(super) fn catalog_provider_display_name(provider: &LlmProviderRecord) -> Str
         .display_name
         .clone()
         .unwrap_or_else(|| provider.provider_id.clone())
+}
+
+pub(super) fn model_provider_record_from_rpc(
+    provider: ModelProviderUpsertRecord,
+) -> Result<LlmProviderRecord, JsonRpcErrorError> {
+    validate_model_provider_auth_config(&provider.auth)?;
+    validate_model_provider_config_values(&provider.headers)?;
+    let api = provider_api_from_rpc_value(provider.api)?;
+    let mut record = LlmProviderRecord::new(provider.provider_id, api, provider.base_url)
+        .with_auth(provider.auth)
+        .with_auth_header(provider.auth_header);
+    record.display_name = provider.display_name;
+    record.headers = provider.headers;
+    record.metadata = provider.metadata;
+    record.models = provider
+        .models
+        .into_iter()
+        .map(model_provider_model_record_from_rpc)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(record)
+}
+
+fn model_provider_model_record_from_rpc(
+    model: ModelProviderModelUpsertRecord,
+) -> Result<crate::LlmProviderModelRecord, JsonRpcErrorError> {
+    validate_model_provider_config_values(&model.headers)?;
+    Ok(crate::LlmProviderModelRecord {
+        model_id: model.model_id,
+        display_name: model.display_name,
+        api: model.api.map(provider_api_from_rpc_value).transpose()?,
+        base_url: model.base_url,
+        context_window_tokens: model.context_window_tokens,
+        max_output_tokens: model.max_output_tokens,
+        input_modalities: model.input_modalities,
+        headers: model.headers,
+        metadata: model.metadata,
+    })
+}
+
+fn validate_model_provider_auth_config(
+    auth: &crate::LlmProviderAuthConfig,
+) -> Result<(), JsonRpcErrorError> {
+    match auth {
+        crate::LlmProviderAuthConfig::InlineApiKey { .. } => Err(jsonrpc_error(
+            -32602,
+            "modelProvider/upsert rejects inline API keys; use modelProvider/auth/set",
+        )),
+        crate::LlmProviderAuthConfig::Command { .. } => Err(jsonrpc_error(
+            -32602,
+            "modelProvider/upsert does not support command-backed auth in v1",
+        )),
+        crate::LlmProviderAuthConfig::StoredOrEnvironment
+        | crate::LlmProviderAuthConfig::None
+        | crate::LlmProviderAuthConfig::Env { .. } => Ok(()),
+    }
+}
+
+fn validate_model_provider_config_values(
+    values: &BTreeMap<String, LlmProviderConfigValue>,
+) -> Result<(), JsonRpcErrorError> {
+    if let Some((name, _)) = values
+        .iter()
+        .find(|(_, value)| matches!(value, LlmProviderConfigValue::Command { .. }))
+    {
+        return Err(jsonrpc_error(
+            -32602,
+            format!("modelProvider/upsert does not support command-backed header {name:?} in v1"),
+        ));
+    }
+    Ok(())
+}
+
+fn model_provider_model_json(
+    provider: &LlmProviderRecord,
+    model: &crate::LlmProviderModelRecord,
+    is_default: bool,
+) -> Value {
+    json!({
+        "modelId": model.model_id,
+        "displayName": model.display_name,
+        "api": provider_api_rpc_json(model.api.as_ref().unwrap_or(&provider.api)),
+        "baseUrl": model.base_url.as_ref().unwrap_or(&provider.base_url),
+        "contextWindowTokens": model.context_window_tokens,
+        "maxOutputTokens": model.max_output_tokens,
+        "inputModalities": model.input_modalities,
+        "headers": redacted_model_provider_config_values(&model.headers),
+        "metadata": model.metadata,
+        "isDefault": is_default,
+    })
+}
+
+fn redacted_model_provider_auth_config(auth: &crate::LlmProviderAuthConfig) -> Value {
+    match auth {
+        crate::LlmProviderAuthConfig::StoredOrEnvironment => {
+            json!({ "type": "stored_or_environment" })
+        }
+        crate::LlmProviderAuthConfig::None => json!({ "type": "none" }),
+        crate::LlmProviderAuthConfig::Env { name } => json!({ "type": "env", "name": name }),
+        crate::LlmProviderAuthConfig::InlineApiKey { .. } => {
+            json!({ "type": "inline_api_key", "key": { "redacted": true } })
+        }
+        crate::LlmProviderAuthConfig::Command { .. } => {
+            json!({ "type": "command", "command": { "redacted": true } })
+        }
+    }
+}
+
+fn redacted_model_provider_config_values(
+    values: &BTreeMap<String, LlmProviderConfigValue>,
+) -> Vec<Value> {
+    values
+        .iter()
+        .map(|(name, value)| {
+            json!({
+                "name": name,
+                "value": redacted_model_provider_config_value(value),
+            })
+        })
+        .collect()
+}
+
+fn redacted_model_provider_config_value(value: &LlmProviderConfigValue) -> Value {
+    match value {
+        LlmProviderConfigValue::Literal { .. } => {
+            json!({ "type": "literal", "value": { "redacted": true } })
+        }
+        LlmProviderConfigValue::Env { name } => json!({ "type": "env", "name": name }),
+        LlmProviderConfigValue::Command { .. } => {
+            json!({ "type": "command", "command": { "redacted": true } })
+        }
+    }
+}
+
+fn provider_api_from_rpc_value(value: Value) -> Result<ProviderApi, JsonRpcErrorError> {
+    match value {
+        Value::String(api) => provider_api_from_rpc_str(&api),
+        Value::Object(mut object) => {
+            let Some(other) = object
+                .remove("other")
+                .and_then(|value| value.as_str().map(str::to_string))
+            else {
+                return Err(jsonrpc_error(
+                    -32602,
+                    "modelProvider/upsert api object must be {\"other\":\"...\"}",
+                ));
+            };
+            Ok(ProviderApi::Other(other))
+        }
+        _ => Err(jsonrpc_error(
+            -32602,
+            "modelProvider/upsert api must be a string or {\"other\":\"...\"}",
+        )),
+    }
+}
+
+fn provider_api_from_rpc_str(api: &str) -> Result<ProviderApi, JsonRpcErrorError> {
+    match api {
+        "open_ai_responses" | "open_a_i_responses" => Ok(ProviderApi::OpenAIResponses),
+        "open_ai_chat_completions" | "open_a_i_chat_completions" => {
+            Ok(ProviderApi::OpenAIChatCompletions)
+        }
+        "anthropic_messages" => Ok(ProviderApi::AnthropicMessages),
+        other => Err(jsonrpc_error(
+            -32602,
+            format!(
+                "unknown modelProvider api {other:?}; expected open_ai_responses, open_ai_chat_completions, anthropic_messages, or {{\"other\":\"...\"}}"
+            ),
+        )),
+    }
+}
+
+fn provider_api_rpc_json(api: &ProviderApi) -> Value {
+    match api {
+        ProviderApi::OpenAIResponses => json!("open_ai_responses"),
+        ProviderApi::OpenAIChatCompletions => json!("open_ai_chat_completions"),
+        ProviderApi::AnthropicMessages => json!("anthropic_messages"),
+        ProviderApi::Other(other) => json!({ "other": other }),
+    }
 }
 
 pub(super) fn thread_event_record_json(
