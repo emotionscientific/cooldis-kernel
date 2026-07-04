@@ -256,11 +256,18 @@ impl CooldisIoConfig {
         self.ingress.validate("io.ingress", errors);
 
         let mut route_ids = BTreeSet::new();
+        let mut clock_route_count = 0;
         for route in &self.routes {
             route.validate(errors);
             if !route.id.trim().is_empty() && !route_ids.insert(route.id.clone()) {
                 errors.push(format!("io.routes id {:?} is duplicated", route.id));
             }
+            if route.kind == "clock.tick" {
+                clock_route_count += 1;
+            }
+        }
+        if clock_route_count > 1 {
+            errors.push("io.routes supports at most one clock.tick route".to_string());
         }
     }
 
@@ -390,6 +397,12 @@ impl CooldisIoRouteConfig {
                 )),
                 None => {}
             }
+        }
+        if self.kind == "clock.tick" && self.telegram.is_some() {
+            errors.push(format!(
+                "io.routes {:?} kind clock.tick does not accept telegram config",
+                self.id
+            ));
         }
     }
 

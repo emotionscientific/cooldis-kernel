@@ -90,6 +90,14 @@ Telegram Bot API updates into IO envelopes and builds `sendMessage` requests
 from visible egress messages. The daemon owns webhook HTTP routing, durable
 queue storage, tenant resolution, and admission policy.
 
+`clock.tick` is the daemon-owned clock ingress adapter. It does not carry
+schedules in route config; it reads active `mandate.started` minus
+`mandate.revoked` facts from thread control streams and turns due occurrences
+into durable ingress envelopes. The queue worker admits those envelopes as
+witnessed `timer.fired` control-stream events with a payload that names the
+source `mandate_event_id`, `scheduled_for`, deterministic `occurrence_index`,
+and whether the fire was a recovery `catch_up`.
+
 `crates/cooldis-io-pgqrs` wraps `pgqrs` behind the core queue traits. The spike
 uses a local SQLite DSN for restart/resume proof. Managed deployments can enable
 the crate's `postgres` feature and point the same wrapper at a Postgres DSN
@@ -148,10 +156,49 @@ threading = "selected_thread"
 
 [daemon.io.routes.ingress.persistence]
 mode = "best_effort_direct"
+
+[[daemon.io.routes]]
+id = "clock-main"
+kind = "clock.tick"
+enabled = true
 ```
 
 Dynamic code plugins can come later as out-of-process adapters that speak the
 same envelope shape over JSON-RPC, websocket, or another small transport.
+
+## Clock Tick Example
+
+Clock ticks use the same queue and worker as other durable ingress. A due
+mandate occurrence becomes:
+
+```text
+clock route
+-> IngressEnvelope {
+     source.protocol = "clock.tick",
+     source.instance_id = "clock-main",
+     conversation.external_conversation_id = "thread:<thread_id>",
+     conversation.kind = "system",
+     dedupe_key = "clock.tick:clock-main:<mandate_event_id>:<occurrence_index>",
+     content = Event {
+       kind = "timer.fired",
+       payload = {
+         mandate_event_id,
+         scheduled_for,
+         occurrence_index,
+         catch_up
+       }
+     }
+   }
+-> shared IO queue / dedupe
+-> daemon bridge
+-> control:<thread_id> timer.fired
+```
+
+The dedupe key is `(mandate_event_id, occurrence_index)` scoped to the clock
+route, so a daemon crash after enqueue but before the route observes success
+does not double-fire the control event on restart. If the daemon was down at
+the due instant, `coalesce_missed` fires one recovery tick with
+`catch_up = true`; `skip_missed` advances to the next occurrence.
 
 ## Telegram Example
 

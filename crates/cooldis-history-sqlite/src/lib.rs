@@ -50,6 +50,29 @@ impl SqliteSessionStore {
             .lock()
             .map_err(|err| HistoryError::Storage(format!("sqlite connection lock poisoned: {err}")))
     }
+
+    pub fn list_control_stream_coordinates(&self) -> HistoryResult<Vec<ThreadCoordinates>> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT tenant_id, user_id, session_id, thread_id
+                 FROM event_records
+                 WHERE stream_id LIKE 'control:%'
+                 ORDER BY tenant_id, user_id, session_id, thread_id",
+            )
+            .map_err(storage_error)?;
+        let mut rows = statement.query([]).map_err(storage_error)?;
+        let mut coordinates = Vec::new();
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            coordinates.push(ThreadCoordinates {
+                tenant_id: row.get(0).map_err(storage_error)?,
+                user_id: row.get(1).map_err(storage_error)?,
+                session_id: row.get(2).map_err(storage_error)?,
+                thread_id: parse_thread_id(&row.get::<_, String>(3).map_err(storage_error)?)?,
+            });
+        }
+        Ok(coordinates)
+    }
 }
 
 #[async_trait]

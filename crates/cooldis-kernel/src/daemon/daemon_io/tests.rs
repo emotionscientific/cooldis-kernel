@@ -1,11 +1,18 @@
 use super::*;
-use crate::{AppServerListenAddr, CooldisAppServerConfig};
+use crate::{
+    AppServerListenAddr, CooldisAppServerConfig, CooldisDaemonClockRoute, DaemonClock, EventKind,
+    EventStore, MandateCatchUpPolicy, MandateSchedulePayload, MandateStartRequest,
+    TimerFiredPayload, control_stream_id, revoke_mandate, start_mandate,
+};
+use chrono::{DateTime, TimeZone, Utc};
 use cooldis_io_core::{
     ConversationKind, DeliveryReceipt, IngressContent, IoConversation, IoProtocolAdapter,
     IoProtocolCapabilities, IoSource,
 };
 use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig};
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 #[derive(Clone)]
@@ -63,6 +70,20 @@ async fn test_bridge() -> (
     CooldisDaemonIoBridge,
     mpsc::UnboundedReceiver<EgressEnvelope>,
 ) {
+    let server = test_server().await;
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let (tx, rx) = mpsc::unbounded_channel();
+    bridge
+        .register_egress_adapter(
+            "telegram.bot",
+            "main",
+            Arc::new(CaptureEgress { sender: tx }),
+        )
+        .await;
+    (bridge, rx)
+}
+
+async fn test_server() -> CooldisAppServer {
     let fixture_id = uuid::Uuid::now_v7().to_string();
     let fixture_root = std::env::temp_dir()
         .join("cooldis-daemon-io-tests")
@@ -74,17 +95,88 @@ async fn test_bridge() -> (
     config.state_home = fixture_root.join("state");
     config.tenant_id = format!("app-server-{fixture_id}");
     config.user_id = format!("local-user-{fixture_id}");
-    let server = CooldisAppServer::new_local(config).await.unwrap();
-    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
-    let (tx, rx) = mpsc::unbounded_channel();
-    bridge
-        .register_egress_adapter(
-            "telegram.bot",
-            "main",
-            Arc::new(CaptureEgress { sender: tx }),
-        )
-        .await;
-    (bridge, rx)
+    CooldisAppServer::new_local(config).await.unwrap()
+}
+
+#[derive(Clone)]
+struct FakeClock {
+    now: Arc<StdMutex<DateTime<Utc>>>,
+}
+
+impl FakeClock {
+    fn new(now: DateTime<Utc>) -> Self {
+        Self {
+            now: Arc::new(StdMutex::new(now)),
+        }
+    }
+
+    fn set(&self, now: DateTime<Utc>) {
+        *self.now.lock().unwrap() = now;
+    }
+}
+
+impl DaemonClock for FakeClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.now.lock().unwrap()
+    }
+}
+
+async fn start_clock_thread_with_mandate(
+    server: &CooldisAppServer,
+    catch_up: MandateCatchUpPolicy,
+) -> (
+    SqliteSessionStore,
+    ThreadCoordinates,
+    crate::MandateStartReceipt,
+) {
+    let handle = server
+        .supervisor()
+        .start_thread(ThreadStartRequest {
+            tenant_id: server.tenant_id().to_string(),
+            user_id: server.user_id().to_string(),
+            session_id: format!("clock-{}", uuid::Uuid::now_v7()),
+            topology: ThreadTopology::root(),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+    let coordinates = handle.context().coordinates.clone();
+    let store = SqliteSessionStore::open(server.session_store_path()).unwrap();
+    let receipt = start_mandate(
+        &store,
+        &coordinates,
+        MandateStartRequest {
+            schedule: MandateSchedulePayload::Interval { every_ms: 60_000 },
+            max_occurrences: Some(3),
+            catch_up: Some(catch_up),
+            input_template: Some("wake".to_string()),
+            snapshot_id: None,
+        },
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    (store, coordinates, receipt)
+}
+
+fn event_time(event_ms: i64, offset_ms: i64) -> DateTime<Utc> {
+    Utc.timestamp_millis_opt(event_ms + offset_ms)
+        .single()
+        .unwrap()
+}
+
+async fn timer_payloads(
+    store: &SqliteSessionStore,
+    coordinates: &ThreadCoordinates,
+) -> Vec<TimerFiredPayload> {
+    store
+        .read_events(&control_stream_id(coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::TimerFired)
+        .map(|event| serde_json::from_value(event.payload).unwrap())
+        .collect()
 }
 
 #[tokio::test]
@@ -169,6 +261,144 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         egress.kind,
         EgressKind::AssistantMessage { ref text } if text.contains("hello after restart")
     ));
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn clock_route_restarts_after_due_coalesces_one_missed_tick() {
+    let server = test_server().await;
+    let (store, coordinates, mandate) =
+        start_clock_thread_with_mandate(&server, MandateCatchUpPolicy::CoalesceMissed).await;
+    let after_due = event_time(mandate.event.created_at_ms, 90_000);
+    let clock = Arc::new(FakeClock::new(after_due));
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!("clock-coalesce-{}.sqlite", uuid::Uuid::now_v7()));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "clock"))
+            .await
+            .unwrap(),
+    );
+    let route =
+        CooldisDaemonClockRoute::new("clock-main", store.clone(), queue.clone(), clock.clone());
+
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let worker = CooldisDaemonQueueWorker::new(queue.clone(), bridge, "clock-worker", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    let fired = timer_payloads(&store, &coordinates).await;
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].mandate_event_id, mandate.event.id);
+    assert_eq!(fired[0].occurrence_index, 0);
+    assert!(fired[0].catch_up);
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 0);
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn clock_route_restarts_after_due_skips_missed_until_next_occurrence() {
+    let server = test_server().await;
+    let (store, coordinates, mandate) =
+        start_clock_thread_with_mandate(&server, MandateCatchUpPolicy::SkipMissed).await;
+    let after_first_due = event_time(mandate.event.created_at_ms, 90_000);
+    let second_due = event_time(mandate.event.created_at_ms, 120_000);
+    let clock = Arc::new(FakeClock::new(after_first_due));
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!("clock-skip-{}.sqlite", uuid::Uuid::now_v7()));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "clock"))
+            .await
+            .unwrap(),
+    );
+    let route =
+        CooldisDaemonClockRoute::new("clock-main", store.clone(), queue.clone(), clock.clone());
+
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 0);
+    assert!(timer_payloads(&store, &coordinates).await.is_empty());
+    clock.set(second_due);
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
+
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let worker = CooldisDaemonQueueWorker::new(queue.clone(), bridge, "clock-worker", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    let fired = timer_payloads(&store, &coordinates).await;
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].mandate_event_id, mandate.event.id);
+    assert_eq!(fired[0].occurrence_index, 1);
+    assert!(!fired[0].catch_up);
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn clock_route_duplicate_enqueue_before_ack_does_not_double_fire() {
+    let server = test_server().await;
+    let (store, coordinates, mandate) =
+        start_clock_thread_with_mandate(&server, MandateCatchUpPolicy::CoalesceMissed).await;
+    let after_due = event_time(mandate.event.created_at_ms, 90_000);
+    let clock = Arc::new(FakeClock::new(after_due));
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!("clock-dedupe-{}.sqlite", uuid::Uuid::now_v7()));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "clock"))
+            .await
+            .unwrap(),
+    );
+    let route =
+        CooldisDaemonClockRoute::new("clock-main", store.clone(), queue.clone(), clock.clone());
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
+    drop(route);
+    drop(queue);
+
+    let reopened = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "clock"))
+            .await
+            .unwrap(),
+    );
+    let restarted_route =
+        CooldisDaemonClockRoute::new("clock-main", store.clone(), reopened.clone(), clock.clone());
+    assert_eq!(restarted_route.enqueue_due_once().await.unwrap(), 0);
+
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let worker = CooldisDaemonQueueWorker::new(reopened.clone(), bridge, "clock-worker", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert_eq!(worker.drain_once().await.unwrap(), 0);
+
+    let fired = timer_payloads(&store, &coordinates).await;
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].mandate_event_id, mandate.event.id);
+    assert_eq!(fired[0].occurrence_index, 0);
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn clock_route_revoke_prevents_further_ticks() {
+    let server = test_server().await;
+    let (store, coordinates, mandate) =
+        start_clock_thread_with_mandate(&server, MandateCatchUpPolicy::CoalesceMissed).await;
+    revoke_mandate(&store, &coordinates, mandate.event.id)
+        .await
+        .unwrap();
+    let after_due = event_time(mandate.event.created_at_ms, 90_000);
+    let clock = Arc::new(FakeClock::new(after_due));
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!("clock-revoke-{}.sqlite", uuid::Uuid::now_v7()));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "clock"))
+            .await
+            .unwrap(),
+    );
+    let route =
+        CooldisDaemonClockRoute::new("clock-main", store.clone(), queue.clone(), clock.clone());
+
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 0);
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let worker = CooldisDaemonQueueWorker::new(queue.clone(), bridge, "clock-worker", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 0);
+    assert!(timer_payloads(&store, &coordinates).await.is_empty());
     let _ = std::fs::remove_file(db);
 }
 

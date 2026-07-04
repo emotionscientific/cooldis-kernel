@@ -5,18 +5,19 @@ use crate::{
     APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentManifestRefStatus, AppServerListenAddr,
     AppServerProviderConfig, CapsuleBindingsConfig, CodexTuiConnectConfig, CodexTuiEvent,
     CodexTuiTestClient, ConsoleAssetConfig, CooldisAppServer, CooldisAppServerConfig,
-    CooldisDaemonIoBridge, CooldisDaemonQueueWorker, CooldisDaemonServiceSpec,
-    CooldisDaemonServiceTarget, CooldisError, CooldisIngressConfig, CooldisIoConfig,
-    CooldisIoRouteConfig, CooldisProviderConfig, CooldisResult, CooldisVfs, EventKind, EventStore,
-    EventStreamId, HostFileSystem, HostFileSystemMode, JsonRpcNotification, LlmProviderAuthStore,
-    LlmProviderCatalogStore, LoadedCooldisDaemonConfig, LocalAgentRegistry, LocalOperationRegistry,
-    McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, PublishOperationRequest,
-    PublishedAgentRecord, PublishedOperationRecord, PublishedOperationSource, RegisteredOperation,
-    RouteIngressSink, RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry,
-    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, TelegramWebhookServer,
-    TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun,
-    ToolInterfaceContract, ToolManualExitStatus, ToolOperationManual, ToolPackageSource,
-    WasmOperationManifest, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+    CooldisDaemonClockRoute, CooldisDaemonIoBridge, CooldisDaemonQueueWorker,
+    CooldisDaemonServiceSpec, CooldisDaemonServiceTarget, CooldisError, CooldisIngressConfig,
+    CooldisIoConfig, CooldisIoRouteConfig, CooldisProviderConfig, CooldisResult, CooldisVfs,
+    EventKind, EventStore, EventStreamId, HostFileSystem, HostFileSystemMode, JsonRpcNotification,
+    LlmProviderAuthStore, LlmProviderCatalogStore, LoadedCooldisDaemonConfig, LocalAgentRegistry,
+    LocalOperationRegistry, McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport,
+    PublishOperationRequest, PublishedAgentRecord, PublishedOperationRecord,
+    PublishedOperationSource, RegisteredOperation, RouteIngressSink, RustWasmBuildOptions,
+    SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore, SqliteSecretStore,
+    SqliteSessionStore, SystemDaemonClock, TelegramWebhookServer, TelegramWebhookServerConfig,
+    ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun, ToolInterfaceContract,
+    ToolManualExitStatus, ToolOperationManual, ToolPackageSource, WasmOperationManifest,
+    WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
     agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
     default_operations_registry_root, discover_cooldis_daemon_config_path,
     discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
@@ -1379,6 +1380,11 @@ async fn start_daemon_io(
     let enabled_routes = io.routes.iter().filter(|route| route.enabled);
     for route in enabled_routes {
         match route.kind.as_str() {
+            "clock.tick" => {
+                let ingress = route.ingress.as_ref().unwrap_or(&io.ingress);
+                let sink = route_sink_for_ingress(route, ingress, &bridge, &mut tasks).await?;
+                start_clock_route(route, sink, server, &mut tasks).await?;
+            }
             "telegram.bot" => {
                 let ingress = route.ingress.as_ref().unwrap_or(&io.ingress);
                 let sink = route_sink_for_ingress(route, ingress, &bridge, &mut tasks).await?;
@@ -1434,6 +1440,24 @@ async fn route_sink_for_ingress(
         }
     };
     Ok(Arc::new(RouteIngressSink::new(inner, route)))
+}
+
+async fn start_clock_route(
+    route: &CooldisIoRouteConfig,
+    sink: Arc<dyn IngressSink>,
+    server: &CooldisAppServer,
+    tasks: &mut Vec<JoinHandle<()>>,
+) -> CooldisResult<()> {
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .map_err(|err| CooldisError::History(err.to_string()))?;
+    let clock =
+        CooldisDaemonClockRoute::new(route.id.clone(), store, sink, Arc::new(SystemDaemonClock));
+    eprintln!(
+        "cooldis clock route {} polling active mandates every 30s",
+        route.id
+    );
+    tasks.push(tokio::spawn(clock.run()));
+    Ok(())
 }
 
 async fn start_telegram_route(
