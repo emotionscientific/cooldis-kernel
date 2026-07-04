@@ -284,7 +284,7 @@ impl CooldisAppServerConfig {
             session_token,
             model,
             max_tokens: 4096,
-            stream: false,
+            stream: true,
         };
         self
     }
@@ -1028,12 +1028,9 @@ fn agent_manifest_provider_surface_from_parts(
         .with_supports_streaming(false)),
         AppServerProviderConfig::BifrostOpenAIResponses { .. }
         | AppServerProviderConfig::OpenAIChatCompletions { .. }
-        | AppServerProviderConfig::AnthropicMessages { .. } => Ok(
+        | AppServerProviderConfig::AnthropicMessages { .. }
+        | AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
             AgentManifestProviderSurface::single(model_provider.to_string(), model.to_string()),
-        ),
-        AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
-            AgentManifestProviderSurface::single(model_provider.to_string(), model.to_string())
-                .with_supports_streaming(false),
         ),
     }
 }

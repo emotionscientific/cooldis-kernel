@@ -34,7 +34,7 @@ Current built-in families:
 | `openai_responses` | OpenAI Responses | yes | yes | yes | no | yes | no | text, image input, LLM tool |
 | `openai_chat_completions` | OpenAI Chat Completions | yes | yes | yes | no | no | no | text, LLM tool |
 | `anthropic_messages` | Anthropic Messages | yes | yes | yes | yes | yes | no | text, image input, LLM tool |
-| `anthropic_bedrock_messages` | Anthropic Messages on Bedrock InvokeModel | yes | no | yes | yes | yes | no | text, image input, LLM tool |
+| `anthropic_bedrock_messages` | Anthropic Messages on Bedrock InvokeModel/InvokeModelWithResponseStream | yes | yes | yes | yes | yes | no | text, image input, LLM tool |
 | local/offline | `ProviderApi::Other(...)` | no | no | no | no | no | no | text |
 
 Adapters or clients that need gateway-specific behavior should override the

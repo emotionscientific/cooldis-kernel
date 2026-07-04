@@ -1,8 +1,9 @@
 use cooldis::{
-    AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage, CanonicalProviderRuntimeConfig,
-    CanonicalProviderRuntimeFactory, OpenAIReasoningSummary, OpenAIResponsesAdapter, ProviderApi,
-    ProviderEndpoint, ProviderHttpClient, ProviderRequest, ProviderStreamEvent,
-    ProviderWireAdapter, RuntimeHost, ThreadCoordinates, ThreadEvent, ThreadTopology,
+    AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage,
+    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, OpenAIReasoningSummary,
+    OpenAIResponsesAdapter, ProviderApi, ProviderClient, ProviderEndpoint, ProviderHttpClient,
+    ProviderRequest, ProviderStreamEvent, ProviderWireAdapter, RuntimeHost, ThreadCoordinates,
+    ThreadEvent, ThreadTopology,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -16,6 +17,18 @@ const DEFAULT_ENV_FILE: &str = ".env";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env_flag("COOLDIS_BEDROCK_SMOKE_ONLY") {
+        let config = BedrockSmokeConfig::load()?;
+        let bedrock_stream = smoke_anthropic_bedrock_stream(&config).await?;
+        println!(
+            "bedrock stream ok model={} stop={:?} text={}",
+            bedrock_stream.model,
+            bedrock_stream.stop_reason,
+            compact(&bedrock_stream.text)
+        );
+        return Ok(());
+    }
+
     let config = SmokeConfig::load()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -82,6 +95,48 @@ struct SmokeResult {
     model: String,
     stop_reason: cooldis::CanonicalStopReason,
     text: String,
+}
+
+struct BedrockSmokeConfig {
+    region: String,
+    base_url: Option<String>,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+    model: String,
+}
+
+impl BedrockSmokeConfig {
+    fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        let env_file = std::env::var("COOLDIS_BEDROCK_ENV_FILE")
+            .or_else(|_| std::env::var("COOLDIS_ANTHROPIC_BEDROCK_ENV_FILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_ENV_FILE));
+        let file_env = read_env_file_if_exists(&env_file)?;
+        let region = env_or_file("AWS_BEDROCK_REGION", &file_env)
+            .or_else(|| env_or_file("AWS_REGION", &file_env))
+            .or_else(|| env_or_file("AWS_DEFAULT_REGION", &file_env))
+            .unwrap_or_else(|| "us-east-1".to_string());
+        let base_url = env_or_file("COOLDIS_BEDROCK_BASE_URL", &file_env)
+            .or_else(|| env_or_file("ANTHROPIC_BEDROCK_BASE_URL", &file_env))
+            .map(|value| value.trim_end_matches('/').to_string());
+        let access_key_id = env_or_file("AWS_ACCESS_KEY_ID", &file_env)
+            .ok_or("missing AWS_ACCESS_KEY_ID for COOLDIS_BEDROCK_SMOKE_ONLY")?;
+        let secret_access_key = env_or_file("AWS_SECRET_ACCESS_KEY", &file_env)
+            .ok_or("missing AWS_SECRET_ACCESS_KEY for COOLDIS_BEDROCK_SMOKE_ONLY")?;
+        let session_token = env_or_file("AWS_SESSION_TOKEN", &file_env);
+        let model = env_or_file("COOLDIS_ANTHROPIC_BEDROCK_MODEL", &file_env)
+            .or_else(|| env_or_file("AWS_BEDROCK_MODEL", &file_env))
+            .unwrap_or_else(|| "global.anthropic.claude-sonnet-4-5-20250929-v1:0".to_string());
+        Ok(Self {
+            region,
+            base_url,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            model,
+        })
+    }
 }
 
 impl SmokeConfig {
@@ -316,6 +371,56 @@ async fn smoke_anthropic_stream(
     })
 }
 
+async fn smoke_anthropic_bedrock_stream(
+    config: &BedrockSmokeConfig,
+) -> Result<SmokeResult, Box<dyn std::error::Error>> {
+    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(AnthropicBedrockMessagesAdapter);
+    let endpoint = if let Some(base_url) = &config.base_url {
+        ProviderEndpoint::anthropic_bedrock_with_base_url(
+            base_url,
+            &config.region,
+            &config.model,
+            config.access_key_id.clone(),
+            config.secret_access_key.clone(),
+            config.session_token.clone(),
+        )
+    } else {
+        ProviderEndpoint::anthropic_bedrock(
+            &config.region,
+            &config.model,
+            config.access_key_id.clone(),
+            config.secret_access_key.clone(),
+            config.session_token.clone(),
+        )
+    };
+    let client = ProviderHttpClient::new(endpoint, adapter)?;
+    let mut request = ProviderRequest::new(
+        ProviderApi::AnthropicMessages,
+        "anthropic_bedrock",
+        config.model.clone(),
+    );
+    request.max_tokens = 32;
+    request.messages = vec![CanonicalMessage::user_text(
+        "Reply with exactly COOL_BEDROCK_STREAM_OK and no other text.",
+    )];
+
+    let events = client.stream(&request).await?;
+    if let Some(error) = stream_error(&events) {
+        return Err(format!("Bedrock stream returned provider error: {error}").into());
+    }
+    let text = stream_text(&events);
+    ensure_marker_with_context(
+        &text,
+        "COOL_BEDROCK_STREAM_OK",
+        &stream_event_summary(&events),
+    )?;
+    Ok(SmokeResult {
+        model: config.model.clone(),
+        stop_reason: stream_stop_reason(&events),
+        text,
+    })
+}
+
 async fn smoke_canonical_openai_runtime(
     config: &SmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
@@ -484,6 +589,13 @@ fn env_or_file(key: &str, file_env: &HashMap<String, String>) -> Option<String> 
         .filter(|value| !value.trim().is_empty())
 }
 
+fn env_flag(key: &str) -> bool {
+    matches!(
+        std::env::var(key).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 fn unquote(value: &str) -> String {
     value
         .strip_prefix('"')
@@ -519,6 +631,51 @@ fn stream_text(events: &[ProviderStreamEvent]) -> String {
         .join("")
 }
 
+fn stream_error(events: &[ProviderStreamEvent]) -> Option<&str> {
+    events.iter().find_map(|event| match event {
+        ProviderStreamEvent::Error { message } => Some(message.as_str()),
+        _ => None,
+    })
+}
+
+fn stream_event_summary(events: &[ProviderStreamEvent]) -> String {
+    if events.is_empty() {
+        return "no_events".to_string();
+    }
+    events
+        .iter()
+        .map(|event| match event {
+            ProviderStreamEvent::TextDelta { text } => format!("text_delta(len={})", text.len()),
+            ProviderStreamEvent::ThinkingDelta { text } => {
+                format!("thinking_delta(len={})", text.len())
+            }
+            ProviderStreamEvent::ToolCallDelta {
+                arguments_delta, ..
+            } => {
+                format!("tool_call_delta(args_len={})", arguments_delta.len())
+            }
+            ProviderStreamEvent::Content { content } => match content {
+                CanonicalContent::Text { text, .. } => format!("content_text(len={})", text.len()),
+                CanonicalContent::Thinking { text, .. } => {
+                    format!("content_thinking(len={})", text.len())
+                }
+                CanonicalContent::Image { .. } => "content_image".to_string(),
+                CanonicalContent::ToolCall { .. } => "content_tool_call".to_string(),
+            },
+            ProviderStreamEvent::Usage { usage } => format!(
+                "usage(in={},out={},cache_create={},cache_read={})",
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens
+            ),
+            ProviderStreamEvent::Done { stop_reason } => format!("done({stop_reason:?})"),
+            ProviderStreamEvent::Error { message } => format!("error(len={})", message.len()),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn stream_stop_reason(events: &[ProviderStreamEvent]) -> cooldis::CanonicalStopReason {
     events
         .iter()
@@ -531,14 +688,27 @@ fn stream_stop_reason(events: &[ProviderStreamEvent]) -> cooldis::CanonicalStopR
 }
 
 fn ensure_marker(text: &str, marker: &str) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_marker_with_context(text, marker, "")
+}
+
+fn ensure_marker_with_context(
+    text: &str,
+    marker: &str,
+    context: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     if text.contains(marker) {
         Ok(())
     } else {
-        Err(format!(
+        let context = if context.is_empty() {
+            String::new()
+        } else {
+            format!(" events=[{context}]")
+        };
+        let message = format!(
             "provider response did not contain expected marker {marker}: {}",
-            compact(text)
-        )
-        .into())
+            compact(text),
+        ) + &context;
+        Err(message.into())
     }
 }
 

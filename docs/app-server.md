@@ -145,8 +145,8 @@ Anthropic Messages-compatible endpoints use the Anthropic provider shape:
 }
 ```
 
-AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` path and AWS
-SigV4 credentials:
+AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` and
+`InvokeModelWithResponseStream` paths with AWS SigV4 credentials:
 
 ```json
 {
@@ -154,7 +154,7 @@ SigV4 credentials:
     "provider": "anthropic_bedrock",
     "region": "us-east-1",
     "model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "stream": false,
+    "stream": true,
     "max_tokens": 4096
   }
 }
@@ -169,8 +169,9 @@ requires it. `anthropic_bedrock` reads credentials from `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and
 `AWS_BEDROCK_REGION`/`AWS_REGION`/`AWS_DEFAULT_REGION`. For the local shared
 1Password item, run the child command through `scripts/with-bedrock-env.sh`.
-Streaming is disabled for this path until Cooldis has an AWS event-stream
-decoder for `InvokeModelWithResponseStream`.
+Streaming uses `InvokeModelWithResponseStream` and decodes AWS
+`application/vnd.amazon.eventstream` frames into the same Anthropic Messages
+stream events as the native Anthropic adapter.
 
 Provider config resolution is:
 
@@ -184,8 +185,8 @@ Provider config resolution is:
 - models resolve from `model`, command line flags, or provider-specific local
   env;
 - `max_tokens` defaults to `4096`;
-- streaming defaults to enabled except for `anthropic_bedrock`, which defaults
-  to non-streaming.
+- streaming defaults to enabled for hosted providers, including
+  `anthropic_bedrock`; local/offline mode remains non-streaming.
 
 Keep real secrets in the environment or a local ignored env file, not in
 committed `cooldis.json`.
@@ -701,6 +702,5 @@ Run an Anthropic Bedrock proof:
 scripts/with-bedrock-env.sh cargo run --bin cooldis -- chat \
   --provider anthropic_bedrock \
   --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
-  --no-stream \
   "Reply with exactly COOL_CHAT_BEDROCK_OK and no other text."
 ```

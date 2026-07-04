@@ -659,8 +659,10 @@ name = "cooldis-provider"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "cooldis-history",
+ "crc32fast",
  "hex",
  "hmac 0.12.1",
  "reqwest",

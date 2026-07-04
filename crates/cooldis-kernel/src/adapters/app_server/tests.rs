@@ -5261,8 +5261,37 @@ async fn model_provider_capabilities_read_returns_local_capabilities() {
             "namespaceTools": true,
             "imageGeneration": false,
             "webSearch": false,
+            "supportsStreaming": false,
         })
     );
+}
+
+#[tokio::test]
+async fn model_provider_capabilities_read_reports_bedrock_streaming() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-bedrock-cap-test-{}.sock", Uuid::now_v7())),
+    );
+    let root = std::env::temp_dir().join(format!("cooldis-bedrock-cap-test-{}", Uuid::now_v7()));
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap())
+        .with_anthropic_bedrock(
+            "us-east-1",
+            "AKIA_TEST",
+            "secret",
+            None,
+            "anthropic.claude-test-v1:0",
+        );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let capabilities = app
+        .dispatch_request(&connection, "modelProvider/capabilities/read", None)
+        .await
+        .unwrap();
+    assert_eq!(capabilities["supportsStreaming"], json!(true));
 }
 
 #[tokio::test]

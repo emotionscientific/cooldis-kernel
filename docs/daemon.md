@@ -105,15 +105,15 @@ stream = true
 max_tokens = 4096
 ```
 
-For AWS Bedrock Anthropic through `InvokeModel`, use AWS credentials from the
-environment and keep streaming disabled:
+For AWS Bedrock Anthropic through `InvokeModel` and
+`InvokeModelWithResponseStream`, use AWS credentials from the environment:
 
 ```toml
 [daemon.provider]
 provider = "anthropic_bedrock"
 region = "us-east-1"
 model = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-stream = false
+stream = true
 max_tokens = 4096
 ```
 

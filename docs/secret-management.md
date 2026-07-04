@@ -137,7 +137,7 @@ loads them for the child process:
 provider = "anthropic_bedrock"
 region = "us-east-1"
 model = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-stream = false
+stream = true
 max_tokens = 4096
 ```
 
