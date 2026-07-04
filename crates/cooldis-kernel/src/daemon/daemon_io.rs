@@ -1,17 +1,19 @@
 use crate::agent::manifest_bind::canonical_json_hash;
 use crate::{
-    AdmissionDecidedPayload, AdmissionDecision as EventAdmissionDecision, CooldisAppServer,
-    CooldisEgressProjectionRuleConfig, CooldisError, CooldisIoRouteConfig, CooldisResult,
-    CooldisSupervisor, CooldisTypingSimulationConfig, EventKind, EventProvenance,
-    IoIngressReceivedPayload, NewEventRecord, PolicyBoundPayload, PolicyKind, RuntimeEventKind,
-    RuntimeTerminalState, RuntimeThreadHandle, ThreadCoordinates, ThreadEvent, ThreadId,
-    ThreadStartRequest, ThreadTopology, TurnInput, TurnSubmissionMode,
+    AdmissionDecidedPayload, AdmissionDecision as EventAdmissionDecision, CLOCK_TICK_ROUTE_KIND,
+    CooldisAppServer, CooldisEgressProjectionRuleConfig, CooldisError, CooldisIoRouteConfig,
+    CooldisResult, CooldisSupervisor, CooldisTypingSimulationConfig, EventKind, EventProvenance,
+    EventStore, IoIngressReceivedPayload, NewEventRecord, PolicyBoundPayload, PolicyKind,
+    RuntimeEventKind, RuntimeTerminalState, RuntimeThreadHandle, SqliteSessionStore,
+    TIMER_FIRED_ENVELOPE_KIND, ThreadCoordinates, ThreadEvent, ThreadId, ThreadStartRequest,
+    ThreadTopology, TimerFiredPayload, TurnInput, TurnSubmissionMode, control_stream_id,
+    list_active_mandates, parse_mandate_event_id,
 };
 use async_trait::async_trait;
 use cooldis_io_core::{
-    AdmissionDecision, EgressAdapter, EgressEnvelope, EgressKind, IngressAck, IngressEnvelope,
-    IngressQueueStore, IngressSink, IngressState, IoError, IoResult, IoTurnInput, KernelIoBridge,
-    KernelIoReceipt, ProviderPolicy, ResolvedIoTarget, ThreadAddress,
+    AdmissionDecision, EgressAdapter, EgressEnvelope, EgressKind, IngressAck, IngressContent,
+    IngressEnvelope, IngressQueueStore, IngressSink, IngressState, IoError, IoResult, IoTurnInput,
+    KernelIoBridge, KernelIoReceipt, ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
 use regex::{Captures, Regex};
@@ -190,6 +192,7 @@ pub struct CooldisDaemonIoBridge {
     model: String,
     model_provider: String,
     cwd: PathBuf,
+    session_store_path: Option<PathBuf>,
     threads: Arc<Mutex<HashMap<String, ThreadCoordinates>>>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
     egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
@@ -212,6 +215,7 @@ impl CooldisDaemonIoBridge {
             model: model.into(),
             model_provider: model_provider.into(),
             cwd: cwd.into(),
+            session_store_path: None,
             threads: Arc::new(Mutex::new(HashMap::new())),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             egress_adapters: Arc::new(RwLock::new(HashMap::new())),
@@ -220,14 +224,16 @@ impl CooldisDaemonIoBridge {
     }
 
     pub fn from_app_server(server: &CooldisAppServer) -> Self {
-        Self::new(
+        let mut bridge = Self::new(
             server.supervisor(),
             server.tenant_id().to_string(),
             server.user_id().to_string(),
             server.model_provider().to_string(),
             server.model().to_string(),
             server.cwd().to_path_buf(),
-        )
+        );
+        bridge.session_store_path = Some(server.session_store_path().to_path_buf());
+        bridge
     }
 
     pub fn direct_sink(&self) -> Arc<dyn IngressSink> {
@@ -265,6 +271,9 @@ impl CooldisDaemonIoBridge {
     }
 
     pub async fn submit_envelope(&self, envelope: IngressEnvelope) -> IoResult<KernelIoReceipt> {
+        if is_clock_tick_envelope(&envelope) {
+            return self.submit_clock_tick_envelope(&envelope).await;
+        }
         let mut target = self.resolve_target(&envelope).await?;
         let (coordinates, _) = self.ensure_thread(&target).await?;
         target.address.thread_id = Some(coordinates.thread_id.to_string());
@@ -285,6 +294,75 @@ impl CooldisDaemonIoBridge {
         )
         .await?;
         self.apply(&envelope, &target, &decision).await
+    }
+
+    async fn submit_clock_tick_envelope(
+        &self,
+        envelope: &IngressEnvelope,
+    ) -> IoResult<KernelIoReceipt> {
+        let store_path = self.session_store_path.as_ref().ok_or_else(|| {
+            IoError::Bridge("clock.tick requires a daemon session store path".to_string())
+        })?;
+        let coordinates = clock_tick_coordinates(envelope)?;
+        let target = ResolvedIoTarget::new(
+            ThreadAddress::new(
+                coordinates.tenant_id.clone(),
+                coordinates.user_id.clone(),
+                coordinates.session_id.clone(),
+            )
+            .with_thread_id(coordinates.thread_id.to_string()),
+        );
+        let decision = AdmissionDecision::ObserveOnly {
+            reason: "clock tick admitted as timer.fired".to_string(),
+        };
+        let mut receipt = KernelIoReceipt::new(envelope, target, &decision);
+        receipt.thread_id = Some(coordinates.thread_id.to_string());
+
+        let timer = clock_tick_payload(envelope)?;
+        let store = SqliteSessionStore::open(store_path).map_err(cooldis_history_error)?;
+        let mandate_is_live = list_active_mandates(&store, &coordinates)
+            .await
+            .map_err(cooldis_bridge_error)?
+            .iter()
+            .any(|mandate| mandate.event.id == timer.mandate_event_id);
+        if !mandate_is_live {
+            return Ok(receipt);
+        }
+        let stream_id = control_stream_id(&coordinates);
+        let events = store
+            .read_events(&stream_id, None)
+            .await
+            .map_err(cooldis_history_error)?;
+        for event in &events {
+            if event.kind != EventKind::TimerFired {
+                continue;
+            }
+            let payload = serde_json::from_value::<TimerFiredPayload>(event.payload.clone())
+                .map_err(|err| IoError::Bridge(format!("invalid timer.fired payload: {err}")))?;
+            if payload.mandate_event_id == timer.mandate_event_id
+                && payload.occurrence_index == timer.occurrence_index
+            {
+                return Ok(receipt);
+            }
+        }
+
+        let mandate_event_id = timer.mandate_event_id;
+        let mut record = NewEventRecord::witnessed(
+            coordinates,
+            EventKind::TimerFired,
+            serde_json::to_value(timer)
+                .map_err(|err| IoError::Bridge(format!("encode timer.fired payload: {err}")))?,
+        );
+        record.provenance = EventProvenance {
+            source_streams: vec![stream_id.clone()],
+            source_event_ids: vec![mandate_event_id],
+            ..EventProvenance::default()
+        };
+        store
+            .append_events(&stream_id, vec![record])
+            .await
+            .map_err(cooldis_history_error)?;
+        Ok(receipt)
     }
 
     async fn resolve_target(&self, envelope: &IngressEnvelope) -> IoResult<ResolvedIoTarget> {
@@ -1401,7 +1479,63 @@ fn admissible_decisions_for_envelope(envelope: &IngressEnvelope) -> Vec<EventAdm
     }
 }
 
+fn is_clock_tick_envelope(envelope: &IngressEnvelope) -> bool {
+    envelope.source.protocol == CLOCK_TICK_ROUTE_KIND
+        && matches!(
+            &envelope.content,
+            IngressContent::Event { kind, .. } if kind == TIMER_FIRED_ENVELOPE_KIND
+        )
+}
+
+fn clock_tick_coordinates(envelope: &IngressEnvelope) -> IoResult<ThreadCoordinates> {
+    Ok(ThreadCoordinates {
+        tenant_id: required_metadata(envelope, "cooldis_tenant_id")?.to_string(),
+        user_id: required_metadata(envelope, "cooldis_user_id")?.to_string(),
+        session_id: required_metadata(envelope, "cooldis_session_id")?.to_string(),
+        thread_id: ThreadId::parse_str(required_metadata(envelope, "cooldis_thread_id")?)
+            .map_err(|err| IoError::Bridge(format!("invalid clock.tick thread id: {err}")))?,
+    })
+}
+
+fn clock_tick_payload(envelope: &IngressEnvelope) -> IoResult<TimerFiredPayload> {
+    if let IngressContent::Event { kind, payload } = &envelope.content
+        && kind == TIMER_FIRED_ENVELOPE_KIND
+    {
+        return serde_json::from_value::<TimerFiredPayload>(payload.clone())
+            .map_err(|err| IoError::Bridge(format!("invalid clock.tick payload: {err}")));
+    }
+
+    Ok(TimerFiredPayload {
+        mandate_event_id: parse_mandate_event_id(required_metadata(
+            envelope,
+            "cooldis_mandate_event_id",
+        )?)
+        .map_err(cooldis_bridge_error)?,
+        scheduled_for: required_metadata(envelope, "cooldis_scheduled_for")?.to_string(),
+        occurrence_index: required_metadata(envelope, "cooldis_occurrence_index")?
+            .parse::<u64>()
+            .map_err(|err| {
+                IoError::Bridge(format!("invalid clock.tick occurrence index: {err}"))
+            })?,
+        catch_up: required_metadata(envelope, "cooldis_catch_up")?
+            .parse::<bool>()
+            .map_err(|err| IoError::Bridge(format!("invalid clock.tick catch_up flag: {err}")))?,
+    })
+}
+
+fn required_metadata<'a>(envelope: &'a IngressEnvelope, key: &str) -> IoResult<&'a str> {
+    envelope
+        .metadata
+        .get(key)
+        .map(String::as_str)
+        .ok_or_else(|| IoError::Bridge(format!("clock.tick missing metadata {key:?}")))
+}
+
 fn cooldis_bridge_error(err: CooldisError) -> IoError {
+    IoError::Bridge(err.to_string())
+}
+
+fn cooldis_history_error(err: impl std::fmt::Display) -> IoError {
     IoError::Bridge(err.to_string())
 }
 

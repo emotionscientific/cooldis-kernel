@@ -46,6 +46,7 @@ pub mod capabilities {
 pub mod cli;
 
 pub mod daemon {
+    pub mod clock_route;
     pub mod daemon_config;
     pub mod daemon_io;
 }
@@ -236,6 +237,10 @@ pub use capabilities::vfs::{
 };
 pub use capabilities::wasm_runner::{
     WasmHttpRequest, WasmHttpResponse, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+};
+pub use daemon::clock_route::{
+    CLOCK_TICK_ROUTE_KIND, CooldisDaemonClockRoute, DaemonClock, SystemDaemonClock,
+    TIMER_FIRED_ENVELOPE_KIND,
 };
 pub use daemon::daemon_config::{
     CooldisDaemonAppServerConfig, CooldisDaemonConfig, CooldisDaemonOperationsConfig,

@@ -62,6 +62,11 @@ listen = "127.0.0.1:9000"
 path = "/telegram"
 secret_token_env = "TELEGRAM_WEBHOOK_SECRET"
 bot_token_env = "TELEGRAM_BOT_TOKEN"
+
+[[daemon.io.routes]]
+id = "clock-main"
+kind = "clock.tick"
+enabled = true
 ```
 
 Operation-backed agent manifests, including examples such as
@@ -147,6 +152,16 @@ to either the durable pgqrs/SQLite queue or the direct runtime bridge, and can
 deliver visible assistant messages through Telegram `sendMessage` when a bot
 token is configured.
 
+Clock routes are daemon-owned ingress adapters. Configure one
+`kind = "clock.tick"` route per daemon; schedules are not route config and live
+in `mandate.started` control-stream events. The route scans control streams for
+active mandates, computes deterministic due occurrences, enqueues due ticks
+through the same durable ingress queue as Telegram, and the queue worker admits
+them as witnessed `timer.fired` events on the subject thread's control stream.
+In this daemon slice the clock route observes mandate changes by rescanning
+control streams on a 30-second poll instead of subscribing to append
+notifications.
+
 ## Lifecycle Boundary For Local V1 Use
 
 The app-server runs in three shapes. They share one implementation; they
@@ -207,6 +222,7 @@ Verification coverage for the daemon lane includes:
 ```sh
 cargo test --test daemon_smoke
 cargo test daemon_io::tests::queue_worker_processes_envelope_after_queue_and_bridge_restart
+cargo test -p cooldis clock_route
 ```
 
 The first smoke starts the real `cooldis daemon run` binary on a configured

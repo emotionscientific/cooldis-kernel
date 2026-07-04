@@ -669,6 +669,10 @@ impl CooldisAppServer {
         &self.inner.cwd
     }
 
+    pub fn session_store_path(&self) -> &Path {
+        &self.inner.session_store_path
+    }
+
     #[cfg(unix)]
     async fn serve_unix(&self, path: PathBuf) -> CooldisResult<()> {
         prepare_unix_socket_path(&path)?;

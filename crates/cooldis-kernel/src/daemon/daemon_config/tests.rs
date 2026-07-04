@@ -524,3 +524,29 @@ fn validates_telegram_route_shape() {
     let errors = config.validation_errors();
     assert!(errors.iter().any(|error| error.contains("path")));
 }
+
+#[test]
+fn validates_single_clock_tick_route() {
+    let mut config = CooldisDaemonConfig::default();
+    for id in ["clock-main", "clock-backup"] {
+        config.io.routes.push(CooldisIoRouteConfig {
+            id: id.to_string(),
+            kind: "clock.tick".to_string(),
+            enabled: true,
+            policy: None,
+            threading: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            telegram: None,
+            metadata: BTreeMap::new(),
+        });
+    }
+
+    let errors = config.validation_errors();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("at most one clock.tick route"))
+    );
+}
