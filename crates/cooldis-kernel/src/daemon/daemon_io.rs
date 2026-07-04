@@ -1,42 +1,54 @@
 use crate::agent::manifest_bind::canonical_json_hash;
 use crate::{
     AdmissionDecidedPayload, AdmissionDecision as EventAdmissionDecision, CLOCK_TICK_ROUTE_KIND,
-    CooldisAppServer, CooldisEgressProjectionRuleConfig, CooldisError, CooldisIoRouteConfig,
-    CooldisResult, CooldisSupervisor, CooldisTypingSimulationConfig, EventKind, EventProvenance,
-    EventStore, IoIngressReceivedPayload, NewEventRecord, PolicyBoundPayload, PolicyKind,
-    RuntimeEventKind, RuntimeTerminalState, RuntimeThreadHandle, SqliteSessionStore,
-    TIMER_FIRED_ENVELOPE_KIND, ThreadCoordinates, ThreadEvent, ThreadId, ThreadStartRequest,
+    CanonicalContent, CanonicalMessage, CooldisAppServer, CooldisEgressProjectionRuleConfig,
+    CooldisEgressRetryConfig, CooldisError, CooldisIoRouteConfig, CooldisResult, CooldisSupervisor,
+    CooldisTypingSimulationConfig, EventKind, EventProvenance, EventRecord, EventRecordId,
+    EventStore, EventStreamId, IoEgressDeliveredPayload, IoEgressFailedPayload,
+    IoIngressReceivedPayload, NewEventRecord, PolicyBoundPayload, PolicyKind, RuntimeThreadHandle,
+    SessionEntry, SessionEntryKind, SqliteSessionStore, StreamCursorV1, TIMER_FIRED_ENVELOPE_KIND,
+    ThreadCoordinates, ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadStartRequest,
     ThreadTopology, TimerFiredPayload, TurnInput, TurnSubmissionMode, control_stream_id,
     list_active_mandates, parse_mandate_event_id,
 };
 use async_trait::async_trait;
 use cooldis_io_core::{
-    AdmissionDecision, EgressAdapter, EgressEnvelope, EgressKind, IngressAck, IngressContent,
-    IngressEnvelope, IngressQueueStore, IngressSink, IngressState, IoError, IoResult, IoTurnInput,
-    KernelIoBridge, KernelIoReceipt, ProviderPolicy, ResolvedIoTarget, ThreadAddress,
+    AdmissionDecision, DeliveryReceipt, EgressAdapter, EgressEnvelope, EgressKind, IngressAck,
+    IngressContent, IngressEnvelope, IngressQueueStore, IngressSink, IngressState, IoError,
+    IoResult, IoTarget, IoTurnInput, KernelIoBridge, KernelIoReceipt, ProviderPolicy,
+    ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
 use regex::{Captures, Regex};
+use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, Value as JsonValue, json};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 
 const DEFAULT_QUEUE_BATCH: usize = 16;
 const DEFAULT_WORKER_POLL_MS: u64 = 250;
+const DEFAULT_EGRESS_PROJECTOR_POLL_MS: u64 = 250;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TYPING_SIMULATION_DELAY: Duration = Duration::from_secs(8);
+const IO_EGRESS_PROJECTOR_DISCHARGED_BY: &str = "projector:io-egress";
+const IO_EGRESS_PROJECTOR_FUNCTION: &str = "delivery/v1";
 
 #[derive(Clone, Debug, Default)]
 struct RouteEgressConfig {
     projection_rules: Vec<CompiledEgressProjectionRule>,
     typing_simulation: Option<CooldisTypingSimulationConfig>,
+    retry: CooldisEgressRetryConfig,
 }
 
 impl RouteEgressConfig {
@@ -50,6 +62,7 @@ impl RouteEgressConfig {
         Ok(Self {
             projection_rules,
             typing_simulation: route.typing_simulation.clone(),
+            retry: route.egress_retry,
         })
     }
 
@@ -184,6 +197,222 @@ struct ProjectedEgress {
     envelope: EgressEnvelope,
 }
 
+#[derive(Clone, Debug)]
+struct BoundEgressThread {
+    route_id: String,
+    scope_key: String,
+    coordinates: ThreadCoordinates,
+}
+
+#[derive(Clone)]
+struct DaemonEgressState {
+    connection: Arc<StdMutex<rusqlite::Connection>>,
+}
+
+impl DaemonEgressState {
+    fn connect(dsn: impl AsRef<str>) -> IoResult<Self> {
+        let connection = open_egress_state_connection(dsn.as_ref())?;
+        init_egress_state_schema(&connection)?;
+        Ok(Self {
+            connection: Arc::new(StdMutex::new(connection)),
+        })
+    }
+
+    fn bind_thread(
+        &self,
+        route_id: &str,
+        source_scope: &str,
+        scope_key: &str,
+        coordinates: &ThreadCoordinates,
+    ) -> IoResult<()> {
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "INSERT INTO cooldis_daemon_egress_threads (
+                    route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(route_id, thread_id) DO UPDATE SET
+                    source_scope = excluded.source_scope,
+                    scope_key = excluded.scope_key,
+                    tenant_id = excluded.tenant_id,
+                    user_id = excluded.user_id,
+                    session_id = excluded.session_id,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    route_id,
+                    source_scope,
+                    scope_key,
+                    coordinates.tenant_id,
+                    coordinates.user_id,
+                    coordinates.session_id,
+                    coordinates.thread_id.to_string(),
+                    now_ms() as i64
+                ],
+            )
+            .map_err(egress_state_error)?;
+        Ok(())
+    }
+
+    fn bound_threads(&self, route_id: &str) -> IoResult<Vec<BoundEgressThread>> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id
+                 FROM cooldis_daemon_egress_threads
+                 WHERE route_id = ?1
+                 ORDER BY updated_at_ms, thread_id",
+            )
+            .map_err(egress_state_error)?;
+        let rows = statement
+            .query_map(params![route_id], |row| {
+                let thread_id: String = row.get(6)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    thread_id,
+                ))
+            })
+            .map_err(egress_state_error)?;
+
+        let mut bindings = Vec::new();
+        for row in rows {
+            let (route_id, scope_key, tenant_id, user_id, session_id, thread_id) =
+                row.map_err(egress_state_error)?;
+            let thread_id = ThreadId::parse_str(&thread_id).map_err(|err| {
+                IoError::Queue(format!("invalid egress thread id {thread_id:?}: {err}"))
+            })?;
+            bindings.push(BoundEgressThread {
+                route_id,
+                scope_key,
+                coordinates: ThreadCoordinates {
+                    tenant_id,
+                    user_id,
+                    session_id,
+                    thread_id,
+                },
+            });
+        }
+        Ok(bindings)
+    }
+
+    fn cursor(&self, route_id: &str, thread_id: &str) -> IoResult<Option<StreamCursorV1>> {
+        let connection = self.lock_connection()?;
+        let cursor_json = connection
+            .query_row(
+                "SELECT cursor_json
+                 FROM cooldis_daemon_egress_cursors
+                 WHERE route_id = ?1 AND thread_id = ?2",
+                params![route_id, thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(egress_state_error)?;
+        cursor_json
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|err| IoError::Queue(format!("decode egress cursor: {err}")))
+            })
+            .transpose()
+    }
+
+    fn store_cursor(
+        &self,
+        route_id: &str,
+        thread_id: &str,
+        cursor: &StreamCursorV1,
+    ) -> IoResult<()> {
+        let cursor_json = serde_json::to_string(cursor)
+            .map_err(|err| IoError::Queue(format!("encode egress cursor: {err}")))?;
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "INSERT INTO cooldis_daemon_egress_cursors (
+                    route_id, thread_id, cursor_json, updated_at_ms
+                 )
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(route_id, thread_id) DO UPDATE SET
+                    cursor_json = excluded.cursor_json,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![route_id, thread_id, cursor_json, now_ms() as i64],
+            )
+            .map_err(egress_state_error)?;
+        Ok(())
+    }
+
+    fn push_dead_letter(&self, dead_letter: &EgressDeadLetter) -> IoResult<()> {
+        let envelope_json = serde_json::to_string(&dead_letter.envelope)
+            .map_err(|err| IoError::Queue(format!("encode dead-letter envelope: {err}")))?;
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "INSERT INTO cooldis_daemon_egress_dead_letters (
+                    id, route_id, thread_id, source_event_id, envelope_index, dedupe_key,
+                    egress_kind, attempts, error, envelope_json, created_at_ms
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    format!("dead-{}", uuid::Uuid::now_v7()),
+                    dead_letter.route_id,
+                    dead_letter.thread_id,
+                    dead_letter.source_event_id,
+                    dead_letter.envelope_index as i64,
+                    dead_letter.dedupe_key,
+                    dead_letter.egress_kind,
+                    dead_letter.attempts as i64,
+                    dead_letter.error,
+                    envelope_json,
+                    now_ms() as i64,
+                ],
+            )
+            .map_err(egress_state_error)?;
+        Ok(())
+    }
+
+    fn dead_letter_count(&self, route_id: &str) -> IoResult<usize> {
+        let connection = self.lock_connection()?;
+        let count = connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM cooldis_daemon_egress_dead_letters
+                 WHERE route_id = ?1",
+                params![route_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(egress_state_error)?;
+        Ok(count.max(0) as usize)
+    }
+
+    fn lock_connection(&self) -> IoResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
+        self.connection
+            .lock()
+            .map_err(|err| IoError::Queue(format!("egress state lock poisoned: {err}")))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EgressDeadLetter {
+    route_id: String,
+    thread_id: String,
+    source_event_id: String,
+    envelope_index: usize,
+    dedupe_key: String,
+    egress_kind: String,
+    attempts: u32,
+    error: String,
+    envelope: EgressEnvelope,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct IngressReceiptContext {
+    target: IoTarget,
+    metadata: BTreeMap<String, String>,
+    source_ingress_id: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct CooldisDaemonIoBridge {
     supervisor: CooldisSupervisor,
@@ -197,6 +426,7 @@ pub struct CooldisDaemonIoBridge {
     active_turns: Arc<Mutex<HashMap<String, String>>>,
     egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
     egress_route_configs: Arc<RwLock<HashMap<String, RouteEgressConfig>>>,
+    egress_states: Arc<RwLock<HashMap<String, Arc<DaemonEgressState>>>>,
 }
 
 impl CooldisDaemonIoBridge {
@@ -220,6 +450,7 @@ impl CooldisDaemonIoBridge {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             egress_adapters: Arc::new(RwLock::new(HashMap::new())),
             egress_route_configs: Arc::new(RwLock::new(HashMap::new())),
+            egress_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -268,6 +499,117 @@ impl CooldisDaemonIoBridge {
             .await
             .insert(source_scope(&protocol, &instance_id), config);
         Ok(())
+    }
+
+    pub async fn register_egress_state_sqlite_dsn(
+        &self,
+        protocol: impl Into<String>,
+        instance_id: impl Into<String>,
+        dsn: impl AsRef<str>,
+    ) -> IoResult<()> {
+        let protocol = protocol.into();
+        let instance_id = instance_id.into();
+        let state = Arc::new(DaemonEgressState::connect(dsn)?);
+        self.egress_states
+            .write()
+            .await
+            .insert(source_scope(&protocol, &instance_id), state);
+        Ok(())
+    }
+
+    pub async fn start_egress_projector_sqlite_dsn(
+        &self,
+        protocol: impl Into<String>,
+        instance_id: impl Into<String>,
+        dsn: impl AsRef<str>,
+    ) -> IoResult<JoinHandle<()>> {
+        let protocol = protocol.into();
+        let instance_id = instance_id.into();
+        self.register_egress_state_sqlite_dsn(&protocol, &instance_id, dsn)
+            .await?;
+        let bridge = self.clone();
+        Ok(tokio::spawn(async move {
+            bridge.run_egress_projector(protocol, instance_id).await;
+        }))
+    }
+
+    pub async fn drain_egress_once(&self, protocol: &str, instance_id: &str) -> IoResult<usize> {
+        let key = source_scope(protocol, instance_id);
+        let state = self.egress_states.read().await.get(&key).cloned();
+        let Some(state) = state else {
+            return Ok(0);
+        };
+        let route_config = self
+            .egress_route_configs
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let adapter = self.egress_adapters.read().await.get(&key).cloned();
+        let mut delivered_sources = 0;
+        for binding in state.bound_threads(instance_id)? {
+            let handle = match self.bound_thread_handle(&binding).await {
+                Ok(handle) => handle,
+                Err(_) => continue,
+            };
+            delivered_sources += self
+                .drain_thread_egress(&state, &binding, handle, adapter.as_deref(), &route_config)
+                .await?;
+        }
+        Ok(delivered_sources)
+    }
+
+    async fn bound_thread_handle(
+        &self,
+        binding: &BoundEgressThread,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        match self.supervisor.get_thread_at(&binding.coordinates).await {
+            Ok(handle) => Ok(handle),
+            Err(CooldisError::ThreadNotFound(_)) => {
+                self.supervisor
+                    .load_thread_from_lifecycle(ThreadLifecycleRecord {
+                        coordinates: binding.coordinates.clone(),
+                        parent_thread_id: None,
+                        topology: ThreadTopology::root(),
+                        status: ThreadLifecycleStatus::Idle,
+                        latest_signal_id: None,
+                        latest_checkpoint_id: None,
+                        created_at_ms: now_ms(),
+                        updated_at_ms: now_ms(),
+                        metadata: BTreeMap::new(),
+                    })
+                    .await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn egress_cursor_for_thread(
+        &self,
+        protocol: &str,
+        instance_id: &str,
+        thread_id: &str,
+    ) -> IoResult<Option<StreamCursorV1>> {
+        let key = source_scope(protocol, instance_id);
+        let state = self.egress_states.read().await.get(&key).cloned();
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        state.cursor(instance_id, thread_id)
+    }
+
+    pub async fn egress_dead_letter_count(
+        &self,
+        protocol: &str,
+        instance_id: &str,
+    ) -> IoResult<usize> {
+        let key = source_scope(protocol, instance_id);
+        let state = self.egress_states.read().await.get(&key).cloned();
+        let Some(state) = state else {
+            return Ok(0);
+        };
+        state.dead_letter_count(instance_id)
     }
 
     pub async fn submit_envelope(&self, envelope: IngressEnvelope) -> IoResult<KernelIoReceipt> {
@@ -689,95 +1031,86 @@ impl CooldisDaemonIoBridge {
         turn
     }
 
-    async fn watch_for_egress(
-        self,
-        envelope: IngressEnvelope,
-        target: ResolvedIoTarget,
-        turn_id: String,
-        mut events: broadcast::Receiver<ThreadEvent>,
-    ) {
-        let mut assistant_text = String::new();
-        let mut terminal = false;
-        let timeout = tokio::time::sleep(Duration::from_secs(30));
-        tokio::pin!(timeout);
-
-        loop {
-            tokio::select! {
-                _ = &mut timeout => break,
-                event = events.recv() => {
-                    let Ok(event) = event else {
-                        break;
-                    };
-                    match event {
-                        ThreadEvent::Runtime { event, .. } => match event.kind {
-                            RuntimeEventKind::TextDelta { text } => assistant_text.push_str(&text),
-                            RuntimeEventKind::Terminal { state } => {
-                                terminal = matches!(
-                                    state,
-                                    RuntimeTerminalState::Completed
-                                        | RuntimeTerminalState::Cancelled
-                                        | RuntimeTerminalState::Stopped
-                                        | RuntimeTerminalState::Failed
-                                );
-                                break;
-                            }
-                            RuntimeEventKind::Failed { message, .. } => {
-                                self.deliver_egress(daemon_egress_for_ingress(
-                                    &envelope,
-                                    EgressKind::Error { message },
-                                ))
-                                .await;
-                                break;
-                            }
-                            _ => {}
-                        },
-                        ThreadEvent::Failed { message, .. } => {
-                            self.deliver_egress(daemon_egress_for_ingress(
-                                &envelope,
-                                EgressKind::Error { message },
-                            ))
-                            .await;
-                            break;
-                        }
-                        ThreadEvent::Stopped { .. } | ThreadEvent::Cancelled { .. } => {
-                            terminal = true;
-                            break;
-                        }
-                        ThreadEvent::Output { text, .. } => {
-                            if assistant_text.is_empty() {
-                                assistant_text = text;
-                            }
-                            terminal = true;
-                            break;
-                        }
-                        ThreadEvent::Started { .. }
-                        | ThreadEvent::CanonicalMirror { .. }
-                        | ThreadEvent::Signal { .. } => {}
-                    }
-                }
-            }
+    async fn bind_egress_thread(
+        &self,
+        envelope: &IngressEnvelope,
+        target: &ResolvedIoTarget,
+        coordinates: &ThreadCoordinates,
+    ) -> IoResult<()> {
+        let route_id = route_id_for_ingress(envelope);
+        let key = source_scope(&envelope.source.protocol, &route_id);
+        let state = self.egress_states.read().await.get(&key).cloned();
+        if let Some(state) = state {
+            state.bind_thread(&route_id, &key, &target.address.scope_key(), coordinates)?;
         }
+        Ok(())
+    }
 
-        self.active_turns
-            .lock()
-            .await
-            .remove(&target.address.scope_key());
+    async fn append_ingress_received_event(
+        &self,
+        handle: &RuntimeThreadHandle,
+        envelope: &IngressEnvelope,
+        _target: &ResolvedIoTarget,
+        turn_id: &str,
+    ) -> IoResult<EventRecord> {
+        let route_id = route_id_for_ingress(envelope);
+        let mut payload = serde_json::to_value(IoIngressReceivedPayload {
+            route_id: Some(route_id.clone()),
+            dedupe_key: envelope.dedupe_key.as_ref().map(|key| key.stable_key()),
+            external_conversation_id: Some(envelope.conversation.external_conversation_id.clone()),
+            external_actor_id: envelope
+                .actor
+                .as_ref()
+                .map(|actor| actor.external_actor_id.clone()),
+            external_message_id: envelope.metadata.get("telegram_message_id").cloned(),
+            envelope_digest: ingress_envelope_digest(envelope)?,
+        })
+        .map_err(|err| IoError::Bridge(format!("encode ingress receipt payload: {err}")))?;
+        let object = payload.as_object_mut().ok_or_else(|| {
+            IoError::Bridge("ingress receipt payload did not encode as object".to_string())
+        })?;
+        object.insert(
+            "turn_id".to_string(),
+            JsonValue::String(turn_id.to_string()),
+        );
+        object.insert(
+            "source_scope".to_string(),
+            JsonValue::String(envelope.source.stable_scope()),
+        );
+        object.insert(
+            "ingress_envelope_id".to_string(),
+            JsonValue::String(envelope.id.clone()),
+        );
+        object.insert(
+            "target".to_string(),
+            serde_json::to_value(IoTarget::reply_to(envelope))
+                .map_err(|err| IoError::Bridge(format!("encode ingress target: {err}")))?,
+        );
+        object.insert(
+            "ingress_metadata".to_string(),
+            serde_json::to_value(&envelope.metadata)
+                .map_err(|err| IoError::Bridge(format!("encode ingress metadata: {err}")))?,
+        );
 
-        if terminal && !assistant_text.is_empty() {
-            self.deliver_egress(daemon_egress_for_ingress(
-                &envelope,
-                EgressKind::AssistantMessage {
-                    text: assistant_text,
-                },
+        handle
+            .append_thread_event_record(NewEventRecord::witnessed(
+                handle.context().coordinates.clone(),
+                EventKind::IoIngressReceived,
+                payload,
             ))
-            .await;
-        } else if !terminal {
-            eprintln!(
-                "cooldis daemon IO turn {turn_id} egress watcher stopped before terminal event"
-            );
+            .await
+            .map_err(cooldis_bridge_error)
+    }
+
+    async fn run_egress_projector(self, protocol: String, instance_id: String) {
+        let poll_interval = Duration::from_millis(DEFAULT_EGRESS_PROJECTOR_POLL_MS);
+        loop {
+            let _ = self.drain_egress_once(&protocol, &instance_id).await;
+            tokio::time::sleep(poll_interval).await;
         }
     }
 
+    #[cfg(test)]
     async fn deliver_egress(&self, envelope: EgressEnvelope) {
         let key = envelope.target.source.stable_scope();
         let adapter = self.egress_adapters.read().await.get(&key).cloned();
@@ -792,41 +1125,327 @@ impl CooldisDaemonIoBridge {
             .cloned()
             .unwrap_or_default();
         for envelope in route_config.project(envelope) {
-            self.deliver_projected_egress(adapter.as_ref(), &route_config, envelope)
-                .await;
+            if let Some(typing) = &route_config.typing_simulation
+                && let EgressKind::AssistantMessage { text } = &envelope.kind
+                && !text.is_empty()
+            {
+                let typing_envelope = sibling_egress(
+                    &envelope,
+                    EgressKind::PlatformAction {
+                        action: "typing".to_string(),
+                        payload: JsonValue::Object(JsonMap::new()),
+                    },
+                );
+                let _ = adapter.deliver(typing_envelope).await;
+                let delay = typing_delay_for_text(text, typing.chars_per_second);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            let _ = adapter.deliver(envelope).await;
         }
     }
 
-    async fn deliver_projected_egress(
+    async fn drain_thread_egress(
         &self,
-        adapter: &dyn EgressAdapter,
+        state: &DaemonEgressState,
+        binding: &BoundEgressThread,
+        handle: RuntimeThreadHandle,
+        adapter: Option<&dyn EgressAdapter>,
         route_config: &RouteEgressConfig,
-        envelope: EgressEnvelope,
-    ) {
-        if let Some(typing) = &route_config.typing_simulation
-            && let EgressKind::AssistantMessage { text } = &envelope.kind
-            && !text.is_empty()
-        {
-            let typing_envelope = sibling_egress(
-                &envelope,
-                EgressKind::PlatformAction {
-                    action: "typing".to_string(),
-                    payload: JsonValue::Object(JsonMap::new()),
-                },
-            );
-            if let Err(err) = adapter.deliver(typing_envelope).await {
-                eprintln!("cooldis daemon IO egress typing action failed: {err}");
+    ) -> IoResult<usize> {
+        let thread_id = binding.coordinates.thread_id.to_string();
+        let cursor = state.cursor(&binding.route_id, &thread_id)?;
+        let after_cursor_ids = match &cursor {
+            Some(cursor) => handle
+                .read_thread_events_after_cursor(cursor)
+                .await
+                .map_err(cooldis_bridge_error)?
+                .into_iter()
+                .map(|event| event.id)
+                .collect::<HashSet<_>>(),
+            None => HashSet::new(),
+        };
+        let all_events = handle
+            .read_thread_events(None)
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let context = handle
+            .session_context()
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let mut receipt_keys = receipt_dedupe_keys(&all_events);
+        let mut pending_contexts = Vec::<IngressReceiptContext>::new();
+        let mut active_context = None;
+        let mut delivered_sources = 0;
+
+        for event in &all_events {
+            if let Some(context) = ingress_context_from_event(event) {
+                pending_contexts.push(context);
             }
-            let delay = typing_delay_for_text(text, typing.chars_per_second);
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
+            if let Some(entry) = session_entry_for_event(event, &context.entries)
+                && session_entry_is_user_authored(entry)
+                && !pending_contexts.is_empty()
+            {
+                active_context = Some(pending_contexts.remove(0));
+            }
+
+            let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
+            if !after_cursor {
+                continue;
+            }
+
+            if matches!(
+                event.kind,
+                EventKind::IoEgressDelivered | EventKind::IoEgressFailed
+            ) {
+                state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
+                continue;
+            }
+
+            let Some(text) = assistant_text_from_session_event(event, &context.entries) else {
+                state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
+                continue;
+            };
+            let Some(source_context) = active_context.clone() else {
+                state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
+                continue;
+            };
+
+            match self
+                .deliver_assistant_source(
+                    state,
+                    binding,
+                    &handle,
+                    adapter,
+                    route_config,
+                    event,
+                    source_context,
+                    text,
+                    &mut receipt_keys,
+                )
+                .await?
+            {
+                SourceDeliveryOutcome::Completed => {
+                    delivered_sources += 1;
+                    self.active_turns.lock().await.remove(&binding.scope_key);
+                }
+                SourceDeliveryOutcome::Blocked => break,
             }
         }
 
-        if let Err(err) = adapter.deliver(envelope).await {
-            eprintln!("cooldis daemon IO egress delivery failed: {err}");
-        }
+        Ok(delivered_sources)
     }
+
+    async fn deliver_assistant_source(
+        &self,
+        state: &DaemonEgressState,
+        binding: &BoundEgressThread,
+        handle: &RuntimeThreadHandle,
+        adapter: Option<&dyn EgressAdapter>,
+        route_config: &RouteEgressConfig,
+        source_event: &EventRecord,
+        source_context: IngressReceiptContext,
+        text: String,
+        receipt_keys: &mut HashSet<String>,
+    ) -> IoResult<SourceDeliveryOutcome> {
+        let mut envelope = EgressEnvelope::new(
+            source_context.target,
+            EgressKind::AssistantMessage { text },
+            now_ms(),
+        );
+        envelope.source_ingress_id = source_context.source_ingress_id;
+        envelope.metadata = source_context.metadata;
+
+        let mut envelope_index = 0;
+        for projected in route_config.project(envelope) {
+            if let Some(typing) = &route_config.typing_simulation
+                && let EgressKind::AssistantMessage { text } = &projected.kind
+                && !text.is_empty()
+            {
+                let typing_envelope = sibling_egress(
+                    &projected,
+                    EgressKind::PlatformAction {
+                        action: "typing".to_string(),
+                        payload: JsonValue::Object(JsonMap::new()),
+                    },
+                );
+                let outcome = self
+                    .deliver_projected_envelope(
+                        state,
+                        binding,
+                        handle,
+                        adapter,
+                        source_event,
+                        envelope_index,
+                        typing_envelope,
+                        route_config.retry,
+                        receipt_keys,
+                    )
+                    .await?;
+                if matches!(outcome, EnvelopeDeliveryOutcome::Blocked) {
+                    return Ok(SourceDeliveryOutcome::Blocked);
+                }
+                envelope_index += 1;
+                let delay = typing_delay_for_text(text, typing.chars_per_second);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+
+            let outcome = self
+                .deliver_projected_envelope(
+                    state,
+                    binding,
+                    handle,
+                    adapter,
+                    source_event,
+                    envelope_index,
+                    projected,
+                    route_config.retry,
+                    receipt_keys,
+                )
+                .await?;
+            if matches!(outcome, EnvelopeDeliveryOutcome::Blocked) {
+                return Ok(SourceDeliveryOutcome::Blocked);
+            }
+            envelope_index += 1;
+        }
+
+        Ok(SourceDeliveryOutcome::Completed)
+    }
+
+    async fn deliver_projected_envelope(
+        &self,
+        state: &DaemonEgressState,
+        binding: &BoundEgressThread,
+        handle: &RuntimeThreadHandle,
+        adapter: Option<&dyn EgressAdapter>,
+        source_event: &EventRecord,
+        envelope_index: usize,
+        envelope: EgressEnvelope,
+        retry: CooldisEgressRetryConfig,
+        receipt_keys: &mut HashSet<String>,
+    ) -> IoResult<EnvelopeDeliveryOutcome> {
+        let dedupe_key = egress_dedupe_key(source_event.id, envelope_index);
+        if receipt_keys.contains(&dedupe_key) {
+            state.store_cursor(
+                &binding.route_id,
+                &binding.coordinates.thread_id.to_string(),
+                &source_event.cursor_v1(),
+            )?;
+            return Ok(EnvelopeDeliveryOutcome::Delivered);
+        }
+
+        if matches!(envelope.kind, EgressKind::Silence { .. }) {
+            let receipt = DeliveryReceipt {
+                egress_id: envelope.id.clone(),
+                delivered: true,
+                external_message_id: None,
+                error: None,
+                metadata: BTreeMap::new(),
+            };
+            let event = append_egress_delivered_receipt(
+                handle,
+                binding,
+                source_event,
+                envelope_index,
+                &dedupe_key,
+                &envelope,
+                &receipt,
+                1,
+            )
+            .await?;
+            state.store_cursor(
+                &binding.route_id,
+                &binding.coordinates.thread_id.to_string(),
+                &event.cursor_v1(),
+            )?;
+            receipt_keys.insert(dedupe_key);
+            return Ok(EnvelopeDeliveryOutcome::Delivered);
+        }
+
+        let Some(adapter) = adapter else {
+            return Ok(EnvelopeDeliveryOutcome::Blocked);
+        };
+        let max_attempts = retry.max_attempts.max(1);
+        let mut last_error = String::new();
+        for attempt in 1..=max_attempts {
+            match adapter.deliver(envelope.clone()).await {
+                Ok(receipt) => {
+                    let event = append_egress_delivered_receipt(
+                        handle,
+                        binding,
+                        source_event,
+                        envelope_index,
+                        &dedupe_key,
+                        &envelope,
+                        &receipt,
+                        attempt,
+                    )
+                    .await?;
+                    state.store_cursor(
+                        &binding.route_id,
+                        &binding.coordinates.thread_id.to_string(),
+                        &event.cursor_v1(),
+                    )?;
+                    receipt_keys.insert(dedupe_key);
+                    return Ok(EnvelopeDeliveryOutcome::Delivered);
+                }
+                Err(err) => {
+                    last_error = err.to_string();
+                    if attempt < max_attempts {
+                        let delay = egress_backoff_delay(retry.base_backoff_ms, attempt);
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        let event = append_egress_failed_receipt(
+            handle,
+            binding,
+            source_event,
+            envelope_index,
+            &dedupe_key,
+            &envelope,
+            max_attempts,
+            &last_error,
+        )
+        .await?;
+        state.push_dead_letter(&EgressDeadLetter {
+            route_id: binding.route_id.clone(),
+            thread_id: binding.coordinates.thread_id.to_string(),
+            source_event_id: source_event.id.to_string(),
+            envelope_index,
+            dedupe_key: dedupe_key.clone(),
+            egress_kind: egress_kind_name(&envelope.kind),
+            attempts: max_attempts,
+            error: last_error,
+            envelope,
+        })?;
+        state.store_cursor(
+            &binding.route_id,
+            &binding.coordinates.thread_id.to_string(),
+            &event.cursor_v1(),
+        )?;
+        receipt_keys.insert(dedupe_key);
+        Ok(EnvelopeDeliveryOutcome::Delivered)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceDeliveryOutcome {
+    Completed,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnvelopeDeliveryOutcome {
+    Delivered,
+    Blocked,
 }
 
 #[async_trait]
@@ -840,7 +1459,10 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
         match decision {
             AdmissionDecision::Queue { turn_id, input } => {
                 let (coordinates, handle) = self.ensure_thread(target).await?;
-                let events = handle.subscribe_events();
+                self.bind_egress_thread(envelope, target, &coordinates)
+                    .await?;
+                self.append_ingress_received_event(&handle, envelope, target, turn_id)
+                    .await?;
                 self.active_turns
                     .lock()
                     .await
@@ -854,19 +1476,16 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
-                tokio::spawn(self.clone().watch_for_egress(
-                    envelope.clone(),
-                    target.clone(),
-                    turn_id.clone(),
-                    events,
-                ));
                 let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                 receipt.thread_id = Some(coordinates.thread_id.to_string());
                 Ok(receipt)
             }
             AdmissionDecision::Steer { turn_id, input, .. } => {
                 let (coordinates, handle) = self.ensure_thread(target).await?;
-                let events = handle.subscribe_events();
+                self.bind_egress_thread(envelope, target, &coordinates)
+                    .await?;
+                self.append_ingress_received_event(&handle, envelope, target, turn_id)
+                    .await?;
                 self.active_turns
                     .lock()
                     .await
@@ -880,12 +1499,6 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
-                tokio::spawn(self.clone().watch_for_egress(
-                    envelope.clone(),
-                    target.clone(),
-                    turn_id.clone(),
-                    events,
-                ));
                 let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                 receipt.thread_id = Some(coordinates.thread_id.to_string());
                 Ok(receipt)
@@ -896,12 +1509,15 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                 replacement,
             } => {
                 let (coordinates, handle) = self.ensure_thread(target).await?;
-                let events = handle.subscribe_events();
                 self.supervisor
                     .cancel_at(&coordinates, reason.clone())
                     .await
                     .map_err(cooldis_bridge_error)?;
                 if let (Some(turn_id), Some(input)) = (replacement_turn_id, replacement) {
+                    self.bind_egress_thread(envelope, target, &coordinates)
+                        .await?;
+                    self.append_ingress_received_event(&handle, envelope, target, turn_id)
+                        .await?;
                     self.active_turns
                         .lock()
                         .await
@@ -915,12 +1531,6 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                         )
                         .await
                         .map_err(cooldis_bridge_error)?;
-                    tokio::spawn(self.clone().watch_for_egress(
-                        envelope.clone(),
-                        target.clone(),
-                        turn_id.clone(),
-                        events,
-                    ));
                 }
                 let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                 receipt.thread_id = Some(coordinates.thread_id.to_string());
@@ -1385,17 +1995,300 @@ fn first_remaining_text_offset(text: &str, matches: &[ProjectionMatch]) -> Optio
     (cursor < text.len()).then_some(cursor)
 }
 
-fn daemon_egress_for_ingress(ingress: &IngressEnvelope, kind: EgressKind) -> EgressEnvelope {
-    let mut envelope = EgressEnvelope::for_ingress(ingress, kind, now_ms());
-    envelope.metadata = ingress.metadata.clone();
-    envelope
-}
-
 fn sibling_egress(source: &EgressEnvelope, kind: EgressKind) -> EgressEnvelope {
     let mut envelope = EgressEnvelope::new(source.target.clone(), kind, now_ms());
     envelope.source_ingress_id = source.source_ingress_id.clone();
     envelope.metadata = source.metadata.clone();
     envelope
+}
+
+async fn append_egress_delivered_receipt(
+    handle: &RuntimeThreadHandle,
+    binding: &BoundEgressThread,
+    source_event: &EventRecord,
+    envelope_index: usize,
+    dedupe_key: &str,
+    envelope: &EgressEnvelope,
+    receipt: &DeliveryReceipt,
+    attempts: u32,
+) -> IoResult<EventRecord> {
+    let payload = egress_delivered_payload(binding, envelope, receipt, attempts)?;
+    append_egress_receipt_event(
+        handle,
+        source_event,
+        EventKind::IoEgressDelivered,
+        add_egress_receipt_metadata(
+            payload,
+            source_event.id,
+            envelope_index,
+            dedupe_key,
+            &envelope.id,
+        )?,
+    )
+    .await
+}
+
+async fn append_egress_failed_receipt(
+    handle: &RuntimeThreadHandle,
+    binding: &BoundEgressThread,
+    source_event: &EventRecord,
+    envelope_index: usize,
+    dedupe_key: &str,
+    envelope: &EgressEnvelope,
+    attempts: u32,
+    error: &str,
+) -> IoResult<EventRecord> {
+    let payload = egress_failed_payload(binding, envelope, attempts, error)?;
+    append_egress_receipt_event(
+        handle,
+        source_event,
+        EventKind::IoEgressFailed,
+        add_egress_receipt_metadata(
+            payload,
+            source_event.id,
+            envelope_index,
+            dedupe_key,
+            &envelope.id,
+        )?,
+    )
+    .await
+}
+
+async fn append_egress_receipt_event(
+    handle: &RuntimeThreadHandle,
+    source_event: &EventRecord,
+    kind: EventKind,
+    payload: JsonValue,
+) -> IoResult<EventRecord> {
+    let stream_id = EventStreamId::for_thread(&handle.context().coordinates);
+    handle
+        .append_thread_event_record(NewEventRecord::discharged(
+            handle.context().coordinates.clone(),
+            kind,
+            payload,
+            EventProvenance {
+                source_streams: vec![stream_id],
+                source_event_ids: vec![source_event.id],
+                discharged_by: Some(IO_EGRESS_PROJECTOR_DISCHARGED_BY.to_string()),
+                function: Some(IO_EGRESS_PROJECTOR_FUNCTION.to_string()),
+                ..EventProvenance::default()
+            },
+        ))
+        .await
+        .map_err(cooldis_bridge_error)
+}
+
+fn egress_delivered_payload(
+    binding: &BoundEgressThread,
+    envelope: &EgressEnvelope,
+    receipt: &DeliveryReceipt,
+    attempts: u32,
+) -> IoResult<JsonValue> {
+    serde_json::to_value(IoEgressDeliveredPayload {
+        route_id: binding.route_id.clone(),
+        egress_kind: egress_kind_name(&envelope.kind),
+        external_message_id: receipt.external_message_id.clone(),
+        attempts,
+    })
+    .map_err(|err| IoError::Bridge(format!("encode egress delivered payload: {err}")))
+}
+
+fn egress_failed_payload(
+    binding: &BoundEgressThread,
+    envelope: &EgressEnvelope,
+    attempts: u32,
+    error: &str,
+) -> IoResult<JsonValue> {
+    let mut payload = serde_json::to_value(IoEgressFailedPayload {
+        route_id: binding.route_id.clone(),
+        egress_kind: egress_kind_name(&envelope.kind),
+        attempts,
+        error_class: "delivery_failed".to_string(),
+        dead_lettered: true,
+    })
+    .map_err(|err| IoError::Bridge(format!("encode egress failed payload: {err}")))?;
+    payload_object_mut(&mut payload)?
+        .insert("error".to_string(), JsonValue::String(error.to_string()));
+    Ok(payload)
+}
+
+fn add_egress_receipt_metadata(
+    mut payload: JsonValue,
+    source_event_id: EventRecordId,
+    envelope_index: usize,
+    dedupe_key: &str,
+    egress_id: &str,
+) -> IoResult<JsonValue> {
+    let object = payload_object_mut(&mut payload)?;
+    object.insert(
+        "source_event_id".to_string(),
+        JsonValue::String(source_event_id.to_string()),
+    );
+    object.insert(
+        "envelope_index".to_string(),
+        JsonValue::Number(serde_json::Number::from(envelope_index as u64)),
+    );
+    object.insert(
+        "dedupe_key".to_string(),
+        JsonValue::String(dedupe_key.to_string()),
+    );
+    object.insert(
+        "egress_id".to_string(),
+        JsonValue::String(egress_id.to_string()),
+    );
+    Ok(payload)
+}
+
+fn payload_object_mut(payload: &mut JsonValue) -> IoResult<&mut JsonMap<String, JsonValue>> {
+    payload
+        .as_object_mut()
+        .ok_or_else(|| IoError::Bridge("receipt payload did not encode as object".to_string()))
+}
+
+fn receipt_dedupe_keys(events: &[EventRecord]) -> HashSet<String> {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                EventKind::IoEgressDelivered | EventKind::IoEgressFailed
+            )
+        })
+        .filter_map(|event| {
+            event
+                .payload
+                .get("dedupe_key")
+                .and_then(JsonValue::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn ingress_context_from_event(event: &EventRecord) -> Option<IngressReceiptContext> {
+    if event.kind != EventKind::IoIngressReceived {
+        return None;
+    }
+    let target = serde_json::from_value(event.payload.get("target")?.clone()).ok()?;
+    let metadata = event
+        .payload
+        .get("ingress_metadata")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let source_ingress_id = event
+        .payload
+        .get("ingress_envelope_id")
+        .and_then(JsonValue::as_str)
+        .map(ToOwned::to_owned);
+    Some(IngressReceiptContext {
+        target,
+        metadata,
+        source_ingress_id,
+    })
+}
+
+fn assistant_text_from_session_event(
+    event: &EventRecord,
+    entries: &[SessionEntry],
+) -> Option<String> {
+    let entry = session_entry_for_event(event, entries)?;
+    assistant_text_from_entry(entry)
+}
+
+fn session_entry_for_event<'a>(
+    event: &EventRecord,
+    entries: &'a [SessionEntry],
+) -> Option<&'a SessionEntry> {
+    if event.kind != EventKind::SessionEntryAppended {
+        return None;
+    }
+    let entry_id = event.payload.get("entry_id").and_then(JsonValue::as_str)?;
+    entries
+        .iter()
+        .find(|entry| entry.entry_id.to_string() == entry_id)
+}
+
+fn session_entry_is_user_authored(entry: &SessionEntry) -> bool {
+    matches!(
+        entry.kind,
+        SessionEntryKind::Message {
+            message: CanonicalMessage::User { .. },
+        } | SessionEntryKind::CustomContextMessage {
+            message: CanonicalMessage::User { .. },
+        }
+    )
+}
+
+fn assistant_text_from_entry(entry: &SessionEntry) -> Option<String> {
+    let (SessionEntryKind::Message {
+        message: CanonicalMessage::Assistant { content, .. },
+    }
+    | SessionEntryKind::CustomContextMessage {
+        message: CanonicalMessage::Assistant { content, .. },
+    }) = &entry.kind
+    else {
+        return None;
+    };
+    let text = text_from_canonical_content(content);
+    (!text.is_empty()).then_some(text)
+}
+
+fn text_from_canonical_content(content: &[CanonicalContent]) -> String {
+    content
+        .iter()
+        .filter_map(|content| match content {
+            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            CanonicalContent::Image { .. }
+            | CanonicalContent::Thinking { .. }
+            | CanonicalContent::ToolCall { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn route_id_for_ingress(envelope: &IngressEnvelope) -> String {
+    envelope
+        .metadata
+        .get("cooldis_route_id")
+        .cloned()
+        .unwrap_or_else(|| envelope.source.instance_id.clone())
+}
+
+fn ingress_envelope_digest(envelope: &IngressEnvelope) -> IoResult<String> {
+    let bytes = serde_json::to_vec(envelope)
+        .map_err(|err| IoError::Bridge(format!("encode ingress envelope digest: {err}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn egress_dedupe_key(source_event_id: EventRecordId, envelope_index: usize) -> String {
+    format!("{source_event_id}:{envelope_index}")
+}
+
+fn egress_kind_name(kind: &EgressKind) -> String {
+    match kind {
+        EgressKind::AssistantDelta { .. } => "assistant_delta".to_string(),
+        EgressKind::AssistantMessage { .. } => "assistant_message".to_string(),
+        EgressKind::Status { .. } => "status".to_string(),
+        EgressKind::ToolStarted { .. } => "tool_started".to_string(),
+        EgressKind::ToolCompleted { .. } => "tool_completed".to_string(),
+        EgressKind::Error { .. } => "error".to_string(),
+        EgressKind::PlatformAction { action, .. } => format!("platform_action:{action}"),
+        EgressKind::Silence { .. } => "silence".to_string(),
+    }
+}
+
+fn egress_backoff_delay(base_backoff_ms: u64, failed_attempt: u32) -> Duration {
+    if base_backoff_ms == 0 {
+        return Duration::ZERO;
+    }
+    let exponent = failed_attempt.saturating_sub(1).min(31);
+    let factor = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX);
+    Duration::from_millis(base_backoff_ms.saturating_mul(factor))
 }
 
 fn typing_delay_for_text(text: &str, chars_per_second: u32) -> Duration {
@@ -1531,12 +2424,97 @@ fn required_metadata<'a>(envelope: &'a IngressEnvelope, key: &str) -> IoResult<&
         .ok_or_else(|| IoError::Bridge(format!("clock.tick missing metadata {key:?}")))
 }
 
+fn open_egress_state_connection(dsn: &str) -> IoResult<rusqlite::Connection> {
+    let path = sqlite_path_from_dsn(dsn)?;
+    if path == Path::new(":memory:") {
+        return rusqlite::Connection::open_in_memory().map_err(egress_state_error);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            IoError::Queue(format!(
+                "create egress sqlite directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    if !path.exists() {
+        std::fs::File::create(&path).map_err(|err| {
+            IoError::Queue(format!(
+                "create egress sqlite file {}: {err}",
+                path.display()
+            ))
+        })?;
+    }
+    let connection = rusqlite::Connection::open(path).map_err(egress_state_error)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(egress_state_error)?;
+    Ok(connection)
+}
+
+fn sqlite_path_from_dsn(dsn: &str) -> IoResult<PathBuf> {
+    let Some(path) = dsn.strip_prefix("sqlite://") else {
+        return Err(IoError::Queue(format!(
+            "egress projector requires a sqlite:// DSN, got {dsn:?}"
+        )));
+    };
+    Ok(PathBuf::from(path))
+}
+
+fn init_egress_state_schema(connection: &rusqlite::Connection) -> IoResult<()> {
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS cooldis_daemon_egress_threads (
+                route_id TEXT NOT NULL,
+                source_scope TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (route_id, thread_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cooldis_daemon_egress_threads_route
+                ON cooldis_daemon_egress_threads (route_id, updated_at_ms);
+            CREATE TABLE IF NOT EXISTS cooldis_daemon_egress_cursors (
+                route_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                cursor_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (route_id, thread_id)
+            );
+            CREATE TABLE IF NOT EXISTS cooldis_daemon_egress_dead_letters (
+                id TEXT PRIMARY KEY,
+                route_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                envelope_index INTEGER NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                egress_kind TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                error TEXT NOT NULL,
+                envelope_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cooldis_daemon_egress_dead_letters_route
+                ON cooldis_daemon_egress_dead_letters (route_id, created_at_ms);
+            ",
+        )
+        .map_err(egress_state_error)
+}
+
 fn cooldis_bridge_error(err: CooldisError) -> IoError {
     IoError::Bridge(err.to_string())
 }
 
 fn cooldis_history_error(err: impl std::fmt::Display) -> IoError {
     IoError::Bridge(err.to_string())
+}
+
+fn egress_state_error(err: rusqlite::Error) -> IoError {
+    IoError::Queue(format!("egress state sqlite: {err}"))
 }
 
 fn now_ms() -> u64 {

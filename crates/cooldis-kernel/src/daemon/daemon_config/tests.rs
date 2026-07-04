@@ -77,6 +77,7 @@ egress_projection = [
   { pattern = '\[no_response\]', action = "silence" },
 ]
 typing_simulation = { chars_per_second = 25 }
+egress_retry = { max_attempts = 7, base_backoff_ms = 250 }
 "#,
     )
     .unwrap();
@@ -93,6 +94,8 @@ typing_simulation = { chars_per_second = 25 }
             .map(|config| config.chars_per_second),
         Some(25)
     );
+    assert_eq!(route.egress_retry.max_attempts, 7);
+    assert_eq!(route.egress_retry.base_backoff_ms, 250);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -112,6 +115,7 @@ fn invalid_egress_projection_regex_reports_rule_index() {
             action: "reaction".to_string(),
         }],
         typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
         telegram: None,
         metadata: BTreeMap::new(),
     });
@@ -420,6 +424,7 @@ fn validates_bad_queue_and_route_config() {
         ingress: None,
         egress_projection: Vec::new(),
         typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
         telegram: None,
         metadata: BTreeMap::new(),
     });
@@ -509,6 +514,7 @@ fn validates_telegram_route_shape() {
         ingress: None,
         egress_projection: Vec::new(),
         typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
         telegram: Some(CooldisTelegramRouteConfig {
             listen: Some("127.0.0.1:9000".to_string()),
             path: "telegram".to_string(),
@@ -538,6 +544,7 @@ fn validates_single_clock_tick_route() {
             ingress: None,
             egress_projection: Vec::new(),
             typing_simulation: None,
+            egress_retry: CooldisEgressRetryConfig::default(),
             telegram: None,
             metadata: BTreeMap::new(),
         });

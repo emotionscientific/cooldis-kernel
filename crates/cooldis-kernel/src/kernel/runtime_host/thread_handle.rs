@@ -9,8 +9,8 @@ use crate::agent::manifest_bind::{
     MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION, coupling_set_content_hash,
 };
 use crate::kernel::history::{
-    EventKind, EventProvenance, EventRecord, EventStreamId, NewEventRecord, PolicyBoundPayload,
-    PolicyKind, SessionContext, SessionEntry, SessionEntryKind,
+    EventKind, EventProvenance, EventRecord, EventSequence, EventStreamId, NewEventRecord,
+    PolicyBoundPayload, PolicyKind, SessionContext, SessionEntry, SessionEntryKind, StreamCursorV1,
 };
 use crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA;
 use cooldis_runtime_contracts::{
@@ -208,6 +208,48 @@ impl RuntimeThreadHandle {
             .read_events(&stream_id, None)
             .await
             .map_err(|err| CooldisError::History(err.to_string()))
+    }
+
+    pub async fn read_thread_events(
+        &self,
+        from_sequence: Option<EventSequence>,
+    ) -> CooldisResult<Vec<EventRecord>> {
+        let stream_id = EventStreamId::for_thread(&self.thread.context.coordinates);
+        self.thread
+            .services
+            .runtime_store()
+            .read_events(&stream_id, from_sequence)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))
+    }
+
+    pub async fn read_thread_events_after_cursor(
+        &self,
+        cursor: &StreamCursorV1,
+    ) -> CooldisResult<Vec<EventRecord>> {
+        let stream_id = EventStreamId::for_thread(&self.thread.context.coordinates);
+        self.thread
+            .services
+            .runtime_store()
+            .read_events_after_cursor(&stream_id, cursor)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))
+    }
+
+    pub async fn append_thread_event_record(
+        &self,
+        record: NewEventRecord,
+    ) -> CooldisResult<EventRecord> {
+        let stream_id = EventStreamId::for_thread(&self.thread.context.coordinates);
+        self.thread
+            .services
+            .runtime_store()
+            .append_events(&stream_id, vec![record])
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CooldisError::History("event append returned no record".to_string()))
     }
 
     pub async fn append_runtime_session_entry(

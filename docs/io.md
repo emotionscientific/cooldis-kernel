@@ -281,6 +281,44 @@ index.
 `typing` platform action before a text envelope and sleeps by
 `text_length / chars_per_second`, capped at 8 seconds.
 
+## Durable Egress Projection
+
+The daemon does not deliver replies from a per-turn in-memory watcher. Each
+enabled route owns an egress projector task. The projector reads the route's
+bound thread event streams from a persisted cursor stored in the same SQLite
+state as the ingress queue, projects assistant output through the route's
+`egress_projection` rules, and calls the route adapter.
+
+Successful delivery appends an `io.egress.delivered` event to the thread
+journal with the route id, egress kind, external message id returned by the
+adapter, and attempt count. Exhausted delivery appends `io.egress.failed` with
+`dead_lettered = true` and writes the envelope to
+`cooldis_daemon_egress_dead_letters` in the same SQLite database. Dead letters
+are inspectable state only in V1; automatic replay is intentionally out of
+scope.
+
+Retries are per route:
+
+```toml
+[[daemon.io.routes]]
+id = "telegram-main"
+kind = "telegram.bot"
+egress_retry = { max_attempts = 5, base_backoff_ms = 500 }
+```
+
+The backoff is exponential from `base_backoff_ms` until `max_attempts` is
+exhausted. `EgressKind::Silence` performs no wire call and is immediately
+witnessed as `io.egress.delivered` with `egress_kind = "silence"`.
+
+Delivery idempotency is journal-first. The projector dedupes on
+`source_event_id + envelope_index` and consults existing
+`io.egress.delivered` / `io.egress.failed` receipts before sending on restart.
+This gives a send-at-most-once bias for text after recovery. There is still one
+honest duplicate window: if the daemon crashes after Telegram accepts a message
+but before the delivered receipt is appended, the recovered projector cannot
+distinguish that accepted send from a never-sent envelope and may send that one
+envelope again.
+
 ## Policy Examples
 
 - `queue_per_conversation`: every event appends behind the active turn.
