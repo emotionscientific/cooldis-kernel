@@ -325,9 +325,28 @@ impl DaemonEgressState {
         thread_id: &str,
         cursor: &StreamCursorV1,
     ) -> IoResult<()> {
+        let connection = self.lock_connection()?;
+        let current_json = connection
+            .query_row(
+                "SELECT cursor_json
+                 FROM cooldis_daemon_egress_cursors
+                 WHERE route_id = ?1 AND thread_id = ?2",
+                params![route_id, thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(egress_state_error)?;
+        if let Some(current_json) = current_json {
+            let current: StreamCursorV1 = serde_json::from_str(&current_json)
+                .map_err(|err| IoError::Queue(format!("decode egress cursor: {err}")))?;
+            if current.stream_id == cursor.stream_id
+                && current.sequence.get() >= cursor.sequence.get()
+            {
+                return Ok(());
+            }
+        }
         let cursor_json = serde_json::to_string(cursor)
             .map_err(|err| IoError::Queue(format!("encode egress cursor: {err}")))?;
-        let connection = self.lock_connection()?;
         connection
             .execute(
                 "INSERT INTO cooldis_daemon_egress_cursors (
@@ -1174,7 +1193,7 @@ impl CooldisDaemonIoBridge {
             .session_context()
             .await
             .map_err(cooldis_bridge_error)?;
-        let mut receipt_keys = receipt_dedupe_keys(&all_events);
+        let mut receipt_cursors = receipt_dedupe_cursors(&all_events);
         let mut pending_contexts = Vec::<IngressReceiptContext>::new();
         let mut active_context = None;
         let mut delivered_sources = 0;
@@ -1190,27 +1209,46 @@ impl CooldisDaemonIoBridge {
                 active_context = Some(pending_contexts.remove(0));
             }
 
-            let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
-            if !after_cursor {
-                continue;
-            }
-
             if matches!(
                 event.kind,
                 EventKind::IoEgressDelivered | EventKind::IoEgressFailed
             ) {
+                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
+                if !after_cursor {
+                    continue;
+                }
                 state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
                 continue;
             }
 
             let Some(text) = assistant_text_from_session_event(event, &context.entries) else {
+                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
+                if !after_cursor {
+                    continue;
+                }
                 state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
                 continue;
             };
             let Some(source_context) = active_context.clone() else {
+                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
+                if !after_cursor {
+                    continue;
+                }
                 state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
                 continue;
             };
+            let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
+            if !after_cursor
+                && !source_has_partial_projected_receipts(
+                    route_config,
+                    event,
+                    &source_context,
+                    &text,
+                    &receipt_cursors,
+                )
+            {
+                continue;
+            }
 
             match self
                 .deliver_assistant_source(
@@ -1222,7 +1260,7 @@ impl CooldisDaemonIoBridge {
                     event,
                     source_context,
                     text,
-                    &mut receipt_keys,
+                    &mut receipt_cursors,
                 )
                 .await?
             {
@@ -1247,7 +1285,7 @@ impl CooldisDaemonIoBridge {
         source_event: &EventRecord,
         source_context: IngressReceiptContext,
         text: String,
-        receipt_keys: &mut HashSet<String>,
+        receipt_cursors: &mut HashMap<String, ReceiptDedupeCursor>,
     ) -> IoResult<SourceDeliveryOutcome> {
         let mut envelope = EgressEnvelope::new(
             source_context.target,
@@ -1258,6 +1296,7 @@ impl CooldisDaemonIoBridge {
         envelope.metadata = source_context.metadata;
 
         let mut envelope_index = 0;
+        let mut latest_receipt_cursor = None;
         for projected in route_config.project(envelope) {
             if let Some(typing) = &route_config.typing_simulation
                 && let EgressKind::AssistantMessage { text } = &projected.kind
@@ -1280,11 +1319,14 @@ impl CooldisDaemonIoBridge {
                         envelope_index,
                         typing_envelope,
                         route_config.retry,
-                        receipt_keys,
+                        receipt_cursors,
                     )
                     .await?;
-                if matches!(outcome, EnvelopeDeliveryOutcome::Blocked) {
-                    return Ok(SourceDeliveryOutcome::Blocked);
+                match outcome {
+                    EnvelopeDeliveryOutcome::Delivered(cursor) => {
+                        retain_newest_cursor(&mut latest_receipt_cursor, cursor);
+                    }
+                    EnvelopeDeliveryOutcome::Blocked => return Ok(SourceDeliveryOutcome::Blocked),
                 }
                 envelope_index += 1;
                 let delay = typing_delay_for_text(text, typing.chars_per_second);
@@ -1303,15 +1345,24 @@ impl CooldisDaemonIoBridge {
                     envelope_index,
                     projected,
                     route_config.retry,
-                    receipt_keys,
+                    receipt_cursors,
                 )
                 .await?;
-            if matches!(outcome, EnvelopeDeliveryOutcome::Blocked) {
-                return Ok(SourceDeliveryOutcome::Blocked);
+            match outcome {
+                EnvelopeDeliveryOutcome::Delivered(cursor) => {
+                    retain_newest_cursor(&mut latest_receipt_cursor, cursor);
+                }
+                EnvelopeDeliveryOutcome::Blocked => return Ok(SourceDeliveryOutcome::Blocked),
             }
             envelope_index += 1;
         }
 
+        let cursor = latest_receipt_cursor.unwrap_or_else(|| source_event.cursor_v1());
+        state.store_cursor(
+            &binding.route_id,
+            &binding.coordinates.thread_id.to_string(),
+            &cursor,
+        )?;
         Ok(SourceDeliveryOutcome::Completed)
     }
 
@@ -1325,16 +1376,12 @@ impl CooldisDaemonIoBridge {
         envelope_index: usize,
         envelope: EgressEnvelope,
         retry: CooldisEgressRetryConfig,
-        receipt_keys: &mut HashSet<String>,
+        receipt_cursors: &mut HashMap<String, ReceiptDedupeCursor>,
     ) -> IoResult<EnvelopeDeliveryOutcome> {
         let dedupe_key = egress_dedupe_key(source_event.id, envelope_index);
-        if receipt_keys.contains(&dedupe_key) {
-            state.store_cursor(
-                &binding.route_id,
-                &binding.coordinates.thread_id.to_string(),
-                &source_event.cursor_v1(),
-            )?;
-            return Ok(EnvelopeDeliveryOutcome::Delivered);
+        if let Some(receipt) = matching_receipt_cursor(receipt_cursors, &dedupe_key, &envelope.kind)
+        {
+            return Ok(EnvelopeDeliveryOutcome::Delivered(receipt.cursor.clone()));
         }
 
         if matches!(envelope.kind, EgressKind::Silence { .. }) {
@@ -1356,13 +1403,15 @@ impl CooldisDaemonIoBridge {
                 1,
             )
             .await?;
-            state.store_cursor(
-                &binding.route_id,
-                &binding.coordinates.thread_id.to_string(),
-                &event.cursor_v1(),
-            )?;
-            receipt_keys.insert(dedupe_key);
-            return Ok(EnvelopeDeliveryOutcome::Delivered);
+            let cursor = event.cursor_v1();
+            receipt_cursors.insert(
+                dedupe_key,
+                ReceiptDedupeCursor {
+                    cursor: cursor.clone(),
+                    egress_kind: egress_kind_name(&envelope.kind),
+                },
+            );
+            return Ok(EnvelopeDeliveryOutcome::Delivered(cursor));
         }
 
         let Some(adapter) = adapter else {
@@ -1384,13 +1433,15 @@ impl CooldisDaemonIoBridge {
                         attempt,
                     )
                     .await?;
-                    state.store_cursor(
-                        &binding.route_id,
-                        &binding.coordinates.thread_id.to_string(),
-                        &event.cursor_v1(),
-                    )?;
-                    receipt_keys.insert(dedupe_key);
-                    return Ok(EnvelopeDeliveryOutcome::Delivered);
+                    let cursor = event.cursor_v1();
+                    receipt_cursors.insert(
+                        dedupe_key,
+                        ReceiptDedupeCursor {
+                            cursor: cursor.clone(),
+                            egress_kind: egress_kind_name(&envelope.kind),
+                        },
+                    );
+                    return Ok(EnvelopeDeliveryOutcome::Delivered(cursor));
                 }
                 Err(err) => {
                     last_error = err.to_string();
@@ -1415,24 +1466,27 @@ impl CooldisDaemonIoBridge {
             &last_error,
         )
         .await?;
+        let egress_kind = egress_kind_name(&envelope.kind);
         state.push_dead_letter(&EgressDeadLetter {
             route_id: binding.route_id.clone(),
             thread_id: binding.coordinates.thread_id.to_string(),
             source_event_id: source_event.id.to_string(),
             envelope_index,
             dedupe_key: dedupe_key.clone(),
-            egress_kind: egress_kind_name(&envelope.kind),
+            egress_kind: egress_kind.clone(),
             attempts: max_attempts,
             error: last_error,
             envelope,
         })?;
-        state.store_cursor(
-            &binding.route_id,
-            &binding.coordinates.thread_id.to_string(),
-            &event.cursor_v1(),
-        )?;
-        receipt_keys.insert(dedupe_key);
-        Ok(EnvelopeDeliveryOutcome::Delivered)
+        let cursor = event.cursor_v1();
+        receipt_cursors.insert(
+            dedupe_key,
+            ReceiptDedupeCursor {
+                cursor: cursor.clone(),
+                egress_kind,
+            },
+        );
+        Ok(EnvelopeDeliveryOutcome::Delivered(cursor))
     }
 }
 
@@ -1442,10 +1496,16 @@ enum SourceDeliveryOutcome {
     Blocked,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum EnvelopeDeliveryOutcome {
-    Delivered,
+    Delivered(StreamCursorV1),
     Blocked,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReceiptDedupeCursor {
+    cursor: StreamCursorV1,
+    egress_kind: String,
 }
 
 #[async_trait]
@@ -2002,6 +2062,98 @@ fn sibling_egress(source: &EgressEnvelope, kind: EgressKind) -> EgressEnvelope {
     envelope
 }
 
+fn source_has_partial_projected_receipts(
+    route_config: &RouteEgressConfig,
+    source_event: &EventRecord,
+    source_context: &IngressReceiptContext,
+    text: &str,
+    receipt_cursors: &HashMap<String, ReceiptDedupeCursor>,
+) -> bool {
+    let mut envelope = EgressEnvelope::new(
+        source_context.target.clone(),
+        EgressKind::AssistantMessage {
+            text: text.to_string(),
+        },
+        now_ms(),
+    );
+    envelope.source_ingress_id = source_context.source_ingress_id.clone();
+    envelope.metadata = source_context.metadata.clone();
+
+    let mut envelope_index = 0;
+    let mut saw_receipt = false;
+    let mut saw_missing = false;
+    for projected in route_config.project(envelope) {
+        if let Some(_typing) = &route_config.typing_simulation
+            && let EgressKind::AssistantMessage { text } = &projected.kind
+            && !text.is_empty()
+        {
+            let typing_envelope = sibling_egress(
+                &projected,
+                EgressKind::PlatformAction {
+                    action: "typing".to_string(),
+                    payload: JsonValue::Object(JsonMap::new()),
+                },
+            );
+            note_projection_receipt_presence(
+                source_event.id,
+                envelope_index,
+                &typing_envelope.kind,
+                receipt_cursors,
+                &mut saw_receipt,
+                &mut saw_missing,
+            );
+            envelope_index += 1;
+        }
+
+        note_projection_receipt_presence(
+            source_event.id,
+            envelope_index,
+            &projected.kind,
+            receipt_cursors,
+            &mut saw_receipt,
+            &mut saw_missing,
+        );
+        envelope_index += 1;
+    }
+    saw_receipt && saw_missing
+}
+
+fn note_projection_receipt_presence(
+    source_event_id: EventRecordId,
+    envelope_index: usize,
+    kind: &EgressKind,
+    receipt_cursors: &HashMap<String, ReceiptDedupeCursor>,
+    saw_receipt: &mut bool,
+    saw_missing: &mut bool,
+) {
+    let dedupe_key = egress_dedupe_key(source_event_id, envelope_index);
+    if matching_receipt_cursor(receipt_cursors, &dedupe_key, kind).is_some() {
+        *saw_receipt = true;
+    } else {
+        *saw_missing = true;
+    }
+}
+
+fn matching_receipt_cursor<'a>(
+    receipt_cursors: &'a HashMap<String, ReceiptDedupeCursor>,
+    dedupe_key: &str,
+    kind: &EgressKind,
+) -> Option<&'a ReceiptDedupeCursor> {
+    let egress_kind = egress_kind_name(kind);
+    receipt_cursors
+        .get(dedupe_key)
+        .filter(|receipt| receipt.egress_kind == egress_kind)
+}
+
+fn retain_newest_cursor(slot: &mut Option<StreamCursorV1>, candidate: StreamCursorV1) {
+    if slot
+        .as_ref()
+        .is_none_or(|current| candidate.sequence.get() > current.sequence.get())
+    {
+        *slot = Some(candidate);
+    }
+}
+
 async fn append_egress_delivered_receipt(
     handle: &RuntimeThreadHandle,
     binding: &BoundEgressThread,
@@ -2145,7 +2297,7 @@ fn payload_object_mut(payload: &mut JsonValue) -> IoResult<&mut JsonMap<String, 
         .ok_or_else(|| IoError::Bridge("receipt payload did not encode as object".to_string()))
 }
 
-fn receipt_dedupe_keys(events: &[EventRecord]) -> HashSet<String> {
+fn receipt_dedupe_cursors(events: &[EventRecord]) -> HashMap<String, ReceiptDedupeCursor> {
     events
         .iter()
         .filter(|event| {
@@ -2155,11 +2307,23 @@ fn receipt_dedupe_keys(events: &[EventRecord]) -> HashSet<String> {
             )
         })
         .filter_map(|event| {
-            event
+            let dedupe_key = event
                 .payload
                 .get("dedupe_key")
                 .and_then(JsonValue::as_str)
-                .map(ToOwned::to_owned)
+                .map(ToOwned::to_owned)?;
+            let egress_kind = event
+                .payload
+                .get("egress_kind")
+                .and_then(JsonValue::as_str)
+                .map(ToOwned::to_owned)?;
+            Some((
+                dedupe_key,
+                ReceiptDedupeCursor {
+                    cursor: event.cursor_v1(),
+                    egress_kind,
+                },
+            ))
         })
         .collect()
 }

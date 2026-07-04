@@ -1002,6 +1002,114 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
 }
 
 #[tokio::test]
+async fn egress_projector_recovers_missing_projection_after_partial_receipt_cursor() {
+    let root = test_root("egress-partial-projection-cursor");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(
+        Vec::new(),
+        Some(crate::CooldisTypingSimulationConfig {
+            chars_per_second: 0,
+        }),
+    );
+
+    let (_server, bridge, mut rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, expected) =
+        submit_and_wait_for_assistant_event(&bridge, "partial cursor").await;
+
+    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let handle = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, parsed)
+        .await
+        .unwrap();
+    let context = handle.session_context().await.unwrap();
+    let events = handle.read_thread_events(None).await.unwrap();
+    let source_event = events
+        .iter()
+        .find(|event| {
+            assistant_text_from_session_event(event, &context.entries).as_deref()
+                == Some(expected.as_str())
+        })
+        .unwrap()
+        .clone();
+    let source_context = events.iter().find_map(ingress_context_from_event).unwrap();
+    let mut source_envelope = EgressEnvelope::new(
+        source_context.target,
+        EgressKind::AssistantMessage {
+            text: expected.clone(),
+        },
+        now_ms(),
+    );
+    source_envelope.source_ingress_id = source_context.source_ingress_id;
+    source_envelope.metadata = source_context.metadata;
+    let typing_envelope = sibling_egress(
+        &source_envelope,
+        EgressKind::PlatformAction {
+            action: "typing".to_string(),
+            payload: JsonValue::Object(JsonMap::new()),
+        },
+    );
+    let binding = BoundEgressThread {
+        route_id: "main".to_string(),
+        scope_key: "test-scope".to_string(),
+        coordinates: handle.context().coordinates.clone(),
+    };
+    let partial_dedupe_key = egress_dedupe_key(source_event.id, 0);
+    let partial_receipt = append_egress_delivered_receipt(
+        &handle,
+        &binding,
+        &source_event,
+        0,
+        &partial_dedupe_key,
+        &typing_envelope,
+        &DeliveryReceipt::delivered(&typing_envelope, "typing-before-crash"),
+        1,
+    )
+    .await
+    .unwrap();
+    let state = bridge
+        .egress_states
+        .read()
+        .await
+        .get(&source_scope("telegram.bot", "main"))
+        .cloned()
+        .unwrap();
+    state
+        .store_cursor("main", &thread_id, &partial_receipt.cursor_v1())
+        .unwrap();
+
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        egress.kind,
+        EgressKind::AssistantMessage { ref text } if text == &expected
+    ));
+    assert!(rx.try_recv().is_err());
+
+    let delivered = egress_receipts(&bridge, &thread_id, EventKind::IoEgressDelivered).await;
+    assert_eq!(delivered.len(), 2);
+    let assistant_dedupe_key = egress_dedupe_key(source_event.id, 1);
+    assert!(delivered.iter().any(|event| {
+        event.payload["dedupe_key"].as_str() == Some(partial_dedupe_key.as_str())
+    }));
+    assert!(delivered.iter().any(|event| {
+        event.payload["dedupe_key"].as_str() == Some(assistant_dedupe_key.as_str())
+    }));
+    let cursor = egress_cursor(&bridge, &thread_id).await.unwrap();
+    assert!(cursor.sequence.get() > partial_receipt.sequence.get());
+}
+
+#[tokio::test]
 async fn egress_projector_retries_transient_failures_and_records_attempts() {
     let root = test_root("egress-retry");
     let db = root.join("io.sqlite");
