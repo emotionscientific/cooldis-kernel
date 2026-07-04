@@ -4702,12 +4702,7 @@ fn load_chat_provider_config(args: &ChatArgs) -> CooldisResult<ChatProviderConfi
                 .or_else(|| env_or_file("AWS_BEDROCK_MODEL", &file_env))
                 .or_else(|| env_or_file("ANTHROPIC_DEFAULT_SONNET_MODEL", &file_env))
                 .unwrap_or_else(|| APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string());
-            let stream = config.stream.unwrap_or(false);
-            if stream {
-                return Err(usage_error(
-                    "Anthropic Bedrock InvokeModel streaming is not wired yet; omit --stream or set stream=false",
-                ));
-            }
+            let stream = config.stream.unwrap_or(true);
             Ok(ChatProviderConfig::AnthropicBedrock {
                 region,
                 base_url,
@@ -5055,12 +5050,7 @@ fn load_daemon_provider_config(
                 .or_else(|| env_or_file("AWS_BEDROCK_MODEL", &file_env))
                 .or_else(|| env_or_file("ANTHROPIC_DEFAULT_SONNET_MODEL", &file_env))
                 .unwrap_or_else(|| APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string());
-            let stream = config.stream.unwrap_or(false);
-            if stream {
-                return Err(usage_error(
-                    "Anthropic Bedrock InvokeModel streaming is not wired yet; set provider.stream=false",
-                ));
-            }
+            let stream = config.stream.unwrap_or(true);
             Ok(ChatProviderConfig::AnthropicBedrock {
                 region,
                 base_url,

@@ -3472,10 +3472,19 @@ impl CooldisAppServer {
     }
 
     pub(super) fn model_provider_capabilities_json(&self) -> Value {
+        let supports_streaming = agent_manifest_provider_surface_from_parts(
+            &self.inner.provider,
+            &self.inner.model_provider,
+            &self.inner.model,
+            &self.inner.metadata_store,
+        )
+        .map(|surface| surface.supports_streaming)
+        .unwrap_or(false);
         json!({
             "namespaceTools": true,
             "imageGeneration": false,
             "webSearch": false,
+            "supportsStreaming": supports_streaming,
         })
     }
 
