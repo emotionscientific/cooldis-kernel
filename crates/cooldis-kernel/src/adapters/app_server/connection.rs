@@ -1035,7 +1035,7 @@ impl CooldisAppServer {
                 "marketplaceLoadErrors": [],
                 "featuredPluginIds": [],
             })),
-            "hooks/list" => Ok(json!({ "data": [] })),
+            "hooks/list" => Ok(json!({ "data": [], "witnessing": true })),
             "mcpServerStatus/list" => self.mcp_server_status_list(),
             "mcpSource/list" => self.mcp_source_list(),
             "mcpSource/read" => {

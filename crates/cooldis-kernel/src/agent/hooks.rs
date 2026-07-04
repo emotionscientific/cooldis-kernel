@@ -1,6 +1,6 @@
 use crate::{
     CompactionTrigger, CooldisError, CooldisResult, ThreadCoordinates, ThreadId,
-    TurnContextSnapshot,
+    TurnContextSnapshot, agent::contracts::sha256_hex,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,28 @@ pub struct HookRunRecord {
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HookValueDigest {
+    pub before_sha256: String,
+    pub after_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HookMutationWitness {
+    pub hook_id: String,
+    #[serde(rename = "hook_event_name")]
+    pub event_name: HookEventName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_sha256: Option<String>,
+    pub mutated_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<HookValueDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output: Option<HookValueDigest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -154,6 +176,7 @@ pub struct HookHandlerOutput {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionStartHookOutcome {
     pub records: Vec<HookRunRecord>,
+    pub mutation_witnesses: Vec<HookMutationWitness>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
     pub additional_contexts: Vec<String>,
@@ -162,6 +185,7 @@ pub struct SessionStartHookOutcome {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UserPromptSubmitHookOutcome {
     pub records: Vec<HookRunRecord>,
+    pub mutation_witnesses: Vec<HookMutationWitness>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
     pub additional_contexts: Vec<String>,
@@ -170,6 +194,7 @@ pub struct UserPromptSubmitHookOutcome {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PreToolUseHookOutcome {
     pub records: Vec<HookRunRecord>,
+    pub mutation_witnesses: Vec<HookMutationWitness>,
     pub should_block: bool,
     pub block_reason: Option<String>,
     pub updated_input: Option<Value>,
@@ -179,6 +204,7 @@ pub struct PreToolUseHookOutcome {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PostToolUseHookOutcome {
     pub records: Vec<HookRunRecord>,
+    pub mutation_witnesses: Vec<HookMutationWitness>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
     pub additional_contexts: Vec<String>,
@@ -189,6 +215,7 @@ pub struct PostToolUseHookOutcome {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PreCompactHookOutcome {
     pub records: Vec<HookRunRecord>,
+    pub mutation_witnesses: Vec<HookMutationWitness>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
 }
@@ -196,13 +223,16 @@ pub struct PreCompactHookOutcome {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PostCompactHookOutcome {
     pub records: Vec<HookRunRecord>,
+    pub mutation_witnesses: Vec<HookMutationWitness>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
+// lexicon-allow: hook - existing host debug hook outcome API name retained for compatibility.
 pub struct StopHookOutcome {
     pub records: Vec<HookRunRecord>,
+    pub mutation_witnesses: Vec<HookMutationWitness>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
     pub should_block: bool,
@@ -211,13 +241,19 @@ pub struct StopHookOutcome {
 }
 
 #[async_trait]
+// lexicon-allow: hook - existing host debug hook trait name retained for compatibility.
 pub trait HookHandler: Send + Sync + 'static {
     fn spec(&self) -> HookHandlerSpec;
+
+    fn command_sha256(&self) -> Option<String> {
+        None
+    }
 
     async fn run(&self, request: HookRequest) -> CooldisResult<HookHandlerOutput>;
 }
 
 #[derive(Clone, Default)]
+// lexicon-allow: hook - existing host debug hook pipeline API name retained for compatibility.
 pub struct HookPipeline {
     handlers: Vec<Arc<dyn HookHandler>>,
 }
@@ -254,6 +290,7 @@ impl HookPipeline {
         let outputs = records.outputs;
         SessionStartHookOutcome {
             records: records.records,
+            mutation_witnesses: records.mutation_witnesses,
             should_stop: outputs.iter().any(|output| output.should_stop),
             stop_reason: outputs.iter().find_map(|output| output.stop_reason.clone()),
             additional_contexts: collect_additional_contexts(outputs.iter()),
@@ -276,6 +313,7 @@ impl HookPipeline {
         let outputs = records.outputs;
         UserPromptSubmitHookOutcome {
             records: records.records,
+            mutation_witnesses: records.mutation_witnesses,
             should_stop: outputs.iter().any(|output| output.should_stop),
             stop_reason: outputs.iter().find_map(|output| output.stop_reason.clone()),
             additional_contexts: collect_additional_contexts(outputs.iter()),
@@ -300,6 +338,7 @@ impl HookPipeline {
         let should_block = outputs.iter().any(|output| output.should_block);
         PreToolUseHookOutcome {
             records: records.records,
+            mutation_witnesses: records.mutation_witnesses,
             should_block,
             block_reason: outputs
                 .iter()
@@ -333,6 +372,7 @@ impl HookPipeline {
         let outputs = records.outputs;
         PostToolUseHookOutcome {
             records: records.records,
+            mutation_witnesses: records.mutation_witnesses,
             should_stop: outputs.iter().any(|output| output.should_stop),
             stop_reason: outputs.iter().find_map(|output| output.stop_reason.clone()),
             additional_contexts: collect_additional_contexts(outputs.iter()),
@@ -363,6 +403,7 @@ impl HookPipeline {
         let outputs = records.outputs;
         PreCompactHookOutcome {
             records: records.records,
+            mutation_witnesses: records.mutation_witnesses,
             should_stop: outputs.iter().any(|output| output.should_stop),
             stop_reason: outputs.iter().find_map(|output| output.stop_reason.clone()),
         }
@@ -385,6 +426,7 @@ impl HookPipeline {
         let outputs = records.outputs;
         PostCompactHookOutcome {
             records: records.records,
+            mutation_witnesses: records.mutation_witnesses,
             should_stop: outputs.iter().any(|output| output.should_stop),
             stop_reason: outputs.iter().find_map(|output| output.stop_reason.clone()),
         }
@@ -406,6 +448,7 @@ impl HookPipeline {
         let outputs = records.outputs;
         StopHookOutcome {
             records: records.records,
+            mutation_witnesses: records.mutation_witnesses,
             should_stop: outputs.iter().any(|output| output.should_stop),
             stop_reason: outputs.iter().find_map(|output| output.stop_reason.clone()),
             should_block: outputs.iter().any(|output| output.should_block),
@@ -425,8 +468,10 @@ impl HookPipeline {
     ) -> HookExecutionBatch {
         let mut records = Vec::new();
         let mut outputs = Vec::new();
+        let mut mutation_witnesses = Vec::new();
         for handler in self.handlers.iter() {
             let spec = handler.spec();
+            let command_sha256 = handler.command_sha256();
             if spec.event_name != event_name
                 || !matches_hook(spec.matcher.as_deref(), matcher_input)
             {
@@ -439,6 +484,11 @@ impl HookPipeline {
                 Ok(output) => {
                     let status = status_for_output(&output);
                     let message = message_for_output(&output);
+                    if let Some(witness) =
+                        mutation_witness_for_output(&spec, command_sha256, &request, &output)
+                    {
+                        mutation_witnesses.push(witness);
+                    }
                     records.push(HookRunRecord {
                         hook_id: spec.id,
                         event_name,
@@ -465,11 +515,16 @@ impl HookPipeline {
                 }
             }
         }
-        HookExecutionBatch { records, outputs }
+        HookExecutionBatch {
+            records,
+            outputs,
+            mutation_witnesses,
+        }
     }
 }
 
 #[derive(Clone, Debug)]
+// lexicon-allow: hook - existing command hook adapter API name retained for compatibility.
 pub struct CommandHookHandler {
     spec: HookHandlerSpec,
     command: String,
@@ -529,6 +584,10 @@ impl HookHandler for CommandHookHandler {
         self.spec.clone()
     }
 
+    fn command_sha256(&self) -> Option<String> {
+        Some(sha256_hex(self.command.as_bytes()))
+    }
+
     async fn run(&self, request: HookRequest) -> CooldisResult<HookHandlerOutput> {
         let input = serde_json::to_string(&request)
             .map_err(|err| CooldisError::RuntimeExecution(err.to_string()))?;
@@ -581,6 +640,108 @@ impl HookHandler for CommandHookHandler {
 struct HookExecutionBatch {
     records: Vec<HookRunRecord>,
     outputs: Vec<HookHandlerOutput>,
+    mutation_witnesses: Vec<HookMutationWitness>,
+}
+
+fn mutation_witness_for_output(
+    spec: &HookHandlerSpec,
+    command_sha256: Option<String>,
+    request: &HookRequest,
+    output: &HookHandlerOutput,
+) -> Option<HookMutationWitness> {
+    let mut mutated_fields = Vec::new();
+    let mut tool_input = None;
+    let mut tool_output = None;
+    match request {
+        HookRequest::SessionStart(_) | HookRequest::UserPromptSubmit(_) | HookRequest::Stop(_) => {
+            push_additional_contexts_field(&mut mutated_fields, output);
+            if output.should_block {
+                mutated_fields.push("should_block".to_string());
+            }
+            if output.should_stop {
+                mutated_fields.push("should_stop".to_string());
+            }
+        }
+        HookRequest::PreToolUse(request) => {
+            push_additional_contexts_field(&mut mutated_fields, output);
+            if output.should_block {
+                mutated_fields.push("should_block".to_string());
+            }
+            if !output.should_block
+                && let Some(updated_input) = &output.updated_input
+                && updated_input != &request.arguments
+            {
+                mutated_fields.push("updated_input".to_string());
+                tool_input = Some(json_value_digest(&request.arguments, updated_input));
+            }
+        }
+        HookRequest::PostToolUse(request) => {
+            push_additional_contexts_field(&mut mutated_fields, output);
+            if output
+                .feedback
+                .as_ref()
+                .is_some_and(|feedback| !feedback.trim().is_empty())
+            {
+                mutated_fields.push("feedback".to_string());
+            }
+            if output.should_stop {
+                mutated_fields.push("should_stop".to_string());
+            }
+            if let Some(replacement_output) = &output.replacement_output
+                && replacement_output != &request.output
+            {
+                mutated_fields.push("replacement_output".to_string());
+                tool_output = Some(text_digest(&request.output, replacement_output));
+            }
+        }
+        HookRequest::PreCompact(_) | HookRequest::PostCompact(_) => {
+            if output.should_stop {
+                mutated_fields.push("should_stop".to_string());
+            }
+        }
+    }
+    if mutated_fields.is_empty() {
+        return None;
+    }
+    Some(HookMutationWitness {
+        hook_id: spec.id.clone(),
+        event_name: spec.event_name,
+        matcher: spec.matcher.clone(),
+        command_sha256,
+        mutated_fields,
+        tool_input,
+        tool_output,
+    })
+}
+
+fn push_additional_contexts_field(mutated_fields: &mut Vec<String>, output: &HookHandlerOutput) {
+    let has_context = output
+        .additional_context
+        .as_ref()
+        .is_some_and(|context| !context.trim().is_empty())
+        || output
+            .additional_contexts
+            .iter()
+            .any(|context| !context.trim().is_empty());
+    if has_context {
+        mutated_fields.push("additional_contexts".to_string());
+    }
+}
+
+fn json_value_digest(before: &Value, after: &Value) -> HookValueDigest {
+    let before = serde_json::to_vec(before).unwrap_or_else(|_| before.to_string().into_bytes());
+    let after = serde_json::to_vec(after).unwrap_or_else(|_| after.to_string().into_bytes());
+    HookValueDigest {
+        before_sha256: sha256_hex(&before),
+        after_sha256: sha256_hex(&after),
+    }
+}
+
+fn text_digest(before: &str, after: &str) -> HookValueDigest {
+    HookValueDigest {
+        before_sha256: sha256_hex(before.as_bytes()),
+        after_sha256: sha256_hex(after.as_bytes()),
+    }
 }
 
 fn matches_hook(matcher: Option<&str>, input: Option<&str>) -> bool {

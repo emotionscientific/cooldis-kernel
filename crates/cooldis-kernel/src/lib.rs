@@ -145,11 +145,11 @@ pub use agent::coupling_templates::{
 };
 pub use agent::hooks::{
     CommandHookHandler, HookEventName, HookHandler, HookHandlerOutput, HookHandlerSpec,
-    HookPipeline, HookRequest, HookRunRecord, HookRunStatus, PostCompactHookOutcome,
-    PostCompactHookRequest, PostToolUseHookOutcome, PostToolUseHookRequest, PreCompactHookOutcome,
-    PreCompactHookRequest, PreToolUseHookOutcome, PreToolUseHookRequest, SessionStartHookOutcome,
-    SessionStartHookRequest, StopHookOutcome, StopHookRequest, UserPromptSubmitHookOutcome,
-    UserPromptSubmitHookRequest,
+    HookMutationWitness, HookPipeline, HookRequest, HookRunRecord, HookRunStatus, HookValueDigest,
+    PostCompactHookOutcome, PostCompactHookRequest, PostToolUseHookOutcome, PostToolUseHookRequest,
+    PreCompactHookOutcome, PreCompactHookRequest, PreToolUseHookOutcome, PreToolUseHookRequest,
+    SessionStartHookOutcome, SessionStartHookRequest, StopHookOutcome, StopHookRequest,
+    UserPromptSubmitHookOutcome, UserPromptSubmitHookRequest,
 };
 pub use agent::manifest::{
     AgentAliasRecord, AgentAliasResolutionReceipt, AgentManifestRefVerification,
