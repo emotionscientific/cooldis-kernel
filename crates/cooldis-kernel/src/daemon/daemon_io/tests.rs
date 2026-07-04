@@ -2,10 +2,11 @@ use super::*;
 use crate::{AppServerListenAddr, CooldisAppServerConfig};
 use cooldis_io_core::{
     ConversationKind, DeliveryReceipt, IngressContent, IoConversation, IoProtocolAdapter,
-    IoProtocolCapabilities, IoSource,
+    IoProtocolCapabilities, IoSource, IoTarget,
 };
 use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig};
 use serde_json::json;
+use std::collections::BTreeMap;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 #[derive(Clone)]
@@ -59,6 +60,43 @@ fn test_envelope(text: &str) -> IngressEnvelope {
     )
 }
 
+fn test_egress(text: &str) -> EgressEnvelope {
+    let mut egress = EgressEnvelope::new(
+        IoTarget {
+            source: IoSource::new("telegram.bot", "main"),
+            conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+            actor: None,
+            metadata: BTreeMap::new(),
+        },
+        EgressKind::AssistantMessage {
+            text: text.to_string(),
+        },
+        now_ms(),
+    );
+    egress
+        .metadata
+        .insert("telegram_message_id".to_string(), "555".to_string());
+    egress
+}
+
+fn route_with_egress(
+    egress_projection: Vec<crate::CooldisEgressProjectionRuleConfig>,
+    typing_simulation: Option<crate::CooldisTypingSimulationConfig>,
+) -> CooldisIoRouteConfig {
+    CooldisIoRouteConfig {
+        id: "main".to_string(),
+        kind: "telegram.bot".to_string(),
+        enabled: true,
+        policy: None,
+        threading: None,
+        ingress: None,
+        egress_projection,
+        typing_simulation,
+        telegram: None,
+        metadata: BTreeMap::new(),
+    }
+}
+
 async fn test_bridge() -> (
     CooldisDaemonIoBridge,
     mpsc::UnboundedReceiver<EgressEnvelope>,
@@ -85,6 +123,134 @@ async fn test_bridge() -> (
         )
         .await;
     (bridge, rx)
+}
+
+#[tokio::test]
+async fn egress_projection_strips_reaction_tag_and_preserves_order() {
+    let route = route_with_egress(
+        vec![crate::CooldisEgressProjectionRuleConfig {
+            pattern: r"\[reaction:(?P<emoji>[^\]]+)\]".to_string(),
+            action: "reaction".to_string(),
+        }],
+        None,
+    );
+    let config = RouteEgressConfig::from_route(&route).unwrap();
+
+    let projected = config.project(test_egress("hello[reaction:👍] friend"));
+
+    assert_eq!(projected.len(), 2);
+    assert!(matches!(
+        projected[0].kind,
+        EgressKind::AssistantMessage { ref text } if text == "hello friend"
+    ));
+    assert!(matches!(
+        projected[1].kind,
+        EgressKind::PlatformAction { ref action, ref payload }
+            if action == "reaction"
+                && payload["emoji"] == "👍"
+                && payload["message_id"].is_null()
+    ));
+}
+
+#[tokio::test]
+async fn egress_projection_turns_no_response_tag_into_silence() {
+    let route = route_with_egress(
+        vec![crate::CooldisEgressProjectionRuleConfig {
+            pattern: r"\[no_response\]".to_string(),
+            action: "silence".to_string(),
+        }],
+        None,
+    );
+    let config = RouteEgressConfig::from_route(&route).unwrap();
+
+    let projected = config.project(test_egress("[no_response]"));
+
+    assert_eq!(projected.len(), 1);
+    assert!(matches!(
+        projected[0].kind,
+        EgressKind::Silence { reason: None }
+    ));
+}
+
+#[tokio::test]
+async fn egress_projection_leaves_text_without_tags_unchanged() {
+    let route = route_with_egress(
+        vec![crate::CooldisEgressProjectionRuleConfig {
+            pattern: r"\[reaction:(?P<emoji>[^\]]+)\]".to_string(),
+            action: "reaction".to_string(),
+        }],
+        None,
+    );
+    let config = RouteEgressConfig::from_route(&route).unwrap();
+
+    let projected = config.project(test_egress("plain answer"));
+
+    assert_eq!(projected.len(), 1);
+    assert!(matches!(
+        projected[0].kind,
+        EgressKind::AssistantMessage { ref text } if text == "plain answer"
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn typing_simulation_sends_typing_action_and_delays_text() {
+    assert_eq!(typing_delay_for_text("abcd", 2), Duration::from_secs(2));
+    assert_eq!(
+        typing_delay_for_text("abcdefghi", 1),
+        Duration::from_secs(8)
+    );
+
+    let (bridge, mut rx) = test_bridge().await;
+    let route = route_with_egress(
+        Vec::new(),
+        Some(crate::CooldisTypingSimulationConfig {
+            chars_per_second: 2,
+        }),
+    );
+    bridge
+        .register_egress_route_config("telegram.bot", "main", &route)
+        .await
+        .unwrap();
+
+    let deliver = tokio::spawn({
+        let bridge = bridge.clone();
+        async move {
+            bridge.deliver_egress(test_egress("abcd")).await;
+        }
+    });
+
+    let typing = rx.recv().await.unwrap();
+    assert!(matches!(
+        typing.kind,
+        EgressKind::PlatformAction { ref action, .. } if action == "typing"
+    ));
+    assert!(rx.try_recv().is_err());
+
+    tokio::time::advance(Duration::from_millis(1_999)).await;
+    tokio::task::yield_now().await;
+    assert!(rx.try_recv().is_err());
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let text = rx.recv().await.unwrap();
+    assert!(matches!(
+        text.kind,
+        EgressKind::AssistantMessage { ref text } if text == "abcd"
+    ));
+    deliver.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn typing_simulation_is_off_by_default() {
+    let (bridge, mut rx) = test_bridge().await;
+
+    bridge.deliver_egress(test_egress("no typing")).await;
+
+    let text = rx.recv().await.unwrap();
+    assert!(matches!(
+        text.kind,
+        EgressKind::AssistantMessage { ref text } if text == "no typing"
+    ));
+    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]

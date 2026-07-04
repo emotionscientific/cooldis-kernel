@@ -235,13 +235,13 @@ pub use capabilities::wasm_runner::{
 pub use daemon::daemon_config::{
     CooldisDaemonAppServerConfig, CooldisDaemonConfig, CooldisDaemonOperationsConfig,
     CooldisDaemonRegistriesConfig, CooldisDaemonServiceSpec, CooldisDaemonServiceTarget,
-    CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProjectDiscovery,
-    CooldisProviderConfig, CooldisQueueConfig, CooldisRuntimeConfig, CooldisTelegramRouteConfig,
-    LoadedCooldisDaemonConfig, cooldis_daemon_service_file_name,
-    cooldis_daemon_service_install_path, cooldis_daemon_service_install_path_for_home,
-    default_cooldis_daemon_socket_path, discover_cooldis_daemon_config_path,
-    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
-    load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
+    CooldisEgressProjectionRuleConfig, CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig,
+    CooldisProjectDiscovery, CooldisProviderConfig, CooldisQueueConfig, CooldisRuntimeConfig,
+    CooldisTelegramRouteConfig, CooldisTypingSimulationConfig, LoadedCooldisDaemonConfig,
+    cooldis_daemon_service_file_name, cooldis_daemon_service_install_path,
+    cooldis_daemon_service_install_path_for_home, default_cooldis_daemon_socket_path,
+    discover_cooldis_daemon_config_path, discover_cooldis_project, install_cooldis_daemon_service,
+    load_cooldis_daemon_config, load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
     uninstall_cooldis_daemon_service,
 };
 pub use daemon::daemon_io::{

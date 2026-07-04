@@ -1,7 +1,8 @@
 use crate::{
-    CooldisAppServer, CooldisError, CooldisIoRouteConfig, CooldisResult, CooldisSupervisor,
-    RuntimeEventKind, RuntimeTerminalState, RuntimeThreadHandle, ThreadCoordinates, ThreadEvent,
-    ThreadId, ThreadStartRequest, ThreadTopology, TurnInput, TurnSubmissionMode,
+    CooldisAppServer, CooldisEgressProjectionRuleConfig, CooldisError, CooldisIoRouteConfig,
+    CooldisResult, CooldisSupervisor, CooldisTypingSimulationConfig, RuntimeEventKind,
+    RuntimeTerminalState, RuntimeThreadHandle, ThreadCoordinates, ThreadEvent, ThreadId,
+    ThreadStartRequest, ThreadTopology, TurnInput, TurnSubmissionMode,
 };
 use async_trait::async_trait;
 use cooldis_io_core::{
@@ -10,7 +11,9 @@ use cooldis_io_core::{
     KernelIoReceipt, ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
+use regex::{Captures, Regex};
 use serde_json::json;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -24,6 +27,158 @@ const DEFAULT_QUEUE_BATCH: usize = 16;
 const DEFAULT_WORKER_POLL_MS: u64 = 250;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TYPING_SIMULATION_DELAY: Duration = Duration::from_secs(8);
+
+#[derive(Clone, Debug, Default)]
+struct RouteEgressConfig {
+    projection_rules: Vec<CompiledEgressProjectionRule>,
+    typing_simulation: Option<CooldisTypingSimulationConfig>,
+}
+
+impl RouteEgressConfig {
+    fn from_route(route: &CooldisIoRouteConfig) -> CooldisResult<Self> {
+        let mut projection_rules = Vec::new();
+        for (index, rule) in route.egress_projection.iter().enumerate() {
+            projection_rules.push(CompiledEgressProjectionRule::compile(
+                &route.id, index, rule,
+            )?);
+        }
+        Ok(Self {
+            projection_rules,
+            typing_simulation: route.typing_simulation.clone(),
+        })
+    }
+
+    fn project(&self, envelope: EgressEnvelope) -> Vec<EgressEnvelope> {
+        if self.projection_rules.is_empty() {
+            return vec![envelope];
+        }
+
+        let EgressKind::AssistantMessage { text } = &envelope.kind else {
+            return vec![envelope];
+        };
+        let text = text.clone();
+        let matches = self.projection_matches(&text);
+        if matches.is_empty() {
+            return vec![envelope];
+        }
+
+        let stripped_text = strip_projection_matches(&text, &matches);
+        let has_silence = matches.iter().any(|matched| matched.action == "silence");
+        let text_order = first_remaining_text_offset(&text, &matches);
+        let mut projected = Vec::new();
+
+        if !has_silence && !stripped_text.trim().is_empty() {
+            let mut text_envelope = envelope.clone();
+            text_envelope.kind = EgressKind::AssistantMessage {
+                text: stripped_text,
+            };
+            projected.push(ProjectedEgress {
+                order: text_order.unwrap_or(usize::MAX),
+                tie_breaker: usize::MAX,
+                envelope: text_envelope,
+            });
+        }
+
+        for (index, matched) in matches.into_iter().enumerate() {
+            let kind = if matched.action == "silence" {
+                EgressKind::Silence {
+                    reason: matched
+                        .payload
+                        .get("reason")
+                        .and_then(JsonValue::as_str)
+                        .map(ToOwned::to_owned),
+                }
+            } else {
+                EgressKind::PlatformAction {
+                    action: matched.action,
+                    payload: matched.payload,
+                }
+            };
+            projected.push(ProjectedEgress {
+                order: matched.start,
+                tie_breaker: index,
+                envelope: sibling_egress(&envelope, kind),
+            });
+        }
+
+        projected.sort_by_key(|projected| (projected.order, projected.tie_breaker));
+        projected
+            .into_iter()
+            .map(|projected| projected.envelope)
+            .collect()
+    }
+
+    fn projection_matches(&self, text: &str) -> Vec<ProjectionMatch> {
+        let mut matches = Vec::new();
+        for (rule_index, rule) in self.projection_rules.iter().enumerate() {
+            for captures in rule.regex.captures_iter(text) {
+                let Some(span) = captures.get(0) else {
+                    continue;
+                };
+                matches.push(ProjectionMatch {
+                    start: span.start(),
+                    end: span.end(),
+                    rule_index,
+                    action: rule.action.clone(),
+                    payload: projection_payload(rule, &captures),
+                });
+            }
+        }
+
+        matches.sort_by_key(|matched| (matched.start, matched.rule_index, matched.end));
+        let mut accepted = Vec::new();
+        let mut previous_end = 0;
+        for matched in matches {
+            if matched.start < previous_end {
+                continue;
+            }
+            previous_end = matched.end;
+            accepted.push(matched);
+        }
+        accepted
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompiledEgressProjectionRule {
+    regex: Regex,
+    action: String,
+}
+
+impl CompiledEgressProjectionRule {
+    fn compile(
+        route_id: &str,
+        index: usize,
+        rule: &CooldisEgressProjectionRuleConfig,
+    ) -> CooldisResult<Self> {
+        let regex = Regex::new(&rule.pattern).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "io.routes.{route_id}.egress_projection[{index}].pattern invalid regex: {err}"
+            ))
+        })?;
+        Ok(Self {
+            regex,
+            action: rule.action.trim().to_string(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ProjectionMatch {
+    start: usize,
+    end: usize,
+    rule_index: usize,
+    action: String,
+    payload: JsonValue,
+}
+
+#[derive(Debug)]
+struct ProjectedEgress {
+    order: usize,
+    tie_breaker: usize,
+    envelope: EgressEnvelope,
+}
 
 #[derive(Clone)]
 pub struct CooldisDaemonIoBridge {
@@ -36,6 +191,7 @@ pub struct CooldisDaemonIoBridge {
     threads: Arc<Mutex<HashMap<String, ThreadCoordinates>>>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
     egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
+    egress_route_configs: Arc<RwLock<HashMap<String, RouteEgressConfig>>>,
 }
 
 impl CooldisDaemonIoBridge {
@@ -57,6 +213,7 @@ impl CooldisDaemonIoBridge {
             threads: Arc::new(Mutex::new(HashMap::new())),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             egress_adapters: Arc::new(RwLock::new(HashMap::new())),
+            egress_route_configs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -87,6 +244,22 @@ impl CooldisDaemonIoBridge {
             .write()
             .await
             .insert(source_scope(&protocol, &instance_id), adapter);
+    }
+
+    pub async fn register_egress_route_config(
+        &self,
+        protocol: impl Into<String>,
+        instance_id: impl Into<String>,
+        route: &CooldisIoRouteConfig,
+    ) -> CooldisResult<()> {
+        let protocol = protocol.into();
+        let instance_id = instance_id.into();
+        let config = RouteEgressConfig::from_route(route)?;
+        self.egress_route_configs
+            .write()
+            .await
+            .insert(source_scope(&protocol, &instance_id), config);
+        Ok(())
     }
 
     pub async fn submit_envelope(&self, envelope: IngressEnvelope) -> IoResult<KernelIoReceipt> {
@@ -306,10 +479,9 @@ impl CooldisDaemonIoBridge {
                                 break;
                             }
                             RuntimeEventKind::Failed { message, .. } => {
-                                self.deliver_egress(EgressEnvelope::for_ingress(
+                                self.deliver_egress(daemon_egress_for_ingress(
                                     &envelope,
                                     EgressKind::Error { message },
-                                    now_ms(),
                                 ))
                                 .await;
                                 break;
@@ -317,10 +489,9 @@ impl CooldisDaemonIoBridge {
                             _ => {}
                         },
                         ThreadEvent::Failed { message, .. } => {
-                            self.deliver_egress(EgressEnvelope::for_ingress(
+                            self.deliver_egress(daemon_egress_for_ingress(
                                 &envelope,
                                 EgressKind::Error { message },
-                                now_ms(),
                             ))
                             .await;
                             break;
@@ -350,12 +521,11 @@ impl CooldisDaemonIoBridge {
             .remove(&target.address.scope_key());
 
         if terminal && !assistant_text.is_empty() {
-            self.deliver_egress(EgressEnvelope::for_ingress(
+            self.deliver_egress(daemon_egress_for_ingress(
                 &envelope,
                 EgressKind::AssistantMessage {
                     text: assistant_text,
                 },
-                now_ms(),
             ))
             .await;
         } else if !terminal {
@@ -371,6 +541,45 @@ impl CooldisDaemonIoBridge {
         let Some(adapter) = adapter else {
             return;
         };
+        let route_config = self
+            .egress_route_configs
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        for envelope in route_config.project(envelope) {
+            self.deliver_projected_egress(adapter.as_ref(), &route_config, envelope)
+                .await;
+        }
+    }
+
+    async fn deliver_projected_egress(
+        &self,
+        adapter: &dyn EgressAdapter,
+        route_config: &RouteEgressConfig,
+        envelope: EgressEnvelope,
+    ) {
+        if let Some(typing) = &route_config.typing_simulation
+            && let EgressKind::AssistantMessage { text } = &envelope.kind
+            && !text.is_empty()
+        {
+            let typing_envelope = sibling_egress(
+                &envelope,
+                EgressKind::PlatformAction {
+                    action: "typing".to_string(),
+                    payload: JsonValue::Object(JsonMap::new()),
+                },
+            );
+            if let Err(err) = adapter.deliver(typing_envelope).await {
+                eprintln!("cooldis daemon IO egress typing action failed: {err}");
+            }
+            let delay = typing_delay_for_text(text, typing.chars_per_second);
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+        }
+
         if let Err(err) = adapter.deliver(envelope).await {
             eprintln!("cooldis daemon IO egress delivery failed: {err}");
         }
@@ -892,6 +1101,71 @@ Connection: close\r\n\
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn projection_payload(rule: &CompiledEgressProjectionRule, captures: &Captures<'_>) -> JsonValue {
+    let mut payload = JsonMap::new();
+    for name in rule.regex.capture_names().flatten() {
+        if let Some(value) = captures.name(name) {
+            payload.insert(
+                name.to_string(),
+                JsonValue::String(value.as_str().to_string()),
+            );
+        }
+    }
+    JsonValue::Object(payload)
+}
+
+fn strip_projection_matches(text: &str, matches: &[ProjectionMatch]) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for matched in matches {
+        if cursor < matched.start {
+            stripped.push_str(&text[cursor..matched.start]);
+        }
+        cursor = matched.end;
+    }
+    if cursor < text.len() {
+        stripped.push_str(&text[cursor..]);
+    }
+    stripped
+}
+
+fn first_remaining_text_offset(text: &str, matches: &[ProjectionMatch]) -> Option<usize> {
+    let mut cursor = 0;
+    for matched in matches {
+        if cursor < matched.start {
+            return Some(cursor);
+        }
+        cursor = matched.end;
+    }
+    (cursor < text.len()).then_some(cursor)
+}
+
+fn daemon_egress_for_ingress(ingress: &IngressEnvelope, kind: EgressKind) -> EgressEnvelope {
+    let mut envelope = EgressEnvelope::for_ingress(ingress, kind, now_ms());
+    envelope.metadata = ingress.metadata.clone();
+    envelope
+}
+
+fn sibling_egress(source: &EgressEnvelope, kind: EgressKind) -> EgressEnvelope {
+    let mut envelope = EgressEnvelope::new(source.target.clone(), kind, now_ms());
+    envelope.source_ingress_id = source.source_ingress_id.clone();
+    envelope.metadata = source.metadata.clone();
+    envelope
+}
+
+fn typing_delay_for_text(text: &str, chars_per_second: u32) -> Duration {
+    if chars_per_second == 0 {
+        return Duration::ZERO;
+    }
+    let chars = text.chars().count();
+    if chars == 0 {
+        return Duration::ZERO;
+    }
+    let seconds =
+        (chars as f64 / chars_per_second as f64).min(MAX_TYPING_SIMULATION_DELAY.as_secs_f64());
+    Duration::from_secs_f64(seconds)
 }
 
 fn source_scope(protocol: &str, instance_id: &str) -> String {
