@@ -1,5 +1,8 @@
+use crate::agent::manifest_bind::canonical_json_hash;
 use crate::{
-    CooldisAppServer, CooldisError, CooldisIoRouteConfig, CooldisResult, CooldisSupervisor,
+    AdmissionDecidedPayload, AdmissionDecision as EventAdmissionDecision, CooldisAppServer,
+    CooldisError, CooldisIoRouteConfig, CooldisResult, CooldisSupervisor, EventKind,
+    EventProvenance, IoIngressReceivedPayload, NewEventRecord, PolicyBoundPayload, PolicyKind,
     RuntimeEventKind, RuntimeTerminalState, RuntimeThreadHandle, ThreadCoordinates, ThreadEvent,
     ThreadId, ThreadStartRequest, ThreadTopology, TurnInput, TurnSubmissionMode,
 };
@@ -10,7 +13,7 @@ use cooldis_io_core::{
     KernelIoReceipt, ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -90,9 +93,25 @@ impl CooldisDaemonIoBridge {
     }
 
     pub async fn submit_envelope(&self, envelope: IngressEnvelope) -> IoResult<KernelIoReceipt> {
-        let target = self.resolve_target(&envelope).await?;
+        let mut target = self.resolve_target(&envelope).await?;
+        let (coordinates, _) = self.ensure_thread(&target).await?;
+        target.address.thread_id = Some(coordinates.thread_id.to_string());
         let state = self.ingress_state(&target).await;
+        let policy_hash = self
+            .ensure_route_policy_bound(&coordinates, &envelope)
+            .await?;
+        let ingress_event = self
+            .record_ingress_received(&coordinates, &envelope)
+            .await?;
         let decision = self.decide(&envelope, &target, &state).await?;
+        self.record_admission_decided(
+            &coordinates,
+            &envelope,
+            &decision,
+            &policy_hash,
+            ingress_event.id,
+        )
+        .await?;
         self.apply(&envelope, &target, &decision).await
     }
 
@@ -189,6 +208,153 @@ impl CooldisDaemonIoBridge {
             }),
             _ => Ok(AdmissionDecision::queue(turn_id, input)),
         }
+    }
+
+    async fn ensure_route_policy_bound(
+        &self,
+        coordinates: &ThreadCoordinates,
+        envelope: &IngressEnvelope,
+    ) -> IoResult<String> {
+        let policy_id = admission_route_policy_id(envelope);
+        let content_hash = canonical_json_hash(&admission_route_policy_config(envelope))
+            .map_err(cooldis_bridge_error)?;
+        let handle = self
+            .supervisor
+            .get_thread_at(coordinates)
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let control_events = handle
+            .read_control_events()
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let latest = control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::PolicyBound)
+            .filter(|event| {
+                event.payload.get("policy_id").and_then(Value::as_str) == Some(policy_id.as_str())
+            })
+            .max_by_key(|event| event.sequence.get());
+        if latest.and_then(|event| event.payload.get("content_hash").and_then(Value::as_str))
+            == Some(content_hash.as_str())
+        {
+            return Ok(content_hash);
+        }
+        let payload = PolicyBoundPayload {
+            policy_kind: PolicyKind::AdmissionRoute,
+            policy_id,
+            content_hash: content_hash.clone(),
+            valid_from_note: "valid until next policy.bound of same policy_id".to_string(),
+        };
+        let mut value = serde_json::to_value(payload)
+            .map_err(|err| IoError::Bridge(format!("policy.bound payload codec failed: {err}")))?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "schema".to_string(),
+                json!(EventKind::PolicyBound.payload_schema_id()),
+            );
+        }
+        handle
+            .append_control_event(NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::PolicyBound,
+                value,
+            ))
+            .await
+            .map_err(cooldis_bridge_error)?;
+        Ok(content_hash)
+    }
+
+    async fn record_ingress_received(
+        &self,
+        coordinates: &ThreadCoordinates,
+        envelope: &IngressEnvelope,
+    ) -> IoResult<crate::EventRecord> {
+        let handle = self
+            .supervisor
+            .get_thread_at(coordinates)
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let envelope_value = serde_json::to_value(envelope)
+            .map_err(|err| IoError::Bridge(format!("ingress envelope codec failed: {err}")))?;
+        let payload = IoIngressReceivedPayload {
+            route_id: Some(route_id_for_envelope(envelope)),
+            dedupe_key: envelope.dedupe_key.as_ref().map(|key| key.stable_key()),
+            external_conversation_id: Some(envelope.conversation.external_conversation_id.clone()),
+            external_actor_id: envelope
+                .actor
+                .as_ref()
+                .map(|actor| actor.external_actor_id.clone()),
+            external_message_id: external_message_id(envelope),
+            envelope_digest: canonical_json_hash(&envelope_value).map_err(cooldis_bridge_error)?,
+        };
+        let mut value = serde_json::to_value(payload).map_err(|err| {
+            IoError::Bridge(format!("io.ingress.received payload codec failed: {err}"))
+        })?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "schema".to_string(),
+                json!(EventKind::IoIngressReceived.payload_schema_id()),
+            );
+        }
+        handle
+            .append_control_event(NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::IoIngressReceived,
+                value,
+            ))
+            .await
+            .map_err(cooldis_bridge_error)
+    }
+
+    async fn record_admission_decided(
+        &self,
+        coordinates: &ThreadCoordinates,
+        envelope: &IngressEnvelope,
+        decision: &AdmissionDecision,
+        policy_hash: &str,
+        ingress_event_id: crate::EventRecordId,
+    ) -> IoResult<crate::EventRecord> {
+        let handle = self
+            .supervisor
+            .get_thread_at(coordinates)
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let route_id = route_id_for_envelope(envelope);
+        let payload = AdmissionDecidedPayload {
+            route_id: route_id.clone(),
+            policy_hash: policy_hash.to_string(),
+            decision: event_admission_decision(decision),
+            admissible: Some(admissible_decisions_for_envelope(envelope)),
+            source_ingress_event_ids: vec![ingress_event_id],
+        };
+        let mut value = serde_json::to_value(payload).map_err(|err| {
+            IoError::Bridge(format!("admission.decided payload codec failed: {err}"))
+        })?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "schema".to_string(),
+                json!(EventKind::AdmissionDecided.payload_schema_id()),
+            );
+        }
+        handle
+            .append_control_event(NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::AdmissionDecided,
+                value,
+                EventProvenance {
+                    source_streams: vec![crate::EventStreamId::new(format!(
+                        "control:{}",
+                        coordinates.thread_id
+                    ))],
+                    source_event_ids: vec![ingress_event_id],
+                    discharged_by: Some(format!("policy:admission_route:{route_id}")),
+                    function: Some("admission_route/v1".to_string()),
+                    config_hash: Some(policy_hash.to_string()),
+                    ..EventProvenance::default()
+                },
+            ))
+            .await
+            .map_err(cooldis_bridge_error)
     }
 
     async fn ensure_thread(
@@ -896,6 +1062,70 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 
 fn source_scope(protocol: &str, instance_id: &str) -> String {
     format!("{protocol}:{instance_id}")
+}
+
+fn route_id_for_envelope(envelope: &IngressEnvelope) -> String {
+    envelope
+        .metadata
+        .get("cooldis_route_id")
+        .cloned()
+        .unwrap_or_else(|| envelope.source.stable_scope())
+}
+
+fn admission_route_policy_id(envelope: &IngressEnvelope) -> String {
+    format!("admission_route:{}", route_id_for_envelope(envelope))
+}
+
+fn admission_route_policy_config(envelope: &IngressEnvelope) -> Value {
+    json!({
+        "route_id": route_id_for_envelope(envelope),
+        "policy": envelope
+            .metadata
+            .get("cooldis_route_policy")
+            .map(String::as_str)
+            .unwrap_or("queue_per_conversation"),
+        "threading": envelope
+            .metadata
+            .get("cooldis_route_threading")
+            .map(String::as_str)
+            .unwrap_or("per_conversation"),
+    })
+}
+
+fn external_message_id(envelope: &IngressEnvelope) -> Option<String> {
+    envelope
+        .metadata
+        .get("external_message_id")
+        .or_else(|| envelope.metadata.get("telegram_message_id"))
+        .cloned()
+}
+
+fn event_admission_decision(decision: &AdmissionDecision) -> EventAdmissionDecision {
+    match decision {
+        AdmissionDecision::Queue { .. } => EventAdmissionDecision::Queue,
+        AdmissionDecision::Steer { .. } => EventAdmissionDecision::Steer,
+        AdmissionDecision::Interrupt { .. } => EventAdmissionDecision::Interrupt,
+        AdmissionDecision::Fork { .. } => EventAdmissionDecision::Fork,
+        AdmissionDecision::ObserveOnly { .. } => EventAdmissionDecision::Observe,
+        AdmissionDecision::Reject { .. } => EventAdmissionDecision::Reject,
+    }
+}
+
+fn admissible_decisions_for_envelope(envelope: &IngressEnvelope) -> Vec<EventAdmissionDecision> {
+    match envelope
+        .metadata
+        .get("cooldis_route_policy")
+        .map(String::as_str)
+        .unwrap_or("queue_per_conversation")
+    {
+        "observe_only" => vec![EventAdmissionDecision::Observe],
+        "reject" => vec![EventAdmissionDecision::Reject],
+        "steer" | "steer_when_active" => {
+            vec![EventAdmissionDecision::Queue, EventAdmissionDecision::Steer]
+        }
+        "interrupt" | "interrupt_on_new_dm" => vec![EventAdmissionDecision::Interrupt],
+        _ => vec![EventAdmissionDecision::Queue],
+    }
 }
 
 fn cooldis_bridge_error(err: CooldisError) -> IoError {

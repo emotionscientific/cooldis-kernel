@@ -6,12 +6,13 @@ use crate::{
     AgentToolRouter, CanonicalStopReason, CanonicalUsage, CommandHookHandler, CouplingRole,
     EventProvenance, EventStore, EventStreamId, HookEventName, HookHandler, HookHandlerOutput,
     HookHandlerSpec, HookRequest, HookRunStatus, InMemorySessionStore, KernelOperationRegistration,
-    NewEventRecord, ObservationStore, OperationRegistration, OperationRegistry, OperationToolAlias,
+    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, NewEventRecord,
+    ObservationStore, OperationRegistration, OperationRegistry, OperationToolAlias,
     ProviderCapabilityRecord, ProviderContextPolicy, RuntimeEvent, RuntimeHost, SessionEntry,
-    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadTopology,
-    ToolCallDecisionOutcomePayload, ToolCallDecisionPayload, ToolCallSubject,
-    ToolCallSuspendedPayload, TurnContextSnapshot, WasmRuntimeArtifact,
-    cooldis_threads_kernel_package,
+    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadJoinedPayload,
+    ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology, ToolCallDecisionOutcomePayload,
+    ToolCallDecisionPayload, ToolCallSubject, ToolCallSuspendedPayload, TurnContextSnapshot,
+    WasmRuntimeArtifact, cooldis_threads_kernel_package,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -69,6 +70,48 @@ struct WitnessCheckingEchoProvider {
     store: Arc<InMemorySessionStore>,
     expected_command_sha256: String,
     seen_arguments: Mutex<Vec<Value>>,
+}
+
+struct StaticThreadSpawnAgentResolver;
+
+const CHILD_AGENT_REF: &str = "agent://worker@latest";
+const CHILD_MANIFEST_HASH: &str = "sha256:child-manifest";
+
+#[async_trait]
+impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
+    async fn resolve_agent_ref(
+        &self,
+        _caller: &ThreadContext,
+        agent_ref: &str,
+    ) -> CooldisResult<KernelThreadSpawnAgentBinding> {
+        assert_eq!(agent_ref, CHILD_AGENT_REF);
+        Ok(KernelThreadSpawnAgentBinding {
+            metadata: BTreeMap::from([(
+                "cooldis.agent.manifest_hash".to_string(),
+                CHILD_MANIFEST_HASH.to_string(),
+            )]),
+            compile_receipt: serde_json::json!({
+                "ref_uri": CHILD_AGENT_REF,
+                "manifest_hash": CHILD_MANIFEST_HASH,
+                "source_hash": "sha256:child-source"
+            }),
+            bind_receipt: serde_json::to_value(AgentManifestBindReceipt {
+                ref_uri: CHILD_AGENT_REF.to_string(),
+                manifest_hash: CHILD_MANIFEST_HASH.to_string(),
+                model_profile_id: "default".to_string(),
+                provider_id: "test".to_string(),
+                model_id: "model".to_string(),
+                tool_ids: Vec::new(),
+                operation_bindings: Vec::new(),
+                tool_universes: Vec::new(),
+                couplings: Vec::new(),
+                granted: vec!["threads.read".to_string()],
+                effective_runtime: AgentManifestRuntimeDefaults::default(),
+                overridden_keys: Vec::new(),
+            })
+            .unwrap(),
+        })
+    }
 }
 
 struct StaticHookHandler {
@@ -419,6 +462,7 @@ impl AgentRuntime for ChildEchoRuntime {
         cancellation: CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
+        let thread_context = context.clone();
         let coordinates = context.coordinates.clone();
         emit_runtime_event(
             &events,
@@ -439,13 +483,41 @@ impl AgentRuntime for ChildEchoRuntime {
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { input, .. }) => {
+                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
                             let _ = services.append_user_turn_input(&coordinates, &input).await;
                             let _ = events.send(ThreadEvent::Output {
                                 thread_id,
                                 text: format!("child:{}", input.text_projection()),
                             });
+                            if let Ok(completed) = services
+                                .append_thread_event(
+                                    &coordinates,
+                                    NewEventRecord::discharged(
+                                        coordinates.clone(),
+                                        EventKind::TurnCompleted,
+                                        serde_json::json!({
+                                            "turn_id": turn_id,
+                                        }),
+                                        EventProvenance {
+                                            source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                                            discharged_by: Some("runtime:child-echo".to_string()),
+                                            function: Some("turn_complete/v1".to_string()),
+                                            ..EventProvenance::default()
+                                        },
+                                    ),
+                                )
+                                .await
+                            {
+                                let _ = services
+                                    .append_thread_joined_event_if_spawned(
+                                        &thread_context,
+                                        ThreadTerminalState::Completed,
+                                        None,
+                                        Some(completed.id),
+                                    )
+                                    .await;
+                            }
                             let _ = status.send(ThreadStatus::Idle);
                         }
                         Some(ThreadCommand::Cancel { reason }) => {
@@ -2811,6 +2883,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
             serde_json::json!({
                 "task_name": "worker",
                 "message": "echo child-through-tool",
+                "agent_ref": CHILD_AGENT_REF,
             }),
         ),
         response_text("spawned child"),
@@ -2820,10 +2893,12 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
         CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let root_factory = CanonicalProviderRuntimeFactory::new(config, provider_client)
-        .with_tool_router(Arc::new(kernel_thread_router().await));
+        .with_tool_router(Arc::new(kernel_thread_router().await))
+        .with_thread_spawn_agent_resolver(Arc::new(StaticThreadSpawnAgentResolver));
     let host = RuntimeHost::new(Arc::new(RootProviderChildEchoFactory {
         root: Arc::new(root_factory),
     }));
+    let store = host.runtime_store();
     let thread = host
         .start_thread(
             ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
@@ -2871,6 +2946,43 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     assert_eq!(
         text_messages(&child_session.messages),
         vec!["echo child-through-tool"]
+    );
+    let spawned = wait_for_control_event(
+        store.as_ref(),
+        &thread.context().coordinates,
+        EventKind::ThreadSpawned,
+    )
+    .await;
+    let spawned_payload: ThreadSpawnedPayload =
+        serde_json::from_value(spawned.payload.clone()).unwrap();
+    assert_eq!(
+        spawned_payload.parent_thread_id,
+        thread.context().coordinates.thread_id
+    );
+    assert_eq!(
+        spawned_payload.child_thread_id,
+        children[0].context().coordinates.thread_id
+    );
+    assert_eq!(spawned_payload.child_manifest_hash, CHILD_MANIFEST_HASH);
+    assert_eq!(spawned_payload.granted, vec!["threads.read".to_string()]);
+    assert!(spawned_payload.inputs_hash.starts_with("sha256:"));
+
+    let joined = wait_for_control_event(
+        store.as_ref(),
+        &thread.context().coordinates,
+        EventKind::ThreadJoined,
+    )
+    .await;
+    let joined_payload: ThreadJoinedPayload =
+        serde_json::from_value(joined.payload.clone()).unwrap();
+    assert_eq!(
+        joined_payload.child_thread_id,
+        spawned_payload.child_thread_id
+    );
+    assert_eq!(joined_payload.spawned_event_id, spawned.id);
+    assert_eq!(
+        joined_payload.terminal_state,
+        ThreadTerminalState::Completed
     );
 
     let parent_session = thread.session_context().await.unwrap();
@@ -3047,6 +3159,26 @@ async fn wait_for_thread_event(
         assert!(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for thread event kind {kind}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_control_event<S: EventStore + ?Sized>(
+    store: &S,
+    coordinates: &ThreadCoordinates,
+    kind: EventKind,
+) -> crate::EventRecord {
+    let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let records = store.read_events(&stream_id, None).await.unwrap();
+        if let Some(record) = records.into_iter().find(|event| event.kind == kind) {
+            return record;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for control event kind {kind}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

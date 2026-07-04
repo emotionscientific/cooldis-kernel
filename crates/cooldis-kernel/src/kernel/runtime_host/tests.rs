@@ -269,6 +269,17 @@ async fn context_compile_receipt_event_carries_discharged_provenance() {
 }
 
 #[tokio::test]
+async fn manifest_bind_receipts_emit_policy_bound_for_bound_coupling_set() {
+    let first =
+        policy_bound_content_hash_for_config(serde_json::json!({"pattern": "rm -rf"})).await;
+    let same = policy_bound_content_hash_for_config(serde_json::json!({"pattern": "rm -rf"})).await;
+    let edited = policy_bound_content_hash_for_config(serde_json::json!({"pattern": "curl"})).await;
+
+    assert_eq!(first, same);
+    assert_ne!(first, edited);
+}
+
+#[tokio::test]
 async fn context_compile_receipt_carries_borrowed_prefix_source_ranges() {
     let store = Arc::new(InMemorySessionStore::new());
     let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
@@ -2014,6 +2025,69 @@ fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
                 .unwrap_or(""),
         })
         .collect()
+}
+
+async fn policy_bound_content_hash_for_config(config: serde_json::Value) -> String {
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let mut coupling = runtime_std_context_spill_coupling();
+    coupling.id = "test.policy".to_string();
+    coupling.function_ref = format!("op://policy/check@sha256:{}", "d".repeat(64));
+    coupling.config = config;
+    coupling.config_hash = "sha256:test-config".to_string();
+    let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+    let metadata = BTreeMap::from([(
+        THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
+        serde_json::to_string(&coupling_set).unwrap(),
+    )]);
+    let thread = host
+        .start_thread_with_topology_and_metadata(
+            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            ThreadTopology::root(),
+            metadata,
+        )
+        .await
+        .unwrap();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({
+                "ref_uri": "agent://policy@0.1.0",
+                "manifest_hash": "snapshot-a",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "ref_uri": "agent://policy@0.1.0",
+                "manifest_hash": "snapshot-a"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let events = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let bind_position = events
+        .iter()
+        .position(|event| event.kind == EventKind::ManifestBindCompleted)
+        .unwrap();
+    let policy_position = events
+        .iter()
+        .position(|event| event.kind == EventKind::PolicyBound)
+        .unwrap();
+    assert!(bind_position < policy_position);
+    let policy = &events[policy_position];
+    assert_eq!(
+        policy.payload["schema"],
+        EventKind::PolicyBound.payload_schema_id()
+    );
+    assert_eq!(policy.payload["policy_kind"], "coupling_set");
+    assert_eq!(policy.payload["policy_id"], "coupling_set:snapshot-a");
+    policy.payload["content_hash"].as_str().unwrap().to_string()
 }
 
 async fn assert_cancelled(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {

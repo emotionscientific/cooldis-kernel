@@ -12,12 +12,12 @@ use crate::kernel::coupling_executor_registry::registered_coupling_executor_supp
 use crate::kernel::coupling_scheduler::CouplingScheduler;
 use crate::kernel::history::{
     CONTEXT_READ_PLAN_SCHEMA_V1, CanonicalMessage, EventKind, EventProvenance, EventRecord,
-    EventStreamId, NewEventRecord, NewObservationRecord, ObservationProvenance, ObservationRecord,
-    RuntimeStore, SessionContext, SessionContextSourceCut, SessionEntry, SessionEntryId,
-    SessionEntryKind,
+    EventRecordId, EventStreamId, NewEventRecord, NewObservationRecord, ObservationProvenance,
+    ObservationRecord, RuntimeStore, SessionContext, SessionContextSourceCut, SessionEntry,
+    SessionEntryId, SessionEntryKind, ThreadJoinedPayload, ThreadTerminalState,
 };
 use crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-use cooldis_runtime_contracts::ThreadCoordinates;
+use cooldis_runtime_contracts::{ThreadContext, ThreadCoordinates};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -170,6 +170,98 @@ impl RuntimeServices {
             record,
         )
         .await
+    }
+
+    pub async fn append_thread_joined_event_if_spawned(
+        &self,
+        context: &ThreadContext,
+        terminal_state: ThreadTerminalState,
+        result_digest: Option<String>,
+        source_event_id: Option<EventRecordId>,
+    ) -> CooldisResult<Option<EventRecord>> {
+        let Some(parent_thread_id) = context.parent_thread_id else {
+            return Ok(None);
+        };
+        let mut parent_coordinates = context.coordinates.clone();
+        parent_coordinates.thread_id = parent_thread_id;
+        let parent_control_stream =
+            EventStreamId::new(format!("control:{}", parent_coordinates.thread_id));
+        let control_events = self
+            .runtime_store
+            .read_events(&parent_control_stream, None)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        let child_thread_id = context.coordinates.thread_id.to_string();
+        let Some(spawned) = control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadSpawned)
+            .filter(|event| {
+                event
+                    .payload
+                    .get("child_thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(child_thread_id.as_str())
+            })
+            .max_by_key(|event| event.sequence.get())
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let spawned_event_id = spawned.id.to_string();
+        if let Some(existing) = control_events
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ThreadJoined)
+            .find(|event| {
+                event
+                    .payload
+                    .get("spawned_event_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(spawned_event_id.as_str())
+            })
+        {
+            return Ok(Some(existing));
+        }
+        let payload = ThreadJoinedPayload {
+            child_thread_id: context.coordinates.thread_id,
+            spawned_event_id: spawned.id,
+            terminal_state,
+            result_digest,
+        };
+        let mut payload = serde_json::to_value(payload).map_err(|err| {
+            CooldisError::History(format!("thread.joined payload codec failed: {err}"))
+        })?;
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "schema".to_string(),
+                serde_json::json!(EventKind::ThreadJoined.payload_schema_id()),
+            );
+        }
+        let source_event_ids = source_event_id.into_iter().collect::<Vec<_>>();
+        let appended = self
+            .runtime_store
+            .append_events(
+                &parent_control_stream,
+                vec![NewEventRecord::discharged(
+                    parent_coordinates,
+                    EventKind::ThreadJoined,
+                    payload,
+                    EventProvenance {
+                        source_streams: vec![EventStreamId::for_thread(&context.coordinates)],
+                        source_event_ids,
+                        discharged_by: Some("runtime:thread-lifecycle".to_string()),
+                        function: Some("thread_join/v1".to_string()),
+                        ..EventProvenance::default()
+                    },
+                )],
+            )
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                CooldisError::History("thread.joined append returned no record".to_string())
+            })?;
+        Ok(Some(appended))
     }
 
     async fn append_event(

@@ -1,10 +1,13 @@
+use crate::agent::manifest_bind::canonical_json_hash;
 use crate::{
-    CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, KernelOperationDispatcher,
-    NOTIFY_PREVIEW_OPERATION, PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION,
-    PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, RuntimeKernelControl,
-    THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION,
-    THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, ThreadContext, ThreadId, TurnInput,
+    AgentManifestBindReceipt, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE,
+    COOLDIS_PROCESS_PACKAGE, COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult,
+    KernelOperationDispatcher, NOTIFY_PREVIEW_OPERATION, PROCESS_EXEC_OPERATION,
+    PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION,
+    RuntimeKernelControl, THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_CANCEL_OPERATION,
+    THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA, THREAD_SPAWN_OPERATION,
+    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, ThreadContext,
+    ThreadId, TurnInput,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -53,6 +56,7 @@ impl KernelThreadOperationProvider {
     async fn invoke_json(&self, operation_name: &str, arguments: Value) -> CooldisResult<Value> {
         let value = match operation_name {
             THREAD_SPAWN_OPERATION => {
+                let inputs_hash = canonical_json_hash(&arguments)?;
                 let args: ThreadSpawnArgs = decode_args(operation_name, arguments)?;
                 let agent_binding = if let Some(agent_ref) = args.agent_ref.as_deref() {
                     let resolver = self.agent_resolver.as_ref().ok_or_else(|| {
@@ -69,6 +73,27 @@ impl KernelThreadOperationProvider {
                     .as_ref()
                     .map(|binding| binding.metadata.clone())
                     .unwrap_or_default();
+                let mut metadata = metadata;
+                metadata.insert(THREAD_SPAWN_INPUTS_HASH_METADATA.to_string(), inputs_hash);
+                if let Some(binding) = &agent_binding {
+                    let bind_receipt = serde_json::from_value::<AgentManifestBindReceipt>(
+                        binding.bind_receipt.clone(),
+                    )
+                    .map_err(|err| {
+                        CooldisError::RuntimeFactory(format!(
+                            "thread_spawn agent_ref bind receipt is invalid: {err}"
+                        ))
+                    })?;
+                    metadata
+                        .entry(THREAD_AGENT_MANIFEST_HASH_METADATA.to_string())
+                        .or_insert_with(|| bind_receipt.manifest_hash.clone());
+                    let granted = serde_json::to_string(&bind_receipt.granted).map_err(|err| {
+                        CooldisError::RuntimeFactory(format!(
+                            "failed to encode thread_spawn grants: {err}"
+                        ))
+                    })?;
+                    metadata.insert(THREAD_SPAWN_GRANTED_METADATA.to_string(), granted);
+                }
                 let receipt = self
                     .control
                     .spawn_subagent(

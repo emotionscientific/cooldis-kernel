@@ -3961,6 +3961,106 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             && receipt["payloadSchema"].as_str() == Some("cooldis.event.session.entry.appended/1")
     }));
 
+    let child_thread_id = ThreadId::new();
+    let thread_spawned = crate::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        crate::EventKind::ThreadSpawned,
+        json!({
+            "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
+            "parent_thread_id": lifecycle.coordinates.thread_id.to_string(),
+            "child_thread_id": child_thread_id.to_string(),
+            "child_manifest_hash": "sha256:debug-child",
+            "granted": [],
+            "inputs_hash": "sha256:debug-inputs",
+        }),
+    );
+    let spawned_event_id = thread_spawned.id;
+    let io_ingress = crate::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        crate::EventKind::IoIngressReceived,
+        json!({
+            "schema": crate::EventKind::IoIngressReceived.payload_schema_id(),
+            "route_id": "debug-route",
+            "envelope_digest": "sha256:debug-envelope",
+        }),
+    );
+    let ingress_event_id = io_ingress.id;
+    session_store
+        .append_events(
+            &control_stream_id,
+            vec![
+                thread_spawned,
+                crate::NewEventRecord::witnessed(
+                    lifecycle.coordinates.clone(),
+                    crate::EventKind::ThreadJoined,
+                    json!({
+                        "schema": crate::EventKind::ThreadJoined.payload_schema_id(),
+                        "child_thread_id": child_thread_id.to_string(),
+                        "spawned_event_id": spawned_event_id.to_string(),
+                        "terminal_state": "completed",
+                    }),
+                ),
+                crate::NewEventRecord::witnessed(
+                    lifecycle.coordinates.clone(),
+                    crate::EventKind::PolicyBound,
+                    json!({
+                        "schema": crate::EventKind::PolicyBound.payload_schema_id(),
+                        "policy_kind": "coupling_set",
+                        "policy_id": "debug-policy",
+                        "content_hash": "sha256:debug-policy",
+                        "valid_from_note": "debug export fixture",
+                    }),
+                ),
+                io_ingress,
+                crate::NewEventRecord::witnessed(
+                    lifecycle.coordinates.clone(),
+                    crate::EventKind::AdmissionDecided,
+                    json!({
+                        "schema": crate::EventKind::AdmissionDecided.payload_schema_id(),
+                        "route_id": "debug-route",
+                        "policy_hash": "sha256:debug-policy",
+                        "decision": "queue",
+                        "admissible": ["queue"],
+                        "source_ingress_event_ids": [ingress_event_id.to_string()],
+                    }),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    let new_kind_export = app
+        .dispatch_request(
+            &connection,
+            "thread/debug/export",
+            Some(json!({
+                "threadId": thread_id,
+                "streams": ["control"],
+                "includeThread": false,
+                "maxEventsPerStream": 100,
+                "redact": false,
+            })),
+        )
+        .await
+        .unwrap();
+    let exported_kinds = new_kind_export["streams"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "thread.spawned",
+        "thread.joined",
+        "policy.bound",
+        "io.ingress.received",
+        "admission.decided",
+    ] {
+        assert!(
+            exported_kinds.contains(&expected),
+            "thread/debug/export should include {expected}"
+        );
+    }
+
     let bad_stream = app
         .dispatch_request(
             &connection,
