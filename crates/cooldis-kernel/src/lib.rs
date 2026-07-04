@@ -244,11 +244,11 @@ pub use daemon::clock_route::{
     TIMER_FIRED_ENVELOPE_KIND,
 };
 pub use daemon::daemon_config::{
-    CooldisDaemonAppServerConfig, CooldisDaemonConfig, CooldisDaemonOperationsConfig,
-    CooldisDaemonRegistriesConfig, CooldisDaemonServiceSpec, CooldisDaemonServiceTarget,
-    CooldisEgressProjectionRuleConfig, CooldisEgressRetryConfig, CooldisIngressConfig,
-    CooldisIoConfig, CooldisIoRouteConfig, CooldisProjectDiscovery, CooldisProviderConfig,
-    CooldisQueueConfig, CooldisRuntimeConfig, CooldisTelegramRouteConfig,
+    CooldisCoalesceBurstsConfig, CooldisDaemonAppServerConfig, CooldisDaemonConfig,
+    CooldisDaemonOperationsConfig, CooldisDaemonRegistriesConfig, CooldisDaemonServiceSpec,
+    CooldisDaemonServiceTarget, CooldisEgressProjectionRuleConfig, CooldisEgressRetryConfig,
+    CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProjectDiscovery,
+    CooldisProviderConfig, CooldisQueueConfig, CooldisRuntimeConfig, CooldisTelegramRouteConfig,
     CooldisTypingSimulationConfig, LoadedCooldisDaemonConfig, cooldis_daemon_service_file_name,
     cooldis_daemon_service_install_path, cooldis_daemon_service_install_path_for_home,
     default_cooldis_daemon_socket_path, discover_cooldis_daemon_config_path,
@@ -303,7 +303,8 @@ pub use kernel::history::{
     StreamBackendCapabilitiesV1, StreamBackendKindV1, StreamCursorV1, StreamRecordEnvelopeV1,
     StreamRouteProfile, StreamRoutingDecisionV1, StreamRoutingKeysV1, StreamStorageScopeV1,
     ThinkingMetadata, ThinkingProvider, ThreadBaseRef, ThreadForkReason, ThreadJoinedPayload,
-    ThreadSpawnedPayload, ThreadTerminalState, TimerFiredPayload, stream_schema_registry_v1,
+    ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload,
+    ThreadTerminalState, TimerFiredPayload, stream_schema_registry_v1,
     validate_context_payload_schema_v1,
 };
 pub use kernel::mandate_lifecycle::{

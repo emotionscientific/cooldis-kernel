@@ -529,6 +529,12 @@ fn events_0_2_payload_fixtures_round_trip_and_validate() {
     let spawned_event_id = EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap(),
     );
+    let checkpoint_id = ThreadCheckpointId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000006").unwrap(),
+    );
+    let leaf_entry_id = SessionEntryId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000007").unwrap(),
+    );
     let mandate_event_id = EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000004").unwrap(),
     );
@@ -551,6 +557,30 @@ fn events_0_2_payload_fixtures_round_trip_and_validate() {
                     "stream.write:control".to_string(),
                 ],
                 inputs_hash: "sha256:inputs".to_string(),
+                fork: None,
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::ThreadSpawned,
+            serde_json::to_value(ThreadSpawnedPayload {
+                parent_thread_id,
+                parent_turn_id: None,
+                child_thread_id,
+                child_manifest_hash: "sha256:fork-child-manifest".to_string(),
+                child_policy_hash: None,
+                granted: vec!["threads.spawn".to_string()],
+                inputs_hash: "sha256:fork-inputs".to_string(),
+                fork: Some(ThreadSpawnedForkPayload {
+                    mode: "clone".to_string(),
+                    source_cut: ThreadSpawnedForkSourceCutPayload {
+                        thread_id: parent_thread_id,
+                        checkpoint_id,
+                        leaf_entry_id: Some(leaf_entry_id),
+                        stream_id: EventStreamId::new(format!("thread:{parent_thread_id}")),
+                        stream_to_sequence: Some(EventSequence::new(42)),
+                    },
+                }),
             })
             .unwrap(),
         ),
@@ -676,6 +706,7 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
     .unwrap();
     assert_eq!(spawned.parent_turn_id, None);
     assert_eq!(spawned.child_policy_hash, None);
+    assert_eq!(spawned.fork, None);
 
     let joined: ThreadJoinedPayload = serde_json::from_value(serde_json::json!({
         "schema": EventKind::ThreadJoined.payload_schema_id(),

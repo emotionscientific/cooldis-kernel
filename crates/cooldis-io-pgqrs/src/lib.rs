@@ -250,6 +250,25 @@ impl IngressQueueStore for PgqrsIngressQueue {
         Ok(())
     }
 
+    async fn hold_ingress_until(&self, message_id: &str, visible_at_ms: u64) -> IoResult<()> {
+        let id = parse_message_id(message_id)?;
+        let visible_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            visible_at_ms.min(i64::MAX as u64) as i64,
+        )
+        .ok_or_else(|| IoError::Queue(format!("invalid visibility timestamp {visible_at_ms}ms")))?;
+        let released = self
+            .consumer
+            .release_with_visibility(id, visible_at)
+            .await
+            .map_err(queue_error)?;
+        if !released {
+            return Err(IoError::Queue(format!(
+                "message {message_id} was not held until {visible_at_ms}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn retry_ingress(&self, message_id: &str, reason: &str) -> IoResult<()> {
         let id = parse_message_id(message_id)?;
         let released = self

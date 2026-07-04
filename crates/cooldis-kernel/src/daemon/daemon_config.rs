@@ -369,6 +369,8 @@ pub struct CooldisIoRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce_bursts: Option<CooldisCoalesceBurstsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<CooldisIngressConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub egress_projection: Vec<CooldisEgressProjectionRuleConfig>,
@@ -392,6 +394,15 @@ impl CooldisIoRouteConfig {
         }
         if let Some(ingress) = &self.ingress {
             ingress.validate(&format!("io.routes.{}", self.id), errors);
+        }
+        if self.policy.as_deref() == Some("coalesce_bursts") && self.coalesce_bursts.is_none() {
+            errors.push(format!(
+                "io.routes.{}.policy coalesce_bursts requires coalesce_bursts config",
+                self.id
+            ));
+        }
+        if let Some(coalesce) = &self.coalesce_bursts {
+            coalesce.validate(&format!("io.routes.{}.coalesce_bursts", self.id), errors);
         }
         for (index, rule) in self.egress_projection.iter().enumerate() {
             let scope = format!("io.routes.{}.egress_projection[{index}]", self.id);
@@ -441,6 +452,23 @@ impl CooldisIoRouteConfig {
     fn resolve_paths(&mut self, base: &Path) {
         if let Some(ingress) = &mut self.ingress {
             ingress.resolve_paths(base);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisCoalesceBurstsConfig {
+    pub window_ms: u64,
+    pub max_batch: usize,
+}
+
+impl CooldisCoalesceBurstsConfig {
+    fn validate(&self, scope: &str, errors: &mut Vec<String>) {
+        if self.window_ms == 0 {
+            errors.push(format!("{scope}.window_ms must be greater than zero"));
+        }
+        if self.max_batch == 0 {
+            errors.push(format!("{scope}.max_batch must be greater than zero"));
         }
     }
 }
