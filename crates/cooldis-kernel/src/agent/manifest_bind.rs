@@ -19,6 +19,7 @@ use crate::agent::manifest_schema::{
 use crate::agent::tool_universe::{
     PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
 };
+use crate::kernel::coupling_executor_registry::registered_coupling_executor_supports_template;
 use crate::{
     COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, EventKind, LlmProviderRecord,
     LocalOperationRegistry, ProviderCapabilityRecord, THREADS_SPAWN_CAPABILITY,
@@ -412,6 +413,12 @@ fn bind_coupling(
     coupling: &AgentManifestCoupling,
     operation_registry_root: Option<&Path>,
 ) -> CooldisResult<BoundCoupling> {
+    if !registered_coupling_executor_supports_template(&coupling.id) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "no registered executor for coupling id {:?}; custom coupling execution is not yet available",
+            coupling.id
+        )));
+    }
     let registry_root = operation_registry_root.ok_or_else(|| {
         CooldisError::RuntimeFactory(format!(
             "coupling {:?} function_ref {:?} requires an app-server operation registry root",

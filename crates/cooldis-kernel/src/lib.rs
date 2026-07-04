@@ -54,6 +54,7 @@ pub mod kernel {
     pub mod compaction;
     pub mod context_compiler;
     pub mod control_decision;
+    pub mod coupling_executor_registry;
     pub mod coupling_scheduler;
     pub mod history;
     pub mod provider_store;
