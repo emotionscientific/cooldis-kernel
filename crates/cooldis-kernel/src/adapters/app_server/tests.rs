@@ -8,10 +8,12 @@ use super::threads::{
 use super::*;
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND, LocalOperationRegistry,
-    NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND, PROCESS_EXEC_OPERATION,
-    PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, ProviderError,
-    PublishedOperationSource, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND,
+    LocalOperationRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
+    MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
+    PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
+    PROCESS_WRITE_OPERATION, ProviderError, PublishedOperationSource, SCHEDULE_MANAGE_CAPABILITY,
+    SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
     THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
     THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL,
     TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig, ThinkingEffort,
@@ -1922,6 +1924,40 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
             .collect::<Vec<_>>(),
         expected_operations
     );
+    let schedule_record = LocalOperationRegistry::new(&operation_registry_root)
+        .load_record(COOLDIS_SCHEDULE_PACKAGE)
+        .expect("startup should publish cooldis-schedule");
+    assert!(matches!(
+        &schedule_record.source,
+        PublishedOperationSource::Kernel { package } if package == COOLDIS_SCHEDULE_PACKAGE
+    ));
+    assert_eq!(
+        schedule_record
+            .metadata
+            .get(OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(Value::as_str),
+        Some(KERNEL_RUNTIME_KIND)
+    );
+    assert_eq!(
+        schedule_record
+            .manifest
+            .operations
+            .iter()
+            .map(|operation| operation.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            MANDATE_START_OPERATION,
+            MANDATE_REVOKE_OPERATION,
+            MANDATE_LIST_OPERATION,
+        ]
+    );
+    assert_eq!(
+        schedule_record.capability_grants,
+        BTreeSet::from([
+            SCHEDULE_MANAGE_CAPABILITY.to_string(),
+            SCHEDULE_READ_CAPABILITY.to_string()
+        ])
+    );
     let process_record = LocalOperationRegistry::new(&operation_registry_root)
         .load_record(COOLDIS_PROCESS_PACKAGE)
         .expect("startup should publish cooldis-process");
@@ -1983,6 +2019,7 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
         !tool["operation_ref"].as_str().is_some_and(|operation_ref| {
             operation_ref.contains(COOLDIS_PROCESS_PACKAGE)
                 || operation_ref.contains(COOLDIS_NOTIFY_PACKAGE)
+                || operation_ref.contains(COOLDIS_SCHEDULE_PACKAGE)
         })
     }));
     for operation in expected_operations {
@@ -2036,7 +2073,9 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
             .all(|binding| {
                 !matches!(
                     binding["name"].as_str(),
-                    Some(COOLDIS_PROCESS_PACKAGE | COOLDIS_NOTIFY_PACKAGE)
+                    Some(
+                        COOLDIS_PROCESS_PACKAGE | COOLDIS_NOTIFY_PACKAGE | COOLDIS_SCHEDULE_PACKAGE
+                    )
                 )
             })
     );
@@ -2240,6 +2279,146 @@ streaming = false
     assert!(err.message.contains("allow_child_agents = false"));
     assert!(err.message.contains("thread_spawn"));
     assert!(err.message.contains("threads.spawn"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn schedule_manifest_direct_tool_starts_mandate_and_requires_grant() {
+    let root = unique_test_root("app-server-schedule-direct-tool");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let agent_registry_root = root.join("agents");
+    let operation_record = crate::ensure_cooldis_schedule_published(Some(&operation_registry_root))
+        .unwrap()
+        .expect("kernel package should publish for schedule direct-tool test");
+
+    let manifest_path = root.join("scheduler.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "scheduler"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "direct_tool"
+id = "mandate_start"
+tool_name = "mandate_start"
+operation_ref = "op://cooldis-schedule/mandate_start@sha256:{}"
+grants = ["{}"]
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation_record.active_artifact_hash, SCHEDULE_MANAGE_CAPABILITY
+        ),
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
+        .unwrap();
+
+    let no_grant_manifest_path = root.join("scheduler-no-grant.cooldis.agent.toml");
+    std::fs::write(
+        &no_grant_manifest_path,
+        format!(
+            r#"
+[agent]
+name = "scheduler-no-grant"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "direct_tool"
+id = "mandate_start"
+tool_name = "mandate_start"
+operation_ref = "op://cooldis-schedule/mandate_start@sha256:{}"
+grants = []
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation_record.active_artifact_hash
+        ),
+    )
+    .unwrap();
+    let err = LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(
+            &no_grant_manifest_path,
+            &operation_registry_root,
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("requires grants"));
+    assert!(err.to_string().contains("mandate_start:schedule.manage"));
+
+    let client = Arc::new(ScheduleMandateStartClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let app = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
+    )
+    .await;
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({ "agentRef": "agent://scheduler@latest" })),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    app.dispatch_request(
+        &connection,
+        "turn/start",
+        Some(json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": "remind me in a minute", "text_elements": [] }],
+        })),
+    )
+    .await
+    .unwrap();
+
+    wait_for_provider_requests(&client, 2).await;
+    let list = app
+        .dispatch_request(
+            &connection,
+            "mandate/list",
+            Some(json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    let mandates = list["data"].as_array().unwrap();
+    assert_eq!(mandates.len(), 1);
+    assert_eq!(
+        mandates[0]["schedule"],
+        json!({ "interval": { "every_ms": 60_000 } })
+    );
+    assert_eq!(
+        mandates[0]["inputTemplate"].as_str(),
+        Some("remind me in a minute")
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3805,6 +3984,185 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     assert_eq!(unknown_thread.code, -32001);
     assert!(unknown_thread.message.contains("thread not found"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn mandate_rpc_validates_and_folds_control_stream_events() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+
+    let malformed_cron = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "cron": { "expr": "not cron", "tz": "UTC" } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(malformed_cron.code, -32602);
+
+    let unknown_tz = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "cron": { "expr": "0 * * * * *", "tz": "Mars/Olympus" } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unknown_tz.code, -32602);
+
+    let short_interval = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "interval": { "every_ms": 59_999 } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(short_interval.code, -32602);
+
+    let past_at = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "at": { "when": "2000-01-01T00:00:00Z" } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(past_at.code, -32602);
+
+    let coalesced = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "at": { "when": "2000-01-01T00:00:00Z" } },
+                "catchUp": "coalesce_missed",
+            })),
+        )
+        .await
+        .unwrap();
+    let coalesced_id = coalesced["mandateEventId"].as_str().unwrap().to_string();
+    app.dispatch_request(
+        &connection,
+        "mandate/revoke",
+        Some(json!({
+            "threadId": thread_id,
+            "mandateEventId": coalesced_id,
+        })),
+    )
+    .await
+    .unwrap();
+
+    let start = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "interval": { "every_ms": 60_000 } },
+                "maxOccurrences": 3,
+                "catchUp": "skip_missed",
+                "inputTemplate": "continue summary",
+            })),
+        )
+        .await
+        .unwrap();
+    let mandate_event_id = start["mandateEventId"].as_str().unwrap().to_string();
+
+    let list = app
+        .dispatch_request(
+            &connection,
+            "mandate/list",
+            Some(json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    let mandates = list["data"].as_array().unwrap();
+    assert_eq!(mandates.len(), 1);
+    assert_eq!(
+        mandates[0]["mandateEventId"].as_str(),
+        Some(mandate_event_id.as_str())
+    );
+    assert_eq!(mandates[0]["schedule"]["interval"]["every_ms"], 60_000);
+    assert_eq!(mandates[0]["maxOccurrences"], 3);
+    assert_eq!(mandates[0]["catchUp"].as_str(), Some("skip_missed"));
+    assert_eq!(
+        mandates[0]["inputTemplate"].as_str(),
+        Some("continue summary")
+    );
+
+    let events = app
+        .dispatch_request(
+            &connection,
+            "thread/events/list",
+            Some(json!({
+                "threadId": thread_id,
+                "stream": "control",
+                "kinds": ["mandate.started"],
+            })),
+        )
+        .await
+        .unwrap();
+    assert!(events["data"].as_array().unwrap().iter().any(|event| {
+        event["eventId"].as_str() == Some(mandate_event_id.as_str())
+            && event["kind"].as_str() == Some("mandate.started")
+            && event["payload_schema"].as_str() == Some("cooldis.event.mandate.started/1")
+    }));
+
+    let revoked = app
+        .dispatch_request(
+            &connection,
+            "mandate/revoke",
+            Some(json!({
+                "threadId": thread_id,
+                "mandateEventId": mandate_event_id,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked["status"].as_str(), Some("revoked"));
+    let revoked_again = app
+        .dispatch_request(
+            &connection,
+            "mandate/revoke",
+            Some(json!({
+                "threadId": thread_id,
+                "mandateEventId": mandate_event_id,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_again["status"].as_str(), Some("already_revoked"));
+
+    let empty = app
+        .dispatch_request(
+            &connection,
+            "mandate/list",
+            Some(json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty["data"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -5469,7 +5827,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
     let bindings = events[1].payload["operation_bindings"].as_array().unwrap();
-    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings.len(), 3);
     assert!(
         bindings
             .iter()
@@ -5494,6 +5852,16 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
         BTreeSet::from([
             NOTIFY_PREVIEW_OPERATION.to_string(),
             CHANNEL_EMIT_OPERATION.to_string()
+        ])
+    );
+    let schedule_binding =
+        manifest_operation_binding_by_name(&events[1].payload, COOLDIS_SCHEDULE_PACKAGE);
+    assert_eq!(
+        json_array_string_set(&schedule_binding["operations"]),
+        BTreeSet::from([
+            MANDATE_START_OPERATION.to_string(),
+            MANDATE_REVOKE_OPERATION.to_string(),
+            MANDATE_LIST_OPERATION.to_string()
         ])
     );
     let _ = std::fs::remove_dir_all(registry_root);
@@ -6659,6 +7027,7 @@ async fn app_server_websocket_query_methods_are_callable() {
     let mut config = CooldisAppServerConfig::local(listen.clone(), &workspace)
         // lexicon-allow: capsule - existing app-server config method and type.
         .with_capsule_bindings(
+            // lexicon-allow: capsule - existing app-server config type.
             CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
         );
     config.runtime_home = root.join("runtime");
@@ -8679,6 +9048,62 @@ impl ProviderClient for ThreadSpawnAgentRefClient {
 }
 
 impl ProviderRequestRecorder for ThreadSpawnAgentRefClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+#[derive(Default)]
+struct ScheduleMandateStartClient {
+    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for ScheduleMandateStartClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+        if has_tool_result {
+            let text = text_from_canonical_messages(&request.messages);
+            assert!(
+                text.contains("cooldis.mandate_start"),
+                "expected mandate_start tool result in provider context: {text}"
+            );
+            assert!(
+                text.contains("mandate_event_id"),
+                "expected mandate event id in provider context: {text}"
+            );
+            return Ok(ProviderResponse {
+                content: vec![CanonicalContent::text("schedule mandate started")],
+                usage: CanonicalUsage::default(),
+                stop_reason: CanonicalStopReason::EndTurn,
+            });
+        }
+
+        let names = tool_names(request);
+        assert!(
+            names.contains(&MANDATE_START_OPERATION.to_string()),
+            "expected mandate_start direct tool in {names:?}"
+        );
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::tool_call(
+                "call_mandate_start_1",
+                MANDATE_START_OPERATION,
+                json!({
+                    "schedule": { "interval": { "every_ms": 60_000 } },
+                    "input_template": "remind me in a minute"
+                }),
+            )],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::ToolUse,
+        })
+    }
+}
+
+impl ProviderRequestRecorder for ScheduleMandateStartClient {
     fn recorded_request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }

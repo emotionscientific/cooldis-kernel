@@ -1,10 +1,13 @@
 use crate::{
-    CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, KernelOperationDispatcher,
+    ActiveMandate, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult,
+    KernelOperationDispatcher, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
+    MANDATE_START_OPERATION, MandateCatchUpPolicy, MandateSchedulePayload, MandateStartRequest,
     NOTIFY_PREVIEW_OPERATION, PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION,
     PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, RuntimeKernelControl,
     THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION,
     THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, ThreadContext, ThreadId, TurnInput,
+    parse_mandate_event_id,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -161,6 +164,99 @@ impl KernelThreadOperationProvider {
             _ => {
                 return Err(CooldisError::RuntimeExecution(format!(
                     "unknown kernel operation {COOLDIS_THREADS_PACKAGE}/{operation_name}"
+                )));
+            }
+        };
+        Ok(value)
+    }
+}
+
+#[derive(Clone)]
+pub struct KernelScheduleOperationProvider {
+    control: RuntimeKernelControl,
+    caller: ThreadContext,
+}
+
+impl KernelScheduleOperationProvider {
+    pub fn new(control: RuntimeKernelControl, caller: ThreadContext) -> Self {
+        Self { control, caller }
+    }
+
+    async fn invoke_json(&self, operation_name: &str, arguments: Value) -> CooldisResult<Value> {
+        let value = match operation_name {
+            MANDATE_START_OPERATION => {
+                let args: MandateStartArgs = decode_schedule_args(operation_name, arguments)?;
+                let target_thread_id = optional_target_thread_id(
+                    &self.caller,
+                    args.thread_id.as_deref(),
+                    "thread_id",
+                )?;
+                let receipt = self
+                    .control
+                    .start_mandate(
+                        &self.caller,
+                        target_thread_id,
+                        MandateStartRequest {
+                            schedule: args.schedule,
+                            max_occurrences: args.max_occurrences,
+                            catch_up: args.catch_up,
+                            input_template: args.input_template,
+                            snapshot_id: None,
+                        },
+                    )
+                    .await?;
+                json!({
+                    "operation": "cooldis.mandate_start",
+                    "status": "started",
+                    "thread_id": target_thread_id.to_string(),
+                    "mandate_event_id": receipt.event.id.to_string(),
+                    "stream_id": receipt.event.stream_id.as_str(),
+                    "sequence": receipt.event.sequence.get(),
+                })
+            }
+            MANDATE_REVOKE_OPERATION => {
+                let args: MandateRevokeArgs = decode_schedule_args(operation_name, arguments)?;
+                let target_thread_id = optional_target_thread_id(
+                    &self.caller,
+                    args.thread_id.as_deref(),
+                    "thread_id",
+                )?;
+                let mandate_event_id = parse_mandate_event_id(&args.mandate_event_id)?;
+                let receipt = self
+                    .control
+                    .revoke_mandate(&self.caller, target_thread_id, mandate_event_id)
+                    .await?;
+                json!({
+                    "operation": "cooldis.mandate_revoke",
+                    "status": receipt.status.as_str(),
+                    "thread_id": target_thread_id.to_string(),
+                    "mandate_event_id": mandate_event_id.to_string(),
+                    "revoked_event_id": receipt.revoke_event.id.to_string(),
+                })
+            }
+            MANDATE_LIST_OPERATION => {
+                let args: MandateListArgs = decode_schedule_args(operation_name, arguments)?;
+                let target_thread_id = optional_target_thread_id(
+                    &self.caller,
+                    args.thread_id.as_deref(),
+                    "thread_id",
+                )?;
+                let mandates = self
+                    .control
+                    .list_mandates(&self.caller, target_thread_id)
+                    .await?
+                    .iter()
+                    .map(active_mandate_json)
+                    .collect::<Vec<_>>();
+                json!({
+                    "operation": "cooldis.mandate_list",
+                    "thread_id": target_thread_id.to_string(),
+                    "mandates": mandates,
+                })
+            }
+            _ => {
+                return Err(CooldisError::RuntimeExecution(format!(
+                    "unknown kernel operation {COOLDIS_SCHEDULE_PACKAGE}/{operation_name}"
                 )));
             }
         };
@@ -404,6 +500,22 @@ impl KernelOperationDispatcher for KernelThreadOperationProvider {
 }
 
 #[async_trait]
+impl KernelOperationDispatcher for KernelScheduleOperationProvider {
+    async fn invoke_kernel_operation(
+        &self,
+        operation_name: &str,
+        input: Vec<u8>,
+    ) -> cooldis_operations::CooldisResult<Vec<u8>> {
+        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let value = self
+            .invoke_json(operation_name, arguments)
+            .await
+            .map_err(operations_runtime_error)?;
+        serde_json::to_vec(&value).map_err(operations_runtime_error)
+    }
+}
+
+#[async_trait]
 impl KernelOperationDispatcher for KernelProcessOperationProvider {
     async fn invoke_kernel_operation(
         &self,
@@ -470,6 +582,35 @@ struct ThreadStatusArgs {
 #[serde(deny_unknown_fields)]
 struct ThreadCancelArgs {
     target_thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MandateStartArgs {
+    #[serde(default)]
+    thread_id: Option<String>,
+    schedule: MandateSchedulePayload,
+    #[serde(default)]
+    max_occurrences: Option<u32>,
+    #[serde(default)]
+    catch_up: Option<MandateCatchUpPolicy>,
+    #[serde(default)]
+    input_template: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MandateRevokeArgs {
+    #[serde(default)]
+    thread_id: Option<String>,
+    mandate_event_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MandateListArgs {
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -545,6 +686,17 @@ fn decode_args<T: DeserializeOwned>(operation_name: &str, arguments: Value) -> C
     serde_json::from_value(arguments).map_err(|err| {
         CooldisError::RuntimeExecution(format!(
             "operation {COOLDIS_THREADS_PACKAGE}/{operation_name} has invalid arguments: {err}"
+        ))
+    })
+}
+
+fn decode_schedule_args<T: DeserializeOwned>(
+    operation_name: &str,
+    arguments: Value,
+) -> CooldisResult<T> {
+    serde_json::from_value(arguments).map_err(|err| {
+        CooldisError::RuntimeExecution(format!(
+            "operation {COOLDIS_SCHEDULE_PACKAGE}/{operation_name} has invalid arguments: {err}"
         ))
     })
 }
@@ -651,6 +803,24 @@ fn process_snapshot_output_json(operation: &str, snapshot: &AsyncProcessSnapshot
         value["exit_code"] = json!(exit_code);
     }
     value
+}
+
+fn active_mandate_json(mandate: &ActiveMandate) -> Value {
+    json!({
+        "mandate_event_id": mandate.event.id.to_string(),
+        "mandate_id": mandate.payload.mandate_id.clone(),
+        "thread_id": mandate
+            .payload
+            .subject
+            .thread_id
+            .as_deref()
+            .or(mandate.payload.thread_id.as_deref()),
+        "schedule": mandate.payload.schedule.clone(),
+        "max_occurrences": mandate.payload.max_occurrences,
+        "catch_up": mandate.payload.catch_up,
+        "input_template": mandate.payload.input_template.clone(),
+        "created_at_ms": mandate.event.created_at_ms,
+    })
 }
 
 fn json_error(err: serde_json::Error) -> CooldisError {

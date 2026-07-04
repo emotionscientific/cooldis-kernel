@@ -9,6 +9,8 @@ autobins = false
 async-trait = "0.1"
 base64 = "0.22"
 bashkit = { version = "0.9.0", features = ["realfs"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
 cooldis-agent = { path = "../cooldis-agent" }
 cooldis-abi = { path = "../cooldis-abi" }
 cooldis-history = { path = "../cooldis-history" }
@@ -24,6 +26,7 @@ cooldis-runtime-contracts = { path = "../cooldis-runtime-contracts" }
 cooldis-vfs = { path = "../cooldis-vfs" }
 cooldis-vbash = { path = "../cooldis-vbash" }
 cooldis-wasm = { path = "../cooldis-wasm" }
+croner = "3.0.1"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 futures-util = "0.3.32"
 object_store = { version = "0.13.2", features = ["aws"] }

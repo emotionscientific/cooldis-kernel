@@ -2094,13 +2094,18 @@ async fn append_loop_mandate_started(
                 EventKind::MandateStarted,
                 serde_json::to_value(MandateStartedPayload {
                     subject: MandateSubject {
-                        loop_id: loop_id.to_string(),
+                        thread_id: None,
+                        loop_id: Some(loop_id.to_string()),
                     },
                     mandate_id: format!("mandate-{loop_id}"),
                     snapshot_id: snapshot_id.to_string(),
                     thread_id: Some(coordinates.thread_id.to_string()),
                     max_continuations,
                     expires_at_ms: None,
+                    schedule: None,
+                    max_occurrences: None,
+                    catch_up: None,
+                    input_template: None,
                 })
                 .unwrap(),
             )],

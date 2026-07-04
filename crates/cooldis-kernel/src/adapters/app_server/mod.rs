@@ -9,25 +9,25 @@ use crate::{
     EventStore, EventStreamId, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
     LlmProviderAuthContext, LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue,
     LlmProviderRecord, LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry,
-    LocalPluginCatalog, LocalPluginCatalogRecord, McpRemoteServerConfig, McpRemoteToolProvider,
-    McpRemoteTransport, McpToolUniverseDiscoverer, MountedToolUniverse,
-    OPENAI_COMPATIBLE_DEFAULT_MODEL, OpenAIChatCompletionsAdapter, OpenAIReasoningSummary,
-    OpenAIResponsesAdapter, OperationRegistry, OperationToolAlias, ProviderAbiProjection,
-    ProviderApi, ProviderAuth, ProviderCapabilityRecord, ProviderClient, ProviderEndpoint,
-    ProviderHttpClient, ProviderRequest, ProviderRequestMode, ProviderResponse, ProviderResult,
-    ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind, RuntimeStore,
-    RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind, SecretStoreError,
-    SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry, SqliteMetadataStore,
-    SqliteSecretStore, SqliteSessionStore, SystemBlock, THREAD_BOUND_COUPLING_SET_METADATA,
-    TenantRegistration, TenantRuntimeContext, ThinkingConfig, ThinkingEffort, ThreadBaseRef,
-    ThreadCheckpointId, ThreadContext, ThreadEvent, ThreadForkReason, ThreadId,
-    ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus, ThreadMetadataStore,
-    ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding, ToolUniverseCaller,
-    ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent, TurnInput,
-    TurnSubmissionMode, VirtualBashRuntimeConfig, bind_published_agent_record,
+    LocalPluginCatalog, LocalPluginCatalogRecord, MandateCatchUpPolicy, MandateSchedulePayload,
+    McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, McpToolUniverseDiscoverer,
+    MountedToolUniverse, OPENAI_COMPATIBLE_DEFAULT_MODEL, OpenAIChatCompletionsAdapter,
+    OpenAIReasoningSummary, OpenAIResponsesAdapter, OperationRegistry, OperationToolAlias,
+    ProviderAbiProjection, ProviderApi, ProviderAuth, ProviderCapabilityRecord, ProviderClient,
+    ProviderEndpoint, ProviderHttpClient, ProviderRequest, ProviderRequestMode, ProviderResponse,
+    ProviderResult, ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind,
+    RuntimeStore, RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind,
+    SecretStoreError, SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry,
+    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, SystemBlock,
+    THREAD_BOUND_COUPLING_SET_METADATA, TenantRegistration, TenantRuntimeContext, ThinkingConfig,
+    ThinkingEffort, ThreadBaseRef, ThreadCheckpointId, ThreadContext, ThreadEvent,
+    ThreadForkReason, ThreadId, ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus,
+    ThreadMetadataStore, ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding,
+    ToolUniverseCaller, ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent,
+    TurnInput, TurnSubmissionMode, VirtualBashRuntimeConfig, bind_published_agent_record,
     ensure_cooldis_notify_published, ensure_cooldis_process_published,
-    ensure_cooldis_threads_published, resolve_llm_provider_auth, seed_default_llm_providers,
-    stream_schema_registry_v1,
+    ensure_cooldis_schedule_published, ensure_cooldis_threads_published, resolve_llm_provider_auth,
+    seed_default_llm_providers, stream_schema_registry_v1,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cooldis_process::{
@@ -577,6 +577,7 @@ impl CooldisAppServer {
         let provider_surface =
             agent_manifest_provider_surface_for_config(&config, &metadata_store)?;
         ensure_cooldis_threads_published(operation_registry_root_for_kernel_publish(&config))?;
+        ensure_cooldis_schedule_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_process_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_notify_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_default_manifest_published(&config, provider_surface.supports_streaming)?;

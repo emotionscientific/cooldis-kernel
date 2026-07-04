@@ -465,6 +465,42 @@ may be available.
 Unknown thread ids and malformed cursors fail with JSON-RPC errors. A valid
 thread with no matching events returns an empty `data` array and null cursors.
 
+### `mandate/start`
+
+Params:
+`{ "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder." }`.
+Only `threadId` and `schedule` are required. The schedule union is externally
+tagged: `{ "cron": { "expr": "0 9 * * *", "tz": "America/Los_Angeles" } }`,
+`{ "interval": { "every_ms": 60000 } }`, or
+`{ "at": { "when": "2026-07-04T18:00:00Z" } }`. `catchUp` defaults to
+`"skip_missed"` and may also be `"coalesce_missed"`.
+
+Result:
+`{ "mandateEventId": "...", "streamId": "control:<threadId>", "sequence": 1 }`.
+The method appends a witnessed `mandate.started` fact to the thread control
+stream. Cron expressions are parsed before append, cron time zones must be
+IANA names, interval schedules must be at least 60 seconds, and `at` schedules
+in the past are rejected unless `catchUp = "coalesce_missed"`.
+
+### `mandate/list`
+
+Params: `{ "threadId": "..." }`.
+
+Result:
+`{ "data": [{ "mandateEventId": "...", "mandateId": "...", "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder.", "createdAtMs": 0, "streamId": "control:<threadId>", "sequence": 1 }], "nextCursor": null }`.
+The projection folds active `mandate.started` facts minus matching
+`mandate.revoked` facts from the thread control stream.
+
+### `mandate/revoke`
+
+Params: `{ "threadId": "...", "mandateEventId": "..." }`.
+
+Result:
+`{ "status": "revoked" | "already_revoked", "mandateEventId": "...", "revokedEventId": "...", "streamId": "control:<threadId>", "sequence": 2 }`.
+The method appends a witnessed `mandate.revoked` fact linked to the start event.
+Revoking an already revoked mandate is an idempotent no-op success and returns
+the original revoke event id.
+
 ### `thread/couplings/list`
 
 Params: `{ "threadId": "...", "limit": 100 }`.
@@ -595,6 +631,7 @@ The V1 app-server implements the Codex TUI-critical request subset:
   `thread/list`, `thread/loaded/list`, `thread/events/list`,
   `thread/couplings/list`, `thread/approvals/list`, `thread/waiting/list`,
   `thread/debug/export`;
+- `mandate/start`, `mandate/revoke`, `mandate/list`;
 - `approval/resolve`;
 - `thread/name/set`, `thread/metadata/update`, `thread/compact/start`,
   `thread/unsubscribe`;
