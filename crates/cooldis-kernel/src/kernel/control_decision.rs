@@ -26,6 +26,8 @@ pub struct ToolCallDecisionPayload {
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
     pub outcome: ToolCallDecisionOutcomePayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admissible: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -116,6 +118,8 @@ pub struct TurnContinuationAcceptedPayload {
     pub snapshot_id: String,
     pub mandate_id: String,
     pub next_turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admissible: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,6 +127,8 @@ pub struct TurnContinuationRejectedPayload {
     pub subject: TurnContinuationSubject,
     pub snapshot_id: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admissible: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -736,6 +742,59 @@ mod tests {
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
 
+    #[test]
+    fn decision_payload_admissible_is_additive_optional() {
+        let tool_without: ToolCallDecisionPayload = serde_json::from_value(json!({
+            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+            "snapshot_id": "snapshot-a",
+            "outcome": {"decision": "allow"}
+        }))
+        .unwrap();
+        assert_eq!(tool_without.admissible, None);
+        assert!(serde_json::to_value(&tool_without).unwrap()["admissible"].is_null());
+
+        let tool_with: ToolCallDecisionPayload = serde_json::from_value(json!({
+            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+            "snapshot_id": "snapshot-a",
+            "outcome": {"decision": "deny", "reason": "blocked"},
+            "admissible": ["allow", "rewrite", "deny"]
+        }))
+        .unwrap();
+        assert_eq!(
+            tool_with.admissible,
+            Some(vec![
+                "allow".to_string(),
+                "rewrite".to_string(),
+                "deny".to_string()
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(&tool_with).unwrap()["admissible"],
+            json!(["allow", "rewrite", "deny"])
+        );
+
+        let accepted: TurnContinuationAcceptedPayload = serde_json::from_value(json!({
+            "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
+            "snapshot_id": "snapshot-a",
+            "mandate_id": "mandate-1",
+            "next_turn_id": "turn-2",
+            "admissible": ["accepted", "rejected"]
+        }))
+        .unwrap();
+        assert_eq!(
+            accepted.admissible,
+            Some(vec!["accepted".to_string(), "rejected".to_string()])
+        );
+
+        let rejected: TurnContinuationRejectedPayload = serde_json::from_value(json!({
+            "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
+            "snapshot_id": "snapshot-a",
+            "reason": "budget exhausted"
+        }))
+        .unwrap();
+        assert_eq!(rejected.admissible, None);
+    }
+
     #[tokio::test]
     async fn tool_decision_accepts_fresh_allow_fact() {
         let fixture = ToolDecisionFixture::new().await;
@@ -744,6 +803,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
 
@@ -764,6 +824,7 @@ mod tests {
                 outcome: ToolCallDecisionOutcomePayload::Rewrite {
                     arguments: json!({"cmd": "ls"}),
                 },
+                admissible: None,
             })
             .await;
 
@@ -790,6 +851,7 @@ mod tests {
                 outcome: ToolCallDecisionOutcomePayload::Deny {
                     reason: "dangerous command".to_string(),
                 },
+                admissible: None,
             })
             .await;
 
@@ -840,6 +902,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: "old-snapshot".to_string(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
 
@@ -879,6 +942,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
         fixture
@@ -888,6 +952,7 @@ mod tests {
                 outcome: ToolCallDecisionOutcomePayload::Deny {
                     reason: "blocked".to_string(),
                 },
+                admissible: None,
             })
             .await;
 
@@ -1097,6 +1162,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
 
