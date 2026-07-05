@@ -27,6 +27,7 @@ allowed to exercise.
 
 - Build an agent locally from a manifest.
 - Attach tools, resources, secrets, and runtime grants.
+- Publish static prompt and context files as immutable blob resources.
 - Run the agent through a governed runtime instead of a one-off app server.
 - Inspect events, tool calls, receipts, and artifacts.
 - Resume work from durable records.

@@ -1038,6 +1038,13 @@ fn validate_artifact_ref(value: &str) -> CooldisResult<()> {
 }
 
 fn content_hash_from_ref(reference: &str) -> Option<String> {
+    if let Some(hash) = reference.strip_prefix("resource://artifact/sha256:")
+        && hash.len() == 64
+    {
+        let content_hash = format!("sha256:{hash}");
+        validate_hash_label("content_hash", &content_hash).ok()?;
+        return Some(content_hash);
+    }
     let (_prefix, hash) = reference.rsplit_once("@sha256:")?;
     if hash.len() != 64 {
         return None;

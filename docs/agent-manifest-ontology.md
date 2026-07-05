@@ -40,14 +40,15 @@ Examples:
 ```text
 op://data/csv_profile@sha256:...
 skill://release-review@sha256:...
-prompt://someone.cool/release-system@sha256:...
-assembler://cooldis/naive-assembly@0
 resource://artifact/sha256:...
+assembler://cooldis/naive-assembly@0
 agent://release-verifier@0.3.1
 ```
 
 Mutable names can exist for ergonomics, but they should lower to immutable
-records at publish or run time:
+records at publish or run time. In a folder-first agent project,
+`prompts/system.md` lowers to a blob resource and is wired into the `identity`
+static context source:
 
 ```text
 agent publish
@@ -426,7 +427,7 @@ mode = "read"
 [[resources]]
 name = "release-playbook"
 kind = "blob"
-ref = "resource://artifact/sha256:abc123"
+ref = "resource://artifact/sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 mount = "context"
 mode = "read"
 

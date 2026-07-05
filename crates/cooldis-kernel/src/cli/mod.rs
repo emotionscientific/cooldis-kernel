@@ -10,19 +10,20 @@ use crate::{
     CooldisIoConfig, CooldisIoRouteConfig, CooldisProviderConfig, CooldisResult, CooldisVfs,
     EventKind, EventStore, EventStreamId, HostFileSystem, HostFileSystemMode, JsonRpcNotification,
     LlmProviderAuthStore, LlmProviderCatalogStore, LoadedCooldisDaemonConfig, LocalAgentRegistry,
-    LocalOperationRegistry, LocalSkillRegistry, McpRemoteServerConfig, McpRemoteToolProvider,
-    McpRemoteTransport, PublishOperationRequest, PublishSkillPackageRequest, PublishedAgentRecord,
-    PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
-    RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore,
-    SqliteSecretStore, SqliteSessionStore, SystemDaemonClock, TelegramWebhookServer,
-    TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun,
-    ToolInterfaceContract, ToolManualExitStatus, ToolOperationManual, ToolPackageSource,
-    WasmOperationManifest, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
-    agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
-    default_operations_registry_root, discover_cooldis_daemon_config_path,
-    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
-    load_cooldis_daemon_config_layers, render_cooldis_daemon_service, required_secret_names,
-    resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
+    LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry, McpRemoteServerConfig,
+    McpRemoteToolProvider, McpRemoteTransport, PublishOperationRequest, PublishSkillPackageRequest,
+    PublishedAgentRecord, PublishedOperationRecord, PublishedOperationSource, RegisteredOperation,
+    RouteIngressSink, RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry,
+    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, SystemDaemonClock,
+    TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore,
+    ToolBuildReceipt, ToolFixtureRun, ToolInterfaceContract, ToolManualExitStatus,
+    ToolOperationManual, ToolPackageSource, WasmOperationManifest, WasmRuntimeArtifact,
+    WasmRuntimeConfig, WasmRuntimeFactory, agent::agent_tool_router::AgentKernelToolProvider,
+    build_rust_wasm_module, default_blob_registry_root,
+    default_blob_registry_root_for_agent_registry_root, default_operations_registry_root,
+    discover_cooldis_daemon_config_path, discover_cooldis_project, install_cooldis_daemon_service,
+    load_cooldis_daemon_config, load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
+    required_secret_names, resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
 };
 use bashkit::InMemoryFs;
 use cooldis_io_core::{IngressPersistenceMode, IngressSink};
@@ -73,6 +74,7 @@ pub async fn run() -> CooldisResult<()> {
         "help" => run_help(args),
         "init" => agent_init(args).await,
         "agent" => run_agent(args).await,
+        "blob" => run_blob(args).await,
         "tool" => run_tool(args).await,
         "skill" => run_skill(args).await,
         "secret" => run_secret(args).await,
@@ -109,6 +111,10 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         [command] if command == "chat" => print_chat_help(),
         [command] if command == "init" => print_agent_init_help(),
         [command] if command == "agent" => print_agent_help(),
+        [command] if command == "blob" => print_blob_help(),
+        [command, subcommand] if command == "blob" && subcommand == "publish" => {
+            print_blob_publish_help()
+        }
         [command, subcommand] if command == "agent" && subcommand == "init" => {
             print_agent_init_help()
         }
@@ -361,7 +367,10 @@ async fn agent_plan(args: Vec<OsString>) -> CooldisResult<()> {
             }
         }
     }
-    println!("writes: none");
+    for line in agent_context_source_lines(&plan.resolved_manifest) {
+        println!("{line}");
+    }
+    println!("writes: agent record none");
     Ok(())
 }
 
@@ -396,6 +405,9 @@ async fn agent_publish(args: Vec<OsString>) -> CooldisResult<()> {
                 .unwrap_or(&resolved_ref.declared),
             content_hash
         );
+    }
+    for line in agent_context_source_lines(&record.resolved_manifest) {
+        println!("{line}");
     }
     println!(
         "alias: {} -> {}",
@@ -467,7 +479,10 @@ async fn agent_run(args: Vec<OsString>) -> CooldisResult<()> {
     let mut config = CooldisAppServerConfig::local(listen, cwd);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    config.agent_registry_root = agent_registry_root(options.registry_root.clone());
+    let agent_registry_root = agent_registry_root(options.registry_root.clone());
+    config.blob_registry_root =
+        default_blob_registry_root_for_agent_registry_root(&agent_registry_root);
+    config.agent_registry_root = agent_registry_root;
     let state_home = config.state_home.clone();
     let app = CooldisAppServer::new_local(config).await?;
     let thread_start = app
@@ -1682,6 +1697,34 @@ async fn run_skill(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
+async fn run_blob(mut args: Vec<OsString>) -> CooldisResult<()> {
+    if args.is_empty()
+        || args
+            .first()
+            .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_blob_help();
+        return Ok(());
+    }
+    let subcommand = args.remove(0);
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        match subcommand.to_string_lossy().as_ref() {
+            "publish" => print_blob_publish_help(),
+            other => return Err(usage_error(format!("unknown blob subcommand {other:?}"))),
+        }
+        return Ok(());
+    }
+    match subcommand.to_string_lossy().as_ref() {
+        "publish" => blob_publish(args).await,
+        _ => Err(usage_error(format!(
+            "unknown blob subcommand {subcommand:?}"
+        ))),
+    }
+}
+
 async fn run_secret(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
@@ -1879,6 +1922,33 @@ async fn skill_publish(args: Vec<OsString>) -> CooldisResult<()> {
     for skill in record.package.skills {
         println!("skill {}", skill.name);
     }
+    Ok(())
+}
+
+async fn blob_publish(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_blob_publish_args(args)?;
+    if options.help {
+        print_blob_publish_help();
+        return Ok(());
+    }
+    let file = options
+        .file
+        .ok_or_else(|| usage_error("blob publish requires <file>"))?;
+    let registry_root = options
+        .registry_root
+        .unwrap_or_else(default_blob_registry_root);
+    let registry = LocalBlobRegistry::new(registry_root);
+    let record = registry.publish_file(&file, options.name.as_deref())?;
+    println!("published blob");
+    println!("artifact {}", record.artifact_hash);
+    println!("content_hash {}", record.content_sha256);
+    println!("ref {}", record.ref_uri);
+    println!(
+        "record {}",
+        registry
+            .version_record_path(&record.artifact_hash)?
+            .display()
+    );
     Ok(())
 }
 
@@ -2827,6 +2897,14 @@ struct SkillPublishArgs {
 }
 
 #[derive(Debug)]
+struct BlobPublishArgs {
+    file: Option<PathBuf>,
+    name: Option<String>,
+    registry_root: Option<PathBuf>,
+    help: bool,
+}
+
+#[derive(Debug)]
 struct ToolRegistryArgs {
     registry_root: Option<PathBuf>,
     help: bool,
@@ -3568,6 +3646,40 @@ fn parse_skill_publish_args(args: Vec<OsString>) -> CooldisResult<SkillPublishAr
     }
     Ok(SkillPublishArgs {
         package_dir,
+        name,
+        registry_root,
+        help,
+    })
+}
+
+fn parse_blob_publish_args(args: Vec<OsString>) -> CooldisResult<BlobPublishArgs> {
+    let mut file = None;
+    let mut name = None;
+    let mut registry_root = None;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--registry-root" => {
+                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown blob publish argument {other:?}"
+                )));
+            }
+            _ => {
+                if file.is_some() {
+                    return Err(usage_error("blob publish accepts exactly one <file>"));
+                }
+                file = Some(PathBuf::from(arg));
+            }
+        }
+    }
+    Ok(BlobPublishArgs {
+        file,
         name,
         registry_root,
         help,
@@ -5782,8 +5894,8 @@ fn render_agent_manifest_template(name: &str) -> CooldisResult<String> {
     crate::validate_record_name(name)?;
     Ok(format!(
         "# Cooldis V1 folder-first agent manifest.\n\
-# Prompt text lives in prompts/system.md. Publish custom operations first,\n\
-# then replace the placeholder op:// ref below before publishing this agent.\n\
+# Prompt text lives in prompts/system.md. Add tools only after publishing\n\
+# operation packages and replacing component refs with real op:// hashes.\n\
 \n\
 [agent]\n\
 name = {name:?}\n\
@@ -5800,12 +5912,7 @@ model_ref = \"model://local_offline/echo\"\n\
 [runtime]\n\
 default_cwd = \".\"\n\
 streaming = false\n\
-\n\
-[[tools]]\n\
-type = \"bash_tool\"\n\
-id = \"example-tool\"\n\
-command = \"example-tool\"\n\
-operation_ref = \"op://example-tool@sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n"
+"
     ))
 }
 
@@ -5898,6 +6005,52 @@ fn print_agent_record_json(record: &PublishedAgentRecord) -> CooldisResult<()> {
     Ok(())
 }
 
+fn agent_context_source_lines(manifest: &Value) -> Vec<String> {
+    let resources = manifest
+        .get("resources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|resource| {
+            let name = resource.get("name").and_then(Value::as_str)?;
+            let ref_uri = resource
+                .get("ref")
+                .or_else(|| resource.get("reference"))
+                .and_then(Value::as_str)?;
+            Some((name, ref_uri))
+        })
+        .collect::<BTreeMap<_, _>>();
+    manifest
+        .get("context")
+        .and_then(|context| context.get("sources"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|source| {
+            source.get("assembler").and_then(Value::as_str) == Some("kernel://assembler/static")
+        })
+        .filter_map(|source| {
+            let id = source.get("id").and_then(Value::as_str)?;
+            let input = source.get("input").and_then(Value::as_str)?;
+            let ref_uri = resources.get(input).copied().unwrap_or(input);
+            let content_hash = content_hash_label_from_ref(ref_uri)?;
+            Some(format!(
+                "context_source: {id} -> {ref_uri} ({content_hash})"
+            ))
+        })
+        .collect()
+}
+
+fn content_hash_label_from_ref(ref_uri: &str) -> Option<String> {
+    if let Some(hash) = ref_uri.strip_prefix("resource://artifact/sha256:")
+        && hash.len() == 64
+    {
+        return Some(format!("sha256:{hash}"));
+    }
+    let (_prefix, hash) = ref_uri.rsplit_once("@sha256:")?;
+    (hash.len() == 64).then(|| format!("sha256:{hash}"))
+}
+
 fn flush_stdout() -> CooldisResult<()> {
     std::io::stdout()
         .flush()
@@ -5918,6 +6071,7 @@ const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
     "cooldis init <name>",
     "cooldis agent plan <manifest>",
     "cooldis agent publish <manifest>",
+    "cooldis blob publish <file>",
     "cooldis tool build --package cooldis.tool.toml",
     "cooldis tool publish --package cooldis.tool.toml",
     "cooldis skill publish <dir>",
@@ -5952,6 +6106,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis agent list [--registry-root .cooldis/agents]",
     "cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]",
     "cooldis agent run <agent-ref> --input <text> [--registry-root .cooldis/agents]",
+    "cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]",
     "cooldis tool build --package cooldis.tool.toml",
     "cooldis tool build --module-path <dir|Cargo.toml> [--name <name>] [--config cooldis.json]",
     "cooldis tool list [--registry-root .cooldis/operations]",
@@ -6058,8 +6213,10 @@ Usage:\n\
   cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
 \n\
 Validates and resolves an agent manifest, previews the publish record, and\n\
-writes nothing. When an operations registry is present, op:// refs are\n\
-verified against it; otherwise they are reported unverified-offline.\n"
+does not write an agent record. Folder-first prompts are lowered through the\n\
+idempotent blob registry so the preview matches publish. When an operations\n\
+registry is present, op:// refs are verified against it; otherwise they are\n\
+reported unverified-offline.\n"
     );
 }
 
@@ -6145,6 +6302,31 @@ Usage:\n\
 Skills are markdown context resources. Publishing turns a directory of\n\
 <name>/SKILL.md files into one content-addressed skill:// package for agent\n\
 manifest resource rows.\n"
+    );
+}
+
+fn print_blob_help() {
+    println!(
+        "cooldis blob\n\
+\n\
+Usage:\n\
+  cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]\n\
+\n\
+Blobs are immutable text or binary artifacts addressable as\n\
+resource://artifact/sha256:<hash>. Agent manifests use blob resources for\n\
+folder-first prompts and other static context inputs.\n"
+    );
+}
+
+fn print_blob_publish_help() {
+    println!(
+        "cooldis blob publish\n\
+\n\
+Usage:\n\
+  cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]\n\
+\n\
+Publishes a file as a content-addressed blob artifact and prints the immutable\n\
+resource://artifact/sha256:<hash> ref for manifest resource rows.\n"
     );
 }
 

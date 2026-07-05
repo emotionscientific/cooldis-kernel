@@ -2,8 +2,8 @@
 
 `cooldis` is the local runtime command. The public surface is intentionally
 small at the root: everyday users start the browser console, chat in the
-terminal, initialize agent projects, publish tools and agents, or run the RPC
-server. Lower-level protocol probes live under `debug`.
+terminal, initialize agent projects, publish tools, agents, and blob resources,
+or run the RPC server. Lower-level protocol probes live under `debug`.
 
 ## Help Model
 
@@ -24,6 +24,7 @@ cooldis console
 cooldis chat
 cooldis init <name>
 cooldis agent init|plan|publish|list|show|run
+cooldis blob publish
 cooldis tool build|list|publish|run|source|manual
 cooldis auth status|set|delete
 cooldis secret import|set|list|status|delete

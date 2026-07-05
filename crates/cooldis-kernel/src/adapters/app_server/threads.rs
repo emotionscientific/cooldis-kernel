@@ -239,6 +239,7 @@ impl CooldisAppServer {
             alias,
             &provider_surface,
             self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.blob_registry_root.as_path()),
             Some(self.inner.skill_registry_root.as_path()),
             &mcp_server_refs,
             Some(&tool_universe_discoverer),
@@ -940,7 +941,14 @@ pub(super) fn resolve_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
 }
 
 pub(super) fn normalize_registry_roots(config: &mut CooldisAppServerConfig) {
+    let blob_registry_root_was_default =
+        config.blob_registry_root == PathBuf::from(DEFAULT_BLOB_REGISTRY_ROOT);
     config.agent_registry_root = resolve_path_against_cwd(&config.cwd, &config.agent_registry_root);
+    config.blob_registry_root = if blob_registry_root_was_default {
+        default_blob_registry_root_for_agent_registry_root(&config.agent_registry_root)
+    } else {
+        resolve_path_against_cwd(&config.cwd, &config.blob_registry_root)
+    };
     config.skill_registry_root = resolve_path_against_cwd(&config.cwd, &config.skill_registry_root);
     if let Some(registry_root) = &config.capsule_bindings.registry_root {
         config.capsule_bindings.registry_root =
@@ -1081,6 +1089,18 @@ pub(super) fn append_bound_agent_metadata(
         })?;
         metadata.insert(
             THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA.to_string(),
+            encoded,
+        );
+    }
+    if !bound.static_context_segments.is_empty() {
+        let encoded = serde_json::to_string(&bound.static_context_segments).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest static context segments: {err}"),
+            )
+        })?;
+        metadata.insert(
+            crate::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA.to_string(),
             encoded,
         );
     }
@@ -1323,6 +1343,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) secret_store_path: Option<PathBuf>,
     pub(super) session_store_path: Option<PathBuf>,
     pub(super) agent_registry_root: Option<PathBuf>,
+    pub(super) blob_registry_root: Option<PathBuf>,
     pub(super) skill_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
 }
@@ -1392,6 +1413,7 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
 struct AppServerThreadSpawnAgentResolver {
     agent_registry_root: PathBuf,
     operation_registry_root: Option<PathBuf>,
+    blob_registry_root: Option<PathBuf>,
     skill_registry_root: Option<PathBuf>,
     metadata_store_path: Option<PathBuf>,
     secret_store_path: Option<PathBuf>,
@@ -1415,6 +1437,7 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             alias,
             &self.provider_surface,
             self.operation_registry_root.as_deref(),
+            self.blob_registry_root.as_deref(),
             self.skill_registry_root.as_deref(),
             &mcp_server_refs,
             tool_universe_discoverer
@@ -1493,6 +1516,7 @@ impl CapsuleBindingRuntimeFactory {
         Some(AppServerThreadSpawnAgentResolver {
             agent_registry_root,
             operation_registry_root: self.capsule_bindings.registry_root.clone(),
+            blob_registry_root: self.blob_registry_root.clone(),
             skill_registry_root: self.skill_registry_root.clone(),
             metadata_store_path: self.metadata_store_path.clone(),
             secret_store_path: self.secret_store_path.clone(),

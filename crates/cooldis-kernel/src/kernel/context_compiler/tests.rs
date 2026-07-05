@@ -91,6 +91,59 @@ fn environment_and_attachment_inputs_are_explicit_context() {
     );
 }
 
+#[test]
+fn static_sources_prepend_system_blocks_in_pipeline_order() {
+    let mut input = compile_input(Vec::new(), AgentContextCompilePolicy::unbounded());
+    input.static_system_sources = vec![
+        static_source("identity", "Prompt identity."),
+        static_source("persona", "Second static source."),
+    ];
+
+    let compiled = AgentContextCompiler::compile(input);
+
+    let system = compiled
+        .system
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        system,
+        vec!["Prompt identity.", "Second static source.", "system"]
+    );
+    assert_eq!(compiled.diagnostics.system_block_count, 3);
+}
+
+#[test]
+fn budget_shared_static_sources_consume_text_budget() {
+    let mut input = compile_input(
+        vec![SessionEntryKind::Message {
+            message: CanonicalMessage::user_text("abcdef"),
+        }],
+        AgentContextCompilePolicy {
+            max_messages: None,
+            max_text_bytes: Some(10),
+        },
+    );
+    input.static_system_sources = vec![
+        static_source("identity", "Pinned prompt."),
+        budgeted_static_source("playbook", "123456"),
+    ];
+
+    let compiled = AgentContextCompiler::compile(input);
+
+    assert_eq!(
+        compiled
+            .system
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Pinned prompt.", "123456", "system"]
+    );
+    assert_eq!(message_texts(&compiled.messages), vec!["cdef"]);
+    assert_eq!(compiled.diagnostics.retained_text_bytes, 10);
+    assert_eq!(compiled.diagnostics.truncated_text_bytes, 2);
+}
+
 fn compile_input(
     kinds: Vec<SessionEntryKind>,
     policy: AgentContextCompilePolicy,
@@ -103,6 +156,7 @@ fn compile_input(
     let thread = ThreadContext::root(coordinates);
     AgentContextCompileInput {
         system: vec![SystemBlock::text("system")],
+        static_system_sources: Vec::new(),
         session_entries: entries,
         turn_context: TurnContextSnapshot {
             turn_id: "turn".to_string(),
@@ -132,6 +186,27 @@ fn compile_input(
             serde_json::json!({"type":"object"}),
         )],
         policy,
+    }
+}
+
+fn static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
+    AgentManifestStaticContextSegment {
+        id: id.to_string(),
+        assembler: "kernel://assembler/static".to_string(),
+        input: id.to_string(),
+        pinned: true,
+        budget_share: None,
+        ref_uri: format!("resource://artifact/sha256:{}", "a".repeat(64)),
+        content_sha256: crate::agent::contracts::sha256_hex(content.as_bytes()),
+        content: content.to_string(),
+    }
+}
+
+fn budgeted_static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
+    AgentManifestStaticContextSegment {
+        pinned: false,
+        budget_share: Some(1.0),
+        ..static_source(id, content)
     }
 }
 

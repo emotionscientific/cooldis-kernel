@@ -11,6 +11,7 @@
 
 use crate::agent::manifest::{AgentAliasResolutionReceipt, PublishedAgentRecord};
 use crate::agent::manifest_schema::{
+    AgentManifestBudgetRest, AgentManifestBudgetShare, AgentManifestContextPipeline,
     AgentManifestCoupling, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
     AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestModelProfile,
     AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
@@ -25,8 +26,8 @@ use crate::kernel::coupling_executor_registry::{
 };
 use crate::{
     COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, EventKind, LlmProviderRecord,
-    LocalOperationRegistry, LocalSkillRegistry, ProviderCapabilityRecord, PublishedOperationSource,
-    SkillPackageRef, THREADS_SPAWN_CAPABILITY,
+    LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry, ProviderCapabilityRecord,
+    PublishedOperationSource, SkillPackageRef, THREADS_SPAWN_CAPABILITY,
 };
 use cooldis_abi::{
     COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, WasmOperationDefinition,
@@ -48,6 +49,8 @@ pub const MANIFEST_BINDER_FUNCTION: &str = "bind/v1";
 pub const THREAD_AGENT_SKILL_PACKAGES_METADATA: &str = "cooldis.agent.skill_packages";
 pub const THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA: &str =
     "cooldis.agent.skill_context_segments";
+pub const THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA: &str =
+    "cooldis.agent.static_context_segments";
 
 /// Caller-supplied runtime overrides at `thread/start`. Every populated
 /// field is checked against the manifest's override allowlist
@@ -162,6 +165,7 @@ pub struct AgentManifestBoundThread {
     pub operation_names: Vec<String>,
     pub operation_bindings: Vec<AgentManifestOperationBinding>,
     pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
+    pub static_context_segments: Vec<AgentManifestStaticContextSegment>,
     pub skill_context_segments: Vec<AgentManifestStaticContextSegment>,
     /// Witnessed universe bindings for the thread's protocol tool imports;
     /// the runtime factory mounts these as the search surface (plus direct
@@ -200,6 +204,7 @@ pub async fn bind_published_agent_record(
     alias: Option<AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
     operation_registry_root: Option<&Path>,
+    blob_registry_root: Option<&Path>,
     skill_registry_root: Option<&Path>,
     configured_mcp_server_refs: &BTreeSet<String>,
     tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
@@ -245,6 +250,7 @@ pub async fn bind_published_agent_record(
         tool_universe_discoverer,
     )
     .await?;
+    let static_context_segments = bind_static_context_sources(&manifest, blob_registry_root)?;
     let bound_skills = bind_skill_resources(&manifest.resources, skill_registry_root)?;
     let couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
     enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings)?;
@@ -271,6 +277,7 @@ pub async fn bind_published_agent_record(
         tool_ids: bound_tools.tool_ids,
         operation_bindings: bound_tools.operation_bindings.clone(),
         skill_packages: bound_skills.package_bindings.clone(),
+        static_context_segments: static_context_segments.clone(),
         tool_universes: bound_tools
             .tool_universes
             .iter()
@@ -290,6 +297,7 @@ pub async fn bind_published_agent_record(
         operation_names,
         operation_bindings: bound_tools.operation_bindings,
         skill_packages: bound_skills.package_bindings,
+        static_context_segments,
         skill_context_segments: bound_skills.context_segments,
         tool_universes: bound_tools.tool_universes,
     })
@@ -312,6 +320,103 @@ struct BoundTools {
 struct BoundSkills {
     package_bindings: Vec<AgentManifestSkillPackageBinding>,
     context_segments: Vec<AgentManifestStaticContextSegment>,
+}
+
+fn bind_static_context_sources(
+    manifest: &AgentManifestSchema,
+    blob_registry_root: Option<&Path>,
+) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    let pipeline = manifest.effective_context_pipeline();
+    let mut segments = Vec::new();
+    for source in &pipeline.sources {
+        if source.assembler != KERNEL_ASSEMBLER_STATIC {
+            continue;
+        }
+        let Some(input) = source
+            .input
+            .as_deref()
+            .filter(|input| !input.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(resource) = static_source_resource(input, &manifest.resources)? else {
+            continue;
+        };
+        if resource.kind != AgentManifestResourceKind::Blob {
+            continue;
+        }
+        let registry_root = blob_registry_root.ok_or_else(|| {
+            CooldisError::RuntimeFactory(format!(
+                "blob resource {:?} ref {:?} requires an app-server blob registry root",
+                resource.name, resource.reference
+            ))
+        })?;
+        let registry = LocalBlobRegistry::new(registry_root);
+        let (record, content) = registry
+            .load_text_ref(&resource.reference)
+            .map_err(|err| missing_blob_resource_error(resource, err))?;
+        segments.push(AgentManifestStaticContextSegment {
+            id: source.id.clone(),
+            assembler: source.assembler.clone(),
+            input: input.to_string(),
+            pinned: source.pinned,
+            budget_share: static_source_budget_share(&pipeline, source.id.as_str()),
+            ref_uri: record.ref_uri,
+            content_sha256: record.content_sha256,
+            content,
+        });
+    }
+    Ok(segments)
+}
+
+fn static_source_resource<'a>(
+    input: &str,
+    resources: &'a [AgentManifestResource],
+) -> CooldisResult<Option<&'a AgentManifestResource>> {
+    if input.starts_with("resource://") || input.starts_with("skill://") {
+        return resources
+            .iter()
+            .find(|resource| resource.reference == input)
+            .map(Some)
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(format!(
+                    "static context source input {input:?} does not match a declared resource ref"
+                ))
+            });
+    }
+    resources
+        .iter()
+        .find(|resource| resource.name == input)
+        .map(Some)
+        .ok_or_else(|| {
+            CooldisError::RuntimeFactory(format!(
+                "static context source input {input:?} does not name a declared resource"
+            ))
+        })
+}
+
+fn missing_blob_resource_error(
+    resource: &AgentManifestResource,
+    err: impl std::fmt::Display,
+) -> CooldisError {
+    CooldisError::RuntimeFactory(format!(
+        "blob resource {:?} ref {:?} was not found in the local blob registry: {err}; run `cooldis blob publish <file>` and use the returned resource://artifact/sha256:<hash> ref",
+        resource.name, resource.reference
+    ))
+}
+
+fn static_source_budget_share(
+    pipeline: &AgentManifestContextPipeline,
+    source_id: &str,
+) -> Option<f64> {
+    pipeline
+        .sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .and_then(|source| match source.budget_share {
+            Some(AgentManifestBudgetShare::Fraction(value)) => Some(value),
+            Some(AgentManifestBudgetShare::Rest(AgentManifestBudgetRest::Rest)) | None => None,
+        })
 }
 
 /// Role inferred from the coupling's resolved sink relation. Manifest
@@ -1393,6 +1498,9 @@ pub struct AgentManifestBindReceipt {
     /// Exact skill packages mounted for this manifest-backed thread.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
+    /// Exact static context sources mounted as provider system blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_context_segments: Vec<AgentManifestStaticContextSegment>,
     /// Witnessed tool universes mounted on the search surface: server ref,
     /// discovery hash, in-scope contracts, and pinned rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

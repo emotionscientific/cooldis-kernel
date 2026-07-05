@@ -158,7 +158,8 @@ pub use agent::hooks::{
 pub use agent::manifest::{
     AgentAliasRecord, AgentAliasResolutionReceipt, AgentManifestRefVerification,
     AgentManifestRefVerificationStatus, AgentPublishPlan, AgentRecordRef, AgentToolRef,
-    LocalAgentRegistry, PublishedAgentRecord, agent_ref_uri, default_operations_registry_root,
+    LocalAgentRegistry, PublishedAgentRecord, agent_ref_uri, default_blob_registry_root,
+    default_blob_registry_root_for_agent_registry_root, default_operations_registry_root,
 };
 pub use agent::manifest_bind::{
     AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBoundThread,
@@ -169,7 +170,8 @@ pub use agent::manifest_bind::{
     BoundCouplingSet, BoundCouplingSink, CouplingRole, MANIFEST_BINDER_DISCHARGED_BY,
     MANIFEST_BINDER_FUNCTION, MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION,
     THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_PACKAGES_METADATA,
-    apply_runtime_overrides, bind_published_agent_record, compile_published_agent_record,
+    THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA, apply_runtime_overrides,
+    bind_published_agent_record, compile_published_agent_record,
 };
 pub use agent::manifest_schema::{
     AgentManifestBashTool, AgentManifestBudgetRest, AgentManifestBudgetShare,
@@ -238,6 +240,9 @@ pub use capabilities::vfs::{
 };
 pub use capabilities::wasm_runner::{
     WasmHttpRequest, WasmHttpResponse, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+};
+pub use cooldis_operations::{
+    LocalBlobRegistry, PublishedBlobRecord, blob_hash_from_ref, blob_ref_uri,
 };
 pub use daemon::clock_route::{
     CLOCK_TICK_ROUTE_KIND, CooldisDaemonClockRoute, DaemonClock, SystemDaemonClock,
