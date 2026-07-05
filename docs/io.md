@@ -143,6 +143,7 @@ kind = "telegram.bot"
 enabled = true
 policy = "interrupt_on_new_dm"
 threading = "per_conversation"
+agent_ref = "agent://karl-dev@latest"
 
 [daemon.io.routes.telegram]
 listen = "127.0.0.1:9000"
@@ -264,6 +265,7 @@ the kernel:
 [[daemon.io.routes]]
 id = "telegram-main"
 kind = "telegram.bot"
+agent_ref = "agent://karl-dev@latest"
 egress_projection = [
   { pattern = '\[reaction:(?P<emoji>[^\]]+)\]', action = "reaction" },
   { pattern = '\[sticker:(?P<file_id>[^\]]+)\]', action = "sticker" },

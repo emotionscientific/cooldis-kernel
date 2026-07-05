@@ -1399,6 +1399,7 @@ async fn start_daemon_io(
     let mut tasks = Vec::new();
     let enabled_routes = io.routes.iter().filter(|route| route.enabled);
     for route in enabled_routes {
+        bridge.validate_route_agent_ref(route).await?;
         match route.kind.as_str() {
             "clock.tick" => {
                 let ingress = route.ingress.as_ref().unwrap_or(&io.ingress);

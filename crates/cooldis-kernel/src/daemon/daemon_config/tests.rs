@@ -38,6 +38,7 @@ id = "chat-tui"
 kind = "websocket.tui"
 policy = "steer_when_active"
 threading = "selected_thread"
+agent_ref = "agent://karl-dev@latest"
 "#,
     )
     .unwrap();
@@ -56,6 +57,10 @@ threading = "selected_thread"
         IngressPersistenceMode::BestEffortDirect
     );
     assert_eq!(loaded.config.io.routes[0].id, "chat-tui");
+    assert_eq!(
+        loaded.config.io.routes[0].agent_ref.as_deref(),
+        Some("agent://karl-dev@latest")
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -109,6 +114,7 @@ fn invalid_egress_projection_regex_reports_rule_index() {
         enabled: true,
         policy: None,
         threading: None,
+        agent_ref: None,
         coalesce_bursts: None,
         ingress: None,
         egress_projection: vec![CooldisEgressProjectionRuleConfig {
@@ -131,6 +137,34 @@ fn invalid_egress_projection_regex_reports_rule_index() {
 }
 
 #[test]
+fn validates_route_agent_ref_syntax() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "telegram-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: None,
+        threading: None,
+        agent_ref: Some("karl-dev".to_string()),
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("io.routes.telegram-main.agent_ref"))
+    );
+}
+
+#[test]
 fn validates_coalesce_bursts_route_config() {
     let mut config = CooldisDaemonConfig::default();
     config.io.routes.push(CooldisIoRouteConfig {
@@ -139,6 +173,7 @@ fn validates_coalesce_bursts_route_config() {
         enabled: true,
         policy: Some("steer_when_active".to_string()),
         threading: None,
+        agent_ref: None,
         coalesce_bursts: Some(CooldisCoalesceBurstsConfig {
             window_ms: 0,
             max_batch: 0,
@@ -449,6 +484,7 @@ fn validates_bad_queue_and_route_config() {
         enabled: true,
         policy: None,
         threading: None,
+        agent_ref: None,
         coalesce_bursts: None,
         ingress: None,
         egress_projection: Vec::new(),
@@ -540,6 +576,7 @@ fn validates_telegram_route_shape() {
         enabled: true,
         policy: None,
         threading: None,
+        agent_ref: None,
         coalesce_bursts: None,
         ingress: None,
         egress_projection: Vec::new(),
@@ -571,6 +608,7 @@ fn validates_single_clock_tick_route() {
             enabled: true,
             policy: None,
             threading: None,
+            agent_ref: None,
             coalesce_bursts: None,
             ingress: None,
             egress_projection: Vec::new(),

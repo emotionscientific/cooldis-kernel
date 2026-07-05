@@ -6,13 +6,13 @@ use crate::{
     CooldisIoRouteConfig, CooldisResult, CooldisSupervisor, CooldisTypingSimulationConfig,
     EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore,
     EventStreamId, IoEgressDeliveredPayload, IoEgressFailedPayload, IoIngressReceivedPayload,
-    NewEventRecord, PolicyBoundPayload, PolicyKind, RuntimeThreadHandle, SessionEntry,
-    SessionEntryKind, SqliteSessionStore, StreamCursorV1, THREAD_AGENT_MANIFEST_HASH_METADATA,
-    THREAD_SPAWN_GRANTED_METADATA, TIMER_FIRED_ENVELOPE_KIND, ThreadCheckpoint, ThreadCoordinates,
-    ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadSpawnedForkPayload,
-    ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload, ThreadStartRequest, ThreadTopology,
-    TimerFiredPayload, TurnInput, TurnSubmissionMode, control_stream_id, list_active_mandates,
-    parse_mandate_event_id,
+    KernelThreadSpawnAgentBinding, NewEventRecord, PolicyBoundPayload, PolicyKind,
+    RuntimeThreadHandle, SessionEntry, SessionEntryKind, SqliteSessionStore, StreamCursorV1,
+    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_SPAWN_GRANTED_METADATA, TIMER_FIRED_ENVELOPE_KIND,
+    ThreadCheckpoint, ThreadCoordinates, ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus,
+    ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload,
+    ThreadStartRequest, ThreadTopology, TimerFiredPayload, TurnInput, TurnSubmissionMode,
+    control_stream_id, list_active_mandates, parse_mandate_event_id,
 };
 use async_trait::async_trait;
 use cooldis_io_core::{
@@ -46,6 +46,7 @@ const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TYPING_SIMULATION_DELAY: Duration = Duration::from_secs(8);
 const IO_EGRESS_PROJECTOR_DISCHARGED_BY: &str = "projector:io-egress";
 const IO_EGRESS_PROJECTOR_FUNCTION: &str = "delivery/v1";
+const ROUTE_AGENT_REF_METADATA: &str = "cooldis_route_agent_ref";
 
 #[derive(Clone, Debug, Default)]
 struct RouteEgressConfig {
@@ -437,6 +438,7 @@ struct IngressReceiptContext {
 
 #[derive(Clone)]
 pub struct CooldisDaemonIoBridge {
+    app_server: Option<CooldisAppServer>,
     supervisor: CooldisSupervisor,
     tenant_id: String,
     user_id: String,
@@ -461,6 +463,7 @@ impl CooldisDaemonIoBridge {
         cwd: impl Into<PathBuf>,
     ) -> Self {
         Self {
+            app_server: None,
             supervisor,
             tenant_id: tenant_id.into(),
             user_id: user_id.into(),
@@ -485,6 +488,7 @@ impl CooldisDaemonIoBridge {
             server.model().to_string(),
             server.cwd().to_path_buf(),
         );
+        bridge.app_server = Some(server.clone());
         bridge.session_store_path = Some(server.session_store_path().to_path_buf());
         bridge
     }
@@ -521,6 +525,31 @@ impl CooldisDaemonIoBridge {
             .await
             .insert(source_scope(&protocol, &instance_id), config);
         Ok(())
+    }
+
+    pub async fn validate_route_agent_ref(
+        &self,
+        route: &CooldisIoRouteConfig,
+    ) -> CooldisResult<()> {
+        let Some(agent_ref) = route.agent_ref.as_deref() else {
+            return Ok(());
+        };
+        let app_server = self.app_server.as_ref().ok_or_else(|| {
+            CooldisError::RuntimeFactory(format!(
+                "io.routes.{}.agent_ref requires daemon IO to be backed by an app-server",
+                route.id
+            ))
+        })?;
+        app_server
+            .validate_daemon_route_agent_ref(agent_ref)
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "io.routes.{}.agent_ref {agent_ref:?} did not resolve in agent registry root {}: {err}. Publish the agent with `cooldis agent publish --registry-root {}` before starting the daemon.",
+                    route.id,
+                    app_server.agent_registry_root().display(),
+                    app_server.agent_registry_root().display()
+                ))
+            })
     }
 
     pub async fn register_egress_state_sqlite_dsn(
@@ -803,6 +832,11 @@ impl CooldisDaemonIoBridge {
             "cooldis_source_scope".to_string(),
             envelope.source.stable_scope(),
         );
+        if let Some(agent_ref) = envelope.metadata.get(ROUTE_AGENT_REF_METADATA) {
+            target
+                .metadata
+                .insert(ROUTE_AGENT_REF_METADATA.to_string(), agent_ref.clone());
+        }
         Ok(target)
     }
 
@@ -1054,6 +1088,11 @@ impl CooldisDaemonIoBridge {
             .map_err(|err| IoError::Bridge(format!("invalid parent thread id: {err}")))?
             .map(ThreadTopology::spawned_from)
             .unwrap_or_else(ThreadTopology::root);
+        let agent_binding = self.route_agent_binding(target).await?;
+        let metadata = agent_binding
+            .as_ref()
+            .map(|binding| binding.metadata.clone())
+            .unwrap_or_default();
 
         let handle = self
             .supervisor
@@ -1062,16 +1101,51 @@ impl CooldisDaemonIoBridge {
                 user_id: target.address.user_id.clone(),
                 session_id: target.address.session_id.clone(),
                 topology,
-                metadata: Default::default(),
+                metadata,
             })
             .await
             .map_err(cooldis_bridge_error)?;
+        if let Some(binding) = agent_binding
+            && let Err(err) = handle
+                .record_manifest_receipts(binding.compile_receipt, binding.bind_receipt)
+                .await
+        {
+            let _ = self
+                .supervisor
+                .shutdown_thread_at(&handle.context().coordinates)
+                .await;
+            return Err(cooldis_bridge_error(err));
+        }
         let coordinates = handle.context().coordinates.clone();
         self.threads
             .lock()
             .await
             .insert(scope_key, coordinates.clone());
         Ok((coordinates, handle))
+    }
+
+    async fn route_agent_binding(
+        &self,
+        target: &ResolvedIoTarget,
+    ) -> IoResult<Option<KernelThreadSpawnAgentBinding>> {
+        let Some(agent_ref) = target
+            .metadata
+            .get(ROUTE_AGENT_REF_METADATA)
+            .filter(|agent_ref| !agent_ref.trim().is_empty())
+        else {
+            return Ok(None);
+        };
+        let app_server = self.app_server.as_ref().ok_or_else(|| {
+            IoError::Bridge(
+                "daemon route agent_ref requires daemon IO to be backed by an app-server"
+                    .to_string(),
+            )
+        })?;
+        app_server
+            .bind_daemon_route_agent(agent_ref)
+            .await
+            .map(Some)
+            .map_err(cooldis_bridge_error)
     }
 
     fn runtime_input(&self, input: &IoTurnInput) -> TurnInput {
@@ -1111,7 +1185,7 @@ impl CooldisDaemonIoBridge {
                 &parent_coordinates,
                 None,
                 Some("daemon-io-fork".to_string()),
-                BTreeMap::new(),
+                parent_handle.context().metadata.clone(),
             )
             .await
             .map_err(cooldis_bridge_error)?;
@@ -1812,6 +1886,7 @@ pub struct RouteIngressSink {
     route_id: String,
     policy: Option<String>,
     threading: Option<String>,
+    agent_ref: Option<String>,
     coalesce_bursts: Option<CooldisCoalesceBurstsConfig>,
 }
 
@@ -1822,6 +1897,7 @@ impl RouteIngressSink {
             route_id: route.id.clone(),
             policy: route.policy.clone(),
             threading: route.threading.clone(),
+            agent_ref: route.agent_ref.clone(),
             coalesce_bursts: route.coalesce_bursts,
         }
     }
@@ -1842,6 +1918,11 @@ impl IngressSink for RouteIngressSink {
             envelope
                 .metadata
                 .insert("cooldis_route_threading".to_string(), threading.clone());
+        }
+        if let Some(agent_ref) = &self.agent_ref {
+            envelope
+                .metadata
+                .insert(ROUTE_AGENT_REF_METADATA.to_string(), agent_ref.clone());
         }
         if let Some(coalesce) = self.coalesce_bursts {
             envelope

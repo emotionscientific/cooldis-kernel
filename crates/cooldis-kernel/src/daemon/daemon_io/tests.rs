@@ -1,8 +1,37 @@
 use super::*;
 use crate::{
-    AppServerListenAddr, CooldisAppServerConfig, CooldisDaemonClockRoute, DaemonClock, EventKind,
-    EventStore, MandateCatchUpPolicy, MandateSchedulePayload, MandateStartRequest, StreamCursorV1,
-    ThreadSpawnedPayload, TimerFiredPayload, control_stream_id, revoke_mandate, start_mandate,
+    APP_SERVER_LOCAL_MODEL,
+    APP_SERVER_LOCAL_PROVIDER,
+    AppServerListenAddr,
+    CanonicalContent,
+    CanonicalProviderRuntimeConfig,
+    CanonicalStopReason,
+    CanonicalUsage,
+    // lexicon-allow: capsule - existing app-server manifest binding config type
+    CapsuleBindingsConfig,
+    CooldisAppServerConfig,
+    CooldisDaemonClockRoute,
+    DaemonClock,
+    EventKind,
+    EventStore,
+    LocalAgentRegistry,
+    MandateCatchUpPolicy,
+    MandateSchedulePayload,
+    MandateStartRequest,
+    ProviderApi,
+    ProviderClient,
+    ProviderRequest,
+    ProviderResponse,
+    ProviderResult,
+    PublishOperationRequest,
+    PublishedOperationSource,
+    StreamCursorV1,
+    THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
+    ThreadSpawnedPayload,
+    TimerFiredPayload,
+    control_stream_id,
+    revoke_mandate,
+    start_mandate,
 };
 use chrono::{DateTime, TimeZone, Utc};
 use cooldis_io_core::{
@@ -279,6 +308,7 @@ fn route_with_egress_and_retry(
         enabled: true,
         policy: None,
         threading: None,
+        agent_ref: None,
         coalesce_bursts: None,
         ingress: None,
         egress_projection,
@@ -319,6 +349,47 @@ async fn test_server_at_root(fixture_root: &Path) -> CooldisAppServer {
     config.user_state_home = fixture_root.join("user-state");
     apply_test_identity(&mut config, fixture_root);
     CooldisAppServer::new_local(config).await.unwrap()
+}
+
+async fn test_server_with_route_provider_at_root(
+    fixture_root: &Path,
+    workspace: &Path,
+    agent_registry_root: &Path,
+    operation_registry_root: &Path,
+    client: Arc<RecordingRouteProviderClient>,
+) -> CooldisAppServer {
+    let socket_path = fixture_root.join("app-server-recording.sock");
+    let listen = AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
+    // lexicon-allow: capsule - existing app-server manifest binding config type
+    let bindings = CapsuleBindingsConfig::default().with_registry_root(operation_registry_root);
+    let mut config = CooldisAppServerConfig::local(listen, workspace)
+        // lexicon-allow: capsule - existing app-server config method
+        .with_capsule_bindings(bindings);
+    config.runtime_home = fixture_root.join("runtime");
+    config.state_home = fixture_root.join("state");
+    config.user_state_home = fixture_root.join("user-state");
+    config.agent_registry_root = agent_registry_root.to_path_buf();
+    config.blob_registry_root =
+        crate::default_blob_registry_root_for_agent_registry_root(agent_registry_root);
+    apply_test_identity(&mut config, fixture_root);
+    let runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let provider_client: Arc<dyn ProviderClient> = client;
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            // lexicon-allow: capsule - existing app-server config field
+            config.capsule_bindings.clone(),
+            None,
+            &config,
+        );
+    CooldisAppServer::with_runtime_factory(config, runtime_factory)
+        .await
+        .unwrap()
 }
 
 async fn test_bridge_at_root(
@@ -375,6 +446,209 @@ fn apply_test_identity(config: &mut CooldisAppServerConfig, fixture_root: &Path)
         .unwrap_or("daemon-io");
     config.tenant_id = format!("app-server-{suffix}");
     config.user_id = format!("local-user-{suffix}");
+}
+
+#[derive(Default)]
+struct RecordingRouteProviderClient {
+    requests: StdMutex<Vec<ProviderRequest>>,
+}
+
+impl RecordingRouteProviderClient {
+    fn requests(&self) -> Vec<ProviderRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProviderClient for RecordingRouteProviderClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text("daemon route ok")],
+            usage: CanonicalUsage {
+                input_tokens: request.messages.len() as u64,
+                output_tokens: 3,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
+async fn wait_for_provider_requests(client: &RecordingRouteProviderClient, count: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if client.requests().len() >= count {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {count} provider request(s)"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn publish_route_test_operation(registry_root: &Path) -> crate::PublishedOperationRecord {
+    std::fs::create_dir_all(registry_root).unwrap();
+    let wasm = wat::parse_str(route_test_operation_guest()).unwrap();
+    let artifact_path = registry_root.join("lookup.wasm");
+    std::fs::write(&artifact_path, wasm).unwrap();
+    crate::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(PublishOperationRequest {
+            name: "lookup".to_string(),
+            artifact_path: artifact_path.clone(),
+            source: PublishedOperationSource::Wasm {
+                bin_path: artifact_path,
+            },
+            interface: None,
+            capability_grants: Default::default(),
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap()
+}
+
+fn publish_route_agent_manifest(
+    root: &Path,
+    agent_registry_root: &Path,
+    operation_registry_root: &Path,
+    operation_hash: &str,
+) -> crate::PublishedAgentRecord {
+    let project = root.join("daemon-route-runner");
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::write(
+        project.join("prompts/system.md"),
+        "You are the daemon route prompt runner.\n",
+    )
+    .unwrap();
+    let manifest_path = project.join("cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "daemon-route-runner"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[runtime]
+default_cwd = "."
+streaming = false
+
+[[tools]]
+type = "direct_tool"
+id = "lookup"
+tool_name = "lookup"
+operation_ref = "op://lookup/lookup@sha256:{operation_hash}"
+"#
+        ),
+    )
+    .unwrap();
+    LocalAgentRegistry::new(agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, operation_registry_root)
+        .unwrap()
+}
+
+fn route_test_operation_guest() -> String {
+    let manifest = serde_json::json!({
+        "abi": "cooldis.operation/0.1",
+        "operations": [{
+            "id": 1,
+            "name": "lookup",
+            "input": "bytes",
+            "output": "bytes",
+            "events": "none",
+            "mode": "sync",
+            "required_capabilities": []
+        }]
+    })
+    .to_string();
+    format!(
+        r#"
+            (module
+              (import "cooldis_0.1" "source_read" (func $source_read (param i32 i32 i32) (result i32)))
+              (import "cooldis_0.1" "sink_write" (func $sink_write (param i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 4096) "{manifest}")
+              (data (i32.const 8192) "lookup:")
+              (func (export "__cooldis_describe_module__") (param $sink i32) (result i32)
+                i32.const 0
+                i32.const {manifest_len}
+                i32.store
+                local.get $sink
+                i32.const 4096
+                i32.const 0
+                call $sink_write)
+              (func (export "__cooldis_call_operation__")
+                (param $op i32)
+                (param $invocation i32)
+                (param $source i32)
+                (param $output i32)
+                (param $events i32)
+                (result i32)
+                (local $n i32)
+                local.get $op
+                i32.const 1
+                i32.ne
+                if
+                  i32.const 2
+                  return
+                end
+                i32.const 0
+                i32.const 1024
+                i32.store
+                local.get $source
+                i32.const 1024
+                i32.const 0
+                call $source_read
+                drop
+                i32.const 0
+                i32.load
+                local.set $n
+                i32.const 0
+                i32.const 7
+                i32.store
+                local.get $output
+                i32.const 8192
+                i32.const 0
+                call $sink_write
+                drop
+                i32.const 0
+                local.get $n
+                i32.store
+                local.get $output
+                i32.const 1024
+                i32.const 0
+                call $sink_write
+                drop
+                i32.const 0))
+            "#,
+        manifest = wat_bytes(manifest.as_bytes()),
+        manifest_len = manifest.len(),
+    )
+}
+
+fn wat_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| match byte {
+            b'\n' => "\\0a".to_string(),
+            b'\r' => "\\0d".to_string(),
+            b'\t' => "\\09".to_string(),
+            b'"' => "\\22".to_string(),
+            b'\\' => "\\5c".to_string(),
+            0x20..=0x7e => (*byte as char).to_string(),
+            _ => format!("\\{byte:02x}"),
+        })
+        .collect()
 }
 
 async fn register_route_state(
@@ -797,6 +1071,213 @@ async fn direct_sink_submits_ingress_to_runtime_and_emits_egress() {
         egress.kind,
         EgressKind::AssistantMessage { ref text } if text.contains("hello direct")
     ));
+}
+
+#[tokio::test]
+async fn route_agent_ref_binds_manifest_prompt_metadata_and_receipts() {
+    let root = test_root("route-agent-binding");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation = publish_route_test_operation(&operation_registry_root).await;
+    let agent_registry_root = root.join("agents");
+    let agent = publish_route_agent_manifest(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        &operation.active_artifact_hash,
+    );
+    let client = Arc::new(RecordingRouteProviderClient::default());
+    let server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        client.clone(),
+    )
+    .await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let mut route = route_with_egress(Vec::new(), None);
+    route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
+    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+
+    sink.submit(test_envelope("hello route")).await.unwrap();
+
+    wait_for_provider_requests(&client, 1).await;
+    let requests = client.requests();
+    assert_eq!(
+        requests[0].system[0].text,
+        "You are the daemon route prompt runner.\n"
+    );
+    assert!(
+        requests[0].system[1]
+            .text
+            .contains("You are running as agent://daemon-route-runner@0.1.0"),
+        "{:?}",
+        requests[0].system
+    );
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let handle = bridge.supervisor.get_thread_at(&coordinates).await.unwrap();
+    let metadata = &handle.context().metadata;
+    assert_eq!(
+        metadata.get("cooldis.agent.ref_uri").map(String::as_str),
+        Some("agent://daemon-route-runner@0.1.0")
+    );
+    assert_eq!(
+        metadata
+            .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .map(String::as_str),
+        Some(agent.manifest_hash.as_str())
+    );
+    let static_segments = metadata
+        .get(THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+        .expect("static context segment metadata should be stamped");
+    let static_segments: Vec<serde_json::Value> = serde_json::from_str(static_segments).unwrap();
+    assert_eq!(static_segments[0]["id"].as_str(), Some("identity"));
+    assert!(
+        static_segments[0]["content_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    assert!(
+        thread_events
+            .iter()
+            .any(|event| event.kind == EventKind::ManifestBindCompleted)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn route_without_agent_ref_stays_unbound() {
+    let root = test_root("route-without-agent-ref");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let agent_registry_root = root.join("agents");
+    let client = Arc::new(RecordingRouteProviderClient::default());
+    let server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        client.clone(),
+    )
+    .await;
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let route = route_with_egress(Vec::new(), None);
+    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+
+    sink.submit(test_envelope("hello unbound")).await.unwrap();
+
+    wait_for_provider_requests(&client, 1).await;
+    assert!(client.requests()[0].system.is_empty());
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let handle = bridge.supervisor.get_thread_at(&coordinates).await.unwrap();
+    assert!(
+        !handle
+            .context()
+            .metadata
+            .contains_key(THREAD_AGENT_MANIFEST_HASH_METADATA)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn route_agent_ref_unknown_fails_with_registry_publish_hint() {
+    let root = test_root("route-agent-missing");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let agent_registry_root = root.join("agents");
+    let client = Arc::new(RecordingRouteProviderClient::default());
+    let server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        client,
+    )
+    .await;
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let mut route = route_with_egress(Vec::new(), None);
+    route.agent_ref = Some("agent://missing-route-agent@latest".to_string());
+
+    let err = bridge.validate_route_agent_ref(&route).await.unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("io.routes.main.agent_ref"));
+    assert!(message.contains(&agent_registry_root.display().to_string()));
+    assert!(message.contains("cooldis agent publish"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn fork_on_new_dm_child_inherits_route_agent_binding() {
+    let root = test_root("route-agent-fork");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation = publish_route_test_operation(&operation_registry_root).await;
+    let agent_registry_root = root.join("agents");
+    let agent = publish_route_agent_manifest(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        &operation.active_artifact_hash,
+    );
+    let client = Arc::new(RecordingRouteProviderClient::default());
+    let server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        client.clone(),
+    )
+    .await;
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("fork_on_new_dm".to_string());
+    route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
+    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+
+    sink.submit(test_envelope("fork route")).await.unwrap();
+
+    wait_for_provider_requests(&client, 1).await;
+    let child_coordinates = only_thread_coordinates(&bridge).await;
+    let child = bridge
+        .supervisor
+        .get_thread_at(&child_coordinates)
+        .await
+        .unwrap();
+    assert_eq!(
+        child
+            .context()
+            .metadata
+            .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .map(String::as_str),
+        Some(agent.manifest_hash.as_str())
+    );
+    let parent_thread_id = child
+        .context()
+        .parent_thread_id
+        .expect("fork child should reference parent");
+    let parent = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, parent_thread_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        parent
+            .context()
+            .metadata
+            .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .map(String::as_str),
+        Some(agent.manifest_hash.as_str())
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

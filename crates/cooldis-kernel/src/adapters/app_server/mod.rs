@@ -1372,7 +1372,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
     )
 }
 
-fn runtime_factory_from_provider_parts_with_app_paths(
+pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
     runtime_config: CanonicalProviderRuntimeConfig,
     client: Arc<dyn ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type name
