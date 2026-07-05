@@ -1,4 +1,4 @@
-use crate::{AppServerListenAddr, CooldisError, CooldisResult};
+use crate::{AgentRecordRef, AppServerListenAddr, CooldisError, CooldisResult};
 use cooldis_io_core::{IngressPersistenceConfig, IngressPersistenceMode};
 use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -369,6 +369,8 @@ pub struct CooldisIoRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_bursts: Option<CooldisCoalesceBurstsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<CooldisIngressConfig>,
@@ -391,6 +393,21 @@ impl CooldisIoRouteConfig {
         }
         if self.kind.trim().is_empty() {
             errors.push(format!("io.routes {:?} kind cannot be empty", self.id));
+        }
+        if let Some(agent_ref) = &self.agent_ref {
+            if agent_ref.trim().is_empty() {
+                errors.push(format!("io.routes.{}.agent_ref cannot be empty", self.id));
+            } else if !agent_ref.starts_with("agent://") {
+                errors.push(format!(
+                    "io.routes.{}.agent_ref must be an agent:// ref",
+                    self.id
+                ));
+            } else if let Err(err) = AgentRecordRef::parse(agent_ref) {
+                errors.push(format!(
+                    "io.routes.{}.agent_ref must be an agent:// ref: {err}",
+                    self.id
+                ));
+            }
         }
         if let Some(ingress) = &self.ingress {
             ingress.validate(&format!("io.routes.{}", self.id), errors);

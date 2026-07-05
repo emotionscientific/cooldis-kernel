@@ -239,6 +239,7 @@ impl CooldisAppServer {
             alias,
             &provider_surface,
             self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.blob_registry_root.as_path()),
             Some(self.inner.skill_registry_root.as_path()),
             &mcp_server_refs,
             Some(&tool_universe_discoverer),
@@ -247,6 +248,69 @@ impl CooldisAppServer {
         )
         .await?;
         record_bound_agent_receipts(handle, &bound).await.map(Some)
+    }
+
+    pub(crate) fn agent_registry_root(&self) -> &Path {
+        &self.inner.agent_registry_root
+    }
+
+    pub(crate) async fn validate_daemon_route_agent_ref(
+        &self,
+        agent_ref: &str,
+    ) -> CooldisResult<()> {
+        if !agent_ref.starts_with("agent://") {
+            return Err(CooldisError::RuntimeFactory(
+                "daemon route agent_ref must be an agent:// ref".to_string(),
+            ));
+        }
+        AgentRecordRef::parse(agent_ref)?;
+        self.bind_daemon_route_agent(agent_ref).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn bind_daemon_route_agent(
+        &self,
+        agent_ref: &str,
+    ) -> CooldisResult<KernelThreadSpawnAgentBinding> {
+        let bound = self
+            .bind_app_server_agent_ref(
+                agent_ref,
+                &AgentManifestModelProfileSelection::default(),
+                &AgentManifestBindOverrides::default(),
+            )
+            .await?;
+        kernel_thread_spawn_agent_binding(
+            &bound,
+            &self.inner.cwd,
+            self.inner.capsule_bindings.registry_root.as_deref(),
+            None,
+        )
+    }
+
+    pub(super) async fn bind_app_server_agent_ref(
+        &self,
+        agent_ref: &str,
+        model_selection: &AgentManifestModelProfileSelection,
+        overrides: &AgentManifestBindOverrides,
+    ) -> CooldisResult<AgentManifestBoundThread> {
+        let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
+        let provider_surface = self.agent_manifest_provider_surface()?;
+        let mcp_server_refs = self.configured_mcp_server_refs()?;
+        let tool_universe_discoverer = self.tool_universe_discoverer()?;
+        bind_published_agent_record(
+            &record,
+            alias,
+            &provider_surface,
+            self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.blob_registry_root.as_path()),
+            Some(self.inner.skill_registry_root.as_path()),
+            &mcp_server_refs,
+            Some(&tool_universe_discoverer),
+            model_selection,
+            overrides,
+        )
+        .await
     }
 
     pub(super) async fn thread_state_from_lifecycle(
@@ -940,7 +1004,14 @@ pub(super) fn resolve_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
 }
 
 pub(super) fn normalize_registry_roots(config: &mut CooldisAppServerConfig) {
+    let blob_registry_root_was_default =
+        config.blob_registry_root == PathBuf::from(DEFAULT_BLOB_REGISTRY_ROOT);
     config.agent_registry_root = resolve_path_against_cwd(&config.cwd, &config.agent_registry_root);
+    config.blob_registry_root = if blob_registry_root_was_default {
+        default_blob_registry_root_for_agent_registry_root(&config.agent_registry_root)
+    } else {
+        resolve_path_against_cwd(&config.cwd, &config.blob_registry_root)
+    };
     config.skill_registry_root = resolve_path_against_cwd(&config.cwd, &config.skill_registry_root);
     if let Some(registry_root) = &config.capsule_bindings.registry_root {
         config.capsule_bindings.registry_root =
@@ -1084,6 +1155,18 @@ pub(super) fn append_bound_agent_metadata(
             encoded,
         );
     }
+    if !bound.static_context_segments.is_empty() {
+        let encoded = serde_json::to_string(&bound.static_context_segments).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest static context segments: {err}"),
+            )
+        })?;
+        metadata.insert(
+            crate::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA.to_string(),
+            encoded,
+        );
+    }
     if !bound.tool_universes.is_empty() {
         let encoded = serde_json::to_string(&bound.tool_universes).map_err(|err| {
             jsonrpc_error(
@@ -1196,6 +1279,32 @@ pub(super) async fn record_bound_agent_receipts(
         .record_tool_universe_discovery_receipts(discovery_payloads)
         .await?;
     Ok(manifest_events)
+}
+
+fn kernel_thread_spawn_agent_binding(
+    bound: &AgentManifestBoundThread,
+    cwd_root: &Path,
+    operation_registry_root: Option<&Path>,
+    overrides: Option<&AgentManifestBindOverrides>,
+) -> CooldisResult<KernelThreadSpawnAgentBinding> {
+    let cwd = resolve_cwd(
+        cwd_root,
+        Some(bound.bind_receipt.effective_runtime.default_cwd.as_str()),
+    );
+    let mut metadata = app_server_thread_metadata(&cwd, &bound.bind_receipt.provider_id, false);
+    append_bound_agent_metadata(&mut metadata, bound, overrides, operation_registry_root)
+        .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
+    let compile_receipt = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to encode manifest compile receipt: {err}"))
+    })?;
+    let bind_receipt = serde_json::to_value(&bound.bind_receipt).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
+    })?;
+    Ok(KernelThreadSpawnAgentBinding {
+        metadata,
+        compile_receipt,
+        bind_receipt,
+    })
 }
 
 pub(super) fn app_server_thread_metadata(
@@ -1323,6 +1432,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) secret_store_path: Option<PathBuf>,
     pub(super) session_store_path: Option<PathBuf>,
     pub(super) agent_registry_root: Option<PathBuf>,
+    pub(super) blob_registry_root: Option<PathBuf>,
     pub(super) skill_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
 }
@@ -1392,6 +1502,7 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
 struct AppServerThreadSpawnAgentResolver {
     agent_registry_root: PathBuf,
     operation_registry_root: Option<PathBuf>,
+    blob_registry_root: Option<PathBuf>,
     skill_registry_root: Option<PathBuf>,
     metadata_store_path: Option<PathBuf>,
     secret_store_path: Option<PathBuf>,
@@ -1415,6 +1526,7 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             alias,
             &self.provider_surface,
             self.operation_registry_root.as_deref(),
+            self.blob_registry_root.as_deref(),
             self.skill_registry_root.as_deref(),
             &mcp_server_refs,
             tool_universe_discoverer
@@ -1424,31 +1536,12 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             &AgentManifestBindOverrides::default(),
         )
         .await?;
-        let cwd = resolve_cwd(
-            &self.cwd,
-            Some(bound.bind_receipt.effective_runtime.default_cwd.as_str()),
-        );
-        let mut metadata = app_server_thread_metadata(&cwd, &bound.bind_receipt.provider_id, false);
-        append_bound_agent_metadata(
-            &mut metadata,
+        kernel_thread_spawn_agent_binding(
             &bound,
-            None,
+            &self.cwd,
             self.operation_registry_root.as_deref(),
+            None,
         )
-        .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
-        let compile_receipt = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
-            CooldisError::RuntimeFactory(format!(
-                "failed to encode manifest compile receipt: {err}"
-            ))
-        })?;
-        let bind_receipt = serde_json::to_value(&bound.bind_receipt).map_err(|err| {
-            CooldisError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
-        })?;
-        Ok(KernelThreadSpawnAgentBinding {
-            metadata,
-            compile_receipt,
-            bind_receipt,
-        })
     }
 }
 
@@ -1492,7 +1585,9 @@ impl CapsuleBindingRuntimeFactory {
         let cwd = self.cwd.clone()?;
         Some(AppServerThreadSpawnAgentResolver {
             agent_registry_root,
+            // lexicon-allow: capsule - existing app-server config field
             operation_registry_root: self.capsule_bindings.registry_root.clone(),
+            blob_registry_root: self.blob_registry_root.clone(),
             skill_registry_root: self.skill_registry_root.clone(),
             metadata_store_path: self.metadata_store_path.clone(),
             secret_store_path: self.secret_store_path.clone(),
@@ -1558,6 +1653,7 @@ impl CapsuleBindingRuntimeFactory {
         if manifest_operation_bindings.is_empty() {
             return Ok(None);
         }
+        // lexicon-allow: capsule - existing app-server config field
         let Some(registry_root) = &self.capsule_bindings.registry_root else {
             // lexicon-allow: capsule - existing app-server config error text
             return Err(CooldisError::RuntimeFactory(

@@ -1356,6 +1356,7 @@ mod tests {
                 tool_ids: Vec::new(),
                 operation_bindings: Vec::new(),
                 skill_packages: Vec::new(),
+                static_context_segments: Vec::new(),
                 tool_universes: Vec::new(),
                 couplings,
                 granted: Vec::new(),

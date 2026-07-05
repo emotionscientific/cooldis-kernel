@@ -189,6 +189,7 @@ streaming = true
         &surface,
         None,
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -199,6 +200,149 @@ streaming = true
 
     assert!(err.to_string().contains("runtime.streaming"));
     assert!(err.to_string().contains("support streaming"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn blob_static_source_binds_prompt_text_and_hash() {
+    let root = temp_dir("manifest-bind-blob");
+    let blob_root = root.join("blobs");
+    let prompt_path = root.join("system.md");
+    fs::write(&prompt_path, "You are the release verifier.\n").unwrap();
+    let blob = LocalBlobRegistry::new(&blob_root)
+        .publish_file(&prompt_path, Some("system_prompt"))
+        .unwrap();
+    let manifest_path = root.join("blob.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "blob-runner"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[resources]]
+name = "system_prompt"
+kind = "blob"
+ref = "{}"
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "{KERNEL_ASSEMBLER_STATIC}"
+input = "system_prompt"
+pinned = true
+"#,
+            blob.ref_uri
+        ),
+    )
+    .unwrap();
+    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo");
+
+    let bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        Some(&blob_root),
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(bound.static_context_segments.len(), 1);
+    let segment = &bound.static_context_segments[0];
+    assert_eq!(segment.id, "identity");
+    assert_eq!(segment.ref_uri, blob.ref_uri);
+    assert_eq!(segment.content, "You are the release verifier.\n");
+    assert_eq!(segment.content_sha256, blob.content_sha256);
+    assert_eq!(
+        bound.bind_receipt.static_context_segments[0].content_sha256,
+        blob.content_sha256
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn missing_blob_resource_fails_bind_with_publish_hint() {
+    let root = temp_dir("manifest-bind-missing-blob");
+    let missing_hash = "a".repeat(64);
+    let manifest_path = root.join("missing-blob.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "missing-blob"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[resources]]
+name = "system_prompt"
+kind = "blob"
+ref = "resource://artifact/sha256:{missing_hash}"
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "{KERNEL_ASSEMBLER_STATIC}"
+input = "system_prompt"
+pinned = true
+"#
+        ),
+    )
+    .unwrap();
+    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo");
+    let blob_root = root.join("blobs");
+
+    let err = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        Some(blob_root.as_path()),
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap_err();
+
+    let text = err.to_string();
+    assert!(text.contains("blob resource \"system_prompt\""));
+    assert!(text.contains("resource://artifact/sha256:"));
+    assert!(text.contains("cooldis blob publish"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -419,6 +563,7 @@ streaming = false
         &surface,
         None,
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -470,6 +615,7 @@ async fn manifest_coupling_binds_controller_receipt() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         None,
         &BTreeSet::new(),
         None,
@@ -578,6 +724,7 @@ async fn manifest_coupling_infers_projection_for_distinct_derived_sink() {
         &surface,
         Some(&operation_root),
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -624,6 +771,7 @@ async fn manifest_coupling_requires_content_addressed_function_ref() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         None,
         &BTreeSet::new(),
         None,
@@ -674,6 +822,7 @@ async fn manifest_coupling_requires_declared_function_grants() {
         &surface,
         Some(&operation_root),
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -722,6 +871,7 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         None,
         &BTreeSet::new(),
         None,
@@ -816,6 +966,7 @@ async fn manifest_coupling_custom_id_binds_to_wasm_executor() {
         &surface,
         Some(&operation_root),
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -890,6 +1041,7 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
             None,
             &surface,
             Some(&operation_root),
+            None,
             None,
             &BTreeSet::new(),
             None,
@@ -969,6 +1121,7 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
             &surface,
             Some(&operation_root),
             None,
+            None,
             &BTreeSet::new(),
             None,
             &AgentManifestModelProfileSelection::default(),
@@ -998,6 +1151,7 @@ async fn manifest_without_couplings_binds_unchanged() {
         &record,
         None,
         &surface,
+        None,
         None,
         None,
         &BTreeSet::new(),
@@ -1068,6 +1222,7 @@ ref = "{}"
         None,
         &surface,
         None,
+        None,
         Some(&skill_root),
         &BTreeSet::new(),
         None,
@@ -1080,6 +1235,7 @@ ref = "{}"
         &record,
         None,
         &surface,
+        None,
         None,
         Some(&skill_root),
         &BTreeSet::new(),

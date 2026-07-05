@@ -15,14 +15,15 @@ use crate::{
     RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
     RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
     SessionEntryId, SessionEntryKind, SessionStartHookRequest, StopHookRequest, SystemBlock,
-    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, ThinkingConfig, ThreadCommand, ThreadContext,
-    ThreadEvent, ThreadSignal, ThreadStatus, ThreadTerminalState, ToolCallCompletedPayload,
-    ToolCallDecision, ToolCallRequestedPayload, ToolCallSubject, ToolDecisionRequest,
-    ToolDefinition, ToolExecutionInterceptor, ToolExecutionRequest, ToolPermissionDecision,
-    ToolPermissionGate, TurnBudget, TurnContext, TurnInput, TurnSubmissionMode,
-    UserPromptSubmitHookRequest, VirtualBashRuntimeConfig, active_manifest_bind_receipt,
-    active_tool_controller_for_request, compile_provider_request_context, decide_tool_call,
-    deterministic_compaction_summary, emit_runtime_event, normalize_history_for_target,
+    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
+    ThinkingConfig, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
+    ThreadTerminalState, ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload,
+    ToolCallSubject, ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor,
+    ToolExecutionRequest, ToolPermissionDecision, ToolPermissionGate, TurnBudget, TurnContext,
+    TurnInput, TurnSubmissionMode, UserPromptSubmitHookRequest, VirtualBashRuntimeConfig,
+    active_manifest_bind_receipt, active_tool_controller_for_request,
+    compile_provider_request_context, decide_tool_call, deterministic_compaction_summary,
+    emit_runtime_event, normalize_history_for_target,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -580,6 +581,7 @@ impl CanonicalProviderRuntime {
             .build_instruction_read_plan_contexts(coordinates)
             .await?;
         let skill_context_segments = skill_context_segments_from_thread(&turn_context.thread)?;
+        let static_context_segments = static_context_segments_from_thread(&turn_context.thread)?;
         let environment_contexts = skill_context_segments
             .iter()
             .map(|segment| segment.content.clone())
@@ -588,6 +590,7 @@ impl CanonicalProviderRuntime {
             .collect::<Vec<_>>();
         let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
             system: self.config.system.clone(),
+            static_system_sources: static_context_segments.clone(),
             session_entries: session_entries.clone(),
             turn_context: turn_context.snapshot(),
             hook_contexts: steering_contexts,
@@ -638,7 +641,7 @@ impl CanonicalProviderRuntime {
         let receipt_payload = context_compile_receipt_payload(
             &session_entries,
             &compiled_context,
-            &skill_context_segments,
+            &context_receipt_static_segments(&static_context_segments, &skill_context_segments),
             &agent_diagnostics,
             &replay_transform,
             provider_dropped_messages,
@@ -924,6 +927,7 @@ async fn run_auto_compaction_if_needed(
         .build_instruction_read_plan_contexts(coordinates)
         .await?;
     let skill_context_segments = skill_context_segments_from_thread(thread_context)?;
+    let static_context_segments = static_context_segments_from_thread(thread_context)?;
     let environment_contexts = skill_context_segments
         .iter()
         .map(|segment| segment.content.clone())
@@ -932,6 +936,7 @@ async fn run_auto_compaction_if_needed(
         .collect::<Vec<_>>();
     let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
         system: runtime.config.system.clone(),
+        static_system_sources: static_context_segments,
         session_entries: context.entries,
         turn_context: runtime
             .turn_context(
@@ -1955,6 +1960,44 @@ fn skill_context_segments_from_thread(
         }
     }
     Ok(segments)
+}
+
+fn static_context_segments_from_thread(
+    thread: &ThreadContext,
+) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    let Some(raw) = thread
+        .metadata
+        .get(THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+    else {
+        return Ok(Vec::new());
+    };
+    let segments =
+        serde_json::from_str::<Vec<AgentManifestStaticContextSegment>>(raw).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "thread manifest static context segments are invalid: {err}"
+            ))
+        })?;
+    for segment in &segments {
+        let expected = sha256_hex(segment.content.as_bytes());
+        if segment.content_sha256 != expected {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "thread manifest static context segment {:?} content hash mismatch: expected {}, got {}",
+                segment.id, expected, segment.content_sha256
+            )));
+        }
+    }
+    Ok(segments)
+}
+
+fn context_receipt_static_segments(
+    static_context_segments: &[AgentManifestStaticContextSegment],
+    skill_context_segments: &[AgentManifestStaticContextSegment],
+) -> Vec<AgentManifestStaticContextSegment> {
+    static_context_segments
+        .iter()
+        .chain(skill_context_segments)
+        .cloned()
+        .collect()
 }
 
 fn context_compile_receipt_payload(

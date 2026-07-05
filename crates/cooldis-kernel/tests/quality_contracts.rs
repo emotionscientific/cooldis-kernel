@@ -230,6 +230,7 @@ fn public_api_coverage_tracks_docs_and_man_page_gaps() {
         "cooldis agent list",
         "cooldis agent show",
         "cooldis agent run",
+        "cooldis blob publish",
         "cooldis tool build",
         "cooldis tool list",
         "cooldis tool publish",

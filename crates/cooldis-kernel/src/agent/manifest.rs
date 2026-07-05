@@ -1,8 +1,10 @@
 use crate::agent::manifest_bind::verify_operation_ref;
 use crate::agent::manifest_schema::{
-    AgentManifestRefStatus, AgentManifestResolvedRef, AgentManifestSchema, AgentManifestTool,
+    AgentManifestContextPipeline, AgentManifestRefStatus, AgentManifestResolvedRef,
+    AgentManifestResource, AgentManifestResourceKind, AgentManifestResourceMode,
+    AgentManifestResourceMount, AgentManifestSchema, AgentManifestTool, KERNEL_ASSEMBLER_STATIC,
 };
-use crate::{CooldisError, CooldisResult, validate_record_name};
+use crate::{CooldisError, CooldisResult, LocalBlobRegistry, validate_record_name};
 use cooldis_agent::{validate_namespace, validate_version};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -15,27 +17,57 @@ use uuid::Uuid;
 
 const AGENT_RECORD_SCHEMA_VERSION: u32 = 1;
 const AGENT_MANIFEST_KIND: &str = "cooldis.agent-manifest";
+const FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE: &str = "identity";
 
 pub fn default_operations_registry_root() -> PathBuf {
     PathBuf::from(".cooldis/operations")
 }
 
+pub fn default_blob_registry_root() -> PathBuf {
+    PathBuf::from(".cooldis/blobs")
+}
+
+pub fn default_blob_registry_root_for_agent_registry_root(root: impl AsRef<Path>) -> PathBuf {
+    let root = root.as_ref();
+    if root.file_name().and_then(|name| name.to_str()) == Some("agents")
+        && let Some(parent) = root.parent()
+    {
+        return parent.join("blobs");
+    }
+    root.join("blobs")
+}
+
 #[derive(Clone, Debug)]
 pub struct LocalAgentRegistry {
     root: PathBuf,
+    blob_registry_root: PathBuf,
 }
 
 impl LocalAgentRegistry {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        let blob_registry_root = default_blob_registry_root_for_agent_registry_root(&root);
+        Self {
+            root,
+            blob_registry_root,
+        }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    pub fn blob_registry_root(&self) -> &Path {
+        &self.blob_registry_root
+    }
+
+    pub fn with_blob_registry_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.blob_registry_root = root.into();
+        self
+    }
+
     pub fn plan_manifest_path(&self, path: impl AsRef<Path>) -> CooldisResult<AgentPublishPlan> {
-        AgentPublishPlan::from_path(path.as_ref())
+        AgentPublishPlan::from_path_with_blob_registry(path.as_ref(), &self.blob_registry_root)
     }
 
     pub fn publish_manifest_path(
@@ -415,21 +447,54 @@ impl AgentManifestRefVerificationStatus {
 
 impl AgentPublishPlan {
     pub fn from_path(path: &Path) -> CooldisResult<Self> {
+        Self::from_path_with_blob_registry(path, default_blob_registry_root())
+    }
+
+    pub fn from_path_with_blob_registry(
+        path: &Path,
+        blob_registry_root: impl AsRef<Path>,
+    ) -> CooldisResult<Self> {
         let source = fs::read_to_string(path).map_err(|err| {
             CooldisError::RuntimeFactory(format!(
                 "failed to read agent manifest {}: {err}",
                 path.display()
             ))
         })?;
-        Self::from_source(&source)
+        Self::from_source_with_folder_first_prompt(
+            &source,
+            path.parent().unwrap_or_else(|| Path::new(".")),
+            blob_registry_root.as_ref(),
+        )
     }
 
     pub fn from_source(source: &str) -> CooldisResult<Self> {
+        Self::from_source_with_manifest(source, |value| {
+            AgentManifestSchema::from_toml_value(value).map_err(Into::into)
+        })
+    }
+
+    fn from_source_with_folder_first_prompt(
+        source: &str,
+        manifest_dir: &Path,
+        blob_registry_root: &Path,
+    ) -> CooldisResult<Self> {
+        let prompt_path = manifest_dir.join("prompts/system.md");
+        Self::from_source_with_manifest(source, |value| {
+            let mut manifest = AgentManifestSchema::from_toml_value(value)?;
+            lower_folder_first_system_prompt(&mut manifest, &prompt_path, blob_registry_root)?;
+            Ok(manifest)
+        })
+    }
+
+    fn from_source_with_manifest<F>(source: &str, manifest_fn: F) -> CooldisResult<Self>
+    where
+        F: FnOnce(&toml::Value) -> CooldisResult<AgentManifestSchema>,
+    {
         let source_hash = text_sha256(source.as_bytes());
         let value: toml::Value = toml::from_str(source).map_err(|err| {
             CooldisError::RuntimeFactory(format!("invalid agent manifest: {err}"))
         })?;
-        let manifest = AgentManifestSchema::from_toml_value(&value)?;
+        let manifest = manifest_fn(&value)?;
         let name = validate_record_name(&manifest.identity.name)?;
         let namespace = manifest
             .identity
@@ -899,6 +964,66 @@ fn compile_resolved_refs(manifest: &AgentManifestSchema) -> Vec<AgentManifestRes
     refs
 }
 
+fn lower_folder_first_system_prompt(
+    manifest: &mut AgentManifestSchema,
+    prompt_path: &Path,
+    blob_registry_root: &Path,
+) -> CooldisResult<()> {
+    if !prompt_path.exists() || !identity_static_source_has_empty_input(manifest) {
+        return Ok(());
+    }
+    if manifest
+        .resources
+        .iter()
+        .any(|resource| resource.name == FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE)
+    {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "folder-first prompt lowering wants to create resource {:?}, but the manifest already declares that resource; either point the identity static source at it explicitly or rename the resource",
+            FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE
+        )));
+    }
+    let blob = LocalBlobRegistry::new(blob_registry_root)
+        .publish_file(prompt_path, Some(FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE))?;
+    manifest.resources.push(AgentManifestResource {
+        name: FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE.to_string(),
+        kind: AgentManifestResourceKind::Blob,
+        reference: blob.ref_uri,
+        mount: AgentManifestResourceMount::Context,
+        mode: AgentManifestResourceMode::Read,
+    });
+    let mut context = manifest.effective_context_pipeline();
+    resolve_identity_static_source(&mut context)?;
+    manifest.context = Some(context);
+    manifest.validate()?;
+    Ok(())
+}
+
+fn identity_static_source_has_empty_input(manifest: &AgentManifestSchema) -> bool {
+    manifest
+        .effective_context_pipeline()
+        .sources
+        .iter()
+        .any(|source| {
+            source.id == "identity"
+                && source.assembler == KERNEL_ASSEMBLER_STATIC
+                && source.input.is_none()
+        })
+}
+
+fn resolve_identity_static_source(context: &mut AgentManifestContextPipeline) -> CooldisResult<()> {
+    let source = context
+        .sources
+        .iter_mut()
+        .find(|source| source.id == "identity" && source.assembler == KERNEL_ASSEMBLER_STATIC)
+        .ok_or_else(|| {
+            CooldisError::RuntimeFactory(
+                "default context pipeline did not contain an identity static source".to_string(),
+            )
+        })?;
+    source.input = Some(FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE.to_string());
+    Ok(())
+}
+
 fn resolve_artifact_ref(reference: &str) -> AgentManifestResolvedRef {
     match content_hash_from_ref(reference) {
         Some(content_hash) => AgentManifestResolvedRef {
@@ -917,6 +1042,13 @@ fn resolve_artifact_ref(reference: &str) -> AgentManifestResolvedRef {
 }
 
 fn content_hash_from_ref(reference: &str) -> Option<String> {
+    if let Some(hash) = reference.strip_prefix("resource://artifact/sha256:")
+        && hash.len() == 64
+    {
+        let content_hash = format!("sha256:{hash}");
+        validate_hash_label("content_hash", &content_hash).ok()?;
+        return Some(content_hash);
+    }
     let (_prefix, hash) = reference.rsplit_once("@sha256:")?;
     if hash.len() != 64 {
         return None;

@@ -1,7 +1,8 @@
 use cooldis::{
-    LocalAgentRegistry, LocalOperationRegistry, LocalSkillRegistry, PublishedAgentRecord,
-    PublishedOperationBuild, PublishedOperationRecord, PublishedOperationSource,
-    RegisteredOperation, WasmOperationDefinition, WasmOperationManifest, WasmOperationValueKind,
+    LocalAgentRegistry, LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry,
+    PublishedAgentRecord, PublishedOperationBuild, PublishedOperationRecord,
+    PublishedOperationSource, RegisteredOperation, WasmOperationDefinition, WasmOperationManifest,
+    WasmOperationValueKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -141,7 +142,7 @@ fn cooldis_cli_init_creates_folder_first_agent_project() {
     let manifest = fs::read_to_string(&manifest_path).unwrap();
     assert!(manifest.contains("name = \"release-verifier\""));
     assert!(manifest.contains("provider_ref = \"provider://local_offline\""));
-    assert!(manifest.contains("operation_ref = \"op://example-tool@sha256:"));
+    assert!(!manifest.contains("0000000000000000000000000000000000000000000000000000000000000000"));
     let prompt = fs::read_to_string(&prompt_path).unwrap();
     assert!(prompt.contains("You are the release-verifier agent."));
     let refs = fs::read_to_string(&refs_path).unwrap();
@@ -163,7 +164,28 @@ fn cooldis_cli_init_creates_folder_first_agent_project() {
         missing_operation_registry_root.to_str().unwrap(),
     ]);
     assert!(plan.contains("agent://release-verifier@0.1.0"));
-    assert!(plan.contains("[unverified-offline]"));
+    assert!(plan.contains("context_source: identity -> resource://artifact/sha256:"));
+    assert!(plan.contains("resources: 1"));
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        missing_operation_registry_root.to_str().unwrap(),
+    ]);
+    assert!(publish.contains("published agent://release-verifier@0.1.0"));
+    assert!(publish.contains("context_source: identity -> resource://artifact/sha256:"));
+    let record = agent_record(&registry_root, "release-verifier");
+    assert_eq!(record.resource_count, 1);
+    assert!(
+        record
+            .resolved_refs
+            .iter()
+            .any(|resolved| resolved.declared.starts_with("resource://artifact/sha256:"))
+    );
 
     let duplicate = run_cooldis_failed([
         "init",
@@ -172,6 +194,106 @@ fn cooldis_cli_init_creates_folder_first_agent_project() {
         project.to_str().unwrap(),
     ]);
     assert!(stderr(&duplicate).contains("already exists"));
+}
+
+#[test]
+fn cooldis_cli_blob_publish_is_idempotent() {
+    let root = temp_dir("blob-publish-cli");
+    let file = root.join("system.md");
+    fs::write(&file, "Prompt text for the model.\n").unwrap();
+    let registry_root = root.join("blobs");
+
+    let first = run_cooldis([
+        "blob",
+        "publish",
+        file.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--name",
+        "identity",
+    ]);
+    let second = run_cooldis([
+        "blob",
+        "publish",
+        file.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--name",
+        "identity",
+    ]);
+
+    let first_ref = output_line_suffix(&first, "ref ");
+    let second_ref = output_line_suffix(&second, "ref ");
+    assert_eq!(first_ref, second_ref);
+    assert!(first_ref.starts_with("resource://artifact/sha256:"));
+    let artifact = output_line_suffix(&first, "artifact ");
+    assert!(
+        registry_root
+            .join("records/artifact")
+            .join(format!("sha256-{artifact}.json"))
+            .exists()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cooldis_cli_agent_run_uses_registry_relative_blob_root() {
+    let root = temp_dir("agent-run-registry-relative-blob");
+    let project = root.join("proj");
+    let agent_registry_root = root.join("ags");
+    let operation_registry_root = root.join("ops");
+
+    run_cooldis([
+        "agent",
+        "init",
+        "smokey",
+        "--out",
+        project.to_str().unwrap(),
+    ]);
+    let manifest_path = project.join("cooldis.agent.toml");
+    let prompt_text = fs::read_to_string(project.join("prompts/system.md")).unwrap();
+    assert!(prompt_text.contains("You are the smokey agent."));
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        agent_registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    assert!(publish.contains("published agent://smokey@0.1.0"));
+    assert!(publish.contains("context_source: identity -> resource://artifact/sha256:"));
+
+    let record = agent_record(&agent_registry_root, "smokey");
+    let prompt_ref = record
+        .resolved_refs
+        .iter()
+        .find(|resolved| resolved.declared.starts_with("resource://artifact/sha256:"))
+        .expect("folder-first prompt should publish a blob resource")
+        .declared
+        .clone();
+    let (_prompt_record, published_prompt) =
+        LocalBlobRegistry::new(agent_registry_root.join("blobs"))
+            .load_text_ref(&prompt_ref)
+            .unwrap();
+    assert_eq!(published_prompt, prompt_text);
+
+    let run = run_cooldis([
+        "agent",
+        "run",
+        "agent://smokey@latest",
+        "--input",
+        "who are you",
+        "--registry-root",
+        agent_registry_root.to_str().unwrap(),
+    ]);
+    assert!(run.contains("local:who are you"));
+    assert!(run.contains("manifest.compile.completed:"));
+    assert!(run.contains("manifest.bind.completed:"));
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1565,10 +1687,14 @@ fn write_skill_fixture(package_dir: &Path, name: &str, body: &str) {
 }
 
 fn skill_artifact_hash(output: &str) -> String {
+    output_line_suffix(output, "artifact ")
+}
+
+fn output_line_suffix(output: &str, prefix: &str) -> String {
     output
         .lines()
-        .find_map(|line| line.strip_prefix("artifact "))
-        .unwrap_or_else(|| panic!("skill publish output did not contain artifact hash:\n{output}"))
+        .find_map(|line| line.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("output did not contain line prefix {prefix:?}:\n{output}"))
         .to_string()
 }
 

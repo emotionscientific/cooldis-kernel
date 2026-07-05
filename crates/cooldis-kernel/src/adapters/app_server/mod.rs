@@ -28,9 +28,10 @@ use crate::{
     ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding, ToolUniverseCaller,
     ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent, TurnInput,
     TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualFile, bind_published_agent_record,
-    ensure_cooldis_notify_published, ensure_cooldis_process_published,
-    ensure_cooldis_schedule_published, ensure_cooldis_threads_published, resolve_llm_provider_auth,
-    seed_default_llm_providers, stream_schema_registry_v1,
+    default_blob_registry_root_for_agent_registry_root, ensure_cooldis_notify_published,
+    ensure_cooldis_process_published, ensure_cooldis_schedule_published,
+    ensure_cooldis_threads_published, resolve_llm_provider_auth, seed_default_llm_providers,
+    stream_schema_registry_v1,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cooldis_process::{
@@ -95,6 +96,7 @@ const MAX_HTTP_REQUEST_HEADER_BYTES: usize = 8192;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_COMMAND_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 const DEFAULT_AGENT_REGISTRY_ROOT: &str = ".cooldis/agents";
+const DEFAULT_BLOB_REGISTRY_ROOT: &str = ".cooldis/blobs";
 const DEFAULT_OPERATION_REGISTRY_ROOT: &str = ".cooldis/operations";
 const DEFAULT_SKILL_REGISTRY_ROOT: &str = ".cooldis/skills";
 const METADATA_DB_NAME: &str = "metadata.sqlite3";
@@ -184,6 +186,7 @@ pub struct CooldisAppServerConfig {
     pub provider: AppServerProviderConfig,
     pub capsule_bindings: CapsuleBindingsConfig,
     pub agent_registry_root: PathBuf,
+    pub blob_registry_root: PathBuf,
     pub skill_registry_root: PathBuf,
     pub console_assets: Option<ConsoleAssetConfig>,
 }
@@ -205,6 +208,7 @@ impl CooldisAppServerConfig {
             capsule_bindings: CapsuleBindingsConfig::default()
                 .with_registry_root(DEFAULT_OPERATION_REGISTRY_ROOT),
             agent_registry_root: PathBuf::from(DEFAULT_AGENT_REGISTRY_ROOT),
+            blob_registry_root: PathBuf::from(DEFAULT_BLOB_REGISTRY_ROOT),
             skill_registry_root: PathBuf::from(DEFAULT_SKILL_REGISTRY_ROOT),
             console_assets: None,
         }
@@ -461,6 +465,7 @@ struct CooldisAppServerInner {
     provider: AppServerProviderConfig,
     capsule_bindings: CapsuleBindingsConfig,
     agent_registry_root: PathBuf,
+    blob_registry_root: PathBuf,
     skill_registry_root: PathBuf,
     console_assets: Option<ConsoleAssetConfig>,
     cwd: PathBuf,
@@ -614,6 +619,7 @@ impl CooldisAppServer {
                 provider: config.provider,
                 capsule_bindings: config.capsule_bindings,
                 agent_registry_root: config.agent_registry_root,
+                blob_registry_root: config.blob_registry_root,
                 skill_registry_root: config.skill_registry_root,
                 console_assets: config.console_assets,
                 cwd: config.cwd,
@@ -1362,10 +1368,11 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         None,
+        None,
     )
 }
 
-fn runtime_factory_from_provider_parts_with_app_paths(
+pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
     runtime_config: CanonicalProviderRuntimeConfig,
     client: Arc<dyn ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type name
@@ -1383,6 +1390,7 @@ fn runtime_factory_from_provider_parts_with_app_paths(
         Some(config.user_metadata_store_path()),
         Some(config.state_home.join("session_history.sqlite3")),
         Some(config.agent_registry_root.clone()),
+        Some(config.blob_registry_root.clone()),
         Some(config.skill_registry_root.clone()),
         Some(config.cwd.clone()),
     )
@@ -1398,6 +1406,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     secret_store_path: Option<PathBuf>,
     session_store_path: Option<PathBuf>,
     agent_registry_root: Option<PathBuf>,
+    blob_registry_root: Option<PathBuf>,
     skill_registry_root: Option<PathBuf>,
     cwd: Option<PathBuf>,
 ) -> Arc<dyn crate::AgentRuntimeFactory> {
@@ -1412,6 +1421,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         secret_store_path,
         session_store_path,
         agent_registry_root,
+        blob_registry_root,
         skill_registry_root,
         cwd,
     })

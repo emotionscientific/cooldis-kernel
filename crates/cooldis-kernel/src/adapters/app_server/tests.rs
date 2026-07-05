@@ -2718,6 +2718,144 @@ streaming = false
 }
 
 #[tokio::test]
+async fn folder_first_prompt_reaches_route_bound_agent_provider_request() {
+    let root = unique_test_root("app-server-folder-first-prompt");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation =
+        publish_echo_operation(&operation_registry_root, "lookup", "lookup", "lookup").await;
+    let agent_registry_root = root.join("agents");
+    let blob_registry_root = root.join("blobs");
+    let project = root.join("prompt-runner");
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::write(
+        project.join("prompts/system.md"),
+        "You are the route-bound prompt runner.\n",
+    )
+    .unwrap();
+    let manifest_path = project.join("cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "prompt-runner"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[runtime]
+default_cwd = "."
+streaming = false
+
+[[tools]]
+type = "direct_tool"
+id = "lookup"
+tool_name = "lookup"
+operation_ref = "op://lookup/lookup@sha256:{operation_hash}"
+"#,
+            operation_hash = operation.active_artifact_hash
+        ),
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
+        .unwrap();
+
+    let client = Arc::new(InspectingCapsuleClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-prompt-resource-{}.sock", Uuid::now_v7())),
+    );
+    let mut config = CooldisAppServerConfig::local(listen, &workspace).with_capsule_bindings(
+        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = agent_registry_root;
+    config.blob_registry_root = blob_registry_root;
+    let runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
+        runtime_config,
+        provider_client,
+        config.capsule_bindings.clone(),
+        None,
+        &config,
+    );
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let app = CooldisAppServer::with_runtime_factory_and_metadata_store(
+        config,
+        runtime_factory,
+        metadata_store,
+    )
+    .await
+    .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({ "agentRef": "agent://prompt-runner@latest" })),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn = app
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "hello", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    wait_for_provider_requests(&client, 1).await;
+    wait_for_turn_completed_notification(
+        &mut outbound_rx,
+        &thread_id,
+        turn["turn"]["id"].as_str().unwrap(),
+    )
+    .await;
+
+    let requests = client.requests();
+    assert_eq!(
+        requests[0].system[0].text,
+        "You are the route-bound prompt runner.\n"
+    );
+    assert!(
+        requests[0].system[1]
+            .text
+            .contains("You are running as agent://prompt-runner@0.1.0"),
+        "{:?}",
+        requests[0].system
+    );
+    let context_page =
+        wait_for_event_kind(&app, &connection, &thread_id, "context.compile.completed").await;
+    let segment = &context_page["data"][0]["payload"]["static_context_segments"][0];
+    assert_eq!(segment["id"].as_str(), Some("identity"));
+    assert!(
+        segment["content_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn child_agent_policy_rejects_manifest_thread_spawn_row() {
     let root = unique_test_root("app-server-thread-spawn-policy");
     let workspace = root.join("workspace");
@@ -6680,6 +6818,7 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
     .await
     .unwrap();
 
+    // lexicon-allow: capsule - existing test helper type
     let second_client = Arc::new(InspectingCapsuleClient::default());
     let provider_client: Arc<dyn ProviderClient> = second_client.clone();
     let restarted = test_app_with_provider_and_capsule_bindings(
@@ -7511,6 +7650,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
             &first_cwd,
             listen.clone(),
             provider_client,
+            // lexicon-allow: capsule - existing test helper parameter type
             CapsuleBindingsConfig::default(),
         )
         .await;
@@ -7548,6 +7688,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
         &restarted_cwd,
         listen.clone(),
         provider_client,
+        // lexicon-allow: capsule - existing test helper parameter type
         CapsuleBindingsConfig::default(),
     )
     .await;
@@ -7614,6 +7755,7 @@ async fn app_server_websocket_listen_accepts_codex_tui_client() {
     let root = unique_test_root("app-server-websocket-listen");
     let addr = unused_loopback_addr();
     let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
+    // lexicon-allow: capsule - existing test helper type
     let first_client = Arc::new(InspectingCapsuleClient::default());
     let provider_client: Arc<dyn ProviderClient> = first_client;
     let app = test_app_with_provider_root_and_listen(
@@ -9101,6 +9243,7 @@ where
         Some(config.metadata_store_path()),
         None,
         Some(config.state_home.join("session_history.sqlite3")),
+        None,
         None,
         None,
         None,

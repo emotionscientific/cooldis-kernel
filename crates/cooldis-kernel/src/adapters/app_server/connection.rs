@@ -2196,33 +2196,14 @@ impl CooldisAppServer {
         agent_ref: &str,
         params: &ThreadStartParams,
     ) -> Result<AgentManifestBoundThread, JsonRpcErrorError> {
-        let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
-        let (record, alias) = registry
-            .load_ref_with_alias_receipt(agent_ref)
-            .map_err(internal_error)?;
-        let provider_surface = self
-            .agent_manifest_provider_surface()
-            .map_err(internal_error)?;
-        let mcp_server_refs = self.configured_mcp_server_refs().map_err(internal_error)?;
-        let tool_universe_discoverer = self.tool_universe_discoverer().map_err(internal_error)?;
         let overrides = params.runtime_overrides.clone().unwrap_or_default();
         let model_selection = AgentManifestModelProfileSelection::from_provider_model(
             params.model_provider.clone(),
             params.model.clone(),
         );
-        bind_published_agent_record(
-            &record,
-            alias,
-            &provider_surface,
-            self.inner.capsule_bindings.registry_root.as_deref(),
-            Some(self.inner.skill_registry_root.as_path()),
-            &mcp_server_refs,
-            Some(&tool_universe_discoverer),
-            &model_selection,
-            &overrides,
-        )
-        .await
-        .map_err(thread_start_bind_error)
+        self.bind_app_server_agent_ref(agent_ref, &model_selection, &overrides)
+            .await
+            .map_err(thread_start_bind_error)
     }
 
     pub(super) async fn bind_rebind_fork_agent(
@@ -2231,32 +2212,13 @@ impl CooldisAppServer {
         model_profile_id: Option<&str>,
         overrides: Option<&AgentManifestBindOverrides>,
     ) -> Result<AgentManifestBoundThread, JsonRpcErrorError> {
-        let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
-        let (record, alias) = registry
-            .load_ref_with_alias_receipt(agent_ref)
-            .map_err(internal_error)?;
-        let provider_surface = self
-            .agent_manifest_provider_surface()
-            .map_err(internal_error)?;
-        let mcp_server_refs = self.configured_mcp_server_refs().map_err(internal_error)?;
-        let tool_universe_discoverer = self.tool_universe_discoverer().map_err(internal_error)?;
         let model_selection = model_profile_id
             .map(AgentManifestModelProfileSelection::profile_id)
             .unwrap_or_default();
         let overrides = overrides.cloned().unwrap_or_default();
-        bind_published_agent_record(
-            &record,
-            alias,
-            &provider_surface,
-            self.inner.capsule_bindings.registry_root.as_deref(),
-            Some(self.inner.skill_registry_root.as_path()),
-            &mcp_server_refs,
-            Some(&tool_universe_discoverer),
-            &model_selection,
-            &overrides,
-        )
-        .await
-        .map_err(thread_start_bind_error)
+        self.bind_app_server_agent_ref(agent_ref, &model_selection, &overrides)
+            .await
+            .map_err(thread_start_bind_error)
     }
 
     pub(super) fn agent_manifest_provider_surface(
