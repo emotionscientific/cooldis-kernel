@@ -254,15 +254,17 @@ impl CooldisAppServer {
         &self.inner.agent_registry_root
     }
 
-    pub(crate) fn validate_daemon_route_agent_ref(&self, agent_ref: &str) -> CooldisResult<()> {
+    pub(crate) async fn validate_daemon_route_agent_ref(
+        &self,
+        agent_ref: &str,
+    ) -> CooldisResult<()> {
         if !agent_ref.starts_with("agent://") {
             return Err(CooldisError::RuntimeFactory(
                 "daemon route agent_ref must be an agent:// ref".to_string(),
             ));
         }
         AgentRecordRef::parse(agent_ref)?;
-        LocalAgentRegistry::new(self.inner.agent_registry_root.clone())
-            .load_ref_with_alias_receipt(agent_ref)?;
+        self.bind_daemon_route_agent(agent_ref).await?;
         Ok(())
     }
 

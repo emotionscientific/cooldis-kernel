@@ -542,9 +542,10 @@ impl CooldisDaemonIoBridge {
         })?;
         app_server
             .validate_daemon_route_agent_ref(agent_ref)
+            .await
             .map_err(|err| {
                 CooldisError::RuntimeFactory(format!(
-                    "io.routes.{}.agent_ref {agent_ref:?} did not resolve in agent registry root {}: {err}. Publish the agent with `cooldis agent publish --registry-root {}` before starting the daemon.",
+                    "io.routes.{}.agent_ref {agent_ref:?} did not bind from agent registry root {}: {err}. Publish the agent with `cooldis agent publish --registry-root {}` before starting the daemon.",
                     route.id,
                     app_server.agent_registry_root().display(),
                     app_server.agent_registry_root().display()

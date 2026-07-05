@@ -557,6 +557,56 @@ operation_ref = "op://lookup/lookup@sha256:{operation_hash}"
         .unwrap()
 }
 
+fn publish_route_agent_manifest_with_missing_blob(
+    root: &Path,
+    agent_registry_root: &Path,
+) -> crate::PublishedAgentRecord {
+    let project = root.join("daemon-missing-blob");
+    std::fs::create_dir_all(&project).unwrap();
+    let manifest_path = project.join("cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "daemon-missing-blob"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[runtime]
+default_cwd = "."
+streaming = false
+
+[[resources]]
+name = "system_prompt"
+kind = "blob"
+ref = "resource://artifact/sha256:{}"
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+input = "system_prompt"
+pinned = true
+"#,
+            "f".repeat(64)
+        ),
+    )
+    .unwrap();
+    LocalAgentRegistry::new(agent_registry_root)
+        .publish_manifest_path(&manifest_path)
+        .unwrap()
+}
+
 fn route_test_operation_guest() -> String {
     let manifest = serde_json::json!({
         "abi": "cooldis.operation/0.1",
@@ -1211,6 +1261,40 @@ async fn route_agent_ref_unknown_fails_with_registry_publish_hint() {
     assert!(message.contains("io.routes.main.agent_ref"));
     assert!(message.contains(&agent_registry_root.display().to_string()));
     assert!(message.contains("cooldis agent publish"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn route_agent_ref_missing_blob_fails_startup_validation() {
+    let root = test_root("route-agent-missing-blob");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let agent_registry_root = root.join("agents");
+    publish_route_agent_manifest_with_missing_blob(&root, &agent_registry_root);
+    let client = Arc::new(RecordingRouteProviderClient::default());
+    let server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        client,
+    )
+    .await;
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let mut route = route_with_egress(Vec::new(), None);
+    route.agent_ref = Some("agent://daemon-missing-blob@latest".to_string());
+
+    let err = bridge.validate_route_agent_ref(&route).await.unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("io.routes.main.agent_ref"), "{message}");
+    assert!(message.contains("did not bind"), "{message}");
+    assert!(
+        message.contains("blob resource \"system_prompt\""),
+        "{message}"
+    );
+    assert!(message.contains("cooldis blob publish"), "{message}");
+    assert!(bridge.threads.lock().await.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
 

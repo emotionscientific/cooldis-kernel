@@ -244,17 +244,23 @@ fn compile_system_blocks(
         let mut content = source.content;
         if !source.pinned {
             let original_len = content.len();
-            if let Some(remaining) = remaining_budget.as_mut() {
-                if original_len > *remaining {
-                    content = prefix_text_bytes(&content, *remaining).to_string();
-                    truncated_text_bytes = truncated_text_bytes
-                        .saturating_add(original_len.saturating_sub(content.len()));
-                    *remaining = 0;
-                } else {
-                    *remaining -= original_len;
-                }
+            if let Some(limit) =
+                static_source_budget_limit(max_text_bytes, source.budget_share, remaining_budget)
+                && original_len > limit
+            {
+                content = prefix_text_bytes(&content, limit).to_string();
             }
-            budgeted_text_bytes = budgeted_text_bytes.saturating_add(content.len());
+            if content.trim().is_empty() {
+                truncated_text_bytes = truncated_text_bytes.saturating_add(original_len);
+                continue;
+            }
+            let retained_len = content.len();
+            truncated_text_bytes =
+                truncated_text_bytes.saturating_add(original_len.saturating_sub(retained_len));
+            if let Some(remaining) = remaining_budget.as_mut() {
+                *remaining = remaining.saturating_sub(retained_len);
+            }
+            budgeted_text_bytes = budgeted_text_bytes.saturating_add(retained_len);
         }
         if !content.trim().is_empty() {
             blocks.push(SystemBlock::text(content));
@@ -266,6 +272,26 @@ fn compile_system_blocks(
         budgeted_text_bytes,
         truncated_text_bytes,
     }
+}
+
+fn static_source_budget_limit(
+    max_text_bytes: Option<usize>,
+    budget_share: Option<f64>,
+    remaining_budget: Option<usize>,
+) -> Option<usize> {
+    let max_text_bytes = max_text_bytes?;
+    let remaining_budget = remaining_budget.unwrap_or(max_text_bytes);
+    let share_limit = budget_share
+        .map(|share| fractional_budget_limit(max_text_bytes, share))
+        .unwrap_or(remaining_budget);
+    Some(share_limit.min(remaining_budget))
+}
+
+fn fractional_budget_limit(max_text_bytes: usize, share: f64) -> usize {
+    if !share.is_finite() || share <= 0.0 {
+        return 0;
+    }
+    ((max_text_bytes as f64) * share).floor() as usize
 }
 
 fn prefix_text_bytes(text: &str, max_bytes: usize) -> &str {

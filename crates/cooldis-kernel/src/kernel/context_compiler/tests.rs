@@ -144,6 +144,91 @@ fn budget_shared_static_sources_consume_text_budget() {
     assert_eq!(compiled.diagnostics.truncated_text_bytes, 2);
 }
 
+#[test]
+fn fractional_static_sources_are_capped_before_history_budget() {
+    let mut input = compile_input(
+        vec![SessionEntryKind::Message {
+            message: CanonicalMessage::user_text("abcdef"),
+        }],
+        AgentContextCompilePolicy {
+            max_messages: None,
+            max_text_bytes: Some(10),
+        },
+    );
+    input.static_system_sources =
+        vec![budgeted_static_source_with_share("playbook", "123456", 0.3)];
+
+    let compiled = AgentContextCompiler::compile(input);
+
+    assert_eq!(
+        compiled
+            .system
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["123", "system"]
+    );
+    assert_eq!(message_texts(&compiled.messages), vec!["abcdef"]);
+    assert_eq!(compiled.diagnostics.retained_text_bytes, 9);
+    assert_eq!(compiled.diagnostics.truncated_text_bytes, 3);
+}
+
+#[test]
+fn tiny_static_source_budget_truncates_on_utf8_boundary_without_false_retention() {
+    let mut input = compile_input(
+        vec![SessionEntryKind::Message {
+            message: CanonicalMessage::user_text("abcdef"),
+        }],
+        AgentContextCompilePolicy {
+            max_messages: None,
+            max_text_bytes: Some(1),
+        },
+    );
+    input.static_system_sources = vec![budgeted_static_source("identity", "éabc")];
+
+    let compiled = AgentContextCompiler::compile(input);
+
+    assert_eq!(
+        compiled
+            .system
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["system"]
+    );
+    assert_eq!(message_texts(&compiled.messages), vec!["f"]);
+    assert_eq!(compiled.diagnostics.retained_text_bytes, 1);
+    assert_eq!(compiled.diagnostics.truncated_text_bytes, "éabc".len() + 5);
+}
+
+#[test]
+fn static_source_prefix_that_trims_empty_does_not_consume_message_budget() {
+    let mut input = compile_input(
+        vec![SessionEntryKind::Message {
+            message: CanonicalMessage::user_text("abcdef"),
+        }],
+        AgentContextCompilePolicy {
+            max_messages: None,
+            max_text_bytes: Some(2),
+        },
+    );
+    input.static_system_sources = vec![budgeted_static_source("identity", "  abc")];
+
+    let compiled = AgentContextCompiler::compile(input);
+
+    assert_eq!(
+        compiled
+            .system
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["system"]
+    );
+    assert_eq!(message_texts(&compiled.messages), vec!["ef"]);
+    assert_eq!(compiled.diagnostics.retained_text_bytes, 2);
+    assert_eq!(compiled.diagnostics.truncated_text_bytes, "  abc".len() + 4);
+}
+
 fn compile_input(
     kinds: Vec<SessionEntryKind>,
     policy: AgentContextCompilePolicy,
@@ -203,9 +288,17 @@ fn static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
 }
 
 fn budgeted_static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
+    budgeted_static_source_with_share(id, content, 1.0)
+}
+
+fn budgeted_static_source_with_share(
+    id: &str,
+    content: &str,
+    budget_share: f64,
+) -> AgentManifestStaticContextSegment {
     AgentManifestStaticContextSegment {
         pinned: false,
-        budget_share: Some(1.0),
+        budget_share: Some(budget_share),
         ..static_source(id, content)
     }
 }
