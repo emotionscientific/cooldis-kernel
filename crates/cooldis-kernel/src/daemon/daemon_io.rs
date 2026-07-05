@@ -1917,16 +1917,25 @@ impl CooldisDaemonQueueWorker {
             .await?;
         let count = leased.len();
         let mut held_until_ms: Option<u64> = None;
-        let mut coalesce_groups: BTreeMap<String, Vec<LeasedIngressEnvelope>> = BTreeMap::new();
+        let mut coalesce_groups: BTreeMap<CoalesceGroupKey, Vec<LeasedIngressEnvelope>> =
+            BTreeMap::new();
         for message in leased {
-            if coalesce_policy_for_envelope(&message.envelope)?.is_some() {
-                coalesce_groups
-                    .entry(coalesce_group_key(&message.envelope))
-                    .or_default()
-                    .push(message);
-                continue;
+            match coalesce_policy_for_envelope(&message.envelope) {
+                Ok(Some(_)) => {
+                    coalesce_groups
+                        .entry(coalesce_group_key(&message.envelope))
+                        .or_default()
+                        .push(message);
+                }
+                Ok(None) => self.submit_leased_message(message).await?,
+                Err(err) => {
+                    let reason = err.to_string();
+                    self.queue
+                        .retry_ingress(&message.message_id, &reason)
+                        .await?;
+                    return Err(err);
+                }
             }
-            self.submit_leased_message(message).await?;
         }
         for (_key, messages) in coalesce_groups {
             if let Some(visible_at_ms) = self.process_coalesce_group(messages).await? {
@@ -1960,6 +1969,7 @@ impl CooldisDaemonQueueWorker {
         &self,
         mut messages: Vec<LeasedIngressEnvelope>,
     ) -> IoResult<Option<u64>> {
+        sort_coalesce_messages(&mut messages);
         while !messages.is_empty() {
             let policy = coalesce_policy_for_envelope(&messages[0].envelope)?.ok_or_else(|| {
                 IoError::Queue("coalesce group is missing coalesce policy".to_string())
@@ -2765,6 +2775,15 @@ struct CoalescePolicy {
     max_batch: usize,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CoalesceGroupKey {
+    route_id: String,
+    source_scope: String,
+    conversation_key: String,
+    threading: String,
+    actor_key: Option<String>,
+}
+
 fn coalesce_policy_for_envelope(envelope: &IngressEnvelope) -> IoResult<Option<CoalescePolicy>> {
     let policy = envelope
         .metadata
@@ -2809,19 +2828,39 @@ fn coalesce_policy_for_envelope(envelope: &IngressEnvelope) -> IoResult<Option<C
     }))
 }
 
-fn coalesce_group_key(envelope: &IngressEnvelope) -> String {
+fn coalesce_group_key(envelope: &IngressEnvelope) -> CoalesceGroupKey {
     let threading = envelope
         .metadata
         .get("cooldis_route_threading")
         .map(String::as_str)
         .unwrap_or("per_conversation");
-    format!(
-        "{}:{}:{}:{}",
-        route_id_for_envelope(envelope),
-        envelope.source.stable_scope(),
-        envelope.conversation.stable_key(),
-        threading
-    )
+    let actor_key = if threading == "per_actor" {
+        Some(
+            envelope
+                .actor
+                .as_ref()
+                .map(|actor| actor.external_actor_id.clone())
+                .unwrap_or_else(|| "anonymous".to_string()),
+        )
+    } else {
+        None
+    };
+    CoalesceGroupKey {
+        route_id: route_id_for_envelope(envelope),
+        source_scope: envelope.source.stable_scope(),
+        conversation_key: envelope.conversation.stable_key(),
+        threading: threading.to_string(),
+        actor_key,
+    }
+}
+
+fn sort_coalesce_messages(messages: &mut [LeasedIngressEnvelope]) {
+    messages.sort_by(|left, right| {
+        left.envelope
+            .received_at_ms
+            .cmp(&right.envelope.received_at_ms)
+            .then_with(|| left.message_id.cmp(&right.message_id))
+    });
 }
 
 fn coalesce_batch_is_ready(messages: &[LeasedIngressEnvelope], policy: CoalescePolicy) -> bool {

@@ -188,6 +188,52 @@ fn steer_coalesce_envelope(
     envelope
 }
 
+#[test]
+fn coalesce_group_key_does_not_collapse_colon_bearing_components() {
+    let mut left = coalesce_envelope("left", "9101", 20, 10)
+        .with_metadata("cooldis_route_id", "a:b")
+        .with_metadata("cooldis_route_threading", "f");
+    left.source = IoSource::new("c", "d");
+    left.conversation = IoConversation::new("e", ConversationKind::Direct);
+
+    let mut right = coalesce_envelope("right", "9102", 20, 10)
+        .with_metadata("cooldis_route_id", "a")
+        .with_metadata("cooldis_route_threading", "f");
+    right.source = IoSource::new("b", "c");
+    right.conversation = IoConversation::new("d:e", ConversationKind::Direct);
+
+    assert_ne!(coalesce_group_key(&left), coalesce_group_key(&right));
+}
+
+#[test]
+fn coalesce_group_key_separates_per_actor_targets() {
+    let first = coalesce_envelope("first", "9201", 20, 10)
+        .with_metadata("cooldis_route_threading", "per_actor")
+        .with_actor(IoActor::new("telegram:user:1"));
+    let second = coalesce_envelope("second", "9202", 20, 10)
+        .with_metadata("cooldis_route_threading", "per_actor")
+        .with_actor(IoActor::new("telegram:user:2"));
+
+    assert_ne!(coalesce_group_key(&first), coalesce_group_key(&second));
+}
+
+#[test]
+fn coalesce_messages_sort_by_received_at_before_merging() {
+    let mut early = coalesce_envelope("early", "9301", 20, 10);
+    early.received_at_ms = 100;
+    let mut late = coalesce_envelope("late", "9302", 20, 10);
+    late.received_at_ms = 200;
+    let mut messages = vec![
+        LeasedIngressEnvelope::new("2", late),
+        LeasedIngressEnvelope::new("1", early),
+    ];
+
+    sort_coalesce_messages(&mut messages);
+    let merged = merged_coalesce_envelope(&messages).unwrap();
+
+    assert_eq!(merged.content.text_projection(), "early\nlate");
+}
+
 fn observe_only_envelope(text: &str) -> IngressEnvelope {
     telegram_queue_envelope(text).with_metadata("cooldis_route_policy", "observe_only")
 }
@@ -780,6 +826,45 @@ async fn queue_worker_processes_sqlite_backed_envelope() {
         egress.kind,
         EgressKind::AssistantMessage { ref text } if text.contains("hello queue")
     ));
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn queue_worker_releases_invalid_coalesce_metadata_for_retry() {
+    let (bridge, _rx, _) = test_bridge().await;
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!(
+            "queue-coalesce-invalid-{}.sqlite",
+            uuid::Uuid::now_v7()
+        ));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    let mut envelope = coalesce_envelope("bad", "9401", 20, 10);
+    envelope.metadata.insert(
+        "cooldis_coalesce_max_batch".to_string(),
+        "not-a-number".to_string(),
+    );
+    queue.submit(envelope).await.unwrap();
+
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-coalesce-invalid", 30);
+    let err = worker.drain_once().await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("invalid coalesce_bursts max_batch")
+    );
+
+    let leased = queue
+        .lease_ingress("worker-coalesce-invalid-retry", 1, 30)
+        .await
+        .unwrap();
+    assert_eq!(leased.len(), 1);
+    assert!(leased[0].attempt > 1);
+    queue.complete_ingress(&leased[0].message_id).await.unwrap();
     let _ = std::fs::remove_file(db);
 }
 
