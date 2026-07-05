@@ -269,6 +269,8 @@ pub enum EventKind {
     TimerFired,
     /// An external IO route received an ingress envelope.
     IoIngressReceived,
+    /// A tool path requested an IO egress action for later projection.
+    IoEgressRequested,
     /// An IO egress attempt was delivered to the external route.
     IoEgressDelivered,
     /// An IO egress attempt failed and may have been dead-lettered.
@@ -316,6 +318,7 @@ impl EventKind {
             Self::GrantPetitioned,
             Self::TimerFired,
             Self::IoIngressReceived,
+            Self::IoEgressRequested,
             Self::IoEgressDelivered,
             Self::IoEgressFailed,
             Self::AdmissionDecided,
@@ -360,6 +363,7 @@ impl EventKind {
             Self::GrantPetitioned => "grant.petitioned",
             Self::TimerFired => "timer.fired",
             Self::IoIngressReceived => "io.ingress.received",
+            Self::IoEgressRequested => "io.egress.requested",
             Self::IoEgressDelivered => "io.egress.delivered",
             Self::IoEgressFailed => "io.egress.failed",
             Self::AdmissionDecided => "admission.decided",
@@ -406,6 +410,7 @@ impl EventKind {
             Self::GrantPetitioned => "cooldis.event.grant.petitioned/1",
             Self::TimerFired => "cooldis.event.timer.fired/1",
             Self::IoIngressReceived => "cooldis.event.io.ingress.received/1",
+            Self::IoEgressRequested => "cooldis.event.io.egress.requested/1",
             Self::IoEgressDelivered => "cooldis.event.io.egress.delivered/1",
             Self::IoEgressFailed => "cooldis.event.io.egress.failed/1",
             Self::AdmissionDecided => "cooldis.event.admission.decided/1",
@@ -454,6 +459,7 @@ impl std::str::FromStr for EventKind {
             "grant.petitioned" => Ok(Self::GrantPetitioned),
             "timer.fired" => Ok(Self::TimerFired),
             "io.ingress.received" => Ok(Self::IoIngressReceived),
+            "io.egress.requested" => Ok(Self::IoEgressRequested),
             "io.egress.delivered" => Ok(Self::IoEgressDelivered),
             "io.egress.failed" => Ok(Self::IoEgressFailed),
             "admission.decided" => Ok(Self::AdmissionDecided),
@@ -597,6 +603,18 @@ pub struct IoIngressReceivedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_message_id: Option<String>,
     pub envelope_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IoEgressRequestedPayload {
+    pub egress_kind: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_target: Option<Value>,
+    pub requested_by_tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_event_id: Option<EventRecordId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1030,10 +1048,17 @@ impl EventRecord {
     pub fn validate_stream_record_v1(&self) -> HistoryResult<()> {
         let envelope = serde_json::to_value(self.to_stream_record_v1())
             .map_err(|err| HistoryError::Codec(format!("encode stream record envelope: {err}")))?;
-        stream_schema_registry_v1()
-            .map_err(|err| HistoryError::Codec(err.to_string()))?
+        let registry =
+            stream_schema_registry_v1().map_err(|err| HistoryError::Codec(err.to_string()))?;
+        registry
             .validate(STREAM_RECORD_SCHEMA_V1, &envelope)
-            .map_err(|err| HistoryError::Codec(err.to_string()))
+            .map_err(|err| HistoryError::Codec(err.to_string()))?;
+        if self.kind == EventKind::IoEgressRequested {
+            registry
+                .validate(self.kind.payload_schema_id(), &self.payload)
+                .map_err(|err| HistoryError::Codec(err.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -1136,6 +1161,10 @@ pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidatio
         io_ingress_received_payload_schema_v1(),
     )?;
     registry.register(
+        EventKind::IoEgressRequested.payload_schema_id(),
+        io_egress_requested_payload_schema_v1(),
+    )?;
+    registry.register(
         EventKind::IoEgressDelivered.payload_schema_id(),
         io_egress_delivered_payload_schema_v1(),
     )?;
@@ -1194,6 +1223,7 @@ fn event_kind_routes_to_runtime_trace(kind: EventKind) -> bool {
             | EventKind::GrantPetitioned
             | EventKind::TimerFired
             | EventKind::IoIngressReceived
+            | EventKind::IoEgressRequested
             | EventKind::IoEgressDelivered
             | EventKind::IoEgressFailed
             | EventKind::AdmissionDecided
@@ -1656,6 +1686,27 @@ fn io_ingress_received_payload_schema_v1() -> Value {
             "external_actor_id": {"type": "string"},
             "external_message_id": {"type": "string"},
             "envelope_digest": {"type": "string"}
+        }
+    })
+}
+
+fn io_egress_requested_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["egress_kind", "requested_by_tool_call_id"],
+        "additionalProperties": true,
+        "properties": {
+            "egress_kind": {
+                "type": "object",
+                "additionalProperties": true
+            },
+            "resolved_target": {
+                "type": "object",
+                "additionalProperties": true
+            },
+            "requested_by_tool_call_id": {"type": "string"},
+            "quote": {"type": "string"},
+            "match_event_id": {"type": "string"}
         }
     })
 }

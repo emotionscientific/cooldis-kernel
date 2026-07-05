@@ -5,14 +5,15 @@ use crate::{
     CooldisEgressProjectionRuleConfig, CooldisEgressRetryConfig, CooldisError,
     CooldisIoRouteConfig, CooldisResult, CooldisSupervisor, CooldisTypingSimulationConfig,
     EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore,
-    EventStreamId, IoEgressDeliveredPayload, IoEgressFailedPayload, IoIngressReceivedPayload,
-    KernelThreadSpawnAgentBinding, NewEventRecord, PolicyBoundPayload, PolicyKind,
-    RuntimeThreadHandle, SessionEntry, SessionEntryKind, SqliteSessionStore, StreamCursorV1,
-    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_SPAWN_GRANTED_METADATA, TIMER_FIRED_ENVELOPE_KIND,
-    ThreadCheckpoint, ThreadCoordinates, ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus,
-    ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload,
-    ThreadStartRequest, ThreadTopology, TimerFiredPayload, TurnInput, TurnSubmissionMode,
-    control_stream_id, list_active_mandates, parse_mandate_event_id,
+    EventStreamId, IoEgressDeliveredPayload, IoEgressFailedPayload, IoEgressRequestedPayload,
+    IoIngressReceivedPayload, KernelThreadSpawnAgentBinding, NewEventRecord, PolicyBoundPayload,
+    PolicyKind, RuntimeThreadHandle, SessionEntry, SessionEntryKind, SqliteSessionStore,
+    StreamCursorV1, THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_SPAWN_GRANTED_METADATA,
+    TIMER_FIRED_ENVELOPE_KIND, ThreadCheckpoint, ThreadCoordinates, ThreadId,
+    ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadSpawnedForkPayload,
+    ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload, ThreadStartRequest, ThreadTopology,
+    TimerFiredPayload, TurnInput, TurnSubmissionMode, control_stream_id, list_active_mandates,
+    parse_mandate_event_id,
 };
 use async_trait::async_trait;
 use cooldis_io_core::{
@@ -1473,6 +1474,49 @@ impl CooldisDaemonIoBridge {
                 continue;
             }
 
+            if event.kind == EventKind::IoEgressRequested {
+                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
+                if !after_cursor {
+                    continue;
+                }
+                let envelope = match requested_egress_from_event(event, &all_events) {
+                    Ok(Some(envelope)) => envelope,
+                    Ok(None) => {
+                        state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
+                        continue;
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "cooldis egress projector skipped invalid io.egress.requested event {}: {err}",
+                            event.id
+                        );
+                        state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
+                        continue;
+                    }
+                };
+                let outcome = self
+                    .deliver_projected_envelope(
+                        state,
+                        binding,
+                        &handle,
+                        adapter,
+                        event,
+                        0,
+                        envelope,
+                        route_config.retry,
+                        &mut receipt_cursors,
+                    )
+                    .await?;
+                match outcome {
+                    EnvelopeDeliveryOutcome::Delivered(cursor) => {
+                        state.store_cursor(&binding.route_id, &thread_id, &cursor)?;
+                        delivered_sources += 1;
+                    }
+                    EnvelopeDeliveryOutcome::Blocked => break,
+                }
+                continue;
+            }
+
             let Some(text) = assistant_text_from_session_event(event, &context.entries) else {
                 let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
                 if !after_cursor {
@@ -2735,6 +2779,38 @@ fn ingress_context_from_event(event: &EventRecord) -> Option<IngressReceiptConte
         metadata,
         source_ingress_id,
     })
+}
+
+fn requested_egress_from_event(
+    event: &EventRecord,
+    events: &[EventRecord],
+) -> IoResult<Option<EgressEnvelope>> {
+    let request = serde_json::from_value::<IoEgressRequestedPayload>(event.payload.clone())
+        .map_err(|err| IoError::Bridge(format!("invalid io.egress.requested payload: {err}")))?;
+    let kind = serde_json::from_value::<EgressKind>(request.egress_kind)
+        .map_err(|err| IoError::Bridge(format!("invalid requested egress kind: {err}")))?;
+    let matched_context = request.match_event_id.and_then(|match_event_id| {
+        events
+            .iter()
+            .find(|candidate| candidate.id == match_event_id)
+            .and_then(ingress_context_from_event)
+    });
+    let target = if let Some(context) = &matched_context {
+        context.target.clone()
+    } else if let Some(target) = request.resolved_target {
+        serde_json::from_value::<IoTarget>(target)
+            .map_err(|err| IoError::Bridge(format!("invalid requested egress target: {err}")))?
+    } else {
+        return Ok(None);
+    };
+    let mut envelope = EgressEnvelope::new(target, kind, now_ms());
+    if let Some(context) = matched_context {
+        envelope.source_ingress_id = context.source_ingress_id;
+        envelope.metadata = context.metadata;
+    } else {
+        envelope.metadata = envelope.target.metadata.clone();
+    }
+    Ok(Some(envelope))
 }
 
 fn assistant_text_from_session_event(

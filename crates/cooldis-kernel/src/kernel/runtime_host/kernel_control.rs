@@ -12,7 +12,8 @@ use crate::agent::contracts::{
 };
 use crate::agent::manifest_bind::{BoundCouplingSet, coupling_set_content_hash};
 use crate::kernel::history::{
-    EventKind, EventRecord, EventRecordId, NewEventRecord, ThreadSpawnedPayload,
+    EventKind, EventRecord, EventRecordId, EventSequence, NewEventRecord, SessionContext,
+    ThreadSpawnedPayload,
 };
 use crate::kernel::mandate_lifecycle::{
     ActiveMandate, MandateRevokeReceipt, MandateStartReceipt, MandateStartRequest,
@@ -760,6 +761,48 @@ impl RuntimeKernelControl {
         let host = self.host()?;
         let target = self.scoped_thread(caller, target_thread_id).await?;
         list_active_mandates(host.runtime_store().as_ref(), &target.context().coordinates).await
+    }
+
+    pub async fn caller_session_context(
+        &self,
+        caller: &ThreadContext,
+    ) -> CooldisResult<SessionContext> {
+        let target = self
+            .scoped_thread(caller, caller.coordinates.thread_id)
+            .await?;
+        target.session_context().await
+    }
+
+    pub async fn caller_thread_events(
+        &self,
+        caller: &ThreadContext,
+        from_sequence: Option<EventSequence>,
+    ) -> CooldisResult<Vec<EventRecord>> {
+        let target = self
+            .scoped_thread(caller, caller.coordinates.thread_id)
+            .await?;
+        target.read_thread_events(from_sequence).await
+    }
+
+    pub async fn caller_control_events(
+        &self,
+        caller: &ThreadContext,
+    ) -> CooldisResult<Vec<EventRecord>> {
+        let target = self
+            .scoped_thread(caller, caller.coordinates.thread_id)
+            .await?;
+        target.read_control_events().await
+    }
+
+    pub async fn append_caller_thread_event(
+        &self,
+        caller: &ThreadContext,
+        record: NewEventRecord,
+    ) -> CooldisResult<EventRecord> {
+        let target = self
+            .scoped_thread(caller, caller.coordinates.thread_id)
+            .await?;
+        target.append_thread_event_record(record).await
     }
 
     async fn scoped_thread(

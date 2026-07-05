@@ -282,10 +282,20 @@ impl AgentToolRouter {
             let input = encode_tool_input(call_id, tool_name, &projection, arguments)?;
             let process = self
                 .operation_registry
-                .invoke_process(
+                .invoke_process_with_kernel_metadata(
                     &projection.registered_name,
                     &projection.operation_name,
                     input,
+                    BTreeMap::from([
+                        (
+                            "cooldis.tool_call_id".to_string(),
+                            Value::String(call_id.to_string()),
+                        ),
+                        (
+                            "cooldis.tool_name".to_string(),
+                            Value::String(tool_name.to_string()),
+                        ),
+                    ]),
                 )
                 .await?;
             let output = process.output();

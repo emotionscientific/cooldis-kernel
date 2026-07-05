@@ -738,7 +738,7 @@ fn sqlite_event_from_row(row: &rusqlite::Row<'_>) -> HistoryResult<EventRecord> 
     let origin: String = row.get(11).map_err(storage_error)?;
     let provenance_json: String = row.get(12).map_err(storage_error)?;
     let payload_json: String = row.get(13).map_err(storage_error)?;
-    Ok(EventRecord {
+    let event = EventRecord {
         id: EventRecordId::from_uuid(parse_uuid(&event_id)?),
         stream_id: EventStreamId::new(row.get::<_, String>(3).map_err(storage_error)?),
         sequence: EventSequence::new(row.get(4).map_err(storage_error)?),
@@ -753,7 +753,9 @@ fn sqlite_event_from_row(row: &rusqlite::Row<'_>) -> HistoryResult<EventRecord> 
         origin: parse_event_origin(&origin)?,
         provenance: serde_json::from_str(&provenance_json).map_err(codec_error)?,
         payload: serde_json::from_str(&payload_json).map_err(codec_error)?,
-    })
+    };
+    event.validate_stream_record_v1()?;
+    Ok(event)
 }
 
 fn sqlite_insert_observation(
