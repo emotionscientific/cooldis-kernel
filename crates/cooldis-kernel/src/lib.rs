@@ -46,6 +46,7 @@ pub mod capabilities {
 pub mod cli;
 
 pub mod daemon {
+    pub mod clock_route;
     pub mod daemon_config;
     pub mod daemon_io;
 }
@@ -54,13 +55,16 @@ pub mod kernel {
     pub mod compaction;
     pub mod context_compiler;
     pub mod control_decision;
+    pub mod coupling_executor_registry;
     pub mod coupling_scheduler;
     pub mod history;
+    pub mod mandate_lifecycle;
     pub mod provider_store;
     pub mod runtime_host;
     pub mod secret_store;
     pub mod stdlib_couplings;
     pub mod supervisor;
+    pub mod wasm_couplings;
 }
 
 #[doc(hidden)]
@@ -72,6 +76,7 @@ pub mod operations {
     pub mod operation_registry;
     pub mod operation_store;
     pub mod plugins;
+    pub mod skill_package;
     pub mod tool_package;
 }
 
@@ -113,8 +118,8 @@ pub use adapters::provider_transform::{
     ReplayTransform, ReplayTransformCounts, normalize_history_for_target,
 };
 pub use agent::agent_process::{
-    KernelNotifyOperationProvider, KernelProcessOperationProvider, KernelThreadOperationProvider,
-    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
+    KernelNotifyOperationProvider, KernelProcessOperationProvider, KernelScheduleOperationProvider,
+    KernelThreadOperationProvider, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
 };
 pub use agent::agent_tool_router::{
     AgentKernelPendingToolCall, AgentKernelToolCall, AgentKernelToolOutcome,
@@ -144,11 +149,11 @@ pub use agent::coupling_templates::{
 };
 pub use agent::hooks::{
     CommandHookHandler, HookEventName, HookHandler, HookHandlerOutput, HookHandlerSpec,
-    HookPipeline, HookRequest, HookRunRecord, HookRunStatus, PostCompactHookOutcome,
-    PostCompactHookRequest, PostToolUseHookOutcome, PostToolUseHookRequest, PreCompactHookOutcome,
-    PreCompactHookRequest, PreToolUseHookOutcome, PreToolUseHookRequest, SessionStartHookOutcome,
-    SessionStartHookRequest, StopHookOutcome, StopHookRequest, UserPromptSubmitHookOutcome,
-    UserPromptSubmitHookRequest,
+    HookMutationWitness, HookPipeline, HookRequest, HookRunRecord, HookRunStatus, HookValueDigest,
+    PostCompactHookOutcome, PostCompactHookRequest, PostToolUseHookOutcome, PostToolUseHookRequest,
+    PreCompactHookOutcome, PreCompactHookRequest, PreToolUseHookOutcome, PreToolUseHookRequest,
+    SessionStartHookOutcome, SessionStartHookRequest, StopHookOutcome, StopHookRequest,
+    UserPromptSubmitHookOutcome, UserPromptSubmitHookRequest,
 };
 pub use agent::manifest::{
     AgentAliasRecord, AgentAliasResolutionReceipt, AgentManifestRefVerification,
@@ -159,9 +164,11 @@ pub use agent::manifest_bind::{
     AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBoundThread,
     AgentManifestCompileReceipt, AgentManifestCouplingBinding, AgentManifestDirectToolBinding,
     AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestProviderSurface, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,
+    AgentManifestProviderSurface, AgentManifestSkillPackageBinding,
+    AgentManifestStaticContextSegment, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,
     BoundCouplingSet, BoundCouplingSink, CouplingRole, MANIFEST_BINDER_DISCHARGED_BY,
     MANIFEST_BINDER_FUNCTION, MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION,
+    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_PACKAGES_METADATA,
     apply_runtime_overrides, bind_published_agent_record, compile_published_agent_record,
 };
 pub use agent::manifest_schema::{
@@ -232,12 +239,17 @@ pub use capabilities::vfs::{
 pub use capabilities::wasm_runner::{
     WasmHttpRequest, WasmHttpResponse, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
 };
+pub use daemon::clock_route::{
+    CLOCK_TICK_ROUTE_KIND, CooldisDaemonClockRoute, DaemonClock, SystemDaemonClock,
+    TIMER_FIRED_ENVELOPE_KIND,
+};
 pub use daemon::daemon_config::{
-    CooldisDaemonAppServerConfig, CooldisDaemonConfig, CooldisDaemonOperationsConfig,
-    CooldisDaemonRegistriesConfig, CooldisDaemonServiceSpec, CooldisDaemonServiceTarget,
+    CooldisCoalesceBurstsConfig, CooldisDaemonAppServerConfig, CooldisDaemonConfig,
+    CooldisDaemonOperationsConfig, CooldisDaemonRegistriesConfig, CooldisDaemonServiceSpec,
+    CooldisDaemonServiceTarget, CooldisEgressProjectionRuleConfig, CooldisEgressRetryConfig,
     CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProjectDiscovery,
     CooldisProviderConfig, CooldisQueueConfig, CooldisRuntimeConfig, CooldisTelegramRouteConfig,
-    LoadedCooldisDaemonConfig, cooldis_daemon_service_file_name,
+    CooldisTypingSimulationConfig, LoadedCooldisDaemonConfig, cooldis_daemon_service_file_name,
     cooldis_daemon_service_install_path, cooldis_daemon_service_install_path_for_home,
     default_cooldis_daemon_socket_path, discover_cooldis_daemon_config_path,
     discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
@@ -258,16 +270,16 @@ pub use kernel::context_compiler::{
     CompiledAgentContext,
 };
 pub use kernel::control_decision::{
-    ApprovalResolvedPayload, ApprovalSubject, MandateRevokedPayload, MandateStartedPayload,
-    MandateSubject, PendingToolCallSuspension, PlacementDecision, PlacementDecisionPayload,
-    PlacementDecisionRequest, PlacementSubject, PlacementTarget, ToolCallCompletedPayload,
-    ToolCallDecision, ToolCallDecisionOutcomePayload, ToolCallDecisionPayload,
-    ToolCallRequestedPayload, ToolCallSubject, ToolCallSuspendedPayload, ToolControllerBinding,
-    ToolDecisionRequest, TurnContinuationAcceptedPayload, TurnContinuationDecision,
-    TurnContinuationDecisionRequest, TurnContinuationRejectedPayload, TurnContinuationSubject,
-    TurnContinueRequestedPayload, active_manifest_bind_receipt, active_tool_controller_for_request,
-    control_stream_id, decide_placement, decide_tool_call, decide_turn_continuation,
-    list_pending_tool_call_suspensions,
+    ApprovalResolvedPayload, ApprovalSubject, MandateCatchUpPolicy, MandateRevokedPayload,
+    MandateSchedulePayload, MandateStartedPayload, MandateSubject, PendingToolCallSuspension,
+    PlacementDecision, PlacementDecisionPayload, PlacementDecisionRequest, PlacementSubject,
+    PlacementTarget, ToolCallCompletedPayload, ToolCallDecision, ToolCallDecisionOutcomePayload,
+    ToolCallDecisionPayload, ToolCallRequestedPayload, ToolCallSubject, ToolCallSuspendedPayload,
+    ToolControllerBinding, ToolDecisionRequest, TurnContinuationAcceptedPayload,
+    TurnContinuationDecision, TurnContinuationDecisionRequest, TurnContinuationRejectedPayload,
+    TurnContinuationSubject, TurnContinueRequestedPayload, active_manifest_bind_receipt,
+    active_tool_controller_for_request, control_stream_id, decide_placement, decide_tool_call,
+    decide_turn_continuation, list_pending_tool_call_suspensions,
 };
 pub use kernel::coupling_scheduler::{
     CouplingActivation, CouplingBudgetSpent, CouplingDischarge, CouplingExecutionResult,
@@ -276,19 +288,29 @@ pub use kernel::coupling_scheduler::{
     CouplingSourceCutEntry,
 };
 pub use kernel::history::{
-    CONTEXT_READ_PLAN_SCHEMA_V1, CacheControl, CacheTtl, CanonicalContent, CanonicalMessage,
-    CanonicalStopReason, CanonicalUsage, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventKind, EventOrigin,
+    AdmissionDecidedPayload, AdmissionDecision, CONTEXT_READ_PLAN_SCHEMA_V1, CacheControl,
+    CacheTtl, CanonicalContent, CanonicalMessage, CanonicalStopReason, CanonicalUsage,
+    DEBUG_THREAD_EXPORT_SCHEMA_V1, EVENT_KIND_SCHEMA_VERSION, EventKind, EventOrigin,
     EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore, EventStreamId,
-    HistoryError, HistoryResult, InMemorySessionStore, NewEventRecord, NewObservationRecord,
-    ObservationId, ObservationProvenance, ObservationRecord, ObservationSourceRange,
-    ObservationStore, ProviderApi, RuntimeStore, STREAM_APPEND_ACK_SCHEMA_V1,
-    STREAM_BACKEND_CAPABILITIES_SCHEMA_V1, STREAM_CURSOR_SCHEMA_V1, STREAM_RECORD_SCHEMA_V1,
-    STREAM_ROUTING_DECISION_SCHEMA_V1, SessionContext, SessionContextSourceCut, SessionEntry,
-    SessionEntryId, SessionEntryKind, SessionStore, SqliteSessionStore, StreamAckClass,
-    StreamAppendAckV1, StreamBackendCapabilitiesV1, StreamBackendKindV1, StreamCursorV1,
-    StreamRecordEnvelopeV1, StreamRouteProfile, StreamRoutingDecisionV1, StreamRoutingKeysV1,
-    StreamStorageScopeV1, ThinkingMetadata, ThinkingProvider, ThreadBaseRef, ThreadForkReason,
-    stream_schema_registry_v1, validate_context_payload_schema_v1,
+    GrantPetitionedPayload, HistoryError, HistoryResult, InMemorySessionStore,
+    IoEgressDeliveredPayload, IoEgressFailedPayload, IoIngressReceivedPayload, NewEventRecord,
+    NewObservationRecord, ObservationId, ObservationProvenance, ObservationRecord,
+    ObservationSourceRange, ObservationStore, PolicyBoundPayload, PolicyKind, ProviderApi,
+    RuntimeStore, STREAM_APPEND_ACK_SCHEMA_V1, STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
+    STREAM_CURSOR_SCHEMA_V1, STREAM_RECORD_SCHEMA_V1, STREAM_ROUTING_DECISION_SCHEMA_V1,
+    SessionContext, SessionContextSourceCut, SessionEntry, SessionEntryId, SessionEntryKind,
+    SessionStore, SqliteSessionStore, StreamAckClass, StreamAppendAckV1,
+    StreamBackendCapabilitiesV1, StreamBackendKindV1, StreamCursorV1, StreamRecordEnvelopeV1,
+    StreamRouteProfile, StreamRoutingDecisionV1, StreamRoutingKeysV1, StreamStorageScopeV1,
+    ThinkingMetadata, ThinkingProvider, ThreadBaseRef, ThreadForkReason, ThreadJoinedPayload,
+    ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload,
+    ThreadTerminalState, TimerFiredPayload, stream_schema_registry_v1,
+    validate_context_payload_schema_v1,
+};
+pub use kernel::mandate_lifecycle::{
+    ActiveMandate, MIN_MANDATE_INTERVAL_MS, MandateRevokeReceipt, MandateRevokeStatus,
+    MandateStartReceipt, MandateStartRequest, list_active_mandates, parse_mandate_event_id,
+    revoke_mandate, start_mandate, validate_mandate_start_request,
 };
 pub use kernel::provider_store::{
     LlmProviderAuthConfig, LlmProviderAuthContext, LlmProviderAuthSourceKind,
@@ -310,7 +332,9 @@ pub use kernel::runtime_host::{
     RuntimeHostSnapshot, RuntimeKernelControl, RuntimeModelRequestErrorClass,
     RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
     RuntimeServices, RuntimeTerminalState, RuntimeThreadHandle, RuntimeToolLogLevel, RuntimeUsage,
-    THREAD_BOUND_COUPLING_SET_METADATA, ThreadCheckpoint, ThreadCheckpointId, ThreadCommand,
+    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
+    THREAD_OPERATION_REGISTRY_ROOT_METADATA, THREAD_SPAWN_GRANTED_METADATA,
+    THREAD_SPAWN_INPUTS_HASH_METADATA, ThreadCheckpoint, ThreadCheckpointId, ThreadCommand,
     ThreadContext, ThreadCoordinates, ThreadEvent, ThreadId, ThreadInitiationSource,
     ThreadInteractionKind, ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus,
     ThreadLineage, ThreadScope, ThreadSignal, ThreadSignalId, ThreadSignalKind,
@@ -339,18 +363,22 @@ pub use kernel::supervisor::{
     TenantLifecycleSnapshot, TenantRegistration, TenantRuntimeConfig, TenantRuntimeContext,
     TenantRuntimeContextDescriptor, TenantSnapshot, ThreadStartRequest,
 };
+pub use kernel::wasm_couplings::WasmCouplingExecutor;
 pub use operations::kernel_packages::{
     CHANNEL_EMIT_CAPABILITY, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE,
-    COOLDIS_PROCESS_PACKAGE, COOLDIS_THREADS_PACKAGE, KERNEL_RUNTIME_KIND,
+    COOLDIS_PROCESS_PACKAGE, COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE,
+    KERNEL_RUNTIME_KIND, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION, MANDATE_START_OPERATION,
     NOTIFY_PREVIEW_CAPABILITY, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
     PROCESS_CONTROL_CAPABILITY, PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION,
     PROCESS_READ_CAPABILITY, PROCESS_SPAWN_CAPABILITY, PROCESS_TERMINATE_OPERATION,
-    PROCESS_WRITE_CAPABILITY, PROCESS_WRITE_OPERATION, THREAD_CANCEL_OPERATION,
-    THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION,
-    THREAD_WAIT_OPERATION, THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY,
-    THREADS_SPAWN_CAPABILITY, cooldis_notify_kernel_package, cooldis_process_kernel_package,
+    PROCESS_WRITE_CAPABILITY, PROCESS_WRITE_OPERATION, SCHEDULE_MANAGE_CAPABILITY,
+    SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
+    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
+    THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY,
+    cooldis_notify_kernel_package, cooldis_process_kernel_package, cooldis_schedule_kernel_package,
     cooldis_threads_kernel_package, ensure_cooldis_notify_published,
-    ensure_cooldis_process_published, ensure_cooldis_threads_published,
+    ensure_cooldis_process_published, ensure_cooldis_schedule_published,
+    ensure_cooldis_threads_published,
 };
 pub use operations::operation_builder::{
     RustWasmBuildOptions, RustWasmBuildOutput, build_rust_wasm_module,
@@ -369,6 +397,10 @@ pub use operations::operation_store::{
 };
 pub use operations::plugins::{
     LocalPluginCatalog, LocalPluginCatalogConfig, LocalPluginCatalogRecord, PluginMount,
+};
+pub use operations::skill_package::{
+    LocalSkillRegistry, PublishSkillPackageRequest, PublishedSkillPackageRecord, SkillPackage,
+    SkillPackageEntry, SkillPackageRef,
 };
 pub use operations::tool_package::{
     TOOL_BUILD_RECEIPT_KIND, TOOL_BUILD_RECEIPT_SCHEMA_VERSION, TOOL_PACKAGE_KIND,

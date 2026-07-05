@@ -56,12 +56,18 @@ kind = "telegram.bot"
 enabled = true
 policy = "queue_per_conversation"
 threading = "per_conversation"
+egress_retry = { max_attempts = 5, base_backoff_ms = 500 }
 
 [daemon.io.routes.telegram]
 listen = "127.0.0.1:9000"
 path = "/telegram"
 secret_token_env = "TELEGRAM_WEBHOOK_SECRET"
 bot_token_env = "TELEGRAM_BOT_TOKEN"
+
+[[daemon.io.routes]]
+id = "clock-main"
+kind = "clock.tick"
+enabled = true
 ```
 
 Operation-backed agent manifests, including examples such as
@@ -105,15 +111,15 @@ stream = true
 max_tokens = 4096
 ```
 
-For AWS Bedrock Anthropic through `InvokeModel`, use AWS credentials from the
-environment and keep streaming disabled:
+For AWS Bedrock Anthropic through `InvokeModel` and
+`InvokeModelWithResponseStream`, use AWS credentials from the environment:
 
 ```toml
 [daemon.provider]
 provider = "anthropic_bedrock"
 region = "us-east-1"
 model = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-stream = false
+stream = true
 max_tokens = 4096
 ```
 
@@ -143,9 +149,24 @@ does not load, enable, start, or stop the service automatically.
 `daemon run` starts the Cooldis app-server with the configured
 provider and starts enabled IO routes. Telegram routes bind the configured HTTP
 webhook listener, normalize updates through `cooldis-io-telegram`, submit them
-to either the durable pgqrs/SQLite queue or the direct runtime bridge, and can
-deliver visible assistant messages through Telegram `sendMessage` when a bot
-token is configured.
+to either the durable pgqrs/SQLite queue or the direct runtime bridge, and
+start a per-route egress projector. The projector reads bound thread streams
+from a persisted cursor, delivers visible assistant messages through Telegram
+`sendMessage` when a bot token is configured, records delivered/failed receipts
+in the journal, and stores exhausted envelopes in
+`cooldis_daemon_egress_dead_letters` in the route's queue SQLite database.
+`egress_retry.max_attempts` and `egress_retry.base_backoff_ms` configure the
+bounded exponential retry loop; the defaults are `5` and `500`.
+
+Clock routes are daemon-owned ingress adapters. Configure one
+`kind = "clock.tick"` route per daemon; schedules are not route config and live
+in `mandate.started` control-stream events. The route scans control streams for
+active mandates, computes deterministic due occurrences, enqueues due ticks
+through the same durable ingress queue as Telegram, and the queue worker admits
+them as witnessed `timer.fired` events on the subject thread's control stream.
+In this daemon slice the clock route observes mandate changes by rescanning
+control streams on a 30-second poll instead of subscribing to append
+notifications.
 
 ## Lifecycle Boundary For Local V1 Use
 
@@ -207,6 +228,7 @@ Verification coverage for the daemon lane includes:
 ```sh
 cargo test --test daemon_smoke
 cargo test daemon_io::tests::queue_worker_processes_envelope_after_queue_and_bridge_restart
+cargo test -p cooldis clock_route
 ```
 
 The first smoke starts the real `cooldis daemon run` binary on a configured

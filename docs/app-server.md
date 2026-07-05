@@ -145,8 +145,8 @@ Anthropic Messages-compatible endpoints use the Anthropic provider shape:
 }
 ```
 
-AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` path and AWS
-SigV4 credentials:
+AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` and
+`InvokeModelWithResponseStream` paths with AWS SigV4 credentials:
 
 ```json
 {
@@ -154,7 +154,7 @@ SigV4 credentials:
     "provider": "anthropic_bedrock",
     "region": "us-east-1",
     "model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "stream": false,
+    "stream": true,
     "max_tokens": 4096
   }
 }
@@ -169,8 +169,9 @@ requires it. `anthropic_bedrock` reads credentials from `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and
 `AWS_BEDROCK_REGION`/`AWS_REGION`/`AWS_DEFAULT_REGION`. For the local shared
 1Password item, run the child command through `scripts/with-bedrock-env.sh`.
-Streaming is disabled for this path until Cooldis has an AWS event-stream
-decoder for `InvokeModelWithResponseStream`.
+Streaming uses `InvokeModelWithResponseStream` and decodes AWS
+`application/vnd.amazon.eventstream` frames into the same Anthropic Messages
+stream events as the native Anthropic adapter.
 
 Provider config resolution is:
 
@@ -184,8 +185,8 @@ Provider config resolution is:
 - models resolve from `model`, command line flags, or provider-specific local
   env;
 - `max_tokens` defaults to `4096`;
-- streaming defaults to enabled except for `anthropic_bedrock`, which defaults
-  to non-streaming.
+- streaming defaults to enabled for hosted providers, including
+  `anthropic_bedrock`; local/offline mode remains non-streaming.
 
 Keep real secrets in the environment or a local ignored env file, not in
 committed `cooldis.json`.
@@ -239,9 +240,9 @@ child store. Its result also includes `fork.sourceCut`, with
 
 `parentThreadId` remains the topology/control parent. `forkedFromId` is kept as
 a compatibility lineage alias on thread objects. New clients should use
-`fork.sourceCut` as the exact split point. Policy-level
-`AdmissionDecision::Fork` is still not wired through the daemon bridge in this
-release.
+`fork.sourceCut` as the exact split point. Daemon IO routes can also select
+`fork_on_new_dm`; the bridge uses the same checkpoint fork lineage and records
+the fork with `thread.spawned`.
 
 ## Manifest Starts
 
@@ -366,6 +367,54 @@ the configured default when the catalog omits it. Exactly one entry has
 A missing catalog provider or invalid provider metadata returns a JSON-RPC
 error during app-server setup or method handling.
 
+### `modelProvider/list`
+
+Params: none.
+
+Result: `{ "data": [...], "nextCursor": null }`. Each entry is a redacted model
+provider endpoint record: `providerId`, `api`, `baseUrl`, optional
+`displayName`, redacted `auth`, `authHeader`, redacted `headers`, `models`,
+`metadata`, timestamps, `configuredAuth` from the user auth store, and
+`isActiveProvider`. Model rows include `modelId`, optional model-level
+`api`/`baseUrl`, token limits, input modalities, redacted headers, metadata,
+and `isDefault` when it matches the runtime default model.
+
+### `modelProvider/read`
+
+Params: `{ "providerId": "wafer" }`.
+
+Result: `{ "provider": { ... } }` with the same redacted shape as
+`modelProvider/list`. Unknown provider ids fail with a JSON-RPC error.
+
+### `modelProvider/upsert`
+
+Params: `{ "provider": { "providerId": "...", "api": "open_ai_chat_completions",
+"baseUrl": "https://...", "displayName": "...", "auth": { "type": "env",
+"name": "PROVIDER_API_KEY" }, "authHeader": true, "headers": { "X-Provider":
+{ "type": "literal", "value": "..." } }, "models": [...], "metadata": {} } }`.
+
+Result: `{ "provider": { ... } }` with the redacted stored record. This method
+creates or replaces provider metadata only. It rejects inline API keys and
+command-backed auth or header values; use `modelProvider/auth/set` for stored
+credentials.
+
+### `modelProvider/delete`
+
+Params: `{ "providerId": "wafer" }`.
+
+Result: `{ "deleted": true, "providerId": "wafer" }`. Deleting a provider also
+removes any user-stored credential for the same provider id and clears stale
+project-store credential rows if present.
+
+### `modelProvider/auth/status`
+
+Params: `{ "providerId": "wafer" }`, or `{}` to list all provider auth statuses.
+
+Result: `{ "auth": { ... } | null, "data": [...], "nextCursor": null }`.
+Entries report `providerId`, optional `displayName`, whether a credential is
+configured, its non-secret source/label, and whether the provider uses an auth
+header. Credential values are never returned.
+
 ### `mcpSource/list`
 
 Params: none.
@@ -464,6 +513,42 @@ may be available.
 
 Unknown thread ids and malformed cursors fail with JSON-RPC errors. A valid
 thread with no matching events returns an empty `data` array and null cursors.
+
+### `mandate/start`
+
+Params:
+`{ "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder." }`.
+Only `threadId` and `schedule` are required. The schedule union is externally
+tagged: `{ "cron": { "expr": "0 9 * * *", "tz": "America/Los_Angeles" } }`,
+`{ "interval": { "every_ms": 60000 } }`, or
+`{ "at": { "when": "2026-07-04T18:00:00Z" } }`. `catchUp` defaults to
+`"skip_missed"` and may also be `"coalesce_missed"`.
+
+Result:
+`{ "mandateEventId": "...", "streamId": "control:<threadId>", "sequence": 1 }`.
+The method appends a witnessed `mandate.started` fact to the thread control
+stream. Cron expressions are parsed before append, cron time zones must be
+IANA names, interval schedules must be at least 60 seconds, and `at` schedules
+in the past are rejected unless `catchUp = "coalesce_missed"`.
+
+### `mandate/list`
+
+Params: `{ "threadId": "..." }`.
+
+Result:
+`{ "data": [{ "mandateEventId": "...", "mandateId": "...", "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder.", "createdAtMs": 0, "streamId": "control:<threadId>", "sequence": 1 }], "nextCursor": null }`.
+The projection folds active `mandate.started` facts minus matching
+`mandate.revoked` facts from the thread control stream.
+
+### `mandate/revoke`
+
+Params: `{ "threadId": "...", "mandateEventId": "..." }`.
+
+Result:
+`{ "status": "revoked" | "already_revoked", "mandateEventId": "...", "revokedEventId": "...", "streamId": "control:<threadId>", "sequence": 2 }`.
+The method appends a witnessed `mandate.revoked` fact linked to the start event.
+Revoking an already revoked mandate is an idempotent no-op success and returns
+the original revoke event id.
 
 ### `thread/couplings/list`
 
@@ -595,6 +680,7 @@ The V1 app-server implements the Codex TUI-critical request subset:
   `thread/list`, `thread/loaded/list`, `thread/events/list`,
   `thread/couplings/list`, `thread/approvals/list`, `thread/waiting/list`,
   `thread/debug/export`;
+- `mandate/start`, `mandate/revoke`, `mandate/list`;
 - `approval/resolve`;
 - `thread/name/set`, `thread/metadata/update`, `thread/compact/start`,
   `thread/unsubscribe`;
@@ -603,6 +689,9 @@ The V1 app-server implements the Codex TUI-critical request subset:
 Schema-valid friendly stubs keep the client calm for catalog/config surfaces
 such as `skills/list`, `plugin/list`, `hooks/list`,
 `account/rateLimits/read`, `config/read`, and `configRequirements/read`.
+`hooks/list` returns `witnessing: true` to report that mutating host debug hook
+outcomes are witnessed before they take effect; it does not expose a manifest
+hook catalog.
 `mcpServerStatus/list` remains as a compatibility alias for `mcpSource/list`.
 `config/read` additionally reports the app-server's
 absolute working directory as `config.cwd`, so clients can discover a real
@@ -701,6 +790,5 @@ Run an Anthropic Bedrock proof:
 scripts/with-bedrock-env.sh cargo run --bin cooldis -- chat \
   --provider anthropic_bedrock \
   --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
-  --no-stream \
   "Reply with exactly COOL_CHAT_BEDROCK_OK and no other text."
 ```

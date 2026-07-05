@@ -25,6 +25,26 @@ Cooldis is not an agent, a graph framework, a provider SDK, or a product app.
 Product systems configure and call Cooldis. The kernel owns the runtime
 contracts those systems depend on.
 
+## What We Mean By Kernel, Runtime, Harness
+
+"Kernel" is an overloaded word, so here is how this repository uses it. We
+mean it in the operating-system sense — the microkernel tradition
+specifically: a small, privileged core that owns mechanism and refuses to own
+policy. The test for what belongs in it is the trusted-computing-base test: if
+changing a thing could make the system's audit receipts lie, it is compiled
+into the kernel — event ordering, provenance, fail-closed grants, budgets,
+receipts — and everything else lives above it, named, versioned, and
+swappable. The kernel does not think, does not prompt, and does not
+orchestrate. (So: not "kernel" as in a Jupyter kernel, which is an evaluator,
+and not "kernel" as in an orchestration SDK. Closer to seL4 than to Semantic
+Kernel.) The **runtime** is that kernel in motion — the running system that
+executes turns and witnesses facts; when we say "the runtime did it," we mean
+an event whose authority is the system's own attestation, not some function's
+output. And a **harness** — the industry's word for everything wrapped around
+a model — is here not something you hand-write but something the system
+resolves: an agent's effective execution envelope, derived from its
+declarations and grants, exportable and diffable like a lockfile.
+
 ## Repository Scope
 
 This repository contains the standalone Cooldis kernel workspace:
@@ -32,7 +52,7 @@ This repository contains the standalone Cooldis kernel workspace:
 - Runtime primitives: tenant hosts, thread lifecycle, history, events,
   cancellation, resume, and supervisor routing.
 - Agent and operation contracts: manifests, tool publication, operation ABI,
-  grants, command projections, and Wasm operation support.
+  coupling ABI, grants, command projections, and Wasm operation support.
 - Runtime surfaces: CLI, daemon, app-server RPC, MCP, ACP, provider adapters,
   virtual bash, VFS, and process handles.
 - Release and verification tooling for tagged binary releases.
@@ -58,6 +78,9 @@ The V1 work is focused on runtime primitives:
 
 - agent manifest planning, publishing, listing, showing, and local running;
 - operation publication and ABI-backed invocation;
+- skill-package publication, manifest binding, static indexes, and read-only
+  VFS bodies;
+- custom Wasm coupling execution for declared event folds;
 - local runtime execution through provider, virtual bash, and Wasm paths;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
 - release packaging for `cooldis`, `cooldis-acp-agent`, and
@@ -76,6 +99,8 @@ stateful product harnesses are future direction. See
 - [Runtime primitives](docs/developers/runtime-primitives.md): kernel-owned
   surfaces and boundaries.
 - [ABI](docs/abi.md): operation boundary and host/guest contract.
+- [Wasm operation dev kit](docs/wasm-operation-dev-kit.md): Rust guest
+  helpers, fixtures, and custom coupling authoring.
 - [Agent CLI](docs/agent-cli.md): manifest authoring and local agent commands.
 - [Agent manifest ontology](docs/agent-manifest-ontology.md): manifest shape
   and deferred fields.

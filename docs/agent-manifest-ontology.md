@@ -19,8 +19,8 @@ start path.
 
 ```text
 AgentManifest
-  versioned declaration of composition, powers, context, resources, hooks,
-  policies, and runtime defaults
+  versioned declaration of composition, powers, context, resources, couplings,
+  reserved hooks, policies, and runtime defaults
 
 Thread
   live or persisted execution state: turns, history, event log, checkpoints,
@@ -39,10 +39,9 @@ Examples:
 
 ```text
 op://data/csv_profile@sha256:...
-skill://cooldis/release-review@1
+skill://release-review@sha256:...
 prompt://someone.cool/release-system@sha256:...
 assembler://cooldis/naive-assembly@0
-hook://cooldis/pre-tool-policy@sha256:...
 resource://artifact/sha256:...
 agent://release-verifier@0.3.1
 ```
@@ -121,7 +120,7 @@ resources
 skills
 context pipelines
 couplings
-hooks
+hooks (reserved; host debug only)
 policies and grants
 topology
 IO
@@ -173,20 +172,32 @@ themselves make the resource model-visible or writable.
 
 ### Skills
 
-A skill is a resource package. It may contain prompts, procedures, examples,
-templates, scripts, schemas, or authoring guidance.
+A skill is a published markdown resource package. In V1 it is declared as a
+`[[resources]]` row with `kind = "skill"` and a content-addressed
+`skill://<package>@sha256:<hash>` ref. The `[skills]` manifest section remains
+reserved until skills need their own grants or executable entrypoints.
 
 ```text
-skill ref
-version/hash
-included files or entrypoints
-requested grants
-context fragments
-tool/resource dependencies
+publish lane: cooldis skill publish <dir>
+registry: .cooldis/skills
+package shape: <name>/SKILL.md files
+metadata: optional frontmatter name, description, trigger_hint
+fallbacks: name from dirname, description from first non-heading line
 ```
 
-Skills are parked under `resources`, then consumed by context pipelines, tools,
-or build steps according to policy.
+At bind, the skill package is loaded from the registry, the package digest is
+recorded in the bind receipt, and the kernel renders a deterministic static
+index:
+
+```text
+<skill name> — <description>
+```
+
+The index is materialized as a pinned `kernel://assembler/static` context
+segment. Skill bodies are not all pinned into model context; they are mounted
+read-only in the thread VFS at `/skills/<name>.md`, where existing virtual bash
+commands such as `cat` or `view` can read them. Skill resources grant no
+ambient host authority.
 
 ### Context
 
@@ -226,8 +237,13 @@ retrieval selectors
 
 Observations carry provenance back to their source events and resources.
 They never replace or rewrite the append-only event stream they were
-produced from. The declared-coupling surface itself is deferred past V1;
-V1 ships built-in couplings only, with this shape documented.
+produced from. Declared couplings may use built-in `std::` executors or custom
+Wasm operations referenced by pinned `op://<record>/<operation>@sha256:<hash>`
+refs. Custom coupling capsules are pure compute: the invocation carries trigger
+and selected source events plus config, and the guest may only propose discharge
+events. The kernel validates the declared sink, applies stream grants, enforces
+budgets/depth, and stamps discharged provenance. HTTP, VFS, secrets, and other
+effectful imports stay tool capabilities rather than coupling authority.
 
 ### Hooks
 
@@ -248,8 +264,9 @@ on_thread_start
 on_thread_resume
 ```
 
-Hooks should be versioned artifacts or built-in host policies. Hook execution
-requires explicit grants.
+Hooks are host-scope debug tooling, not a manifest authority surface. The
+manifest `[hooks]` table remains reserved; runtime control that must be replayed
+or audited belongs in witnessed couplings.
 
 ### Policies And Grants
 
@@ -267,7 +284,7 @@ child-thread creation rules
 ```
 
 The model cannot grant itself new powers. Publish and start must validate that
-declared tools, resources, hooks, and effects are allowed.
+declared tools, resources, couplings, and effects are allowed.
 
 ### Topology And Delegation
 
@@ -402,7 +419,7 @@ grants = []
 [[resources]]
 name = "release-review"
 kind = "skill"
-ref = "skill://cooldis/release-review@1"
+ref = "skill://release-review@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 mount = "context"
 mode = "read"
 
@@ -419,7 +436,7 @@ id = "default"
 [[context.pipelines.sources]]
 id = "playbook"
 assembler = "kernel://assembler/static"
-input = ["resource:release-review", "resource:release-playbook"]
+input = "release-playbook"
 pinned = true
 
 [[context.pipelines.sources]]
@@ -434,9 +451,7 @@ assembler = "kernel://assembler/anchored-window"
 select = { stream = "thread", read_plan = "history.default", fallback = "start" }
 budget_share = "rest"
 
-[hooks]
-pre_tool_use = "hook://cooldis/pre-tool-policy@sha256:def456"
-post_tool_use = "hook://cooldis/post-tool-recorder@sha256:789abc"
+# [hooks] is reserved. Use witnessed couplings for replayable control.
 
 [policies]
 network = "deny"

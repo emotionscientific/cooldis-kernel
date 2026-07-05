@@ -62,6 +62,12 @@ impl WasmRuntimeArtifact {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WasmHostImportPolicy {
+    Operation,
+    PureCompute,
+}
+
 #[derive(Clone)]
 pub struct WasmRuntimeConfig {
     pub artifact: WasmRuntimeArtifact,
@@ -76,6 +82,7 @@ pub struct WasmRuntimeConfig {
     pub invocation_context: InvocationContext,
     pub secrets: BTreeMap<String, String>,
     pub vfs: Option<Arc<CooldisVfs>>,
+    pub host_import_policy: WasmHostImportPolicy,
 }
 
 impl WasmRuntimeConfig {
@@ -93,6 +100,7 @@ impl WasmRuntimeConfig {
             invocation_context: InvocationContext::anonymous(),
             secrets: BTreeMap::new(),
             vfs: None,
+            host_import_policy: WasmHostImportPolicy::Operation,
         }
     }
 
@@ -168,6 +176,11 @@ impl WasmRuntimeConfig {
         self.vfs = Some(vfs);
         self
     }
+
+    pub fn with_host_import_policy(mut self, policy: WasmHostImportPolicy) -> Self {
+        self.host_import_policy = policy;
+        self
+    }
 }
 
 impl fmt::Debug for WasmRuntimeConfig {
@@ -185,6 +198,7 @@ impl fmt::Debug for WasmRuntimeConfig {
             .field("invocation_context", &self.invocation_context)
             .field("secrets", &"<redacted>")
             .field("vfs", &self.vfs.as_ref().map(|_| "<CooldisVfs>"))
+            .field("host_import_policy", &self.host_import_policy)
             .finish()
     }
 }

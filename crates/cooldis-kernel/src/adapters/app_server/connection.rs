@@ -200,6 +200,66 @@ pub(super) struct AgentDraftParams {
     pub(super) expected_latest_version: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderReadParams {
+    pub(super) provider_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderUpsertParams {
+    pub(super) provider: ModelProviderUpsertRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderDeleteParams {
+    pub(super) provider_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderUpsertRecord {
+    pub(super) provider_id: String,
+    pub(super) api: Value,
+    pub(super) base_url: String,
+    #[serde(default)]
+    pub(super) display_name: Option<String>,
+    #[serde(default)]
+    pub(super) auth: crate::LlmProviderAuthConfig,
+    #[serde(default)]
+    pub(super) headers: BTreeMap<String, LlmProviderConfigValue>,
+    #[serde(default)]
+    pub(super) auth_header: bool,
+    #[serde(default)]
+    pub(super) models: Vec<ModelProviderModelUpsertRecord>,
+    #[serde(default)]
+    pub(super) metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderModelUpsertRecord {
+    pub(super) model_id: String,
+    #[serde(default)]
+    pub(super) display_name: Option<String>,
+    #[serde(default)]
+    pub(super) api: Option<Value>,
+    #[serde(default)]
+    pub(super) base_url: Option<String>,
+    #[serde(default)]
+    pub(super) context_window_tokens: Option<u64>,
+    #[serde(default)]
+    pub(super) max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub(super) input_modalities: Vec<crate::LlmProviderInputModality>,
+    #[serde(default)]
+    pub(super) headers: BTreeMap<String, LlmProviderConfigValue>,
+    #[serde(default)]
+    pub(super) metadata: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ModelProviderAuthStatusParams {
@@ -218,6 +278,32 @@ pub(super) struct ModelProviderAuthSetParams {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ModelProviderAuthDeleteParams {
     pub(super) provider_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MandateStartParams {
+    pub(super) thread_id: String,
+    pub(super) schedule: MandateSchedulePayload,
+    #[serde(default)]
+    pub(super) max_occurrences: Option<u32>,
+    #[serde(default)]
+    pub(super) catch_up: Option<MandateCatchUpPolicy>,
+    #[serde(default)]
+    pub(super) input_template: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MandateRevokeParams {
+    pub(super) thread_id: String,
+    pub(super) mandate_event_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MandateListParams {
+    pub(super) thread_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -800,6 +886,19 @@ impl CooldisAppServer {
                 "nextCursor": null,
             })),
             "modelProvider/capabilities/read" => Ok(self.model_provider_capabilities_json()),
+            "modelProvider/list" => self.model_provider_list(),
+            "modelProvider/read" => {
+                let params: ModelProviderReadParams = parse_params(params)?;
+                self.model_provider_read(params)
+            }
+            "modelProvider/upsert" => {
+                let params: ModelProviderUpsertParams = parse_params(params)?;
+                self.model_provider_upsert(params)
+            }
+            "modelProvider/delete" => {
+                let params: ModelProviderDeleteParams = parse_params(params)?;
+                self.model_provider_delete(params)
+            }
             "modelProvider/auth/status" => {
                 let params: ModelProviderAuthStatusParams = parse_params(params)?;
                 self.model_provider_auth_status(params)
@@ -872,6 +971,18 @@ impl CooldisAppServer {
             "approval/resolve" => {
                 let params: ApprovalResolveParams = parse_params(params)?;
                 self.approval_resolve(params).await
+            }
+            "mandate/start" => {
+                let params: MandateStartParams = parse_params(params)?;
+                self.mandate_start(params).await
+            }
+            "mandate/revoke" => {
+                let params: MandateRevokeParams = parse_params(params)?;
+                self.mandate_revoke(params).await
+            }
+            "mandate/list" => {
+                let params: MandateListParams = parse_params(params)?;
+                self.mandate_list(params).await
             }
             "thread/debug/export" => {
                 let params: ThreadDebugExportParams = parse_params(params)?;
@@ -962,7 +1073,7 @@ impl CooldisAppServer {
                 "marketplaceLoadErrors": [],
                 "featuredPluginIds": [],
             })),
-            "hooks/list" => Ok(json!({ "data": [] })),
+            "hooks/list" => Ok(json!({ "data": [], "witnessing": true })),
             "mcpServerStatus/list" => self.mcp_server_status_list(),
             "mcpSource/list" => self.mcp_source_list(),
             "mcpSource/read" => {
@@ -1377,6 +1488,62 @@ impl CooldisAppServer {
             .unwrap_or_else(crate::default_operations_registry_root)
     }
 
+    pub(super) fn model_provider_list(&self) -> Result<Value, JsonRpcErrorError> {
+        let mut providers = self
+            .inner
+            .metadata_store
+            .list_providers()
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+        let data = providers
+            .iter()
+            .map(|provider| self.model_provider_json(provider))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({ "data": data, "nextCursor": null }))
+    }
+
+    pub(super) fn model_provider_read(
+        &self,
+        params: ModelProviderReadParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let provider = self.model_provider_record(&params.provider_id)?;
+        Ok(json!({ "provider": self.model_provider_json(&provider)? }))
+    }
+
+    pub(super) fn model_provider_upsert(
+        &self,
+        params: ModelProviderUpsertParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let provider = model_provider_record_from_rpc(params.provider)?;
+        self.inner
+            .metadata_store
+            .upsert_provider(provider.clone())
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        let provider = self.model_provider_record(&provider.provider_id)?;
+        Ok(json!({ "provider": self.model_provider_json(&provider)? }))
+    }
+
+    pub(super) fn model_provider_delete(
+        &self,
+        params: ModelProviderDeleteParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let provider_id = params.provider_id;
+        self.model_provider_record(&provider_id)?;
+        self.inner
+            .metadata_store
+            .delete_provider(&provider_id)
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        self.inner
+            .user_metadata_store
+            .delete_credential(&provider_id)
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        self.inner
+            .metadata_store
+            .delete_credential(&provider_id)
+            .map_err(|err| internal_error(provider_store_error(err)))?;
+        Ok(json!({ "deleted": true, "providerId": provider_id }))
+    }
+
     pub(super) fn model_provider_auth_status(
         &self,
         params: ModelProviderAuthStatusParams,
@@ -1473,6 +1640,39 @@ impl CooldisAppServer {
             "source": status.source,
             "label": status.label,
             "authHeader": provider.auth_header,
+        }))
+    }
+
+    fn model_provider_json(
+        &self,
+        provider: &LlmProviderRecord,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let status = crate::llm_provider_auth_status(
+            &self.inner.user_metadata_store,
+            provider,
+            &LlmProviderAuthContext::from_process_env(),
+        )
+        .map_err(|err| internal_error(provider_store_error(err)))?;
+        Ok(json!({
+            "providerId": provider.provider_id,
+            "api": provider_api_rpc_json(&provider.api),
+            "baseUrl": provider.base_url,
+            "displayName": provider.display_name,
+            "auth": redacted_model_provider_auth_config(&provider.auth),
+            "authHeader": provider.auth_header,
+            "headers": redacted_model_provider_config_values(&provider.headers),
+            "models": provider.models.iter().map(|model| {
+                model_provider_model_json(provider, model, model.model_id == self.inner.model)
+            }).collect::<Vec<_>>(),
+            "metadata": provider.metadata,
+            "createdAtMs": provider.created_at_ms,
+            "updatedAtMs": provider.updated_at_ms,
+            "configuredAuth": {
+                "configured": status.configured,
+                "source": status.source,
+                "label": status.label,
+            },
+            "isActiveProvider": provider.provider_id == self.inner.model_provider,
         }))
     }
 
@@ -1779,6 +1979,74 @@ impl CooldisAppServer {
         ))
     }
 
+    pub(super) async fn mandate_start(
+        &self,
+        params: MandateStartParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
+        let receipt = crate::start_mandate(
+            &store,
+            &lifecycle.coordinates,
+            crate::MandateStartRequest {
+                schedule: params.schedule,
+                max_occurrences: params.max_occurrences,
+                catch_up: params.catch_up,
+                input_template: params.input_template,
+                snapshot_id: lifecycle
+                    .metadata
+                    .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+                    .cloned(),
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(mandate_jsonrpc_error)?;
+        Ok(json!({
+            "mandateEventId": receipt.event.id.to_string(),
+            "streamId": receipt.event.stream_id.as_str(),
+            "sequence": receipt.event.sequence.get(),
+        }))
+    }
+
+    pub(super) async fn mandate_revoke(
+        &self,
+        params: MandateRevokeParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let mandate_event_id = crate::parse_mandate_event_id(&params.mandate_event_id)
+            .map_err(mandate_jsonrpc_error)?;
+        let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
+        let receipt = crate::revoke_mandate(&store, &lifecycle.coordinates, mandate_event_id)
+            .await
+            .map_err(mandate_jsonrpc_error)?;
+        Ok(json!({
+            "status": receipt.status.as_str(),
+            "mandateEventId": mandate_event_id.to_string(),
+            "revokedEventId": receipt.revoke_event.id.to_string(),
+            "streamId": receipt.revoke_event.stream_id.as_str(),
+            "sequence": receipt.revoke_event.sequence.get(),
+        }))
+    }
+
+    pub(super) async fn mandate_list(
+        &self,
+        params: MandateListParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
+        let data = crate::list_active_mandates(&store, &lifecycle.coordinates)
+            .await
+            .map_err(mandate_jsonrpc_error)?
+            .iter()
+            .map(active_mandate_json)
+            .collect::<Vec<_>>();
+        Ok(json!({ "data": data, "nextCursor": null }))
+    }
+
     pub(super) async fn thread_debug_export(
         &self,
         params: ThreadDebugExportParams,
@@ -1947,6 +2215,7 @@ impl CooldisAppServer {
             alias,
             &provider_surface,
             self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.skill_registry_root.as_path()),
             &mcp_server_refs,
             Some(&tool_universe_discoverer),
             &model_selection,
@@ -1980,6 +2249,7 @@ impl CooldisAppServer {
             alias,
             &provider_surface,
             self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.skill_registry_root.as_path()),
             &mcp_server_refs,
             Some(&tool_universe_discoverer),
             &model_selection,
@@ -2072,6 +2342,7 @@ impl CooldisAppServer {
             &mut metadata,
             &bound_agent,
             params.runtime_overrides.as_ref(),
+            self.inner.capsule_bindings.registry_root.as_deref(),
         )?;
         let handle = self
             .inner
@@ -2450,6 +2721,7 @@ impl CooldisAppServer {
             &mut child_metadata,
             &bound_agent,
             params.runtime_overrides.as_ref(),
+            self.inner.capsule_bindings.registry_root.as_deref(),
         )?;
         child_metadata.insert(
             THREAD_REBIND_FORK_REASON_METADATA.to_string(),
@@ -2872,11 +3144,13 @@ impl CooldisAppServer {
         &self,
         params: CapsuleBindingResolveParams,
     ) -> Result<Value, JsonRpcErrorError> {
+        // lexicon-allow: capsule - preserves existing app-server operation binding API.
         let registry = LocalOperationRegistry::new(self.capsule_registry_root()?);
         let tenant_id = params
             .tenant_id
             .unwrap_or_else(|| self.inner.tenant_id.clone());
         let request = if let Some(thread_id) = params.thread_id {
+            // lexicon-allow: capsule - preserves existing app-server operation binding API.
             CapsuleBindingResolutionRequest::for_thread(tenant_id, thread_id)
         } else {
             // lexicon-allow: capsule - preserves existing app-server operation binding API.
@@ -3310,10 +3584,19 @@ impl CooldisAppServer {
     }
 
     pub(super) fn model_provider_capabilities_json(&self) -> Value {
+        let supports_streaming = agent_manifest_provider_surface_from_parts(
+            &self.inner.provider,
+            &self.inner.model_provider,
+            &self.inner.model,
+            &self.inner.metadata_store,
+        )
+        .map(|surface| surface.supports_streaming)
+        .unwrap_or(false);
         json!({
             "namespaceTools": true,
             "imageGeneration": false,
             "webSearch": false,
+            "supportsStreaming": supports_streaming,
         })
     }
 
@@ -4202,6 +4485,184 @@ pub(super) fn catalog_provider_display_name(provider: &LlmProviderRecord) -> Str
         .unwrap_or_else(|| provider.provider_id.clone())
 }
 
+pub(super) fn model_provider_record_from_rpc(
+    provider: ModelProviderUpsertRecord,
+) -> Result<LlmProviderRecord, JsonRpcErrorError> {
+    validate_model_provider_auth_config(&provider.auth)?;
+    validate_model_provider_config_values(&provider.headers)?;
+    let api = provider_api_from_rpc_value(provider.api)?;
+    let mut record = LlmProviderRecord::new(provider.provider_id, api, provider.base_url)
+        .with_auth(provider.auth)
+        .with_auth_header(provider.auth_header);
+    record.display_name = provider.display_name;
+    record.headers = provider.headers;
+    record.metadata = provider.metadata;
+    record.models = provider
+        .models
+        .into_iter()
+        .map(model_provider_model_record_from_rpc)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(record)
+}
+
+fn model_provider_model_record_from_rpc(
+    model: ModelProviderModelUpsertRecord,
+) -> Result<crate::LlmProviderModelRecord, JsonRpcErrorError> {
+    validate_model_provider_config_values(&model.headers)?;
+    Ok(crate::LlmProviderModelRecord {
+        model_id: model.model_id,
+        display_name: model.display_name,
+        api: model.api.map(provider_api_from_rpc_value).transpose()?,
+        base_url: model.base_url,
+        context_window_tokens: model.context_window_tokens,
+        max_output_tokens: model.max_output_tokens,
+        input_modalities: model.input_modalities,
+        headers: model.headers,
+        metadata: model.metadata,
+    })
+}
+
+fn validate_model_provider_auth_config(
+    auth: &crate::LlmProviderAuthConfig,
+) -> Result<(), JsonRpcErrorError> {
+    match auth {
+        crate::LlmProviderAuthConfig::InlineApiKey { .. } => Err(jsonrpc_error(
+            -32602,
+            "modelProvider/upsert rejects inline API keys; use modelProvider/auth/set",
+        )),
+        crate::LlmProviderAuthConfig::Command { .. } => Err(jsonrpc_error(
+            -32602,
+            "modelProvider/upsert does not support command-backed auth in v1",
+        )),
+        crate::LlmProviderAuthConfig::StoredOrEnvironment
+        | crate::LlmProviderAuthConfig::None
+        | crate::LlmProviderAuthConfig::Env { .. } => Ok(()),
+    }
+}
+
+fn validate_model_provider_config_values(
+    values: &BTreeMap<String, LlmProviderConfigValue>,
+) -> Result<(), JsonRpcErrorError> {
+    if let Some((name, _)) = values
+        .iter()
+        .find(|(_, value)| matches!(value, LlmProviderConfigValue::Command { .. }))
+    {
+        return Err(jsonrpc_error(
+            -32602,
+            format!("modelProvider/upsert does not support command-backed header {name:?} in v1"),
+        ));
+    }
+    Ok(())
+}
+
+fn model_provider_model_json(
+    provider: &LlmProviderRecord,
+    model: &crate::LlmProviderModelRecord,
+    is_default: bool,
+) -> Value {
+    json!({
+        "modelId": model.model_id,
+        "displayName": model.display_name,
+        "api": provider_api_rpc_json(model.api.as_ref().unwrap_or(&provider.api)),
+        "baseUrl": model.base_url.as_ref().unwrap_or(&provider.base_url),
+        "contextWindowTokens": model.context_window_tokens,
+        "maxOutputTokens": model.max_output_tokens,
+        "inputModalities": model.input_modalities,
+        "headers": redacted_model_provider_config_values(&model.headers),
+        "metadata": model.metadata,
+        "isDefault": is_default,
+    })
+}
+
+fn redacted_model_provider_auth_config(auth: &crate::LlmProviderAuthConfig) -> Value {
+    match auth {
+        crate::LlmProviderAuthConfig::StoredOrEnvironment => {
+            json!({ "type": "stored_or_environment" })
+        }
+        crate::LlmProviderAuthConfig::None => json!({ "type": "none" }),
+        crate::LlmProviderAuthConfig::Env { name } => json!({ "type": "env", "name": name }),
+        crate::LlmProviderAuthConfig::InlineApiKey { .. } => {
+            json!({ "type": "inline_api_key", "key": { "redacted": true } })
+        }
+        crate::LlmProviderAuthConfig::Command { .. } => {
+            json!({ "type": "command", "command": { "redacted": true } })
+        }
+    }
+}
+
+fn redacted_model_provider_config_values(
+    values: &BTreeMap<String, LlmProviderConfigValue>,
+) -> Vec<Value> {
+    values
+        .iter()
+        .map(|(name, value)| {
+            json!({
+                "name": name,
+                "value": redacted_model_provider_config_value(value),
+            })
+        })
+        .collect()
+}
+
+fn redacted_model_provider_config_value(value: &LlmProviderConfigValue) -> Value {
+    match value {
+        LlmProviderConfigValue::Literal { .. } => {
+            json!({ "type": "literal", "value": { "redacted": true } })
+        }
+        LlmProviderConfigValue::Env { name } => json!({ "type": "env", "name": name }),
+        LlmProviderConfigValue::Command { .. } => {
+            json!({ "type": "command", "command": { "redacted": true } })
+        }
+    }
+}
+
+fn provider_api_from_rpc_value(value: Value) -> Result<ProviderApi, JsonRpcErrorError> {
+    match value {
+        Value::String(api) => provider_api_from_rpc_str(&api),
+        Value::Object(mut object) => {
+            let Some(other) = object
+                .remove("other")
+                .and_then(|value| value.as_str().map(str::to_string))
+            else {
+                return Err(jsonrpc_error(
+                    -32602,
+                    "modelProvider/upsert api object must be {\"other\":\"...\"}",
+                ));
+            };
+            Ok(ProviderApi::Other(other))
+        }
+        _ => Err(jsonrpc_error(
+            -32602,
+            "modelProvider/upsert api must be a string or {\"other\":\"...\"}",
+        )),
+    }
+}
+
+fn provider_api_from_rpc_str(api: &str) -> Result<ProviderApi, JsonRpcErrorError> {
+    match api {
+        "open_ai_responses" | "open_a_i_responses" => Ok(ProviderApi::OpenAIResponses),
+        "open_ai_chat_completions" | "open_a_i_chat_completions" => {
+            Ok(ProviderApi::OpenAIChatCompletions)
+        }
+        "anthropic_messages" => Ok(ProviderApi::AnthropicMessages),
+        other => Err(jsonrpc_error(
+            -32602,
+            format!(
+                "unknown modelProvider api {other:?}; expected open_ai_responses, open_ai_chat_completions, anthropic_messages, or {{\"other\":\"...\"}}"
+            ),
+        )),
+    }
+}
+
+fn provider_api_rpc_json(api: &ProviderApi) -> Value {
+    match api {
+        ProviderApi::OpenAIResponses => json!("open_ai_responses"),
+        ProviderApi::OpenAIChatCompletions => json!("open_ai_chat_completions"),
+        ProviderApi::AnthropicMessages => json!("anthropic_messages"),
+        ProviderApi::Other(other) => json!({ "other": other }),
+    }
+}
+
 pub(super) fn thread_event_record_json(
     record: &crate::EventRecord,
 ) -> Result<Value, JsonRpcErrorError> {
@@ -4290,6 +4751,33 @@ pub(super) fn approval_resolution_json(
         "sequence": record.sequence.get(),
         "createdAtMs": record.created_at_ms,
     })
+}
+
+pub(super) fn active_mandate_json(mandate: &crate::ActiveMandate) -> Value {
+    json!({
+        "mandateEventId": mandate.event.id.to_string(),
+        "mandateId": mandate.payload.mandate_id.clone(),
+        "threadId": mandate
+            .payload
+            .subject
+            .thread_id
+            .as_deref()
+            .or(mandate.payload.thread_id.as_deref()),
+        "schedule": mandate.payload.schedule.clone(),
+        "maxOccurrences": mandate.payload.max_occurrences,
+        "catchUp": mandate.payload.catch_up,
+        "inputTemplate": mandate.payload.input_template.clone(),
+        "createdAtMs": mandate.event.created_at_ms,
+        "streamId": mandate.event.stream_id.as_str(),
+        "sequence": mandate.event.sequence.get(),
+    })
+}
+
+pub(super) fn mandate_jsonrpc_error(err: CooldisError) -> JsonRpcErrorError {
+    match err {
+        CooldisError::RuntimeExecution(_) => jsonrpc_error(-32602, err.to_string()),
+        _ => internal_error(err),
+    }
 }
 
 pub(super) fn pending_tool_approval_json(suspension: &crate::PendingToolCallSuspension) -> Value {

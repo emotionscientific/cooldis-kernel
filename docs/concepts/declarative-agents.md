@@ -24,7 +24,7 @@ A Cooldis agent declaration can include:
 - context strategy;
 - sandbox and placement requirements;
 - triggers and channels;
-- hooks, approval gates, and policies;
+- couplings, approval gates, and policies;
 - external connections and secrets;
 - events, receipts, versioning, rollback, and audit records.
 

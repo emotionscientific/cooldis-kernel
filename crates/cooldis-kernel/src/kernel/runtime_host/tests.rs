@@ -7,15 +7,26 @@ use crate::agent::manifest_bind::{
 use crate::agent::manifest_schema::{AgentManifestCouplingBudget, AgentManifestCouplingQuota};
 use crate::kernel::context_compiler::AgentContextCompilationDiagnostics;
 use crate::kernel::control_decision::{
-    MandateStartedPayload, MandateSubject, TurnContinuationAcceptedPayload,
-    TurnContinuationSubject, TurnContinueRequestedPayload, control_stream_id,
+    MandateCatchUpPolicy, MandateSchedulePayload, MandateStartedPayload, MandateSubject,
+    TurnContinuationAcceptedPayload, TurnContinuationSubject, TurnContinueRequestedPayload,
+    control_stream_id,
 };
 use crate::kernel::history::{
     CanonicalContent, CanonicalMessage, CanonicalStopReason, EventKind, EventOrigin,
     EventProvenance, EventRecord, EventRecordId, EventStore, EventStreamId, NewEventRecord,
     ProviderApi, SessionEntryId, SessionEntryKind, SessionStore, ThreadBaseRef, ThreadForkReason,
+    TimerFiredPayload,
+};
+use crate::{
+    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CooldisDaemonClockRoute,
+    CouplingScheduler, DaemonClock, LocalOfflineProviderClient, SqliteSessionStore,
+    StdlibCouplingExecutor,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use cooldis_io_core::{
+    IngressAck, IngressContent, IngressEnvelope, IngressSink, IoError, IoResult,
+};
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
@@ -269,6 +280,17 @@ async fn context_compile_receipt_event_carries_discharged_provenance() {
 }
 
 #[tokio::test]
+async fn manifest_bind_receipts_emit_policy_bound_for_bound_coupling_set() {
+    let first =
+        policy_bound_content_hash_for_config(serde_json::json!({"pattern": "rm -rf"})).await;
+    let same = policy_bound_content_hash_for_config(serde_json::json!({"pattern": "rm -rf"})).await;
+    let edited = policy_bound_content_hash_for_config(serde_json::json!({"pattern": "curl"})).await;
+
+    assert_eq!(first, same);
+    assert_ne!(first, edited);
+}
+
+#[tokio::test]
 async fn context_compile_receipt_carries_borrowed_prefix_source_ranges() {
     let store = Arc::new(InMemorySessionStore::new());
     let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
@@ -394,6 +416,55 @@ fn runtime_std_context_spill_coupling() -> BoundCoupling {
         },
         config: serde_json::json!({}),
         config_hash: "sha256:context-spill".to_string(),
+    }
+}
+
+fn runtime_std_schedule_cron_timer_coupling() -> BoundCoupling {
+    BoundCoupling {
+        id: "std::schedule.cron".to_string(),
+        role: CouplingRole::Controller,
+        trigger_kind: EventKind::TimerFired,
+        trigger_match: Default::default(),
+        trigger_quota: AgentManifestCouplingQuota::default(),
+        source_selectors: vec![BoundCouplingSelector {
+            stream: "control".to_string(),
+            kinds: vec![
+                EventKind::MandateStarted,
+                EventKind::MandateRevoked,
+                EventKind::TimerFired,
+            ],
+            scope: None,
+            since: None,
+        }],
+        sink: BoundCouplingSink {
+            stream: "control".to_string(),
+            kinds: vec![
+                EventKind::TurnContinueRequested,
+                EventKind::LoopBudgetExhausted,
+            ],
+        },
+        function_ref: format!("op://std-schedule-cron/run@sha256:{}", "s".repeat(64)),
+        function: BoundCouplingFunction {
+            name: "std-schedule-cron".to_string(),
+            artifact_hash: "s".repeat(64),
+            operation_name: Some("run".to_string()),
+        },
+        grants: vec![
+            "stream.read:control".to_string(),
+            "stream.write:control".to_string(),
+        ],
+        budget: AgentManifestCouplingBudget {
+            max_discharge_events: Some(1),
+            max_ms: None,
+        },
+        config: serde_json::json!({
+            "max_occurrences": 2,
+            "mandate_scope": "match_all",
+            "schedule_id": "nightly-summary",
+            "loop_id": "loop-nightly",
+            "parent_turn_id": "turn-nightly-root",
+        }),
+        config_hash: "sha256:schedule-cron".to_string(),
     }
 }
 
@@ -1441,6 +1512,110 @@ async fn loop_continuation_accepts_request_and_submits_next_turn_once() {
 }
 
 #[tokio::test]
+async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider() {
+    let root = std::env::temp_dir()
+        .join("cooldis-runtime-host-tests")
+        .join(uuid::Uuid::now_v7().to_string());
+    let store = SqliteSessionStore::open(root.join("history.sqlite3")).unwrap();
+    let mut config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other("local_offline".to_string()),
+        "local_offline",
+        "gpt-test",
+    );
+    config.max_tokens = 128;
+    let provider = Arc::new(LocalOfflineProviderClient::new("local_offline", "gpt-test"));
+    let factory = Arc::new(CanonicalProviderRuntimeFactory::new(config, provider));
+    let host = RuntimeHost::with_session_store(factory, Arc::new(store.clone()));
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "scheduled");
+    let thread = host
+        .start_thread(coordinates.clone(), ThreadTopology::root())
+        .await
+        .unwrap();
+    let thread_id = thread.context().coordinates.thread_id;
+    let mut events = thread.subscribe_events();
+    wait_for_status(&thread, ThreadStatus::Idle).await;
+
+    let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap();
+    let due = start + ChronoDuration::minutes(1);
+    let mandate = append_scheduled_loop_mandate(&store, &coordinates, "loop-nightly", start).await;
+    let sink = Arc::new(WitnessTimerFiredSink {
+        store: store.clone(),
+        coordinates: coordinates.clone(),
+    });
+    let clock = Arc::new(RuntimeFakeClock::new(due));
+    let route = CooldisDaemonClockRoute::new("clock-main", store.clone(), sink, clock)
+        .with_started_at(start);
+
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
+    let control_events = store
+        .read_events(&control_stream_id(&coordinates), None)
+        .await
+        .unwrap();
+    let fired = control_events
+        .iter()
+        .filter(|event| event.kind == EventKind::TimerFired)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].provenance.source_event_ids, vec![mandate.id]);
+
+    let executor = StdlibCouplingExecutor;
+    let scheduler = CouplingScheduler::new(&store, &executor);
+    let receipt = scheduler
+        .run_batch(
+            &BoundCouplingSet::new(
+                "schedule.v1",
+                vec![runtime_std_schedule_cron_timer_coupling()],
+            ),
+            fired,
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.runs.len(), 1);
+    assert_eq!(receipt.runs[0].coupling_id, "std::schedule.cron");
+    assert_eq!(receipt.runs[0].discharged_event_ids.len(), 1);
+
+    let continuation = store
+        .read_events(&control_stream_id(&coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::TurnContinueRequested)
+        .unwrap();
+    assert_eq!(
+        continuation.payload["next_turn_input"],
+        "wake at 2026-01-01T00:01:00.000Z"
+    );
+
+    let continuation_receipt = host
+        .continue_turn_if_requested(
+            thread_id,
+            "loop-nightly",
+            "turn-nightly-root",
+            "turn-nightly-1",
+            due.timestamp_millis(),
+            0,
+        )
+        .await
+        .unwrap();
+    match continuation_receipt {
+        LoopContinuationReceipt::Accepted {
+            loop_id,
+            parent_turn_id,
+            next_turn_id,
+            ..
+        } => {
+            assert_eq!(loop_id, "loop-nightly");
+            assert_eq!(parent_turn_id, "turn-nightly-root");
+            assert_eq!(next_turn_id, "turn-nightly-1");
+        }
+        other => panic!("expected accepted schedule continuation, got {other:?}"),
+    }
+    assert_output(&mut events, "local:wake at 2026-01-01T00:01:00.000Z").await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn loop_continuation_without_mandate_rejects_without_submitting() {
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
@@ -2016,6 +2191,69 @@ fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
         .collect()
 }
 
+async fn policy_bound_content_hash_for_config(config: serde_json::Value) -> String {
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let mut coupling = runtime_std_context_spill_coupling();
+    coupling.id = "test.policy".to_string();
+    coupling.function_ref = format!("op://policy/check@sha256:{}", "d".repeat(64));
+    coupling.config = config;
+    coupling.config_hash = "sha256:test-config".to_string();
+    let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+    let metadata = BTreeMap::from([(
+        THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
+        serde_json::to_string(&coupling_set).unwrap(),
+    )]);
+    let thread = host
+        .start_thread_with_topology_and_metadata(
+            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            ThreadTopology::root(),
+            metadata,
+        )
+        .await
+        .unwrap();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({
+                "ref_uri": "agent://policy@0.1.0",
+                "manifest_hash": "snapshot-a",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "ref_uri": "agent://policy@0.1.0",
+                "manifest_hash": "snapshot-a"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let events = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let bind_position = events
+        .iter()
+        .position(|event| event.kind == EventKind::ManifestBindCompleted)
+        .unwrap();
+    let policy_position = events
+        .iter()
+        .position(|event| event.kind == EventKind::PolicyBound)
+        .unwrap();
+    assert!(bind_position < policy_position);
+    let policy = &events[policy_position];
+    assert_eq!(
+        policy.payload["schema"],
+        EventKind::PolicyBound.payload_schema_id()
+    );
+    assert_eq!(policy.payload["policy_kind"], "coupling_set");
+    assert_eq!(policy.payload["policy_id"], "coupling_set:snapshot-a");
+    policy.payload["content_hash"].as_str().unwrap().to_string()
+}
+
 async fn assert_cancelled(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
     loop {
         let event = timeout(Duration::from_secs(2), events.recv())
@@ -2059,6 +2297,101 @@ fn canonical_user_content(context: &SessionContext) -> Vec<Vec<CanonicalContent>
         .collect()
 }
 
+#[derive(Clone)]
+struct RuntimeFakeClock {
+    now: Arc<std::sync::Mutex<DateTime<Utc>>>,
+}
+
+impl RuntimeFakeClock {
+    fn new(now: DateTime<Utc>) -> Self {
+        Self {
+            now: Arc::new(std::sync::Mutex::new(now)),
+        }
+    }
+}
+
+impl DaemonClock for RuntimeFakeClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.now.lock().unwrap()
+    }
+}
+
+struct WitnessTimerFiredSink {
+    store: SqliteSessionStore,
+    coordinates: ThreadCoordinates,
+}
+
+#[async_trait]
+impl IngressSink for WitnessTimerFiredSink {
+    async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        let IngressContent::Event { kind, payload } = &envelope.content else {
+            return Err(IoError::Bridge(
+                "clock route emitted non-event ingress".to_string(),
+            ));
+        };
+        if kind != "timer.fired" {
+            return Err(IoError::Bridge(format!(
+                "clock route emitted unexpected event kind {kind:?}"
+            )));
+        }
+        let timer = serde_json::from_value::<TimerFiredPayload>(payload.clone())
+            .map_err(|err| IoError::Bridge(format!("invalid timer.fired payload: {err}")))?;
+        let mandate_event_id = timer.mandate_event_id;
+        let control_stream = control_stream_id(&self.coordinates);
+        let mut record = NewEventRecord::witnessed(
+            self.coordinates.clone(),
+            EventKind::TimerFired,
+            serde_json::to_value(timer)
+                .map_err(|err| IoError::Bridge(format!("encode timer.fired payload: {err}")))?,
+        );
+        record.provenance = EventProvenance {
+            source_streams: vec![control_stream.clone()],
+            source_event_ids: vec![mandate_event_id],
+            ..EventProvenance::default()
+        };
+        self.store
+            .append_events(&control_stream, vec![record])
+            .await
+            .map_err(|err| IoError::Bridge(format!("append timer.fired: {err}")))?;
+        Ok(IngressAck::accepted(&envelope))
+    }
+}
+
+async fn append_scheduled_loop_mandate(
+    store: &SqliteSessionStore,
+    coordinates: &ThreadCoordinates,
+    loop_id: &str,
+    created_at: DateTime<Utc>,
+) -> EventRecord {
+    let mut record = NewEventRecord::witnessed(
+        coordinates.clone(),
+        EventKind::MandateStarted,
+        serde_json::to_value(MandateStartedPayload {
+            subject: MandateSubject {
+                thread_id: Some(coordinates.thread_id.to_string()),
+                loop_id: Some(loop_id.to_string()),
+            },
+            mandate_id: format!("mandate-{loop_id}"),
+            snapshot_id: "schedule.v1".to_string(),
+            thread_id: Some(coordinates.thread_id.to_string()),
+            max_continuations: None,
+            expires_at_ms: None,
+            schedule: Some(MandateSchedulePayload::Interval { every_ms: 60_000 }),
+            max_occurrences: Some(2),
+            catch_up: Some(MandateCatchUpPolicy::SkipMissed),
+            input_template: Some("wake at {scheduled_for}".to_string()),
+        })
+        .unwrap(),
+    );
+    record.created_at_ms = created_at.timestamp_millis();
+    store
+        .append_events(&control_stream_id(coordinates), vec![record])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
 async fn append_loop_parent_completed(
     store: &InMemorySessionStore,
     coordinates: &ThreadCoordinates,
@@ -2094,13 +2427,18 @@ async fn append_loop_mandate_started(
                 EventKind::MandateStarted,
                 serde_json::to_value(MandateStartedPayload {
                     subject: MandateSubject {
-                        loop_id: loop_id.to_string(),
+                        thread_id: None,
+                        loop_id: Some(loop_id.to_string()),
                     },
                     mandate_id: format!("mandate-{loop_id}"),
                     snapshot_id: snapshot_id.to_string(),
                     thread_id: Some(coordinates.thread_id.to_string()),
                     max_continuations,
                     expires_at_ms: None,
+                    schedule: None,
+                    max_occurrences: None,
+                    catch_up: None,
+                    input_template: None,
                 })
                 .unwrap(),
             )],

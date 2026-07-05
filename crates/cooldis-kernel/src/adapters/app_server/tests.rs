@@ -8,13 +8,16 @@ use super::threads::{
 use super::*;
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND, LocalOperationRegistry,
-    NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND, PROCESS_EXEC_OPERATION,
-    PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, ProviderError,
-    PublishedOperationSource, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
-    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
-    THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL,
-    TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig, ThinkingEffort,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND,
+    LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
+    MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
+    PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
+    PROCESS_WRITE_OPERATION, ProviderError, PublishSkillPackageRequest, PublishedOperationSource,
+    SCHEDULE_MANAGE_CAPABILITY, SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION,
+    THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION,
+    THREAD_WAIT_OPERATION, THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY,
+    THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL, TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig,
+    ThinkingEffort,
 };
 
 #[test]
@@ -454,6 +457,346 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         )
         .unwrap()
         .is_none()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_list_and_read_return_redacted_endpoint_records() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-list-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-list");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let provider_id = "fixture-list";
+    let project_metadata_path = config.metadata_store_path();
+    let user_metadata_path = config.user_metadata_store_path();
+    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path).unwrap();
+    metadata_store
+        .upsert_provider(
+            LlmProviderRecord::new(
+                provider_id,
+                ProviderApi::OpenAIChatCompletions,
+                "https://example.invalid/v1",
+            )
+            .with_display_name("Fixture List")
+            .with_auth(crate::LlmProviderAuthConfig::Env {
+                name: "FIXTURE_API_KEY".to_string(),
+            })
+            .with_auth_header(true)
+            .with_header(
+                "x-fixture",
+                crate::LlmProviderConfigValue::literal("secret-header"),
+            )
+            .with_model(
+                crate::LlmProviderModelRecord::new("fixture-model")
+                    .with_display_name("Fixture Model")
+                    .with_context_window_tokens(4096),
+            ),
+        )
+        .unwrap();
+    drop(metadata_store);
+    crate::SqliteMetadataStore::open(&user_metadata_path)
+        .unwrap()
+        .set_credential(
+            provider_id,
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-list-key".to_string(),
+            },
+        )
+        .unwrap();
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let list = app
+        .dispatch_request(&connection, "modelProvider/list", None)
+        .await
+        .unwrap();
+    let provider = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"].as_str() == Some(provider_id))
+        .expect("expected fixture provider");
+    assert_eq!(provider["api"], "open_ai_chat_completions");
+    assert_eq!(provider["baseUrl"], "https://example.invalid/v1");
+    assert_eq!(provider["auth"]["type"], "env");
+    assert_eq!(provider["auth"]["name"], "FIXTURE_API_KEY");
+    assert_eq!(provider["headers"][0]["name"], "x-fixture");
+    assert_eq!(provider["headers"][0]["value"]["type"], "literal");
+    assert_eq!(provider["headers"][0]["value"]["value"]["redacted"], true);
+    assert_eq!(provider["models"][0]["modelId"], "fixture-model");
+    assert_eq!(provider["models"][0]["contextWindowTokens"], 4096);
+    assert_eq!(provider["configuredAuth"]["configured"], true);
+    assert_eq!(provider["configuredAuth"]["source"], "stored");
+    assert!(
+        !serde_json::to_string(&list)
+            .unwrap()
+            .contains("secret-header")
+    );
+    assert!(
+        !serde_json::to_string(&list)
+            .unwrap()
+            .contains("stored-list-key")
+    );
+
+    let read = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/read",
+            Some(json!({ "providerId": provider_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read["provider"]["providerId"], provider_id);
+
+    let unknown = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/read",
+            Some(json!({ "providerId": "missing-provider" })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code, -32602);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_upsert_creates_and_updates_endpoint_records() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-upsert-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-upsert");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let metadata_path = config.metadata_store_path();
+    let app = CooldisAppServer::new_local(config.clone()).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let created = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-upsert",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "displayName": "Fixture Upsert",
+                    "auth": { "type": "env", "name": "FIXTURE_UPSERT_KEY" },
+                    "authHeader": true,
+                    "headers": {
+                        "x-mode": { "type": "literal", "value": "secret-mode" },
+                        "x-env": { "type": "env", "name": "FIXTURE_HEADER" }
+                    },
+                    "metadata": { "owner": "tests" },
+                    "models": [{
+                        "modelId": "fixture-small",
+                        "displayName": "Fixture Small",
+                        "api": "open_ai_chat_completions",
+                        "baseUrl": "https://example.invalid/model-v1",
+                        "contextWindowTokens": 8192,
+                        "maxOutputTokens": 2048,
+                        "inputModalities": ["text", "image"],
+                        "headers": {
+                            "x-model": { "type": "literal", "value": "secret-model" }
+                        },
+                        "metadata": { "tier": "small" }
+                    }]
+                }
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created["provider"]["providerId"], "fixture-upsert");
+    assert_eq!(
+        created["provider"]["models"][0]["baseUrl"],
+        "https://example.invalid/model-v1"
+    );
+    assert_eq!(
+        created["provider"]["models"][0]["inputModalities"],
+        json!(["text", "image"])
+    );
+    assert_eq!(created["provider"]["metadata"]["owner"], "tests");
+    assert!(!created.to_string().contains("secret-mode"));
+    assert!(!created.to_string().contains("secret-model"));
+
+    let stored = crate::SqliteMetadataStore::open(&metadata_path)
+        .unwrap()
+        .get_provider("fixture-upsert")
+        .unwrap()
+        .expect("provider should be stored");
+    assert_eq!(stored.display_name.as_deref(), Some("Fixture Upsert"));
+    assert_eq!(stored.models[0].model_id, "fixture-small");
+    assert_eq!(stored.models[0].context_window_tokens, Some(8192));
+
+    let updated = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-upsert",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v2",
+                    "displayName": "Fixture Updated",
+                    "auth": { "type": "none" },
+                    "models": [{ "modelId": "fixture-large" }]
+                }
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated["provider"]["baseUrl"], "https://example.invalid/v2");
+    assert_eq!(updated["provider"]["displayName"], "Fixture Updated");
+    assert_eq!(updated["provider"]["models"][0]["modelId"], "fixture-large");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-reject-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-reject");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let inline = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-inline",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "auth": { "type": "inline_api_key", "key": "secret" }
+                }
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(inline.code, -32602);
+    assert!(inline.message.contains("inline API keys"));
+
+    let command_auth = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-command-auth",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "auth": { "type": "command", "command": "secret-helper" }
+                }
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(command_auth.code, -32602);
+    assert!(command_auth.message.contains("command-backed auth"));
+
+    let command_header = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(json!({
+                "provider": {
+                    "providerId": "fixture-command-header",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://example.invalid/v1",
+                    "headers": {
+                        "x-command": { "type": "command", "command": "secret-helper" }
+                    }
+                }
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(command_header.code, -32602);
+    assert!(command_header.message.contains("command-backed header"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_delete_removes_record_and_stored_credential() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-provider-delete-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-provider-delete");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let metadata_path = config.metadata_store_path();
+    let user_metadata_path = config.user_metadata_store_path();
+    let metadata_store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
+    metadata_store
+        .upsert_provider(LlmProviderRecord::new(
+            "fixture-delete",
+            ProviderApi::OpenAIChatCompletions,
+            "https://example.invalid/v1",
+        ))
+        .unwrap();
+    metadata_store
+        .set_credential(
+            "fixture-delete",
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-delete-key".to_string(),
+            },
+        )
+        .unwrap();
+    drop(metadata_store);
+    crate::SqliteMetadataStore::open(&user_metadata_path)
+        .unwrap()
+        .set_credential(
+            "fixture-delete",
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-user-delete-key".to_string(),
+            },
+        )
+        .unwrap();
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let deleted = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/delete",
+            Some(json!({ "providerId": "fixture-delete" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(deleted["providerId"], "fixture-delete");
+
+    let store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
+    assert!(store.get_provider("fixture-delete").unwrap().is_none());
+    assert!(store.get_credential("fixture-delete").unwrap().is_none());
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path).unwrap();
+    assert!(
+        user_store
+            .get_credential("fixture-delete")
+            .unwrap()
+            .is_none()
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1922,6 +2265,40 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
             .collect::<Vec<_>>(),
         expected_operations
     );
+    let schedule_record = LocalOperationRegistry::new(&operation_registry_root)
+        .load_record(COOLDIS_SCHEDULE_PACKAGE)
+        .expect("startup should publish cooldis-schedule");
+    assert!(matches!(
+        &schedule_record.source,
+        PublishedOperationSource::Kernel { package } if package == COOLDIS_SCHEDULE_PACKAGE
+    ));
+    assert_eq!(
+        schedule_record
+            .metadata
+            .get(OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(Value::as_str),
+        Some(KERNEL_RUNTIME_KIND)
+    );
+    assert_eq!(
+        schedule_record
+            .manifest
+            .operations
+            .iter()
+            .map(|operation| operation.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            MANDATE_START_OPERATION,
+            MANDATE_REVOKE_OPERATION,
+            MANDATE_LIST_OPERATION,
+        ]
+    );
+    assert_eq!(
+        schedule_record.capability_grants,
+        BTreeSet::from([
+            SCHEDULE_MANAGE_CAPABILITY.to_string(),
+            SCHEDULE_READ_CAPABILITY.to_string()
+        ])
+    );
     let process_record = LocalOperationRegistry::new(&operation_registry_root)
         .load_record(COOLDIS_PROCESS_PACKAGE)
         .expect("startup should publish cooldis-process");
@@ -1983,6 +2360,7 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
         !tool["operation_ref"].as_str().is_some_and(|operation_ref| {
             operation_ref.contains(COOLDIS_PROCESS_PACKAGE)
                 || operation_ref.contains(COOLDIS_NOTIFY_PACKAGE)
+                || operation_ref.contains(COOLDIS_SCHEDULE_PACKAGE)
         })
     }));
     for operation in expected_operations {
@@ -2036,7 +2414,9 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
             .all(|binding| {
                 !matches!(
                     binding["name"].as_str(),
-                    Some(COOLDIS_PROCESS_PACKAGE | COOLDIS_NOTIFY_PACKAGE)
+                    Some(
+                        COOLDIS_PROCESS_PACKAGE | COOLDIS_NOTIFY_PACKAGE | COOLDIS_SCHEDULE_PACKAGE
+                    )
                 )
             })
     );
@@ -2171,6 +2551,173 @@ streaming = false
 }
 
 #[tokio::test]
+async fn skill_resource_static_index_and_bodies_are_available_in_live_turn() {
+    let root = unique_test_root("app-server-skill-resource");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let agent_registry_root = root.join("agents");
+    let skill_registry_root = root.join("skills");
+    let package_dir = root.join("skill-src").join("karl-skills");
+    write_skill_fixture(
+        &package_dir,
+        "alpha",
+        r#"---
+name: alpha
+description: Alpha description.
+---
+# Alpha
+
+Alpha body marker.
+"#,
+    );
+    let skill_record = LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    let manifest_path = root.join("skill-runner.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "skill-runner"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[resources]]
+name = "karl_skills"
+kind = "skill"
+ref = "{}"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            skill_record.ref_uri()
+        ),
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+
+    let client = Arc::new(SkillResourceClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-skill-resource-{}.sock", Uuid::now_v7())),
+    );
+    let mut config = CooldisAppServerConfig::local(listen, &workspace);
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = agent_registry_root;
+    config.skill_registry_root = skill_registry_root.clone();
+    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    runtime_config.max_tokens = 128;
+    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
+        runtime_config,
+        provider_client,
+        config.capsule_bindings.clone(),
+        None,
+        &config,
+    );
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let app = CooldisAppServer::with_runtime_factory_and_metadata_store(
+        config,
+        runtime_factory,
+        metadata_store,
+    )
+    .await
+    .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({ "agentRef": "agent://skill-runner@latest" })),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn = app
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "read skill body", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    wait_for_provider_requests(&client, 2).await;
+    wait_for_turn_completed_notification(
+        &mut outbound_rx,
+        &thread_id,
+        turn["turn"]["id"].as_str().unwrap(),
+    )
+    .await;
+
+    let context_page =
+        wait_for_event_kind(&app, &connection, &thread_id, "context.compile.completed").await;
+    let segment = &context_page["data"][0]["payload"]["static_context_segments"][0];
+    assert_eq!(segment["id"].as_str(), Some("skill-index:karl_skills"));
+    assert_eq!(
+        segment["assembler"].as_str(),
+        Some("kernel://assembler/static")
+    );
+    assert_eq!(segment["input"].as_str(), Some("karl_skills"));
+    assert_eq!(segment["pinned"].as_bool(), Some(true));
+    assert_eq!(segment["budget_share"], Value::Null);
+    assert_eq!(
+        segment["ref_uri"].as_str(),
+        Some(skill_record.ref_uri().as_str())
+    );
+    assert!(
+        segment["content_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+
+    let bind_page = app
+        .dispatch_request(
+            &connection,
+            "thread/events/list",
+            Some(json!({
+                "threadId": thread_id,
+                "kinds": ["manifest.bind.completed"],
+            })),
+        )
+        .await
+        .unwrap();
+    let binding = &bind_page["data"][0]["payload"]["skill_packages"][0];
+    assert_eq!(binding["resource_name"].as_str(), Some("karl_skills"));
+    let expected_package_digest = format!("sha256:{}", skill_record.active_artifact_hash);
+    assert_eq!(
+        binding["package_digest"].as_str(),
+        Some(expected_package_digest.as_str())
+    );
+    assert_eq!(
+        binding["index_sha256"].as_str(),
+        segment["content_sha256"].as_str()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn child_agent_policy_rejects_manifest_thread_spawn_row() {
     let root = unique_test_root("app-server-thread-spawn-policy");
     let workspace = root.join("workspace");
@@ -2240,6 +2787,146 @@ streaming = false
     assert!(err.message.contains("allow_child_agents = false"));
     assert!(err.message.contains("thread_spawn"));
     assert!(err.message.contains("threads.spawn"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn schedule_manifest_direct_tool_starts_mandate_and_requires_grant() {
+    let root = unique_test_root("app-server-schedule-direct-tool");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let agent_registry_root = root.join("agents");
+    let operation_record = crate::ensure_cooldis_schedule_published(Some(&operation_registry_root))
+        .unwrap()
+        .expect("kernel package should publish for schedule direct-tool test");
+
+    let manifest_path = root.join("scheduler.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "scheduler"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "direct_tool"
+id = "mandate_start"
+tool_name = "mandate_start"
+operation_ref = "op://cooldis-schedule/mandate_start@sha256:{}"
+grants = ["{}"]
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation_record.active_artifact_hash, SCHEDULE_MANAGE_CAPABILITY
+        ),
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
+        .unwrap();
+
+    let no_grant_manifest_path = root.join("scheduler-no-grant.cooldis.agent.toml");
+    std::fs::write(
+        &no_grant_manifest_path,
+        format!(
+            r#"
+[agent]
+name = "scheduler-no-grant"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "direct_tool"
+id = "mandate_start"
+tool_name = "mandate_start"
+operation_ref = "op://cooldis-schedule/mandate_start@sha256:{}"
+grants = []
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation_record.active_artifact_hash
+        ),
+    )
+    .unwrap();
+    let err = LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(
+            &no_grant_manifest_path,
+            &operation_registry_root,
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("requires grants"));
+    assert!(err.to_string().contains("mandate_start:schedule.manage"));
+
+    let client = Arc::new(ScheduleMandateStartClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let app = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
+    )
+    .await;
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({ "agentRef": "agent://scheduler@latest" })),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    app.dispatch_request(
+        &connection,
+        "turn/start",
+        Some(json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": "remind me in a minute", "text_elements": [] }],
+        })),
+    )
+    .await
+    .unwrap();
+
+    wait_for_provider_requests(&client, 2).await;
+    let list = app
+        .dispatch_request(
+            &connection,
+            "mandate/list",
+            Some(json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    let mandates = list["data"].as_array().unwrap();
+    assert_eq!(mandates.len(), 1);
+    assert_eq!(
+        mandates[0]["schedule"],
+        json!({ "interval": { "every_ms": 60_000 } })
+    );
+    assert_eq!(
+        mandates[0]["inputTemplate"].as_str(),
+        Some("remind me in a minute")
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3621,6 +4308,106 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             && receipt["payloadSchema"].as_str() == Some("cooldis.event.session.entry.appended/1")
     }));
 
+    let child_thread_id = ThreadId::new();
+    let thread_spawned = crate::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        crate::EventKind::ThreadSpawned,
+        json!({
+            "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
+            "parent_thread_id": lifecycle.coordinates.thread_id.to_string(),
+            "child_thread_id": child_thread_id.to_string(),
+            "child_manifest_hash": "sha256:debug-child",
+            "granted": [],
+            "inputs_hash": "sha256:debug-inputs",
+        }),
+    );
+    let spawned_event_id = thread_spawned.id;
+    let io_ingress = crate::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        crate::EventKind::IoIngressReceived,
+        json!({
+            "schema": crate::EventKind::IoIngressReceived.payload_schema_id(),
+            "route_id": "debug-route",
+            "envelope_digest": "sha256:debug-envelope",
+        }),
+    );
+    let ingress_event_id = io_ingress.id;
+    session_store
+        .append_events(
+            &control_stream_id,
+            vec![
+                thread_spawned,
+                crate::NewEventRecord::witnessed(
+                    lifecycle.coordinates.clone(),
+                    crate::EventKind::ThreadJoined,
+                    json!({
+                        "schema": crate::EventKind::ThreadJoined.payload_schema_id(),
+                        "child_thread_id": child_thread_id.to_string(),
+                        "spawned_event_id": spawned_event_id.to_string(),
+                        "terminal_state": "completed",
+                    }),
+                ),
+                crate::NewEventRecord::witnessed(
+                    lifecycle.coordinates.clone(),
+                    crate::EventKind::PolicyBound,
+                    json!({
+                        "schema": crate::EventKind::PolicyBound.payload_schema_id(),
+                        "policy_kind": "coupling_set",
+                        "policy_id": "debug-policy",
+                        "content_hash": "sha256:debug-policy",
+                        "valid_from_note": "debug export fixture",
+                    }),
+                ),
+                io_ingress,
+                crate::NewEventRecord::witnessed(
+                    lifecycle.coordinates.clone(),
+                    crate::EventKind::AdmissionDecided,
+                    json!({
+                        "schema": crate::EventKind::AdmissionDecided.payload_schema_id(),
+                        "route_id": "debug-route",
+                        "policy_hash": "sha256:debug-policy",
+                        "decision": "queue",
+                        "admissible": ["queue"],
+                        "source_ingress_event_ids": [ingress_event_id.to_string()],
+                    }),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    let new_kind_export = app
+        .dispatch_request(
+            &connection,
+            "thread/debug/export",
+            Some(json!({
+                "threadId": thread_id,
+                "streams": ["control"],
+                "includeThread": false,
+                "maxEventsPerStream": 100,
+                "redact": false,
+            })),
+        )
+        .await
+        .unwrap();
+    let exported_kinds = new_kind_export["streams"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "thread.spawned",
+        "thread.joined",
+        "policy.bound",
+        "io.ingress.received",
+        "admission.decided",
+    ] {
+        assert!(
+            exported_kinds.contains(&expected),
+            "thread/debug/export should include {expected}"
+        );
+    }
+
     let bad_stream = app
         .dispatch_request(
             &connection,
@@ -3805,6 +4592,185 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     assert_eq!(unknown_thread.code, -32001);
     assert!(unknown_thread.message.contains("thread not found"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn mandate_rpc_validates_and_folds_control_stream_events() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+
+    let malformed_cron = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "cron": { "expr": "not cron", "tz": "UTC" } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(malformed_cron.code, -32602);
+
+    let unknown_tz = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "cron": { "expr": "0 * * * * *", "tz": "Mars/Olympus" } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unknown_tz.code, -32602);
+
+    let short_interval = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "interval": { "every_ms": 59_999 } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(short_interval.code, -32602);
+
+    let past_at = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "at": { "when": "2000-01-01T00:00:00Z" } },
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(past_at.code, -32602);
+
+    let coalesced = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "at": { "when": "2000-01-01T00:00:00Z" } },
+                "catchUp": "coalesce_missed",
+            })),
+        )
+        .await
+        .unwrap();
+    let coalesced_id = coalesced["mandateEventId"].as_str().unwrap().to_string();
+    app.dispatch_request(
+        &connection,
+        "mandate/revoke",
+        Some(json!({
+            "threadId": thread_id,
+            "mandateEventId": coalesced_id,
+        })),
+    )
+    .await
+    .unwrap();
+
+    let start = app
+        .dispatch_request(
+            &connection,
+            "mandate/start",
+            Some(json!({
+                "threadId": thread_id,
+                "schedule": { "interval": { "every_ms": 60_000 } },
+                "maxOccurrences": 3,
+                "catchUp": "skip_missed",
+                "inputTemplate": "continue summary",
+            })),
+        )
+        .await
+        .unwrap();
+    let mandate_event_id = start["mandateEventId"].as_str().unwrap().to_string();
+
+    let list = app
+        .dispatch_request(
+            &connection,
+            "mandate/list",
+            Some(json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    let mandates = list["data"].as_array().unwrap();
+    assert_eq!(mandates.len(), 1);
+    assert_eq!(
+        mandates[0]["mandateEventId"].as_str(),
+        Some(mandate_event_id.as_str())
+    );
+    assert_eq!(mandates[0]["schedule"]["interval"]["every_ms"], 60_000);
+    assert_eq!(mandates[0]["maxOccurrences"], 3);
+    assert_eq!(mandates[0]["catchUp"].as_str(), Some("skip_missed"));
+    assert_eq!(
+        mandates[0]["inputTemplate"].as_str(),
+        Some("continue summary")
+    );
+
+    let events = app
+        .dispatch_request(
+            &connection,
+            "thread/events/list",
+            Some(json!({
+                "threadId": thread_id,
+                "stream": "control",
+                "kinds": ["mandate.started"],
+            })),
+        )
+        .await
+        .unwrap();
+    assert!(events["data"].as_array().unwrap().iter().any(|event| {
+        event["eventId"].as_str() == Some(mandate_event_id.as_str())
+            && event["kind"].as_str() == Some("mandate.started")
+            && event["payload_schema"].as_str() == Some("cooldis.event.mandate.started/1")
+    }));
+
+    let revoked = app
+        .dispatch_request(
+            &connection,
+            "mandate/revoke",
+            Some(json!({
+                "threadId": thread_id,
+                "mandateEventId": mandate_event_id,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked["status"].as_str(), Some("revoked"));
+    let revoked_again = app
+        .dispatch_request(
+            &connection,
+            "mandate/revoke",
+            Some(json!({
+                "threadId": thread_id,
+                "mandateEventId": mandate_event_id,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_again["status"].as_str(), Some("already_revoked"));
+
+    let empty = app
+        .dispatch_request(
+            &connection,
+            "mandate/list",
+            Some(json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty["data"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -5261,8 +6227,37 @@ async fn model_provider_capabilities_read_returns_local_capabilities() {
             "namespaceTools": true,
             "imageGeneration": false,
             "webSearch": false,
+            "supportsStreaming": false,
         })
     );
+}
+
+#[tokio::test]
+async fn model_provider_capabilities_read_reports_bedrock_streaming() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-bedrock-cap-test-{}.sock", Uuid::now_v7())),
+    );
+    let root = std::env::temp_dir().join(format!("cooldis-bedrock-cap-test-{}", Uuid::now_v7()));
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap())
+        .with_anthropic_bedrock(
+            "us-east-1",
+            "AKIA_TEST",
+            "secret",
+            None,
+            "anthropic.claude-test-v1:0",
+        );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let capabilities = app
+        .dispatch_request(&connection, "modelProvider/capabilities/read", None)
+        .await
+        .unwrap();
+    assert_eq!(capabilities["supportsStreaming"], json!(true));
 }
 
 #[tokio::test]
@@ -5469,7 +6464,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
     let bindings = events[1].payload["operation_bindings"].as_array().unwrap();
-    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings.len(), 3);
     assert!(
         bindings
             .iter()
@@ -5494,6 +6489,16 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
         BTreeSet::from([
             NOTIFY_PREVIEW_OPERATION.to_string(),
             CHANNEL_EMIT_OPERATION.to_string()
+        ])
+    );
+    let schedule_binding =
+        manifest_operation_binding_by_name(&events[1].payload, COOLDIS_SCHEDULE_PACKAGE);
+    assert_eq!(
+        json_array_string_set(&schedule_binding["operations"]),
+        BTreeSet::from([
+            MANDATE_START_OPERATION.to_string(),
+            MANDATE_REVOKE_OPERATION.to_string(),
+            MANDATE_LIST_OPERATION.to_string()
         ])
     );
     let _ = std::fs::remove_dir_all(registry_root);
@@ -6616,7 +7621,7 @@ async fn app_server_websocket_listen_accepts_codex_tui_client() {
         &root,
         listen.clone(),
         provider_client,
-        CapsuleBindingsConfig::default(),
+        CapsuleBindingsConfig::default(), // lexicon-allow: capsule - existing test helper parameter type
     )
     .await;
     let server_task = tokio::spawn(async move { app.serve(listen).await });
@@ -6657,8 +7662,9 @@ async fn app_server_websocket_query_methods_are_callable() {
     let addr = unused_loopback_addr();
     let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
     let mut config = CooldisAppServerConfig::local(listen.clone(), &workspace)
-        // lexicon-allow: capsule - existing app-server config method and type.
+        // lexicon-allow: capsule - existing app-server config method.
         .with_capsule_bindings(
+            // lexicon-allow: capsule - existing app-server config type.
             CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
         );
     config.runtime_home = root.join("runtime");
@@ -7208,6 +8214,12 @@ async fn local_ui_affordance_methods_return_safe_shapes() {
             .await
             .unwrap(),
         json!({ "data": [], "nextCursor": null })
+    );
+    assert_eq!(
+        app.dispatch_request(&connection, "hooks/list", None)
+            .await
+            .unwrap(),
+        json!({ "data": [], "witnessing": true })
     );
     assert_eq!(
         app.dispatch_request(
@@ -8053,6 +9065,12 @@ streaming = false
         .unwrap()
 }
 
+fn write_skill_fixture(package_dir: &Path, name: &str, body: &str) {
+    let dir = package_dir.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
 async fn app_server_with_tool_client<T>(
     root: &Path,
     workspace: &Path,
@@ -8083,6 +9101,7 @@ where
         Some(config.metadata_store_path()),
         None,
         Some(config.state_home.join("session_history.sqlite3")),
+        None,
         None,
         None,
     );
@@ -8684,6 +9703,62 @@ impl ProviderRequestRecorder for ThreadSpawnAgentRefClient {
     }
 }
 
+#[derive(Default)]
+struct ScheduleMandateStartClient {
+    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for ScheduleMandateStartClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+        if has_tool_result {
+            let text = text_from_canonical_messages(&request.messages);
+            assert!(
+                text.contains("cooldis.mandate_start"),
+                "expected mandate_start tool result in provider context: {text}"
+            );
+            assert!(
+                text.contains("mandate_event_id"),
+                "expected mandate event id in provider context: {text}"
+            );
+            return Ok(ProviderResponse {
+                content: vec![CanonicalContent::text("schedule mandate started")],
+                usage: CanonicalUsage::default(),
+                stop_reason: CanonicalStopReason::EndTurn,
+            });
+        }
+
+        let names = tool_names(request);
+        assert!(
+            names.contains(&MANDATE_START_OPERATION.to_string()),
+            "expected mandate_start direct tool in {names:?}"
+        );
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::tool_call(
+                "call_mandate_start_1",
+                MANDATE_START_OPERATION,
+                json!({
+                    "schedule": { "interval": { "every_ms": 60_000 } },
+                    "input_template": "remind me in a minute"
+                }),
+            )],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::ToolUse,
+        })
+    }
+}
+
+impl ProviderRequestRecorder for ScheduleMandateStartClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
 #[derive(Clone)]
 enum SequencedStreamResponse {
     TextDelta(String),
@@ -8800,6 +9875,56 @@ impl ProviderClient for FailingProviderClient {
         request: &ProviderRequest,
     ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
         Err(self.record(request))
+    }
+}
+
+#[derive(Default)]
+struct SkillResourceClient {
+    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for SkillResourceClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let text = text_from_canonical_messages(&request.messages);
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+        if !has_tool_result {
+            assert!(
+                text.contains("alpha — Alpha description."),
+                "provider request did not include skill index: {text}"
+            );
+            let names = tool_names(request);
+            assert!(names.contains(&"bash".to_string()));
+            return Ok(ProviderResponse {
+                content: vec![CanonicalContent::tool_call(
+                    "call_bash_skill",
+                    "bash",
+                    json!({
+                        "command": "cat /skills/alpha.md; printf '\\nWRITE:\\n'; echo nope > /skills/alpha.md"
+                    }),
+                )],
+                usage: CanonicalUsage::default(),
+                stop_reason: CanonicalStopReason::ToolUse,
+            });
+        }
+
+        assert!(
+            text.contains("Alpha body marker."),
+            "bash result did not include skill body: {text}"
+        );
+        assert!(
+            text.contains("read-only") || text.contains("denied"),
+            "bash result did not include read-only denial: {text}"
+        );
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text("skill read completed")],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
     }
 }
 
@@ -9500,6 +10625,12 @@ impl ProviderRequestRecorder for SequencedStreamCapsuleClient {
 }
 
 impl ProviderRequestRecorder for FailingProviderClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+impl ProviderRequestRecorder for SkillResourceClient {
     fn recorded_request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }

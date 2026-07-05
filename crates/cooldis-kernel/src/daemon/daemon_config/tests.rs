@@ -61,6 +61,103 @@ threading = "selected_thread"
 }
 
 #[test]
+fn loads_route_egress_projection_and_typing_simulation() {
+    let root = temp_root("egress-projection");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("cooldis.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[daemon.io.routes]]
+id = "telegram-main"
+kind = "websocket.tui"
+egress_projection = [
+  { pattern = '\[reaction:(?P<emoji>[^\]]+)\]', action = "reaction" },
+  { pattern = '\[sticker:(?P<file_id>[^\]]+)\]', action = "sticker" },
+  { pattern = '\[no_response\]', action = "silence" },
+]
+typing_simulation = { chars_per_second = 25 }
+egress_retry = { max_attempts = 7, base_backoff_ms = 250 }
+"#,
+    )
+    .unwrap();
+
+    let loaded = load_cooldis_daemon_config(Some(&path)).unwrap();
+    let route = &loaded.config.io.routes[0];
+
+    assert_eq!(route.egress_projection.len(), 3);
+    assert_eq!(route.egress_projection[0].action, "reaction");
+    assert_eq!(
+        route
+            .typing_simulation
+            .as_ref()
+            .map(|config| config.chars_per_second),
+        Some(25)
+    );
+    assert_eq!(route.egress_retry.max_attempts, 7);
+    assert_eq!(route.egress_retry.base_backoff_ms, 250);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_egress_projection_regex_reports_rule_index() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "telegram-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: None,
+        threading: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: vec![CooldisEgressProjectionRuleConfig {
+            pattern: "[bad".to_string(),
+            action: "reaction".to_string(),
+        }],
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(
+        errors.iter().any(|error| {
+            error.contains("io.routes.telegram-main.egress_projection[0].pattern")
+        })
+    );
+}
+
+#[test]
+fn validates_coalesce_bursts_route_config() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "coalesce-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: Some("steer_when_active".to_string()),
+        threading: None,
+        coalesce_bursts: Some(CooldisCoalesceBurstsConfig {
+            window_ms: 0,
+            max_batch: 0,
+        }),
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(errors.iter().any(|error| error.contains("window_ms")));
+    assert!(errors.iter().any(|error| error.contains("max_batch")));
+}
+
+#[test]
 fn loads_toml_daemon_config_and_resolves_registry_paths() {
     let root = temp_root("registries");
     let absolute_agents = root.join("absolute-agents");
@@ -352,7 +449,11 @@ fn validates_bad_queue_and_route_config() {
         enabled: true,
         policy: None,
         threading: None,
+        coalesce_bursts: None,
         ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
         telegram: None,
         metadata: BTreeMap::new(),
     });
@@ -439,7 +540,11 @@ fn validates_telegram_route_shape() {
         enabled: true,
         policy: None,
         threading: None,
+        coalesce_bursts: None,
         ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
         telegram: Some(CooldisTelegramRouteConfig {
             listen: Some("127.0.0.1:9000".to_string()),
             path: "telegram".to_string(),
@@ -454,4 +559,32 @@ fn validates_telegram_route_shape() {
 
     let errors = config.validation_errors();
     assert!(errors.iter().any(|error| error.contains("path")));
+}
+
+#[test]
+fn validates_single_clock_tick_route() {
+    let mut config = CooldisDaemonConfig::default();
+    for id in ["clock-main", "clock-backup"] {
+        config.io.routes.push(CooldisIoRouteConfig {
+            id: id.to_string(),
+            kind: "clock.tick".to_string(),
+            enabled: true,
+            policy: None,
+            threading: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: CooldisEgressRetryConfig::default(),
+            telegram: None,
+            metadata: BTreeMap::new(),
+        });
+    }
+
+    let errors = config.validation_errors();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("at most one clock.tick route"))
+    );
 }

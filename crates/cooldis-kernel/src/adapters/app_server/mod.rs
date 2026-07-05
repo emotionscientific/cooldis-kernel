@@ -1,33 +1,36 @@
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindOverrides,
     AgentManifestBoundThread, AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestProviderSurface, AgentRecordRef, AgentRuntime, AgentRuntimeFactory,
-    AgentToolRouter, AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter, CanonicalContent,
-    CanonicalMessage, CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory,
-    CanonicalStopReason, CanonicalUsage, CapsuleBindingResolutionRequest, CapsuleBindingScope,
-    CooldisError, CooldisResult, CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence,
-    EventStore, EventStreamId, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
-    LlmProviderAuthContext, LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue,
-    LlmProviderRecord, LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry,
-    LocalPluginCatalog, LocalPluginCatalogRecord, McpRemoteServerConfig, McpRemoteToolProvider,
-    McpRemoteTransport, McpToolUniverseDiscoverer, MountedToolUniverse,
-    OPENAI_COMPATIBLE_DEFAULT_MODEL, OpenAIChatCompletionsAdapter, OpenAIReasoningSummary,
-    OpenAIResponsesAdapter, OperationRegistry, OperationToolAlias, ProviderAbiProjection,
-    ProviderApi, ProviderAuth, ProviderCapabilityRecord, ProviderClient, ProviderEndpoint,
-    ProviderHttpClient, ProviderRequest, ProviderRequestMode, ProviderResponse, ProviderResult,
-    ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind, RuntimeStore,
-    RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind, SecretStoreError,
-    SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry, SqliteMetadataStore,
-    SqliteSecretStore, SqliteSessionStore, SystemBlock, THREAD_BOUND_COUPLING_SET_METADATA,
+    AgentManifestProviderSurface, AgentManifestSkillPackageBinding, AgentRecordRef, AgentRuntime,
+    AgentRuntimeFactory, AgentToolRouter, AnthropicBedrockMessagesAdapter,
+    AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage, CanonicalProviderRuntimeConfig,
+    CanonicalProviderRuntimeFactory, CanonicalStopReason, CanonicalUsage,
+    CapsuleBindingResolutionRequest, CapsuleBindingScope, CooldisError, CooldisResult,
+    CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence, EventStore, EventStreamId,
+    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, LlmProviderAuthContext,
+    LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue, LlmProviderRecord,
+    LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry, LocalPluginCatalog,
+    LocalPluginCatalogRecord, LocalSkillRegistry, MandateCatchUpPolicy, MandateSchedulePayload,
+    McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, McpToolUniverseDiscoverer,
+    MountedToolUniverse, OPENAI_COMPATIBLE_DEFAULT_MODEL, OpenAIChatCompletionsAdapter,
+    OpenAIReasoningSummary, OpenAIResponsesAdapter, OperationRegistry, OperationToolAlias,
+    ProviderAbiProjection, ProviderApi, ProviderAuth, ProviderCapabilityRecord, ProviderClient,
+    ProviderEndpoint, ProviderHttpClient, ProviderRequest, ProviderRequestMode, ProviderResponse,
+    ProviderResult, ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind,
+    RuntimeStore, RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind,
+    SecretStoreError, SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry,
+    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, SystemBlock,
+    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_PACKAGES_METADATA,
+    THREAD_BOUND_COUPLING_SET_METADATA, THREAD_OPERATION_REGISTRY_ROOT_METADATA,
     TenantRegistration, TenantRuntimeContext, ThinkingConfig, ThinkingEffort, ThreadBaseRef,
     ThreadCheckpointId, ThreadContext, ThreadEvent, ThreadForkReason, ThreadId,
     ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus, ThreadMetadataStore,
     ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding, ToolUniverseCaller,
     ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent, TurnInput,
-    TurnSubmissionMode, VirtualBashRuntimeConfig, bind_published_agent_record,
+    TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualFile, bind_published_agent_record,
     ensure_cooldis_notify_published, ensure_cooldis_process_published,
-    ensure_cooldis_threads_published, resolve_llm_provider_auth, seed_default_llm_providers,
-    stream_schema_registry_v1,
+    ensure_cooldis_schedule_published, ensure_cooldis_threads_published, resolve_llm_provider_auth,
+    seed_default_llm_providers, stream_schema_registry_v1,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cooldis_process::{
@@ -93,6 +96,7 @@ const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_COMMAND_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 const DEFAULT_AGENT_REGISTRY_ROOT: &str = ".cooldis/agents";
 const DEFAULT_OPERATION_REGISTRY_ROOT: &str = ".cooldis/operations";
+const DEFAULT_SKILL_REGISTRY_ROOT: &str = ".cooldis/skills";
 const METADATA_DB_NAME: &str = "metadata.sqlite3";
 const THREAD_APP_SERVER_CWD_METADATA: &str = "cooldis.app_server.cwd";
 const THREAD_APP_SERVER_MODEL_PROVIDER_METADATA: &str = "cooldis.app_server.model_provider";
@@ -180,6 +184,7 @@ pub struct CooldisAppServerConfig {
     pub provider: AppServerProviderConfig,
     pub capsule_bindings: CapsuleBindingsConfig,
     pub agent_registry_root: PathBuf,
+    pub skill_registry_root: PathBuf,
     pub console_assets: Option<ConsoleAssetConfig>,
 }
 
@@ -200,6 +205,7 @@ impl CooldisAppServerConfig {
             capsule_bindings: CapsuleBindingsConfig::default()
                 .with_registry_root(DEFAULT_OPERATION_REGISTRY_ROOT),
             agent_registry_root: PathBuf::from(DEFAULT_AGENT_REGISTRY_ROOT),
+            skill_registry_root: PathBuf::from(DEFAULT_SKILL_REGISTRY_ROOT),
             console_assets: None,
         }
     }
@@ -284,7 +290,7 @@ impl CooldisAppServerConfig {
             session_token,
             model,
             max_tokens: 4096,
-            stream: false,
+            stream: true,
         };
         self
     }
@@ -455,6 +461,7 @@ struct CooldisAppServerInner {
     provider: AppServerProviderConfig,
     capsule_bindings: CapsuleBindingsConfig,
     agent_registry_root: PathBuf,
+    skill_registry_root: PathBuf,
     console_assets: Option<ConsoleAssetConfig>,
     cwd: PathBuf,
     codex_home: PathBuf,
@@ -577,6 +584,7 @@ impl CooldisAppServer {
         let provider_surface =
             agent_manifest_provider_surface_for_config(&config, &metadata_store)?;
         ensure_cooldis_threads_published(operation_registry_root_for_kernel_publish(&config))?;
+        ensure_cooldis_schedule_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_process_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_notify_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_default_manifest_published(&config, provider_surface.supports_streaming)?;
@@ -606,6 +614,7 @@ impl CooldisAppServer {
                 provider: config.provider,
                 capsule_bindings: config.capsule_bindings,
                 agent_registry_root: config.agent_registry_root,
+                skill_registry_root: config.skill_registry_root,
                 console_assets: config.console_assets,
                 cwd: config.cwd,
                 codex_home,
@@ -659,6 +668,10 @@ impl CooldisAppServer {
 
     pub fn cwd(&self) -> &Path {
         &self.inner.cwd
+    }
+
+    pub fn session_store_path(&self) -> &Path {
+        &self.inner.session_store_path
     }
 
     #[cfg(unix)]
@@ -1028,12 +1041,9 @@ fn agent_manifest_provider_surface_from_parts(
         .with_supports_streaming(false)),
         AppServerProviderConfig::BifrostOpenAIResponses { .. }
         | AppServerProviderConfig::OpenAIChatCompletions { .. }
-        | AppServerProviderConfig::AnthropicMessages { .. } => Ok(
+        | AppServerProviderConfig::AnthropicMessages { .. }
+        | AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
             AgentManifestProviderSurface::single(model_provider.to_string(), model.to_string()),
-        ),
-        AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
-            AgentManifestProviderSurface::single(model_provider.to_string(), model.to_string())
-                .with_supports_streaming(false),
         ),
     }
 }
@@ -1351,6 +1361,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -1372,6 +1383,7 @@ fn runtime_factory_from_provider_parts_with_app_paths(
         Some(config.user_metadata_store_path()),
         Some(config.state_home.join("session_history.sqlite3")),
         Some(config.agent_registry_root.clone()),
+        Some(config.skill_registry_root.clone()),
         Some(config.cwd.clone()),
     )
 }
@@ -1386,6 +1398,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     secret_store_path: Option<PathBuf>,
     session_store_path: Option<PathBuf>,
     agent_registry_root: Option<PathBuf>,
+    skill_registry_root: Option<PathBuf>,
     cwd: Option<PathBuf>,
 ) -> Arc<dyn crate::AgentRuntimeFactory> {
     // lexicon-allow: capsule - existing app-server runtime factory name
@@ -1399,6 +1412,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         secret_store_path,
         session_store_path,
         agent_registry_root,
+        skill_registry_root,
         cwd,
     })
 }

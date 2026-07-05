@@ -239,6 +239,7 @@ impl CooldisAppServer {
             alias,
             &provider_surface,
             self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.skill_registry_root.as_path()),
             &mcp_server_refs,
             Some(&tool_universe_discoverer),
             &model_selection,
@@ -940,6 +941,7 @@ pub(super) fn resolve_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
 
 pub(super) fn normalize_registry_roots(config: &mut CooldisAppServerConfig) {
     config.agent_registry_root = resolve_path_against_cwd(&config.cwd, &config.agent_registry_root);
+    config.skill_registry_root = resolve_path_against_cwd(&config.cwd, &config.skill_registry_root);
     if let Some(registry_root) = &config.capsule_bindings.registry_root {
         config.capsule_bindings.registry_root =
             Some(resolve_path_against_cwd(&config.cwd, registry_root));
@@ -1002,6 +1004,7 @@ pub(super) fn append_bound_agent_metadata(
     metadata: &mut BTreeMap<String, String>,
     bound: &AgentManifestBoundThread,
     overrides: Option<&AgentManifestBindOverrides>,
+    operation_registry_root: Option<&Path>,
 ) -> Result<(), JsonRpcErrorError> {
     metadata.insert(
         THREAD_AGENT_REF_METADATA.to_string(),
@@ -1060,6 +1063,27 @@ pub(super) fn append_bound_agent_metadata(
             encoded,
         );
     }
+    if !bound.skill_packages.is_empty() {
+        let encoded = serde_json::to_string(&bound.skill_packages).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest skill package bindings: {err}"),
+            )
+        })?;
+        metadata.insert(THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(), encoded);
+    }
+    if !bound.skill_context_segments.is_empty() {
+        let encoded = serde_json::to_string(&bound.skill_context_segments).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest skill context segments: {err}"),
+            )
+        })?;
+        metadata.insert(
+            THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA.to_string(),
+            encoded,
+        );
+    }
     if !bound.tool_universes.is_empty() {
         let encoded = serde_json::to_string(&bound.tool_universes).map_err(|err| {
             jsonrpc_error(
@@ -1077,6 +1101,12 @@ pub(super) fn append_bound_agent_metadata(
             )
         })?;
         metadata.insert(THREAD_BOUND_COUPLING_SET_METADATA.to_string(), encoded);
+        if let Some(root) = operation_registry_root {
+            metadata.insert(
+                THREAD_OPERATION_REGISTRY_ROOT_METADATA.to_string(),
+                root.display().to_string(),
+            );
+        }
     }
     if let Some(overrides) = overrides {
         let encoded = serde_json::to_string(overrides).map_err(|err| {
@@ -1269,6 +1299,21 @@ pub(super) fn thread_manifest_tool_universes(
     Ok(bindings)
 }
 
+pub(super) fn thread_manifest_skill_packages(
+    context: &ThreadContext,
+) -> CooldisResult<Vec<AgentManifestSkillPackageBinding>> {
+    let Some(raw) = context.metadata.get(THREAD_AGENT_SKILL_PACKAGES_METADATA) else {
+        return Ok(Vec::new());
+    };
+    let bindings =
+        serde_json::from_str::<Vec<AgentManifestSkillPackageBinding>>(raw).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "thread manifest skill package bindings are invalid: {err}"
+            ))
+        })?;
+    Ok(bindings)
+}
+
 pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) config: CanonicalProviderRuntimeConfig,
     pub(super) client: Arc<dyn ProviderClient>,
@@ -1278,6 +1323,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) secret_store_path: Option<PathBuf>,
     pub(super) session_store_path: Option<PathBuf>,
     pub(super) agent_registry_root: Option<PathBuf>,
+    pub(super) skill_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
 }
 
@@ -1302,6 +1348,7 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
             factory = factory.with_thread_spawn_agent_resolver(Arc::new(resolver));
         }
         let mut tool_router = None;
+        let skill_files = self.skill_mount_files_for_thread(context).await?;
         if let Some(catalog) = self.operation_catalog_for_thread(context).await? {
             let ThreadOperationCatalog {
                 registry,
@@ -1314,12 +1361,18 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
                     .with_tool_aliases(tool_aliases)
                     .with_capability_grants(capability_grants.clone()),
             );
-            factory = factory.with_bash_tool(
+            factory = factory.with_bash_tool(bash_config_with_skill_files(
                 VirtualBashRuntimeConfig::default()
                     .with_operation_registry(registry)
                     .with_workspace_vfs(workspace_vfs)
                     .with_capability_grants(capability_grants),
-            );
+                &skill_files,
+            ));
+        } else if !skill_files.is_empty() {
+            factory = factory.with_bash_tool(bash_config_with_skill_files(
+                VirtualBashRuntimeConfig::default(),
+                &skill_files,
+            ));
         }
         if let Some(tool_universe_surface) = self.tool_universe_search_surface(context).await? {
             let router = tool_router
@@ -1339,6 +1392,7 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
 struct AppServerThreadSpawnAgentResolver {
     agent_registry_root: PathBuf,
     operation_registry_root: Option<PathBuf>,
+    skill_registry_root: Option<PathBuf>,
     metadata_store_path: Option<PathBuf>,
     secret_store_path: Option<PathBuf>,
     cwd: PathBuf,
@@ -1361,6 +1415,7 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             alias,
             &self.provider_surface,
             self.operation_registry_root.as_deref(),
+            self.skill_registry_root.as_deref(),
             &mcp_server_refs,
             tool_universe_discoverer
                 .as_ref()
@@ -1374,8 +1429,13 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             Some(bound.bind_receipt.effective_runtime.default_cwd.as_str()),
         );
         let mut metadata = app_server_thread_metadata(&cwd, &bound.bind_receipt.provider_id, false);
-        append_bound_agent_metadata(&mut metadata, &bound, None)
-            .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
+        append_bound_agent_metadata(
+            &mut metadata,
+            &bound,
+            None,
+            self.operation_registry_root.as_deref(),
+        )
+        .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
         let compile_receipt = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
             CooldisError::RuntimeFactory(format!(
                 "failed to encode manifest compile receipt: {err}"
@@ -1433,11 +1493,61 @@ impl CapsuleBindingRuntimeFactory {
         Some(AppServerThreadSpawnAgentResolver {
             agent_registry_root,
             operation_registry_root: self.capsule_bindings.registry_root.clone(),
+            skill_registry_root: self.skill_registry_root.clone(),
             metadata_store_path: self.metadata_store_path.clone(),
             secret_store_path: self.secret_store_path.clone(),
             cwd,
             provider_surface: provider_surface_for_runtime_config(&self.config),
         })
+    }
+
+    async fn skill_mount_files_for_thread(
+        &self,
+        context: &ThreadContext,
+    ) -> CooldisResult<Vec<VirtualFile>> {
+        let bindings = thread_manifest_skill_packages(context)?;
+        if bindings.is_empty() {
+            return Ok(Vec::new());
+        }
+        let registry_root = self.skill_registry_root.as_ref().ok_or_else(|| {
+            CooldisError::RuntimeFactory(
+                "skill package bindings require an app-server skill registry root".to_string(),
+            )
+        })?;
+        let registry = LocalSkillRegistry::new(registry_root);
+        let mut files = Vec::new();
+        let mut names = BTreeSet::new();
+        for binding in bindings {
+            let record = registry
+                .load_version_record(&binding.package_name, &binding.artifact_hash)
+                .map_err(|err| {
+                    CooldisError::RuntimeFactory(format!(
+                        "manifest skill package binding {:?}@sha256:{} was not found: {err}",
+                        binding.package_name, binding.artifact_hash
+                    ))
+                })?;
+            if record.ref_uri() != binding.ref_uri {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "manifest skill package binding {:?} ref drift: receipt {}, registry {}",
+                    binding.resource_name,
+                    binding.ref_uri,
+                    record.ref_uri()
+                )));
+            }
+            for skill in record.package.skills {
+                if !names.insert(skill.name.clone()) {
+                    return Err(CooldisError::RuntimeFactory(format!(
+                        "manifest skill packages contain duplicate /skills/{}.md",
+                        skill.name
+                    )));
+                }
+                files.push(VirtualFile::new(
+                    PathBuf::from(format!("{}.md", skill.name)),
+                    skill.body.into_bytes(),
+                ));
+            }
+        }
+        Ok(files)
     }
 
     async fn operation_catalog_for_thread(
@@ -1549,6 +1659,16 @@ impl CapsuleBindingRuntimeFactory {
             discoverer,
         )))
     }
+}
+
+fn bash_config_with_skill_files(
+    mut config: VirtualBashRuntimeConfig,
+    skill_files: &[VirtualFile],
+) -> VirtualBashRuntimeConfig {
+    for file in skill_files {
+        config = config.with_readonly_skill_file(file.path.clone(), file.content.clone());
+    }
+    config
 }
 
 fn provider_surface_for_runtime_config(

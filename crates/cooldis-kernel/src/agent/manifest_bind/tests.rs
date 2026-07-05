@@ -1,8 +1,11 @@
 use super::*;
-use crate::agent::manifest_schema::{AgentManifestCouplingSource, AgentManifestCouplingTrigger};
+use crate::agent::manifest_schema::{
+    AgentManifestCouplingSource, AgentManifestCouplingTrigger, KERNEL_ASSEMBLER_STATIC,
+};
 use crate::{
     AgentManifestCompactionDefaults, AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol,
-    ToolDefinition, ToolUniverseDiscovery, WitnessedToolContract,
+    LocalSkillRegistry, PublishSkillPackageRequest, ToolDefinition, ToolUniverseDiscovery,
+    WitnessedToolContract,
 };
 use async_trait::async_trait;
 use std::fs;
@@ -184,6 +187,7 @@ streaming = true
         &record,
         None,
         &surface,
+        None,
         None,
         &BTreeSet::new(),
         None,
@@ -414,6 +418,7 @@ streaming = false
         None,
         &surface,
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -443,6 +448,7 @@ async fn manifest_coupling_binds_controller_receipt() {
         &root,
         &manifest_with_coupling(
             "controller_agent",
+            "std::permission.approval_gate",
             &format!(
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
@@ -464,6 +470,7 @@ async fn manifest_coupling_binds_controller_receipt() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -474,7 +481,7 @@ async fn manifest_coupling_binds_controller_receipt() {
 
     assert_eq!(bound.couplings.len(), 1);
     let coupling = &bound.couplings[0];
-    assert_eq!(coupling.id, "bash_regex_gate");
+    assert_eq!(coupling.id, "std::permission.approval_gate");
     assert_eq!(coupling.role, CouplingRole::Controller);
     assert_eq!(coupling.trigger_kind, EventKind::ToolCallRequested);
     assert_eq!(
@@ -506,7 +513,7 @@ async fn manifest_coupling_binds_controller_receipt() {
     assert_eq!(
         bound.bind_receipt.couplings[0],
         AgentManifestCouplingBinding {
-            id: "bash_regex_gate".to_string(),
+            id: "std::permission.approval_gate".to_string(),
             role: CouplingRole::Controller,
             trigger_kind: "tool.call.requested".to_string(),
             trigger_match: BTreeMap::from([("tool".to_string(), serde_json::json!("bash"))]),
@@ -548,6 +555,7 @@ async fn manifest_coupling_infers_projection_for_distinct_derived_sink() {
         &root,
         &manifest_with_coupling(
             "projection_agent",
+            "std::memory.extract",
             &format!(
                 "op://memory_writer/extract@sha256:{}",
                 operation.active_artifact_hash
@@ -569,6 +577,7 @@ async fn manifest_coupling_infers_projection_for_distinct_derived_sink() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -596,6 +605,7 @@ async fn manifest_coupling_requires_content_addressed_function_ref() {
         &root,
         &manifest_with_coupling(
             "unpinned_agent",
+            "std::permission.approval_gate",
             "op://hitl_gate/pre_tool_gate",
             "thread.pause",
             "tool.call.requested",
@@ -614,6 +624,7 @@ async fn manifest_coupling_requires_content_addressed_function_ref() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -640,6 +651,7 @@ async fn manifest_coupling_requires_declared_function_grants() {
         &root,
         &manifest_with_coupling(
             "grantless_agent",
+            "std::permission.approval_gate",
             &format!(
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
@@ -661,6 +673,7 @@ async fn manifest_coupling_requires_declared_function_grants() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -687,6 +700,7 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
         &root,
         &manifest_with_coupling(
             "unknown_kind_agent",
+            "std::permission.approval_gate",
             &format!(
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
@@ -708,6 +722,7 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
         None,
         &surface,
         Some(&operation_root),
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -725,7 +740,7 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
 fn manifest_coupling_source_sink_identity_fails_closed_at_bind() {
     let root = temp_dir("manifest-bind-coupling-identity");
     let coupling = AgentManifestCoupling {
-        id: "identity_gate".to_string(),
+        id: "std::prompt.steer".to_string(),
         function_ref: format!("op://gate/check@sha256:{}", "a".repeat(64)),
         grants: Vec::new(),
         trigger: AgentManifestCouplingTrigger {
@@ -770,6 +785,209 @@ fn coupling_config_hash_is_canonical_for_object_key_order() {
 }
 
 #[tokio::test]
+async fn manifest_coupling_custom_id_binds_to_wasm_executor() {
+    let root = temp_dir("manifest-bind-custom-coupling-id");
+    let operation_root = root.join("operations");
+    let operation = publish_json_operation_record(&operation_root, "custom_policy", "check").await;
+    let record = publish_agent_manifest(
+        &root,
+        &manifest_with_coupling(
+            "custom_policy_agent",
+            "org.example.custom_policy",
+            &format!(
+                "op://custom_policy/check@sha256:{}",
+                operation.active_artifact_hash
+            ),
+            "",
+            "turn.completed",
+            "thread",
+            "turn.completed",
+            "control",
+            r#""turn.continue.requested""#,
+            "",
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(bound.couplings.len(), 1);
+    let coupling = &bound.couplings[0];
+    assert_eq!(coupling.id, "org.example.custom_policy");
+    assert_eq!(coupling.function.name, "custom_policy");
+    assert_eq!(coupling.function.operation_name.as_deref(), Some("check"));
+    assert_eq!(
+        coupling.function.artifact_hash,
+        operation.active_artifact_hash
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
+    let root = temp_dir("manifest-bind-runtime-stdlib-couplings");
+    let operation_root = root.join("operations");
+    let operation =
+        publish_multi_operation_record(&operation_root, "stdlib_policy", &[("run", vec![])]).await;
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    for template in crate::coupling_template_catalog_v1()
+        .templates
+        .into_iter()
+        .filter(|template| template.runtime_executable)
+    {
+        let source_stream = if template.source.stream == template.sink.stream {
+            "thread"
+        } else {
+            &template.source.stream
+        };
+        let record = publish_agent_manifest(
+            &root,
+            &manifest_with_coupling(
+                &format!(
+                    "runtime_{}",
+                    template.id.replace("std::", "").replace(['.', ':'], "_")
+                ),
+                &template.id,
+                &format!(
+                    "op://stdlib_policy/run@sha256:{}",
+                    operation.active_artifact_hash
+                ),
+                "",
+                &template.trigger_kinds[0].to_string(),
+                source_stream,
+                &template.source.kinds[0].to_string(),
+                &template.sink.stream,
+                &serde_json::to_string(
+                    &template
+                        .sink
+                        .kinds
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                "",
+            ),
+        );
+
+        let bound = bind_published_agent_record(
+            &record,
+            None,
+            &surface,
+            Some(&operation_root),
+            None,
+            &BTreeSet::new(),
+            None,
+            &AgentManifestModelProfileSelection::default(),
+            &AgentManifestBindOverrides::default(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{} should bind: {err}", template.id));
+
+        assert_eq!(bound.couplings.len(), 1, "{}", template.id);
+        assert_eq!(bound.couplings[0].id, template.id);
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_bind() {
+    let root = temp_dir("manifest-bind-non-runtime-stdlib-couplings");
+    let operation_root = root.join("operations");
+    let operation =
+        publish_multi_operation_record(&operation_root, "reference_policy", &[("run", vec![])])
+            .await;
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let non_executable = crate::coupling_template_catalog_v1()
+        .templates
+        .into_iter()
+        .filter(|template| !template.runtime_executable)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        non_executable
+            .iter()
+            .map(|template| template.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "std::io.channel_ingress",
+            "std::io.channel_egress",
+            "std::supervisor.spawn",
+        ]
+    );
+
+    for template in non_executable {
+        let record = publish_agent_manifest(
+            &root,
+            &manifest_with_coupling(
+                &format!(
+                    "reference_{}",
+                    template.id.replace("std::", "").replace(['.', ':'], "_")
+                ),
+                &template.id,
+                &format!(
+                    "op://reference_policy/run@sha256:{}",
+                    operation.active_artifact_hash
+                ),
+                "",
+                &template.trigger_kinds[0].to_string(),
+                &template.source.stream,
+                &template.source.kinds[0].to_string(),
+                &template.sink.stream,
+                &serde_json::to_string(
+                    &template
+                        .sink
+                        .kinds
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                "",
+            ),
+        );
+
+        let err = bind_published_agent_record(
+            &record,
+            None,
+            &surface,
+            Some(&operation_root),
+            None,
+            &BTreeSet::new(),
+            None,
+            &AgentManifestModelProfileSelection::default(),
+            &AgentManifestBindOverrides::default(),
+        )
+        .await
+        .unwrap_err();
+        let diagnostic = err.to_string();
+
+        assert!(diagnostic.contains(&template.id), "{diagnostic}");
+        assert!(
+            diagnostic.contains("no registered executor"),
+            "{diagnostic}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn manifest_without_couplings_binds_unchanged() {
     let root = temp_dir("manifest-bind-no-couplings");
     let record = publish_agent_manifest(&root, &minimal_manifest("plain_agent"));
@@ -781,6 +999,7 @@ async fn manifest_without_couplings_binds_unchanged() {
         None,
         &surface,
         None,
+        None,
         &BTreeSet::new(),
         None,
         &AgentManifestModelProfileSelection::default(),
@@ -791,6 +1010,115 @@ async fn manifest_without_couplings_binds_unchanged() {
 
     assert!(bound.couplings.is_empty());
     assert!(bound.bind_receipt.couplings.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn skill_resource_binds_package_digest_and_static_index() {
+    let root = temp_dir("manifest-bind-skill-resource");
+    let skill_root = root.join("skills");
+    let package_dir = root.join("skill-src").join("karl-skills");
+    write_skill_file(
+        &package_dir,
+        "alpha",
+        r#"---
+name: alpha
+description: Alpha description.
+---
+# Alpha
+
+Alpha body.
+"#,
+    );
+    write_skill_file(
+        &package_dir,
+        "設計",
+        r#"# 設計
+
+Unicode description.
+
+Unicode body.
+"#,
+    );
+    let package = LocalSkillRegistry::new(&skill_root)
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[[resources]]
+name = "karl_skills"
+kind = "skill"
+ref = "{}"
+"#,
+            minimal_manifest("skillful_agent"),
+            package.ref_uri()
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let first = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+    let second = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first.bind_receipt.skill_packages.len(), 1);
+    let binding = &first.bind_receipt.skill_packages[0];
+    assert_eq!(binding.resource_name, "karl_skills");
+    assert_eq!(binding.package_name, "karl-skills");
+    assert_eq!(binding.ref_uri, package.ref_uri());
+    assert_eq!(binding.artifact_hash, package.active_artifact_hash);
+    assert_eq!(
+        binding.package_digest,
+        format!("sha256:{}", package.active_artifact_hash)
+    );
+    assert_eq!(binding.skill_count, 2);
+
+    assert_eq!(first.skill_context_segments, second.skill_context_segments);
+    let segment = first.skill_context_segments.first().unwrap();
+    assert_eq!(segment.id, "skill-index:karl_skills");
+    assert_eq!(segment.assembler, KERNEL_ASSEMBLER_STATIC);
+    assert_eq!(segment.input, "karl_skills");
+    assert!(segment.pinned);
+    assert_eq!(segment.budget_share, None);
+    assert_eq!(segment.ref_uri, package.ref_uri());
+    assert_eq!(
+        segment.content,
+        "alpha — Alpha description.\n設計 — Unicode description.\n"
+    );
+    assert_eq!(segment.content_sha256, binding.index_sha256);
+    assert_eq!(
+        first.bind_receipt.skill_packages,
+        second.bind_receipt.skill_packages
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1244,9 +1572,16 @@ streaming = false
     )
 }
 
+fn write_skill_file(package_dir: &Path, name: &str, body: &str) {
+    let dir = package_dir.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn manifest_with_coupling(
     name: &str,
+    coupling_id: &str,
     function_ref: &str,
     grant: &str,
     trigger_kind: &str,
@@ -1275,7 +1610,7 @@ fn manifest_with_coupling(
         r#"{}
 
 [[couplings]]
-id = "bash_regex_gate"
+id = "{coupling_id}"
 function_ref = "{function_ref}"
 grants = {grants}
 
@@ -1373,6 +1708,73 @@ async fn publish_multi_operation_record(
         })
         .await
         .unwrap()
+}
+
+async fn publish_json_operation_record(
+    root: &Path,
+    record_name: &str,
+    operation_name: &str,
+) -> crate::PublishedOperationRecord {
+    fs::create_dir_all(root).unwrap();
+    let registry = LocalOperationRegistry::new(root);
+    let wasm = wat::parse_str(json_operation_guest(operation_name)).unwrap();
+    let artifact = root.join(format!("{record_name}.wasm"));
+    fs::write(&artifact, wasm).unwrap();
+    registry
+        .publish_artifact(crate::PublishOperationRequest {
+            name: record_name.to_string(),
+            artifact_path: artifact.clone(),
+            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
+            interface: None,
+            capability_grants: Default::default(),
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap()
+}
+
+fn json_operation_guest(operation_name: &str) -> String {
+    let manifest = serde_json::json!({
+        "abi": "cooldis.operation/0.1",
+        "operations": [{
+            "id": 1,
+            "name": operation_name,
+            "input": "json",
+            "output": "json",
+            "events": "none",
+            "mode": "sync",
+            "required_capabilities": []
+        }]
+    })
+    .to_string();
+    format!(
+        r#"
+            (module
+              (import "cooldis_0.1" "sink_write" (func $sink_write (param i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 4096) "{manifest}")
+              (func (export "__cooldis_describe_module__") (param $sink i32) (result i32)
+                i32.const 0
+                i32.const {manifest_len}
+                i32.store
+                local.get $sink
+                i32.const 4096
+                i32.const 0
+                call $sink_write
+                drop
+                i32.const 0)
+              (func (export "__cooldis_call_operation__")
+                (param $op i32)
+                (param $invocation i32)
+                (param $source i32)
+                (param $output i32)
+                (param $events i32)
+                (result i32)
+                i32.const 0))
+            "#,
+        manifest = wat_bytes(manifest.as_bytes()),
+        manifest_len = manifest.len(),
+    )
 }
 
 fn multi_operation_guest_with_required_capabilities(operations: &[(&str, Vec<&str>)]) -> String {

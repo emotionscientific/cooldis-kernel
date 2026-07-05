@@ -1,10 +1,10 @@
 use crate::{
     CONTEXT_READ_PLAN_SCHEMA_V1, CooldisError, CooldisResult, CouplingDischarge,
     CouplingExecutionResult, CouplingExecutor, CouplingInvocation, CouplingRunReceipt,
-    CouplingRunStatus, EventKind, EventRecord, EventRecordId, EventSequence,
-    ObservationSourceRange, ToolCallDecisionOutcomePayload, ToolCallDecisionPayload,
-    ToolCallRequestedPayload, ToolCallSuspendedPayload, TurnContinuationSubject,
-    TurnContinueRequestedPayload, agent::contracts::sha256_hex,
+    CouplingRunStatus, EventKind, EventRecord, EventRecordId, EventSequence, MandateStartedPayload,
+    MandateSubject, ObservationSourceRange, TimerFiredPayload, ToolCallDecisionOutcomePayload,
+    ToolCallDecisionPayload, ToolCallRequestedPayload, ToolCallSuspendedPayload,
+    TurnContinuationSubject, TurnContinueRequestedPayload, agent::contracts::sha256_hex,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -286,6 +286,7 @@ impl Default for RetryWithBudgetConfig {
 #[serde(default)]
 struct ScheduleCronConfig {
     max_occurrences: u32,
+    mandate_scope: ScheduleCronMandateScope,
     loop_id: Option<String>,
     parent_turn_id: Option<String>,
     next_turn_input: Option<String>,
@@ -293,10 +294,33 @@ struct ScheduleCronConfig {
     reason: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ScheduleCronMandateScope {
+    MatchAll,
+    Subject(MandateSubject),
+}
+
+impl Default for ScheduleCronMandateScope {
+    fn default() -> Self {
+        Self::MatchAll
+    }
+}
+
+impl ScheduleCronMandateScope {
+    fn matches(&self, subject: &MandateSubject) -> bool {
+        match self {
+            Self::MatchAll => true,
+            Self::Subject(expected) => expected == subject,
+        }
+    }
+}
+
 impl Default for ScheduleCronConfig {
     fn default() -> Self {
         Self {
             max_occurrences: 1,
+            mandate_scope: ScheduleCronMandateScope::default(),
             loop_id: None,
             parent_turn_id: None,
             next_turn_input: None,
@@ -1438,6 +1462,7 @@ fn permission_tool_decision_result(
         subject: requested.subject.clone(),
         snapshot_id: request.activation.snapshot_id.clone(),
         outcome,
+        admissible: None,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
         CooldisError::RuntimeFactory(format!(
@@ -1474,42 +1499,56 @@ fn permission_tool_decision_result(
 }
 
 fn invoke_schedule_cron(request: CouplingInvocation) -> CooldisResult<CouplingExecutionResult> {
-    if request.trigger_event.kind != EventKind::MandateStarted {
-        return Err(CooldisError::RuntimeFactory(format!(
-            "{STD_SCHEDULE_CRON_TEMPLATE_ID} expected mandate.started trigger, got {}",
-            request.trigger_event.kind
-        )));
+    match request.trigger_event.kind {
+        EventKind::MandateStarted => Ok(CouplingExecutionResult::default()),
+        EventKind::TimerFired => {
+            let config = schedule_cron_config(&request.coupling.config)?;
+            invoke_schedule_cron_timer_fired(request, config)
+        }
+        kind => Err(CooldisError::RuntimeFactory(format!(
+            "{STD_SCHEDULE_CRON_TEMPLATE_ID} expected timer.fired trigger, got {kind}"
+        ))),
     }
-    let config = schedule_cron_config(&request.coupling.config)?;
-    let occurrence = request
-        .trigger_event
-        .payload
-        .get("occurrence")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(1)
-        .max(1);
+}
+
+fn invoke_schedule_cron_timer_fired(
+    request: CouplingInvocation,
+    config: ScheduleCronConfig,
+) -> CooldisResult<CouplingExecutionResult> {
+    let timer = timer_fired_payload(&request)?;
+    let Some((mandate_event, mandate)) = timer_fired_mandate(&request, &timer)? else {
+        return Ok(CouplingExecutionResult::default());
+    };
+    if !config.mandate_scope.matches(&mandate.subject) {
+        return Ok(CouplingExecutionResult::default());
+    }
+
+    let max_occurrences = mandate.max_occurrences.unwrap_or(config.max_occurrences);
     let schedule_id = config
         .schedule_id
         .clone()
-        .or_else(|| payload_string(&request.trigger_event.payload, &["schedule_id"]))
         .unwrap_or_else(|| "default".to_string());
-    let mandate_id = payload_string(&request.trigger_event.payload, &["mandate_id"]);
-    let reason = config
-        .reason
-        .clone()
-        .or_else(|| payload_string(&request.trigger_event.payload, &["reason"]))
-        .unwrap_or_else(|| "scheduled occurrence accepted".to_string());
-
-    if occurrence > config.max_occurrences {
+    if timer.occurrence_index >= u64::from(max_occurrences) {
+        let mut discharge = schedule_budget_exhausted_discharge(
+            &request,
+            &schedule_id,
+            timer.mandate_event_id,
+            Some(mandate.mandate_id.as_str()),
+            timer.occurrence_index,
+            max_occurrences,
+        );
+        if let Some(object) = discharge.payload.as_object_mut() {
+            object.insert(
+                "occurrence_index".to_string(),
+                json!(timer.occurrence_index),
+            );
+            object.insert(
+                "timer_event_id".to_string(),
+                json!(request.trigger_event.id.to_string()),
+            );
+        }
         return Ok(CouplingExecutionResult {
-            discharges: vec![schedule_budget_exhausted_discharge(
-                &request,
-                &schedule_id,
-                mandate_id.as_deref(),
-                occurrence,
-                config.max_occurrences,
-            )],
+            discharges: vec![discharge],
         });
     }
 
@@ -1518,17 +1557,25 @@ fn invoke_schedule_cron(request: CouplingInvocation) -> CooldisResult<CouplingEx
             "std::schedule.cron continuation requires parent_turn_id".to_string(),
         )
     })?;
-    let next_turn_input = config.next_turn_input.ok_or_else(|| {
-        CooldisError::RuntimeFactory(
-            "std::schedule.cron continuation requires next_turn_input".to_string(),
-        )
-    })?;
+    let input_template = mandate
+        .input_template
+        .clone()
+        .or(config.next_turn_input)
+        .ok_or_else(|| {
+            CooldisError::RuntimeFactory(
+                "std::schedule.cron continuation requires input_template".to_string(),
+            )
+        })?;
+    let next_turn_input = render_schedule_input_template(&input_template, &timer.scheduled_for);
     let payload = TurnContinueRequestedPayload {
         subject: TurnContinuationSubject {
-            loop_id: config.loop_id.unwrap_or_else(|| "default".to_string()),
+            loop_id: config
+                .loop_id
+                .or_else(|| mandate.subject.loop_id.clone())
+                .unwrap_or_else(|| "default".to_string()),
             parent_turn_id,
         },
-        snapshot_id: request.activation.snapshot_id.clone(),
+        snapshot_id: mandate.snapshot_id.clone(),
         next_turn_input,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
@@ -1543,15 +1590,24 @@ fn invoke_schedule_cron(request: CouplingInvocation) -> CooldisResult<CouplingEx
             "template_id".to_string(),
             json!(STD_SCHEDULE_CRON_TEMPLATE_ID),
         );
-        object.insert("reason".to_string(), json!(reason));
+        object.insert(
+            "reason".to_string(),
+            json!(
+                config
+                    .reason
+                    .unwrap_or_else(|| "scheduled occurrence accepted".to_string())
+            ),
+        );
         object.insert(
             "schedule".to_string(),
             json!({
                 "schedule_id": schedule_id,
-                "mandate_id": mandate_id,
-                "mandate_event_id": request.trigger_event.id.to_string(),
-                "occurrence": occurrence,
-                "max_occurrences": config.max_occurrences,
+                "mandate_id": mandate.mandate_id,
+                "mandate_event_id": mandate_event.id.to_string(),
+                "timer_event_id": request.trigger_event.id.to_string(),
+                "scheduled_for": timer.scheduled_for,
+                "occurrence_index": timer.occurrence_index,
+                "max_occurrences": max_occurrences,
             }),
         );
     }
@@ -1566,11 +1622,48 @@ fn invoke_schedule_cron(request: CouplingInvocation) -> CooldisResult<CouplingEx
     })
 }
 
+fn timer_fired_payload(request: &CouplingInvocation) -> CooldisResult<TimerFiredPayload> {
+    serde_json::from_value(request.trigger_event.payload.clone()).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("std::schedule.cron timer payload failed: {err}"))
+    })
+}
+
+fn timer_fired_mandate(
+    request: &CouplingInvocation,
+    timer: &TimerFiredPayload,
+) -> CooldisResult<Option<(EventRecord, MandateStartedPayload)>> {
+    if !request
+        .trigger_event
+        .provenance
+        .source_event_ids
+        .contains(&timer.mandate_event_id)
+    {
+        return Ok(None);
+    }
+    let Some(event) = request.source_events.iter().find(|event| {
+        event.id == timer.mandate_event_id && event.kind == EventKind::MandateStarted
+    }) else {
+        return Ok(None);
+    };
+    let mandate =
+        serde_json::from_value::<MandateStartedPayload>(event.payload.clone()).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "std::schedule.cron mandate payload failed: {err}"
+            ))
+        })?;
+    Ok(Some((event.clone(), mandate)))
+}
+
+fn render_schedule_input_template(template: &str, scheduled_for: &str) -> String {
+    template.replace("{scheduled_for}", scheduled_for)
+}
+
 fn schedule_budget_exhausted_discharge(
     request: &CouplingInvocation,
     schedule_id: &str,
+    mandate_event_id: EventRecordId,
     mandate_id: Option<&str>,
-    occurrence: u32,
+    occurrence: u64,
     max_occurrences: u32,
 ) -> CouplingDischarge {
     CouplingDischarge {
@@ -1581,7 +1674,7 @@ fn schedule_budget_exhausted_discharge(
             "schema": EventKind::LoopBudgetExhausted.payload_schema_id(),
             "template_id": STD_SCHEDULE_CRON_TEMPLATE_ID,
             "snapshot_id": request.activation.snapshot_id,
-            "mandate_event_id": request.trigger_event.id.to_string(),
+            "mandate_event_id": mandate_event_id.to_string(),
             "mandate_id": mandate_id,
             "schedule_id": schedule_id,
             "occurrence": occurrence,
@@ -2288,9 +2381,10 @@ mod tests {
     use crate::{
         AgentManifestCouplingBudget, AgentManifestCouplingQuota, BoundCoupling,
         BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSet, BoundCouplingSink,
-        CouplingRole, CouplingScheduler, EventKind, EventProvenance, EventRecordId, EventSequence,
-        EventStore, EventStreamId, InMemorySessionStore, NewEventRecord, ObservationSourceRange,
-        ThreadCoordinates,
+        CouplingRole, CouplingScheduler, EventKind, EventProvenance, EventRecord, EventRecordId,
+        EventSequence, EventStore, EventStreamId, InMemorySessionStore, MandateCatchUpPolicy,
+        MandateSchedulePayload, MandateStartedPayload, MandateSubject, NewEventRecord,
+        ObservationSourceRange, ThreadCoordinates, TimerFiredPayload,
     };
     use serde_json::json;
 
@@ -3109,18 +3203,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn std_schedule_cron_requests_continuation_for_mandate() {
+    async fn std_schedule_cron_mandate_started_does_not_discharge() {
         let coordinates = ThreadCoordinates::new("tenant", "user", "session");
         let store = InMemorySessionStore::default();
         let control_stream = EventStreamId::new(format!("control:{}", coordinates.thread_id));
-        let mandate = append_mandate_started(&store, &coordinates, &control_stream, 1).await;
+        let mandate = append_schedule_mandate_started(
+            &store,
+            &coordinates,
+            &control_stream,
+            MandateSubject {
+                thread_id: Some(coordinates.thread_id.to_string()),
+                loop_id: Some("loop-nightly".to_string()),
+            },
+            2,
+            "run summary for {scheduled_for}",
+        )
+        .await;
+        let mut coupling = std_schedule_cron_coupling();
+        coupling.trigger_kind = EventKind::MandateStarted;
 
         let executor = StdlibCouplingExecutor;
         let scheduler = CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![std_schedule_cron_coupling()]),
-                mandate,
+                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                vec![mandate],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.runs.len(), 1);
+        assert_eq!(receipt.runs[0].coupling_id, "std::schedule.cron");
+        assert!(receipt.runs[0].discharged_event_ids.is_empty());
+
+        let control_events = store.read_events(&control_stream, None).await.unwrap();
+        assert!(control_events.iter().all(|event| !matches!(
+            event.kind,
+            EventKind::TurnContinueRequested | EventKind::LoopBudgetExhausted
+        )));
+    }
+
+    #[tokio::test]
+    async fn std_schedule_cron_requests_continuation_for_timer_fired() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let control_stream = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let mandate = append_schedule_mandate_started(
+            &store,
+            &coordinates,
+            &control_stream,
+            MandateSubject {
+                thread_id: Some(coordinates.thread_id.to_string()),
+                loop_id: Some("loop-nightly".to_string()),
+            },
+            2,
+            "run summary for {scheduled_for}",
+        )
+        .await;
+        let fired = append_timer_fired(
+            &store,
+            &coordinates,
+            &control_stream,
+            mandate.id,
+            1,
+            "2026-01-01T00:01:00.000Z",
+            mandate.id,
+        )
+        .await;
+
+        let executor = StdlibCouplingExecutor;
+        let scheduler = CouplingScheduler::new(&store, &executor);
+        let receipt = scheduler
+            .run_batch(
+                &BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_schedule_cron_timer_coupling(json!({
+                        "max_occurrences": 2,
+                        "schedule_id": "nightly-summary",
+                        "parent_turn_id": "turn-nightly-root",
+                        "loop_id": "loop-nightly",
+                        "mandate_scope": "match_all",
+                    }))],
+                ),
+                fired,
             )
             .await
             .unwrap();
@@ -3140,30 +3305,60 @@ mod tests {
         );
         assert_eq!(continuation.payload["template_id"], "std::schedule.cron");
         assert_eq!(
-            continuation.payload["schedule"]["schedule_id"],
-            "nightly-summary"
+            continuation.payload["next_turn_input"],
+            "run summary for 2026-01-01T00:01:00.000Z"
         );
-        assert_eq!(continuation.payload["schedule"]["occurrence"], 1);
-        assert_eq!(continuation.payload["schedule"]["max_occurrences"], 2);
         assert_eq!(
-            continuation.provenance.discharged_by.as_deref(),
-            Some("coupling:std::schedule.cron")
+            continuation.payload["schedule"]["mandate_event_id"],
+            mandate.id.to_string()
         );
+        assert_eq!(continuation.payload["schedule"]["occurrence_index"], 1);
+        assert_eq!(continuation.payload["schedule"]["max_occurrences"], 2);
     }
 
     #[tokio::test]
-    async fn std_schedule_cron_emits_budget_exhausted_when_limit_reached() {
+    async fn std_schedule_cron_emits_budget_exhausted_for_timer_fired_at_cap() {
         let coordinates = ThreadCoordinates::new("tenant", "user", "session");
         let store = InMemorySessionStore::default();
         let control_stream = EventStreamId::new(format!("control:{}", coordinates.thread_id));
-        let mandate = append_mandate_started(&store, &coordinates, &control_stream, 3).await;
+        let mandate = append_schedule_mandate_started(
+            &store,
+            &coordinates,
+            &control_stream,
+            MandateSubject {
+                thread_id: Some(coordinates.thread_id.to_string()),
+                loop_id: Some("loop-nightly".to_string()),
+            },
+            2,
+            "run summary",
+        )
+        .await;
+        let fired = append_timer_fired(
+            &store,
+            &coordinates,
+            &control_stream,
+            mandate.id,
+            2,
+            "2026-01-01T00:02:00.000Z",
+            mandate.id,
+        )
+        .await;
 
         let executor = StdlibCouplingExecutor;
         let scheduler = CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![std_schedule_cron_coupling()]),
-                mandate,
+                &BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_schedule_cron_timer_coupling(json!({
+                        "max_occurrences": 2,
+                        "schedule_id": "nightly-summary",
+                        "parent_turn_id": "turn-nightly-root",
+                        "loop_id": "loop-nightly",
+                        "mandate_scope": "match_all",
+                    }))],
+                ),
+                fired,
             )
             .await
             .unwrap();
@@ -3173,6 +3368,11 @@ mod tests {
         assert_eq!(receipt.runs[0].discharged_event_ids.len(), 1);
 
         let control_events = store.read_events(&control_stream, None).await.unwrap();
+        assert!(
+            control_events
+                .iter()
+                .all(|event| event.kind != EventKind::TurnContinueRequested)
+        );
         let exhausted = control_events
             .iter()
             .find(|event| event.kind == EventKind::LoopBudgetExhausted)
@@ -3182,9 +3382,75 @@ mod tests {
             EventKind::LoopBudgetExhausted.payload_schema_id()
         );
         assert_eq!(exhausted.payload["template_id"], "std::schedule.cron");
-        assert_eq!(exhausted.payload["schedule_id"], "nightly-summary");
-        assert_eq!(exhausted.payload["occurrence"], 3);
+        assert_eq!(
+            exhausted.payload["mandate_event_id"],
+            mandate.id.to_string()
+        );
+        assert_eq!(exhausted.payload["occurrence_index"], 2);
         assert_eq!(exhausted.payload["max_occurrences"], 2);
+    }
+
+    #[tokio::test]
+    async fn std_schedule_cron_ignores_timer_fired_for_other_mandate_scope() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let control_stream = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let mandate = append_schedule_mandate_started(
+            &store,
+            &coordinates,
+            &control_stream,
+            MandateSubject {
+                thread_id: Some(coordinates.thread_id.to_string()),
+                loop_id: Some("loop-nightly".to_string()),
+            },
+            2,
+            "run summary for {scheduled_for}",
+        )
+        .await;
+        let fired = append_timer_fired(
+            &store,
+            &coordinates,
+            &control_stream,
+            mandate.id,
+            1,
+            "2026-01-01T00:01:00.000Z",
+            mandate.id,
+        )
+        .await;
+
+        let executor = StdlibCouplingExecutor;
+        let scheduler = CouplingScheduler::new(&store, &executor);
+        let receipt = scheduler
+            .run_batch(
+                &BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_schedule_cron_timer_coupling(json!({
+                        "max_occurrences": 2,
+                        "schedule_id": "nightly-summary",
+                        "parent_turn_id": "turn-nightly-root",
+                        "loop_id": "loop-nightly",
+                        "mandate_scope": {
+                            "subject": {
+                                "thread_id": coordinates.thread_id.to_string(),
+                                "loop_id": "loop-other",
+                            }
+                        },
+                    }))],
+                ),
+                fired,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.runs.len(), 1);
+        assert_eq!(receipt.runs[0].coupling_id, "std::schedule.cron");
+        assert!(receipt.runs[0].discharged_event_ids.is_empty());
+
+        let control_events = store.read_events(&control_stream, None).await.unwrap();
+        assert!(control_events.iter().all(|event| !matches!(
+            event.kind,
+            EventKind::TurnContinueRequested | EventKind::LoopBudgetExhausted
+        )));
     }
 
     #[tokio::test]
@@ -3479,27 +3745,68 @@ mod tests {
             .unwrap()
     }
 
-    async fn append_mandate_started(
+    async fn append_schedule_mandate_started(
         store: &InMemorySessionStore,
         coordinates: &ThreadCoordinates,
         control_stream: &EventStreamId,
-        occurrence: u32,
-    ) -> Vec<crate::EventRecord> {
+        subject: MandateSubject,
+        max_occurrences: u32,
+        input_template: &str,
+    ) -> EventRecord {
         store
             .append_events(
                 control_stream,
                 vec![NewEventRecord::witnessed(
                     coordinates.clone(),
                     EventKind::MandateStarted,
-                    json!({
-                        "schema": EventKind::MandateStarted.payload_schema_id(),
-                        "mandate_id": "mandate-nightly-summary",
-                        "schedule_id": "nightly-summary",
-                        "occurrence": occurrence,
-                        "reason": "nightly summary requested",
-                    }),
+                    serde_json::to_value(MandateStartedPayload {
+                        subject,
+                        mandate_id: "mandate-nightly-summary".to_string(),
+                        snapshot_id: "schedule.v1".to_string(),
+                        thread_id: Some(coordinates.thread_id.to_string()),
+                        max_continuations: None,
+                        expires_at_ms: None,
+                        schedule: Some(MandateSchedulePayload::Interval { every_ms: 60_000 }),
+                        max_occurrences: Some(max_occurrences),
+                        catch_up: Some(MandateCatchUpPolicy::SkipMissed),
+                        input_template: Some(input_template.to_string()),
+                    })
+                    .unwrap(),
                 )],
             )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
+
+    async fn append_timer_fired(
+        store: &InMemorySessionStore,
+        coordinates: &ThreadCoordinates,
+        control_stream: &EventStreamId,
+        mandate_event_id: EventRecordId,
+        occurrence_index: u64,
+        scheduled_for: &str,
+        provenance_event_id: EventRecordId,
+    ) -> Vec<EventRecord> {
+        let mut record = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::TimerFired,
+            serde_json::to_value(TimerFiredPayload {
+                mandate_event_id,
+                scheduled_for: scheduled_for.to_string(),
+                occurrence_index,
+                catch_up: false,
+            })
+            .unwrap(),
+        );
+        record.provenance = EventProvenance {
+            source_streams: vec![control_stream.clone()],
+            source_event_ids: vec![provenance_event_id],
+            ..EventProvenance::default()
+        };
+        store
+            .append_events(control_stream, vec![record])
             .await
             .unwrap()
     }
@@ -3912,12 +4219,16 @@ mod tests {
         BoundCoupling {
             id: "std::schedule.cron".to_string(),
             role: CouplingRole::Controller,
-            trigger_kind: EventKind::MandateStarted,
+            trigger_kind: EventKind::TimerFired,
             trigger_match: Default::default(),
             trigger_quota: AgentManifestCouplingQuota::default(),
             source_selectors: vec![BoundCouplingSelector {
                 stream: "control".to_string(),
-                kinds: vec![EventKind::MandateStarted, EventKind::MandateRevoked],
+                kinds: vec![
+                    EventKind::MandateStarted,
+                    EventKind::MandateRevoked,
+                    EventKind::TimerFired,
+                ],
                 scope: None,
                 since: None,
             }],
@@ -3950,6 +4261,12 @@ mod tests {
             }),
             config_hash: "sha256:schedule-cron".to_string(),
         }
+    }
+
+    fn std_schedule_cron_timer_coupling(config: serde_json::Value) -> BoundCoupling {
+        let mut coupling = std_schedule_cron_coupling();
+        coupling.config = config;
+        coupling
     }
 
     fn std_supervisor_child_completion_coupling() -> BoundCoupling {

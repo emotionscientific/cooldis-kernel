@@ -10,7 +10,18 @@ use crate::agent::contracts::{
     ThreadContractSource, ThreadDeclaration, ThreadHandle, ThreadInitialTurn,
     ThreadPropagatorSelection, ThreadReceiptSet, sha256_hex,
 };
-use crate::kernel::history::EventRecord;
+use crate::agent::manifest_bind::{BoundCouplingSet, coupling_set_content_hash};
+use crate::kernel::history::{
+    EventKind, EventRecord, EventRecordId, NewEventRecord, ThreadSpawnedPayload,
+};
+use crate::kernel::mandate_lifecycle::{
+    ActiveMandate, MandateRevokeReceipt, MandateStartReceipt, MandateStartRequest,
+    list_active_mandates, revoke_mandate, start_mandate,
+};
+use crate::kernel::runtime_host::{
+    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
+    THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA,
+};
 use cooldis_runtime_contracts::{
     RuntimeEventId, ThreadCheckpointId, ThreadContext, ThreadCoordinates, ThreadId,
     ThreadInteractionKind, ThreadLifecycleStatus, ThreadSignalId, ThreadStatus, ThreadTopology,
@@ -30,6 +41,76 @@ impl RuntimeKernelControl {
     pub(super) fn new(inner: Weak<RuntimeHostInner>) -> Self {
         Self { inner }
     }
+}
+
+async fn append_thread_spawned_event(
+    parent: &RuntimeThreadHandle,
+    caller: &ThreadContext,
+    child: &RuntimeThreadHandle,
+) -> CooldisResult<EventRecord> {
+    let metadata = &child.context().metadata;
+    let child_manifest_hash = metadata
+        .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+        .cloned()
+        .unwrap_or_else(|| "unbound".to_string());
+    let granted = metadata
+        .get(THREAD_SPAWN_GRANTED_METADATA)
+        .map(|raw| {
+            serde_json::from_str::<Vec<String>>(raw).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "thread_spawn granted metadata is invalid: {err}"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let inputs_hash = metadata
+        .get(THREAD_SPAWN_INPUTS_HASH_METADATA)
+        .cloned()
+        .unwrap_or_else(|| {
+            format!(
+                "sha256:{}",
+                sha256_hex(child.context().coordinates.thread_id.to_string().as_bytes())
+            )
+        });
+    let child_policy_hash = metadata
+        .get(THREAD_BOUND_COUPLING_SET_METADATA)
+        .map(|raw| {
+            serde_json::from_str::<BoundCouplingSet>(raw)
+                .map_err(|err| {
+                    CooldisError::RuntimeFactory(format!(
+                        "thread bound coupling set is invalid: {err}"
+                    ))
+                })
+                .and_then(|coupling_set| coupling_set_content_hash(&coupling_set))
+        })
+        .transpose()?;
+    let payload = ThreadSpawnedPayload {
+        parent_thread_id: caller.coordinates.thread_id,
+        parent_turn_id: None,
+        child_thread_id: child.context().coordinates.thread_id,
+        child_manifest_hash,
+        child_policy_hash,
+        granted,
+        inputs_hash,
+        fork: None,
+    };
+    let mut value = serde_json::to_value(payload).map_err(|err| {
+        CooldisError::History(format!("thread.spawned payload codec failed: {err}"))
+    })?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "schema".to_string(),
+            serde_json::json!(EventKind::ThreadSpawned.payload_schema_id()),
+        );
+    }
+    parent
+        .append_control_event(NewEventRecord::witnessed(
+            caller.coordinates.clone(),
+            EventKind::ThreadSpawned,
+            value,
+        ))
+        .await
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -195,6 +276,11 @@ impl RuntimeKernelControl {
             )
             .await?;
         let child_thread_id = child.context().coordinates.thread_id;
+        let parent = host.get_thread(caller.coordinates.thread_id).await?;
+        if let Err(err) = append_thread_spawned_event(&parent, caller, &child).await {
+            let _ = host.shutdown_thread(child_thread_id).await;
+            return Err(err);
+        }
         let turn_id = format!("agent-process-v1-{}", ThreadSignalId::new());
         if let Err(err) = host
             .submit_turn(child_thread_id, turn_id.clone(), input)
@@ -624,6 +710,56 @@ impl RuntimeKernelControl {
         target
             .record_manifest_receipts(compile_payload, bind_payload)
             .await
+    }
+
+    pub async fn start_mandate(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+        mut request: MandateStartRequest,
+    ) -> CooldisResult<MandateStartReceipt> {
+        let host = self.host()?;
+        let target = self.scoped_thread(caller, target_thread_id).await?;
+        if request.snapshot_id.is_none() {
+            request.snapshot_id = target
+                .context()
+                .metadata
+                .get("cooldis.agent.manifest_hash")
+                .cloned();
+        }
+        start_mandate(
+            host.runtime_store().as_ref(),
+            &target.context().coordinates,
+            request,
+            chrono::Utc::now(),
+        )
+        .await
+    }
+
+    pub async fn revoke_mandate(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+        mandate_event_id: EventRecordId,
+    ) -> CooldisResult<MandateRevokeReceipt> {
+        let host = self.host()?;
+        let target = self.scoped_thread(caller, target_thread_id).await?;
+        revoke_mandate(
+            host.runtime_store().as_ref(),
+            &target.context().coordinates,
+            mandate_event_id,
+        )
+        .await
+    }
+
+    pub async fn list_mandates(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+    ) -> CooldisResult<Vec<ActiveMandate>> {
+        let host = self.host()?;
+        let target = self.scoped_thread(caller, target_thread_id).await?;
+        list_active_mandates(host.runtime_store().as_ref(), &target.context().coordinates).await
     }
 
     async fn scoped_thread(

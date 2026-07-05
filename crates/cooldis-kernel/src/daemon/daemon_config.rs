@@ -1,5 +1,6 @@
 use crate::{AppServerListenAddr, CooldisError, CooldisResult};
 use cooldis_io_core::{IngressPersistenceConfig, IngressPersistenceMode};
+use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -256,11 +257,18 @@ impl CooldisIoConfig {
         self.ingress.validate("io.ingress", errors);
 
         let mut route_ids = BTreeSet::new();
+        let mut clock_route_count = 0;
         for route in &self.routes {
             route.validate(errors);
             if !route.id.trim().is_empty() && !route_ids.insert(route.id.clone()) {
                 errors.push(format!("io.routes id {:?} is duplicated", route.id));
             }
+            if route.kind == "clock.tick" {
+                clock_route_count += 1;
+            }
+        }
+        if clock_route_count > 1 {
+            errors.push("io.routes supports at most one clock.tick route".to_string());
         }
     }
 
@@ -361,7 +369,15 @@ pub struct CooldisIoRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce_bursts: Option<CooldisCoalesceBurstsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<CooldisIngressConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_projection: Vec<CooldisEgressProjectionRuleConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing_simulation: Option<CooldisTypingSimulationConfig>,
+    #[serde(default, skip_serializing_if = "CooldisEgressRetryConfig::is_default")]
+    pub egress_retry: CooldisEgressRetryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<CooldisTelegramRouteConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -379,6 +395,40 @@ impl CooldisIoRouteConfig {
         if let Some(ingress) = &self.ingress {
             ingress.validate(&format!("io.routes.{}", self.id), errors);
         }
+        if self.policy.as_deref() == Some("coalesce_bursts") && self.coalesce_bursts.is_none() {
+            errors.push(format!(
+                "io.routes.{}.policy coalesce_bursts requires coalesce_bursts config",
+                self.id
+            ));
+        }
+        if let Some(coalesce) = &self.coalesce_bursts {
+            coalesce.validate(&format!("io.routes.{}.coalesce_bursts", self.id), errors);
+        }
+        for (index, rule) in self.egress_projection.iter().enumerate() {
+            let scope = format!("io.routes.{}.egress_projection[{index}]", self.id);
+            if rule.pattern.trim().is_empty() {
+                errors.push(format!("{scope}.pattern cannot be empty"));
+            } else if let Err(err) = Regex::new(&rule.pattern) {
+                errors.push(format!("{scope}.pattern invalid regex: {err}"));
+            }
+            if rule.action.trim().is_empty() {
+                errors.push(format!("{scope}.action cannot be empty"));
+            }
+        }
+        if let Some(typing) = &self.typing_simulation
+            && typing.chars_per_second == 0
+        {
+            errors.push(format!(
+                "io.routes.{}.typing_simulation.chars_per_second must be greater than zero",
+                self.id
+            ));
+        }
+        if self.egress_retry.max_attempts == 0 {
+            errors.push(format!(
+                "io.routes.{}.egress_retry.max_attempts must be greater than zero",
+                self.id
+            ));
+        }
         if self.kind == "telegram.bot" {
             match &self.telegram {
                 Some(telegram) => {
@@ -391,11 +441,68 @@ impl CooldisIoRouteConfig {
                 None => {}
             }
         }
+        if self.kind == "clock.tick" && self.telegram.is_some() {
+            errors.push(format!(
+                "io.routes {:?} kind clock.tick does not accept telegram config",
+                self.id
+            ));
+        }
     }
 
     fn resolve_paths(&mut self, base: &Path) {
         if let Some(ingress) = &mut self.ingress {
             ingress.resolve_paths(base);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisCoalesceBurstsConfig {
+    pub window_ms: u64,
+    pub max_batch: usize,
+}
+
+impl CooldisCoalesceBurstsConfig {
+    fn validate(&self, scope: &str, errors: &mut Vec<String>) {
+        if self.window_ms == 0 {
+            errors.push(format!("{scope}.window_ms must be greater than zero"));
+        }
+        if self.max_batch == 0 {
+            errors.push(format!("{scope}.max_batch must be greater than zero"));
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisEgressProjectionRuleConfig {
+    pub pattern: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisTypingSimulationConfig {
+    pub chars_per_second: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisEgressRetryConfig {
+    #[serde(default = "default_egress_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_egress_base_backoff_ms")]
+    pub base_backoff_ms: u64,
+}
+
+impl CooldisEgressRetryConfig {
+    fn is_default(value: &Self) -> bool {
+        *value == Self::default()
+    }
+}
+
+impl Default for CooldisEgressRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_egress_max_attempts(),
+            base_backoff_ms: default_egress_base_backoff_ms(),
         }
     }
 }
@@ -1073,6 +1180,14 @@ fn default_app_server_listen() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_egress_max_attempts() -> u32 {
+    5
+}
+
+fn default_egress_base_backoff_ms() -> u64 {
+    500
 }
 
 fn default_telegram_webhook_path() -> String {
