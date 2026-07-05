@@ -356,12 +356,10 @@ decoding failures return JSON-RPC errors.
 
 At startup, the app-server synthesizes first-party kernel operation records into
 the configured registry: `cooldis-threads`, `cooldis-schedule`,
-`cooldis-messaging`, `cooldis-process`, and `cooldis-notify`.
-`cooldis-messaging` currently exposes the direct tool `message_react { quote,
-emoji }` with required grant `messaging.react`. The default manifest binds the
-thread-control package only; agents that need targeted message reactions must
-bind `op://cooldis-messaging/message_react@sha256:<record-hash>` explicitly and
-grant `messaging.react`.
+`cooldis-process`, and `cooldis-notify`. The default manifest binds the
+thread-control package only; agents that need other first-party operations bind
+the corresponding `op://...@sha256:<record-hash>` explicitly with the required
+grants.
 
 ### `model/list`
 

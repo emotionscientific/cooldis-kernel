@@ -77,7 +77,6 @@ fn loads_route_egress_projection_and_typing_simulation() {
 id = "telegram-main"
 kind = "websocket.tui"
 egress_projection = [
-  { pattern = '\[reaction:(?P<emoji>[^\]]+)\]', action = "reaction" },
   { pattern = '\[sticker:(?P<file_id>[^\]]+)\]', action = "sticker" },
   { pattern = '\[no_response\]', action = "silence" },
 ]
@@ -90,8 +89,8 @@ egress_retry = { max_attempts = 7, base_backoff_ms = 250 }
     let loaded = load_cooldis_daemon_config(Some(&path)).unwrap();
     let route = &loaded.config.io.routes[0];
 
-    assert_eq!(route.egress_projection.len(), 3);
-    assert_eq!(route.egress_projection[0].action, "reaction");
+    assert_eq!(route.egress_projection.len(), 2);
+    assert_eq!(route.egress_projection[0].action, "sticker");
     assert_eq!(
         route
             .typing_simulation
@@ -113,14 +112,14 @@ fn invalid_egress_projection_regex_reports_rule_index() {
         kind: "websocket.tui".to_string(),
         enabled: true,
         policy: None,
-        reaction_policy: None,
+        content_policies: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
         ingress: None,
         egress_projection: vec![CooldisEgressProjectionRuleConfig {
             pattern: "[bad".to_string(),
-            action: "reaction".to_string(),
+            action: "sticker".to_string(),
         }],
         typing_simulation: None,
         egress_retry: CooldisEgressRetryConfig::default(),
@@ -145,7 +144,7 @@ fn validates_route_agent_ref_syntax() {
         kind: "websocket.tui".to_string(),
         enabled: true,
         policy: None,
-        reaction_policy: None,
+        content_policies: None,
         threading: None,
         agent_ref: Some("karl-dev".to_string()),
         coalesce_bursts: None,
@@ -174,7 +173,7 @@ fn validates_coalesce_bursts_route_config() {
         kind: "websocket.tui".to_string(),
         enabled: true,
         policy: Some("steer_when_active".to_string()),
-        reaction_policy: None,
+        content_policies: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: Some(CooldisCoalesceBurstsConfig {
@@ -486,7 +485,7 @@ fn validates_bad_queue_and_route_config() {
         kind: "".to_string(),
         enabled: true,
         policy: None,
-        reaction_policy: None,
+        content_policies: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
@@ -579,7 +578,7 @@ fn validates_telegram_route_shape() {
         kind: "telegram.bot".to_string(),
         enabled: true,
         policy: None,
-        reaction_policy: None,
+        content_policies: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
@@ -604,14 +603,17 @@ fn validates_telegram_route_shape() {
 }
 
 #[test]
-fn invalid_reaction_policy_names_field() {
+fn invalid_content_policy_names_field() {
     let mut config = CooldisDaemonConfig::default();
     config.io.routes.push(CooldisIoRouteConfig {
         id: "telegram-main".to_string(),
         kind: "telegram.bot".to_string(),
         enabled: false,
         policy: None,
-        reaction_policy: Some("wake_everything".to_string()),
+        content_policies: Some(BTreeMap::from([(
+            "external.event".to_string(),
+            "wake_everything".to_string(),
+        )])),
         agent_ref: None,
         threading: None,
         coalesce_bursts: None,
@@ -626,8 +628,72 @@ fn invalid_reaction_policy_names_field() {
     let errors = config.validation_errors();
 
     assert!(errors.iter().any(|error| {
-        error.contains("io.routes.telegram-main.reaction_policy")
+        error.contains("io.routes.telegram-main.content_policies.external.event")
             && error.contains("wake_everything")
+    }));
+}
+
+#[test]
+fn valid_content_policies_are_route_kind_lenient() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "tui-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: Some("queue_per_conversation".to_string()),
+        content_policies: Some(BTreeMap::from([(
+            "external.event".to_string(),
+            "observe_only".to_string(),
+        )])),
+        agent_ref: None,
+        threading: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(
+        errors
+            .iter()
+            .all(|error| !error.contains("content_policies")),
+        "valid content_policies should not be route-kind-gated: {errors:?}"
+    );
+}
+
+#[test]
+fn content_policy_coalesce_requires_coalesce_config() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "event-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: None,
+        content_policies: Some(BTreeMap::from([(
+            "external.event".to_string(),
+            "coalesce_bursts".to_string(),
+        )])),
+        agent_ref: None,
+        threading: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(errors.iter().any(|error| {
+        error.contains("io.routes.event-main.content_policies.external.event")
+            && error.contains("requires coalesce_bursts config")
     }));
 }
 
@@ -640,7 +706,7 @@ fn validates_single_clock_tick_route() {
             kind: "clock.tick".to_string(),
             enabled: true,
             policy: None,
-            reaction_policy: None,
+            content_policies: None,
             threading: None,
             agent_ref: None,
             coalesce_bursts: None,

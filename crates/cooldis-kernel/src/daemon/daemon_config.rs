@@ -379,7 +379,7 @@ pub struct CooldisIoRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reaction_policy: Option<String>,
+    pub content_policies: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -429,13 +429,15 @@ impl CooldisIoRouteConfig {
         if let Some(policy) = &self.policy {
             validate_route_policy(&format!("io.routes.{}", self.id), "policy", policy, errors);
         }
-        if let Some(policy) = &self.reaction_policy {
-            validate_route_policy(
-                &format!("io.routes.{}", self.id),
-                "reaction_policy",
-                policy,
-                errors,
-            );
+        if let Some(content_policies) = &self.content_policies {
+            for (kind, policy) in content_policies {
+                validate_route_policy(
+                    &format!("io.routes.{}", self.id),
+                    &format!("content_policies.{kind}"),
+                    policy,
+                    errors,
+                );
+            }
         }
         if self.policy.as_deref() == Some("coalesce_bursts") && self.coalesce_bursts.is_none() {
             errors.push(format!(
@@ -443,13 +445,15 @@ impl CooldisIoRouteConfig {
                 self.id
             ));
         }
-        if self.reaction_policy.as_deref() == Some("coalesce_bursts")
-            && self.coalesce_bursts.is_none()
-        {
-            errors.push(format!(
-                "io.routes.{}.reaction_policy coalesce_bursts requires coalesce_bursts config",
-                self.id
-            ));
+        if let Some(content_policies) = &self.content_policies {
+            for (kind, policy) in content_policies {
+                if policy == "coalesce_bursts" && self.coalesce_bursts.is_none() {
+                    errors.push(format!(
+                        "io.routes.{}.content_policies.{kind} coalesce_bursts requires coalesce_bursts config",
+                        self.id
+                    ));
+                }
+            }
         }
         if let Some(coalesce) = &self.coalesce_bursts {
             coalesce.validate(&format!("io.routes.{}.coalesce_bursts", self.id), errors);

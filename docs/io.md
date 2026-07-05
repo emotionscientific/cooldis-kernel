@@ -142,9 +142,11 @@ id = "telegram-main"
 kind = "telegram.bot"
 enabled = true
 policy = "interrupt_on_new_dm"
-reaction_policy = "observe_only"
 threading = "per_conversation"
 agent_ref = "agent://karl-dev@latest"
+
+[daemon.io.routes.content_policies]
+"telegram.message_reaction" = "observe_only"
 
 [daemon.io.routes.telegram]
 listen = "127.0.0.1:9000"
@@ -254,11 +256,16 @@ witnessed.
 
 The adapter should not decide whether the event queues, steers, or interrupts.
 It can provide hints in metadata, but policy owns the final decision.
-Telegram reaction envelopes are the exception to the route default: they stamp
-`cooldis_route_policy` from `reaction_policy`, which defaults to `observe_only`.
-Set `reaction_policy = "queue_per_conversation"` only for routes where human
-reactions should wake the agent. Ordinary message updates continue to use the
-route's `policy` field.
+The bridge can override the route default with `content_policies`, keyed by the
+adapter-stamped event content kind. For example:
+
+```toml
+[daemon.io.routes.content_policies]
+"telegram.message_reaction" = "observe_only"
+```
+
+Only `IngressContent::Event { kind, .. }` selects these overrides. Ordinary
+messages and metadata continue to use the route's `policy` field.
 
 Telegram only sends reaction updates to webhooks that opt into
 `message_reaction` in `allowed_updates` when calling `setWebhook`:
@@ -312,9 +319,7 @@ reply.
 
 Routes can project inline assistant text tags into platform actions before
 delivery. The tag grammar belongs in daemon TOML with the product route, not in
-the kernel. Inline reaction projection is available for routes that opt into it,
-but routes that need targeted reactions should prefer the content-addressed
-`message_react` tool below:
+the kernel:
 
 ```toml
 [[daemon.io.routes]]
@@ -338,24 +343,6 @@ A message containing only `[no_response]` becomes one `Silence` envelope and no
 text envelope. Invalid regexes fail daemon config validation with the rule
 index.
 
-Targeted reactions use the `cooldis-messaging` kernel package instead of inline
-assistant tags. The direct tool is:
-
-```text
-message_react { quote, emoji }
-required grant: messaging.react
-```
-
-The model quotes a substring of a recent user message; it does not supply a
-platform message id. The kernel scans recent routed user messages newest-first,
-normalizes case and whitespace, and requires exactly one match. No match returns
-`no message matching quote`; multiple matches return candidate previews so the
-model can retry with a longer quote. On success, the tool appends
-`io.egress.requested` with `egress_kind = PlatformAction { action = "reaction",
-payload = { message_id, emoji } }`, the matched ingress event id, the quote, and
-the source tool call id. The egress projector then delivers that requested event
-through the same retry, dead-letter, and receipt path as assistant output.
-
 `typing_simulation` is off by default. When enabled, the daemon emits a
 `typing` platform action before a text envelope and sleeps by
 `text_length / chars_per_second`, capped at 8 seconds.
@@ -368,6 +355,10 @@ bound thread event streams from a persisted cursor stored in the same SQLite
 state as the ingress queue, projects assistant output through the route's
 `egress_projection` rules, picks up `io.egress.requested` events directly, and
 calls the route adapter.
+
+`io.egress.requested` currently has no in-kernel producer. Producers are
+boundary clients that append the event through the control plane and future
+published operations that can be granted the relevant stream access.
 
 Successful delivery appends an `io.egress.delivered` event to the thread
 journal with the route id, egress kind, external message id returned by the

@@ -1492,8 +1492,8 @@ async fn in_memory_append_events_validates_io_egress_requested_payload_schema() 
         }),
         EventProvenance {
             source_streams: vec![stream_id.clone()],
-            discharged_by: Some("tool:message_react".to_string()),
-            function: Some("message_react/v1".to_string()),
+            discharged_by: Some("rpc:append_events".to_string()),
+            function: Some("io_egress_requested/v1".to_string()),
             ..EventProvenance::default()
         },
     );
