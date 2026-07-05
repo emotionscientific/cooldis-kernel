@@ -118,9 +118,8 @@ pub use adapters::provider_transform::{
     ReplayTransform, ReplayTransformCounts, normalize_history_for_target,
 };
 pub use agent::agent_process::{
-    KernelMessagingOperationProvider, KernelNotifyOperationProvider,
-    KernelProcessOperationProvider, KernelScheduleOperationProvider, KernelThreadOperationProvider,
-    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
+    KernelNotifyOperationProvider, KernelProcessOperationProvider, KernelScheduleOperationProvider,
+    KernelThreadOperationProvider, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
 };
 pub use agent::agent_tool_router::{
     AgentKernelPendingToolCall, AgentKernelToolCall, AgentKernelToolOutcome,
@@ -371,10 +370,9 @@ pub use kernel::supervisor::{
 };
 pub use kernel::wasm_couplings::WasmCouplingExecutor;
 pub use operations::kernel_packages::{
-    CHANNEL_EMIT_CAPABILITY, CHANNEL_EMIT_OPERATION, COOLDIS_MESSAGING_PACKAGE,
-    COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, COOLDIS_SCHEDULE_PACKAGE,
-    COOLDIS_THREADS_PACKAGE, KERNEL_RUNTIME_KIND, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
-    MANDATE_START_OPERATION, MESSAGE_REACT_OPERATION, MESSAGING_REACT_CAPABILITY,
+    CHANNEL_EMIT_CAPABILITY, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE,
+    COOLDIS_PROCESS_PACKAGE, COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE,
+    KERNEL_RUNTIME_KIND, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION, MANDATE_START_OPERATION,
     NOTIFY_PREVIEW_CAPABILITY, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
     PROCESS_CONTROL_CAPABILITY, PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION,
     PROCESS_READ_CAPABILITY, PROCESS_SPAWN_CAPABILITY, PROCESS_TERMINATE_OPERATION,
@@ -382,11 +380,10 @@ pub use operations::kernel_packages::{
     SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
     THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
     THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY,
-    cooldis_messaging_kernel_package, cooldis_notify_kernel_package,
-    cooldis_process_kernel_package, cooldis_schedule_kernel_package,
-    cooldis_threads_kernel_package, ensure_cooldis_messaging_published,
-    ensure_cooldis_notify_published, ensure_cooldis_process_published,
-    ensure_cooldis_schedule_published, ensure_cooldis_threads_published,
+    cooldis_notify_kernel_package, cooldis_process_kernel_package, cooldis_schedule_kernel_package,
+    cooldis_threads_kernel_package, ensure_cooldis_notify_published,
+    ensure_cooldis_process_published, ensure_cooldis_schedule_published,
+    ensure_cooldis_threads_published,
 };
 pub use operations::operation_builder::{
     RustWasmBuildOptions, RustWasmBuildOutput, build_rust_wasm_module,

@@ -180,34 +180,23 @@ fn telegram_queue_envelope_with_update(text: &str, update_id: &str) -> IngressEn
     .with_metadata("telegram_message_id", "555")
 }
 
-fn telegram_message_reaction_update(
-    update_id: i64,
-    message_id: i64,
-    emoji: &str,
-) -> TelegramUpdate {
-    serde_json::from_value(json!({
-        "update_id": update_id,
-        "message_reaction": {
-            "chat": {
-                "id": 123,
-                "type": "private",
-                "first_name": "Ada"
-            },
-            "message_id": message_id,
-            "user": {
-                "id": 42,
-                "is_bot": false,
-                "first_name": "Ada",
-                "username": "ada"
-            },
-            "date": 1777000000,
-            "old_reaction": [],
-            "new_reaction": [
-                { "type": "emoji", "emoji": emoji }
-            ]
-        }
-    }))
-    .unwrap()
+fn event_envelope(kind: &str) -> IngressEnvelope {
+    let source = IoSource::new("external.test", "main");
+    IngressEnvelope::new(
+        source.clone(),
+        IoConversation::new("external:conversation:123", ConversationKind::Direct),
+        IngressContent::Event {
+            kind: kind.to_string(),
+            payload: json!({
+                "message_id": 556,
+                "value": "event payload",
+            }),
+        },
+        now_ms(),
+    )
+    .with_actor(IoActor::new("external:user:42"))
+    .with_dedupe_key(IoDedupeKey::for_source(&source, format!("event:{kind}")))
+    .with_metadata("external_message_id", "556")
 }
 
 fn coalesce_envelope(
@@ -337,7 +326,7 @@ fn route_with_egress_and_retry(
         kind: "telegram.bot".to_string(),
         enabled: true,
         policy: None,
-        reaction_policy: None,
+        content_policies: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
@@ -944,17 +933,17 @@ async fn drain_until_egress(
 }
 
 #[tokio::test]
-async fn egress_projection_strips_reaction_tag_and_preserves_order() {
+async fn egress_projection_strips_platform_action_tag_and_preserves_order() {
     let route = route_with_egress(
         vec![crate::CooldisEgressProjectionRuleConfig {
-            pattern: r"\[reaction:(?P<emoji>[^\]]+)\]".to_string(),
-            action: "reaction".to_string(),
+            pattern: r"\[sticker:(?P<file_id>[^\]]+)\]".to_string(),
+            action: "sticker".to_string(),
         }],
         None,
     );
     let config = RouteEgressConfig::from_route(&route).unwrap();
 
-    let projected = config.project(test_egress("hello[reaction:👍] friend"));
+    let projected = config.project(test_egress("hello[sticker:file-123] friend"));
 
     assert_eq!(projected.len(), 2);
     assert!(matches!(
@@ -964,8 +953,8 @@ async fn egress_projection_strips_reaction_tag_and_preserves_order() {
     assert!(matches!(
         projected[1].kind,
         EgressKind::PlatformAction { ref action, ref payload }
-            if action == "reaction"
-                && payload["emoji"] == "👍"
+            if action == "sticker"
+                && payload["file_id"] == "file-123"
                 && payload["message_id"].is_null()
     ));
 }
@@ -994,8 +983,8 @@ async fn egress_projection_turns_no_response_tag_into_silence() {
 async fn egress_projection_leaves_text_without_tags_unchanged() {
     let route = route_with_egress(
         vec![crate::CooldisEgressProjectionRuleConfig {
-            pattern: r"\[reaction:(?P<emoji>[^\]]+)\]".to_string(),
-            action: "reaction".to_string(),
+            pattern: r"\[sticker:(?P<file_id>[^\]]+)\]".to_string(),
+            action: "sticker".to_string(),
         }],
         None,
     );
@@ -1448,24 +1437,19 @@ async fn queue_worker_processes_sqlite_backed_envelope() {
 }
 
 #[tokio::test]
-async fn telegram_reaction_ingress_defaults_observe_only_without_turn() {
-    let root = test_root("reaction-observe");
+async fn content_policy_observe_only_event_does_not_start_turn() {
+    let root = test_root("content-policy-observe");
     let (server, bridge, _rx) = test_bridge_at_root(&root).await;
     let session_store_path = server.session_store_path().to_path_buf();
     let mut route = route_with_egress(Vec::new(), None);
     route.policy = Some("queue_per_conversation".to_string());
-    let sink = Arc::new(RouteIngressSink::new(bridge.direct_sink(), &route));
-    let adapter = TelegramWebhookAdapter::new("main");
+    route.content_policies = Some(BTreeMap::from([(
+        "external.event".to_string(),
+        "observe_only".to_string(),
+    )]));
+    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
 
-    let ack = adapter
-        .submit_update(
-            sink.as_ref(),
-            &telegram_message_reaction_update(7101, 555, "👍"),
-            now_ms(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let ack = sink.submit(event_envelope("external.event")).await.unwrap();
 
     assert!(ack.accepted);
     let coordinates = only_thread_coordinates(&bridge).await;
@@ -1474,7 +1458,7 @@ async fn telegram_reaction_ingress_defaults_observe_only_without_turn() {
         .iter()
         .find(|event| event.kind == crate::EventKind::IoIngressReceived)
         .unwrap();
-    assert_eq!(ingress.payload["external_message_id"].as_str(), Some("555"));
+    assert_eq!(ingress.payload["external_message_id"].as_str(), Some("556"));
     let admission = control_events
         .iter()
         .find(|event| event.kind == crate::EventKind::AdmissionDecided)
@@ -1492,25 +1476,19 @@ async fn telegram_reaction_ingress_defaults_observe_only_without_turn() {
 }
 
 #[tokio::test]
-async fn telegram_reaction_policy_queue_starts_turn_with_event_payload() {
-    let root = test_root("reaction-queue");
+async fn content_policy_queue_starts_turn_with_event_payload() {
+    let root = test_root("content-policy-queue");
     let (server, bridge, _rx) = test_bridge_at_root(&root).await;
     let session_store_path = server.session_store_path().to_path_buf();
     let mut route = route_with_egress(Vec::new(), None);
     route.policy = Some("observe_only".to_string());
-    route.reaction_policy = Some("queue_per_conversation".to_string());
-    let sink = Arc::new(RouteIngressSink::new(bridge.direct_sink(), &route));
-    let adapter = TelegramWebhookAdapter::new("main");
+    route.content_policies = Some(BTreeMap::from([(
+        "external.event".to_string(),
+        "queue_per_conversation".to_string(),
+    )]));
+    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
 
-    let ack = adapter
-        .submit_update(
-            sink.as_ref(),
-            &telegram_message_reaction_update(7102, 556, "❤️"),
-            now_ms(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let ack = sink.submit(event_envelope("external.event")).await.unwrap();
 
     assert!(ack.accepted);
     let coordinates = only_thread_coordinates(&bridge).await;
@@ -1520,24 +1498,54 @@ async fn telegram_reaction_policy_queue_starts_turn_with_event_payload() {
         .find(|event| event.kind == crate::EventKind::AdmissionDecided)
         .unwrap();
     assert_eq!(admission.payload["decision"].as_str(), Some("queue"));
-    wait_for_user_text_containing(&bridge, &coordinates, "telegram.message_reaction").await;
+    wait_for_user_text_containing(&bridge, &coordinates, "external.event").await;
     wait_for_user_text_containing(&bridge, &coordinates, "\"message_id\":556").await;
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
-async fn telegram_reaction_policy_does_not_change_message_updates() {
+async fn content_policy_no_match_uses_route_default_for_event() {
     let envelopes = Arc::new(TokioMutex::new(Vec::new()));
     let capture = Arc::new(CaptureSink {
         envelopes: envelopes.clone(),
     });
     let mut route = route_with_egress(Vec::new(), None);
     route.policy = Some("queue_per_conversation".to_string());
-    route.reaction_policy = Some("observe_only".to_string());
+    route.content_policies = Some(BTreeMap::from([(
+        "other.event".to_string(),
+        "observe_only".to_string(),
+    )]));
+    let sink = RouteIngressSink::new(capture, &route);
+
+    sink.submit(event_envelope("external.event")).await.unwrap();
+
+    let captured = envelopes.lock().await;
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_route_policy")
+            .map(String::as_str),
+        Some("queue_per_conversation")
+    );
+}
+
+#[tokio::test]
+async fn content_policy_ignores_spoofed_kind_on_plain_message() {
+    let envelopes = Arc::new(TokioMutex::new(Vec::new()));
+    let capture = Arc::new(CaptureSink {
+        envelopes: envelopes.clone(),
+    });
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("queue_per_conversation".to_string());
+    route.content_policies = Some(BTreeMap::from([(
+        "external.event".to_string(),
+        "observe_only".to_string(),
+    )]));
     let sink = RouteIngressSink::new(capture, &route);
 
     sink.submit(
-        telegram_queue_envelope("ordinary").with_metadata("telegram_update_kind", "message"),
+        telegram_queue_envelope("ordinary text mentioning external.event")
+            .with_metadata("content_kind", "external.event"),
     )
     .await
     .unwrap();
@@ -1553,65 +1561,143 @@ async fn telegram_reaction_policy_does_not_change_message_updates() {
 }
 
 #[tokio::test]
-async fn telegram_reaction_policy_ignores_spoofed_update_kind_on_message() {
+async fn content_policy_observe_only_bypasses_route_coalesce_metadata() {
     let envelopes = Arc::new(TokioMutex::new(Vec::new()));
     let capture = Arc::new(CaptureSink {
         envelopes: envelopes.clone(),
     });
-    let mut route = route_with_egress(Vec::new(), None);
-    route.policy = Some("queue_per_conversation".to_string());
-    route.reaction_policy = Some("observe_only".to_string());
-    let sink = RouteIngressSink::new(capture, &route);
-
-    sink.submit(
-        telegram_queue_envelope("ordinary")
-            .with_metadata("telegram_update_kind", "message_reaction"),
-    )
-    .await
-    .unwrap();
-
-    let captured = envelopes.lock().await;
-    assert_eq!(
-        captured[0]
-            .metadata
-            .get("cooldis_route_policy")
-            .map(String::as_str),
-        Some("queue_per_conversation")
-    );
-}
-
-#[tokio::test]
-async fn telegram_reaction_observe_only_bypasses_route_coalesce_in_queued_lane() {
-    let root = test_root("reaction-queue-observe-coalesce");
-    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
-    let session_store_path = server.session_store_path().to_path_buf();
     let mut route = route_with_egress(Vec::new(), None);
     route.policy = Some("coalesce_bursts".to_string());
+    route.content_policies = Some(BTreeMap::from([(
+        "external.event".to_string(),
+        "observe_only".to_string(),
+    )]));
     route.coalesce_bursts = Some(CooldisCoalesceBurstsConfig {
         window_ms: 60_000,
         max_batch: 8,
     });
-    let db = root.join("reaction-queue.sqlite");
+    let sink = RouteIngressSink::new(capture, &route);
+
+    sink.submit(event_envelope("external.event")).await.unwrap();
+
+    let captured = envelopes.lock().await;
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_route_policy")
+            .map(String::as_str),
+        Some("observe_only")
+    );
+    assert!(!captured[0].metadata.contains_key("cooldis_coalesce_bursts"));
+    assert!(
+        !captured[0]
+            .metadata
+            .contains_key("cooldis_coalesce_window_ms")
+    );
+    assert!(
+        !captured[0]
+            .metadata
+            .contains_key("cooldis_coalesce_max_batch")
+    );
+}
+
+#[tokio::test]
+async fn content_policy_coalesce_stamps_metadata_for_matching_event() {
+    let envelopes = Arc::new(TokioMutex::new(Vec::new()));
+    let capture = Arc::new(CaptureSink {
+        envelopes: envelopes.clone(),
+    });
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("observe_only".to_string());
+    route.content_policies = Some(BTreeMap::from([(
+        "external.event".to_string(),
+        "coalesce_bursts".to_string(),
+    )]));
+    route.coalesce_bursts = Some(CooldisCoalesceBurstsConfig {
+        window_ms: 60_000,
+        max_batch: 8,
+    });
+    let sink = RouteIngressSink::new(capture, &route);
+
+    sink.submit(event_envelope("external.event")).await.unwrap();
+
+    let captured = envelopes.lock().await;
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_route_policy")
+            .map(String::as_str),
+        Some("coalesce_bursts")
+    );
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_coalesce_bursts")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_coalesce_window_ms")
+            .map(String::as_str),
+        Some("60000")
+    );
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_coalesce_max_batch")
+            .map(String::as_str),
+        Some("8")
+    );
+}
+
+#[tokio::test]
+async fn content_policy_reject_rejects_matching_event() {
+    let (bridge, _rx, _) = test_bridge().await;
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("queue_per_conversation".to_string());
+    route.content_policies = Some(BTreeMap::from([(
+        "external.event".to_string(),
+        "reject".to_string(),
+    )]));
+    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+
+    let err = sink
+        .submit(event_envelope("external.event"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, IoError::PolicyRejected(reason) if reason == "route policy reject"));
+}
+
+#[tokio::test]
+async fn content_policy_observe_only_bypasses_route_coalesce_in_queued_lane() {
+    let root = test_root("content-policy-queue-observe-coalesce");
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("coalesce_bursts".to_string());
+    route.content_policies = Some(BTreeMap::from([(
+        "external.event".to_string(),
+        "observe_only".to_string(),
+    )]));
+    route.coalesce_bursts = Some(CooldisCoalesceBurstsConfig {
+        window_ms: 60_000,
+        max_batch: 8,
+    });
+    let db = root.join("content-policy-queue.sqlite");
     let queue = Arc::new(
         PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
             .await
             .unwrap(),
     );
-    let sink = Arc::new(RouteIngressSink::new(queue.clone(), &route));
-    let adapter = TelegramWebhookAdapter::new("main");
+    let sink = RouteIngressSink::new(queue.clone(), &route);
 
-    let ack = adapter
-        .submit_update(
-            sink.as_ref(),
-            &telegram_message_reaction_update(7103, 557, "👍"),
-            now_ms(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let ack = sink.submit(event_envelope("external.event")).await.unwrap();
 
     assert!(ack.accepted);
-    let worker = CooldisDaemonQueueWorker::new(queue, bridge.clone(), "reaction-worker", 30);
+    let worker = CooldisDaemonQueueWorker::new(queue, bridge.clone(), "content-policy-worker", 30);
     assert_eq!(worker.drain_once().await.unwrap(), 1);
 
     let coordinates = only_thread_coordinates(&bridge).await;
@@ -1627,6 +1713,13 @@ async fn telegram_reaction_observe_only_bypasses_route_coalesce_in_queued_lane()
     assert!(ingress_index < admission_index);
     let admission = &control_events[admission_index];
     assert_eq!(admission.payload["decision"].as_str(), Some("observe"));
+    assert!(
+        admission.payload["admissible"]
+            .as_array()
+            .is_some_and(|admissible| !admissible
+                .iter()
+                .any(|decision| decision.as_str() == Some("coalesce")))
+    );
     assert_eq!(
         admission.payload["source_ingress_event_ids"]
             .as_array()
@@ -2372,19 +2465,19 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
 }
 
 #[tokio::test]
-async fn egress_projector_delivers_requested_reaction_after_bridge_restart() {
-    let root = test_root("egress-requested-reaction-restart");
+async fn egress_projector_delivers_requested_platform_action_after_bridge_restart() {
+    let root = test_root("egress-requested-action-restart");
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
 
     let (server, bridge, mut first_rx) = test_bridge_at_root(&root).await;
     register_route_state(&bridge, &route, &db).await;
     let receipt = bridge
-        .submit_envelope(telegram_queue_envelope("please react"))
+        .submit_envelope(telegram_queue_envelope("please send action"))
         .await
         .unwrap();
     let thread_id = receipt.thread_id.expect("receipt should include thread id");
-    wait_for_assistant_text(&bridge, &thread_id, "local:please react").await;
+    wait_for_assistant_text(&bridge, &thread_id, "local:please send action").await;
     assert_eq!(
         bridge
             .drain_egress_once("telegram.bot", "main")
@@ -2398,7 +2491,7 @@ async fn egress_projector_delivers_requested_reaction_after_bridge_restart() {
         .unwrap();
     assert!(matches!(
         assistant.kind,
-        EgressKind::AssistantMessage { ref text } if text == "local:please react"
+        EgressKind::AssistantMessage { ref text } if text == "local:please send action"
     ));
     let assistant_cursor = egress_cursor(&bridge, &thread_id)
         .await
@@ -2425,16 +2518,15 @@ async fn egress_projector_delivers_requested_reaction_after_bridge_restart() {
     target.metadata = ingress_context.metadata.clone();
     let mut payload = serde_json::to_value(IoEgressRequestedPayload {
         egress_kind: serde_json::to_value(EgressKind::PlatformAction {
-            action: "reaction".to_string(),
+            action: "sticker".to_string(),
             payload: json!({
-                "message_id": "555",
-                "emoji": "👍"
+                "file_id": "file-555"
             }),
         })
         .unwrap(),
         resolved_target: Some(serde_json::to_value(target).unwrap()),
-        requested_by_tool_call_id: "call_react".to_string(),
-        quote: Some("please react".to_string()),
+        requested_by_tool_call_id: "call_platform_action".to_string(),
+        quote: Some("please send action".to_string()),
         match_event_id: Some(ingress_event.id),
     })
     .unwrap();
@@ -2450,8 +2542,8 @@ async fn egress_projector_delivers_requested_reaction_after_bridge_restart() {
             EventProvenance {
                 source_streams: vec![EventStreamId::for_thread(&handle.context().coordinates)],
                 source_event_ids: vec![ingress_event.id],
-                discharged_by: Some("tool:message_react".to_string()),
-                function: Some("message_react/v1".to_string()),
+                discharged_by: Some("rpc:append_events".to_string()),
+                function: Some("io_egress_requested/v1".to_string()),
                 ..EventProvenance::default()
             },
         ))
@@ -2465,16 +2557,15 @@ async fn egress_projector_delivers_requested_reaction_after_bridge_restart() {
             .unwrap(),
         1
     );
-    let reaction = tokio::time::timeout(Duration::from_secs(3), first_rx.recv())
+    let platform_action = tokio::time::timeout(Duration::from_secs(3), first_rx.recv())
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(
-        reaction.kind,
+        platform_action.kind,
         EgressKind::PlatformAction { ref action, ref payload }
-            if action == "reaction"
-                && payload["message_id"].as_str() == Some("555")
-                && payload["emoji"].as_str() == Some("👍")
+            if action == "sticker"
+                && payload["file_id"].as_str() == Some("file-555")
     ));
     let state = bridge
         .egress_states
@@ -2510,7 +2601,7 @@ async fn egress_projector_delivers_requested_reaction_after_bridge_restart() {
             .iter()
             .filter(|event| {
                 event.payload["source_event_id"].as_str() == Some(requested_event_id.as_str())
-                    && event.payload["egress_kind"].as_str() == Some("platform_action:reaction")
+                    && event.payload["egress_kind"].as_str() == Some("platform_action:sticker")
             })
             .count(),
         1
@@ -2569,10 +2660,9 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
 
     let mut invalid_payload = serde_json::to_value(IoEgressRequestedPayload {
         egress_kind: serde_json::to_value(EgressKind::PlatformAction {
-            action: "reaction".to_string(),
+            action: "sticker".to_string(),
             payload: json!({
-                "message_id": "bad",
-                "emoji": "👍"
+                "file_id": "bad"
             }),
         })
         .unwrap(),
@@ -2594,8 +2684,8 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
             EventProvenance {
                 source_streams: vec![EventStreamId::for_thread(&handle.context().coordinates)],
                 source_event_ids: vec![ingress_event.id],
-                discharged_by: Some("tool:message_react".to_string()),
-                function: Some("message_react/v1".to_string()),
+                discharged_by: Some("rpc:append_events".to_string()),
+                function: Some("io_egress_requested/v1".to_string()),
                 ..EventProvenance::default()
             },
         ))
@@ -2604,10 +2694,9 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
 
     let mut valid_payload = serde_json::to_value(IoEgressRequestedPayload {
         egress_kind: serde_json::to_value(EgressKind::PlatformAction {
-            action: "reaction".to_string(),
+            action: "sticker".to_string(),
             payload: json!({
-                "message_id": "777",
-                "emoji": "👍"
+                "file_id": "file-777"
             }),
         })
         .unwrap(),
@@ -2629,8 +2718,8 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
             EventProvenance {
                 source_streams: vec![EventStreamId::for_thread(&handle.context().coordinates)],
                 source_event_ids: vec![ingress_event.id],
-                discharged_by: Some("tool:message_react".to_string()),
-                function: Some("message_react/v1".to_string()),
+                discharged_by: Some("rpc:append_events".to_string()),
+                function: Some("io_egress_requested/v1".to_string()),
                 ..EventProvenance::default()
             },
         ))
@@ -2652,14 +2741,13 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
     assert!(matches!(
         egress.kind,
         EgressKind::PlatformAction { ref action, ref payload }
-            if action == "reaction"
-                && payload["message_id"].as_str() == Some("777")
-                && payload["emoji"].as_str() == Some("👍")
+            if action == "sticker"
+                && payload["file_id"].as_str() == Some("file-777")
     ));
     let delivered = egress_receipts(&bridge, &thread_id, EventKind::IoEgressDelivered).await;
     assert!(delivered.iter().any(|event| {
         event.payload["source_event_id"].as_str() == Some(valid_event_id.as_str())
-            && event.payload["egress_kind"].as_str() == Some("platform_action:reaction")
+            && event.payload["egress_kind"].as_str() == Some("platform_action:sticker")
     }));
 }
 

@@ -55,10 +55,12 @@ id = "telegram-main"
 kind = "telegram.bot"
 enabled = true
 policy = "queue_per_conversation"
-reaction_policy = "observe_only"
 threading = "per_conversation"
 agent_ref = "agent://karl-dev@latest"
 egress_retry = { max_attempts = 5, base_backoff_ms = 500 }
+
+[daemon.io.routes.content_policies]
+"telegram.message_reaction" = "observe_only"
 
 [daemon.io.routes.telegram]
 listen = "127.0.0.1:9000"
@@ -80,17 +82,18 @@ Common route keys:
 | `kind` | Route adapter kind such as `telegram.bot` or `clock.tick`. |
 | `enabled` | Starts the route when true; disabled routes are parsed but not started. |
 | `policy` | Admission policy such as `queue_per_conversation`, `interrupt_on_new_dm`, or `fork_on_new_dm`. |
-| `reaction_policy` | Telegram-only admission policy for `message_reaction` updates; same values as `policy`, defaults to `observe_only`. |
+| `content_policies` | Optional map from adapter-stamped event content kind to a policy override. Values use the same vocabulary as `policy`. |
 | `threading` | Scope selector such as `per_conversation`, `per_actor`, or `route_single_thread`. |
 | `agent_ref` | Optional published manifest ref, for example `agent://karl-dev@latest`. The daemon requires an `agent://` ref and fails startup if the ref does not resolve in the effective `daemon.registries.agents` root. Publish missing refs with `cooldis agent publish`. |
 | `egress_retry` | Per-route delivery retry limits for projected assistant output. |
 
-For Telegram routes, `reaction_policy` applies only to Telegram
-`message_reaction` updates. It uses the same values as `policy` and defaults to
-`observe_only`, so human reactions are witnessed as `io.ingress.received` plus
-`admission.decided` without starting a turn unless the route opts in, for
-example `reaction_policy = "queue_per_conversation"`. Ordinary message updates
-continue to use `policy`.
+`content_policies` applies only to envelopes whose content is
+`Event { kind, .. }`; plain text, commands, and metadata use the route's
+`policy`. A `coalesce_bursts` override requires the route to define
+`coalesce_bursts`, just like the route-level policy. For Telegram routes, map
+`"telegram.message_reaction" = "observe_only"` to witness those webhook updates
+without starting turns, or map that content kind to another route policy when
+the route should wake the agent.
 
 Telegram only delivers `message_reaction` updates when the webhook is
 registered with that update kind:
