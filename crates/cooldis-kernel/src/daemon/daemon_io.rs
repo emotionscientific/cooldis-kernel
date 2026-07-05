@@ -21,7 +21,7 @@ use cooldis_io_core::{
     IoResult, IoTarget, IoTurnInput, KernelIoBridge, KernelIoReceipt, LeasedIngressEnvelope,
     ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
-use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
+use cooldis_io_telegram::{TELEGRAM_PROTOCOL, TelegramUpdate, TelegramWebhookAdapter};
 use regex::{Captures, Regex};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -864,12 +864,15 @@ impl CooldisDaemonIoBridge {
     ) -> IoResult<AdmissionDecision> {
         let input = IoTurnInput::from_envelope(envelope, target);
         let turn_id = format!("turn-{}", uuid::Uuid::now_v7());
-        match envelope
+        let policy = envelope
             .metadata
             .get("cooldis_route_policy")
             .map(String::as_str)
-            .unwrap_or("queue_per_conversation")
-        {
+            .unwrap_or("queue_per_conversation");
+        match policy {
+            "queue_per_conversation" | "coalesce_bursts" => {
+                Ok(AdmissionDecision::queue(turn_id, input))
+            }
             "observe_only" => Ok(AdmissionDecision::ObserveOnly {
                 reason: "route policy observe_only".to_string(),
             }),
@@ -894,7 +897,7 @@ impl CooldisDaemonIoBridge {
                 child_key: turn_id,
                 input,
             }),
-            _ => Ok(AdmissionDecision::queue(turn_id, input)),
+            other => Err(IoError::Bridge(format!("unknown route policy {other:?}"))),
         }
     }
 
@@ -1885,7 +1888,9 @@ impl IngressSink for DirectRuntimeIngressSink {
 pub struct RouteIngressSink {
     inner: Arc<dyn IngressSink>,
     route_id: String,
+    route_kind: String,
     policy: Option<String>,
+    reaction_policy: Option<String>,
     threading: Option<String>,
     agent_ref: Option<String>,
     coalesce_bursts: Option<CooldisCoalesceBurstsConfig>,
@@ -1896,7 +1901,9 @@ impl RouteIngressSink {
         Self {
             inner,
             route_id: route.id.clone(),
+            route_kind: route.kind.clone(),
             policy: route.policy.clone(),
+            reaction_policy: route.reaction_policy.clone(),
             threading: route.threading.clone(),
             agent_ref: route.agent_ref.clone(),
             coalesce_bursts: route.coalesce_bursts,
@@ -1910,10 +1917,17 @@ impl IngressSink for RouteIngressSink {
         envelope
             .metadata
             .insert("cooldis_route_id".to_string(), self.route_id.clone());
-        if let Some(policy) = &self.policy {
+        let is_reaction = self.route_kind == TELEGRAM_PROTOCOL
+            && is_telegram_message_reaction_envelope(&envelope);
+        let effective_policy = if is_reaction {
+            Some(self.reaction_policy.as_deref().unwrap_or("observe_only"))
+        } else {
+            self.policy.as_deref()
+        };
+        if let Some(policy) = effective_policy {
             envelope
                 .metadata
-                .insert("cooldis_route_policy".to_string(), policy.clone());
+                .insert("cooldis_route_policy".to_string(), policy.to_string());
         }
         if let Some(threading) = &self.threading {
             envelope
@@ -1925,7 +1939,9 @@ impl IngressSink for RouteIngressSink {
                 .metadata
                 .insert(ROUTE_AGENT_REF_METADATA.to_string(), agent_ref.clone());
         }
-        if let Some(coalesce) = self.coalesce_bursts {
+        if route_coalesce_applies(effective_policy)
+            && let Some(coalesce) = self.coalesce_bursts
+        {
             envelope
                 .metadata
                 .insert("cooldis_coalesce_bursts".to_string(), "true".to_string());
@@ -1940,6 +1956,22 @@ impl IngressSink for RouteIngressSink {
         }
         self.inner.submit(envelope).await
     }
+}
+
+fn route_coalesce_applies(policy: Option<&str>) -> bool {
+    !matches!(policy, Some("observe_only" | "reject"))
+}
+
+fn is_telegram_message_reaction_envelope(envelope: &IngressEnvelope) -> bool {
+    envelope.source.protocol == TELEGRAM_PROTOCOL
+        && matches!(
+            &envelope.content,
+            IngressContent::Event { kind, .. } if kind == "telegram.message_reaction"
+        )
+        && envelope
+            .metadata
+            .get("telegram_update_kind")
+            .is_some_and(|kind| kind == "message_reaction")
 }
 
 pub struct CooldisDaemonQueueWorker {

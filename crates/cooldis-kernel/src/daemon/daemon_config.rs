@@ -9,6 +9,18 @@ use std::path::{Path, PathBuf};
 const DEFAULT_SQLITE_QUEUE_PATH: &str = ".cooldis/queue/ingress.sqlite";
 const DEFAULT_SERVICE_LABEL: &str = "com.cooldis.daemon";
 const DEFAULT_TELEGRAM_WEBHOOK_PATH: &str = "/telegram";
+const ROUTE_POLICY_VALUES: &[&str] = &[
+    "queue_per_conversation",
+    "observe_only",
+    "reject",
+    "steer",
+    "steer_when_active",
+    "interrupt",
+    "interrupt_on_new_dm",
+    "fork",
+    "fork_on_new_dm",
+    "coalesce_bursts",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedCooldisDaemonConfig {
@@ -367,6 +379,8 @@ pub struct CooldisIoRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reaction_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_ref: Option<String>,
@@ -412,9 +426,28 @@ impl CooldisIoRouteConfig {
         if let Some(ingress) = &self.ingress {
             ingress.validate(&format!("io.routes.{}", self.id), errors);
         }
+        if let Some(policy) = &self.policy {
+            validate_route_policy(&format!("io.routes.{}", self.id), "policy", policy, errors);
+        }
+        if let Some(policy) = &self.reaction_policy {
+            validate_route_policy(
+                &format!("io.routes.{}", self.id),
+                "reaction_policy",
+                policy,
+                errors,
+            );
+        }
         if self.policy.as_deref() == Some("coalesce_bursts") && self.coalesce_bursts.is_none() {
             errors.push(format!(
                 "io.routes.{}.policy coalesce_bursts requires coalesce_bursts config",
+                self.id
+            ));
+        }
+        if self.reaction_policy.as_deref() == Some("coalesce_bursts")
+            && self.coalesce_bursts.is_none()
+        {
+            errors.push(format!(
+                "io.routes.{}.reaction_policy coalesce_bursts requires coalesce_bursts config",
                 self.id
             ));
         }
@@ -471,6 +504,16 @@ impl CooldisIoRouteConfig {
             ingress.resolve_paths(base);
         }
     }
+}
+
+fn validate_route_policy(scope: &str, field: &str, policy: &str, errors: &mut Vec<String>) {
+    if ROUTE_POLICY_VALUES.contains(&policy) {
+        return;
+    }
+    errors.push(format!(
+        "{scope}.{field} must be one of {}, got {policy:?}",
+        ROUTE_POLICY_VALUES.join(", ")
+    ));
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

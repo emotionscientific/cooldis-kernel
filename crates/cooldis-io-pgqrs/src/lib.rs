@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const INGRESS_PAYLOAD_KIND: &str = "cooldis.ingress.v1";
 const DEFAULT_QUEUE_NAME: &str = "cooldis-ingress";
+const INGRESS_QUEUE_MAX_OBJECT_DEPTH: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PgqrsQueueConfig {
@@ -76,7 +77,10 @@ impl PgqrsIngressQueue {
     pub async fn connect(config: PgqrsQueueConfig) -> IoResult<Self> {
         ensure_sqlite_file_exists(&config.dsn)?;
 
-        let store = pgqrs::connect(&config.dsn).await.map_err(queue_error)?;
+        let store_config = pgqrs_store_config(&config.dsn);
+        let store = pgqrs::connect_with_config(&store_config)
+            .await
+            .map_err(queue_error)?;
         pgqrs::admin(&store).install().await.map_err(queue_error)?;
 
         match pgqrs::admin(&store).create_queue(&config.queue_name).await {
@@ -84,13 +88,10 @@ impl PgqrsIngressQueue {
             Err(err) => return Err(queue_error(err)),
         }
 
-        let producer = pgqrs::store::Store::producer_ephemeral(
-            &store,
-            &config.queue_name,
-            pgqrs::store::Store::config(&store),
-        )
-        .await
-        .map_err(queue_error)?;
+        let producer =
+            pgqrs::store::Store::producer_ephemeral(&store, &config.queue_name, &store_config)
+                .await
+                .map_err(queue_error)?;
         let consumer = pgqrs::store::Store::consumer_ephemeral(&store, &config.queue_name)
             .await
             .map_err(queue_error)?;
@@ -124,6 +125,13 @@ impl PgqrsIngressQueue {
         )
         .await
     }
+}
+
+fn pgqrs_store_config(dsn: &str) -> pgqrs::Config {
+    let mut config = pgqrs::Config::default();
+    config.dsn = dsn.to_string();
+    config.validation_config.max_object_depth = INGRESS_QUEUE_MAX_OBJECT_DEPTH;
+    config
 }
 
 #[async_trait]

@@ -113,6 +113,7 @@ fn invalid_egress_projection_regex_reports_rule_index() {
         kind: "websocket.tui".to_string(),
         enabled: true,
         policy: None,
+        reaction_policy: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
@@ -144,6 +145,7 @@ fn validates_route_agent_ref_syntax() {
         kind: "websocket.tui".to_string(),
         enabled: true,
         policy: None,
+        reaction_policy: None,
         threading: None,
         agent_ref: Some("karl-dev".to_string()),
         coalesce_bursts: None,
@@ -172,6 +174,7 @@ fn validates_coalesce_bursts_route_config() {
         kind: "websocket.tui".to_string(),
         enabled: true,
         policy: Some("steer_when_active".to_string()),
+        reaction_policy: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: Some(CooldisCoalesceBurstsConfig {
@@ -483,6 +486,7 @@ fn validates_bad_queue_and_route_config() {
         kind: "".to_string(),
         enabled: true,
         policy: None,
+        reaction_policy: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
@@ -575,6 +579,7 @@ fn validates_telegram_route_shape() {
         kind: "telegram.bot".to_string(),
         enabled: true,
         policy: None,
+        reaction_policy: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
@@ -599,6 +604,34 @@ fn validates_telegram_route_shape() {
 }
 
 #[test]
+fn invalid_reaction_policy_names_field() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "telegram-main".to_string(),
+        kind: "telegram.bot".to_string(),
+        enabled: false,
+        policy: None,
+        reaction_policy: Some("wake_everything".to_string()),
+        agent_ref: None,
+        threading: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(errors.iter().any(|error| {
+        error.contains("io.routes.telegram-main.reaction_policy")
+            && error.contains("wake_everything")
+    }));
+}
+
+#[test]
 fn validates_single_clock_tick_route() {
     let mut config = CooldisDaemonConfig::default();
     for id in ["clock-main", "clock-backup"] {
@@ -607,6 +640,7 @@ fn validates_single_clock_tick_route() {
             kind: "clock.tick".to_string(),
             enabled: true,
             policy: None,
+            reaction_policy: None,
             threading: None,
             agent_ref: None,
             coalesce_bursts: None,

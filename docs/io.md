@@ -142,6 +142,7 @@ id = "telegram-main"
 kind = "telegram.bot"
 enabled = true
 policy = "interrupt_on_new_dm"
+reaction_policy = "observe_only"
 threading = "per_conversation"
 agent_ref = "agent://karl-dev@latest"
 
@@ -224,8 +225,60 @@ Telegram Update
 -> shared IO queue / resolver / admission
 ```
 
+Telegram `message_reaction` updates become ordinary ingress events, not a new
+journal event kind:
+
+```text
+Telegram message_reaction Update
+-> IngressEnvelope {
+     source.protocol = "telegram.bot",
+     metadata.telegram_update_kind = "message_reaction",
+     metadata.telegram_message_id = "<reacted-to_message_id>",
+     content = Event {
+       kind = "telegram.message_reaction",
+       payload = {
+         message_id,
+         old_reaction,
+         new_reaction
+       }
+     }
+   }
+-> io.ingress.received
+-> admission.decided
+```
+
+`old_reaction` and `new_reaction` preserve Telegram `ReactionType` objects.
+Known `emoji` and `custom_emoji` reactions are typed by the adapter; unknown
+reaction variants stay as opaque JSON so the whole update can still be
+witnessed.
+
 The adapter should not decide whether the event queues, steers, or interrupts.
 It can provide hints in metadata, but policy owns the final decision.
+Telegram reaction envelopes are the exception to the route default: they stamp
+`cooldis_route_policy` from `reaction_policy`, which defaults to `observe_only`.
+Set `reaction_policy = "queue_per_conversation"` only for routes where human
+reactions should wake the agent. Ordinary message updates continue to use the
+route's `policy` field.
+
+Telegram only sends reaction updates to webhooks that opt into
+`message_reaction` in `allowed_updates` when calling `setWebhook`:
+
+```sh
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://alice.example.com/telegram",
+    "secret_token": "'"$TELEGRAM_WEBHOOK_SECRET"'",
+    "allowed_updates": [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+      "callback_query",
+      "message_reaction"
+    ]
+  }'
+```
 
 Egress is symmetric:
 
