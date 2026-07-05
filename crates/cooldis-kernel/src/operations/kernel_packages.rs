@@ -19,6 +19,7 @@ use std::path::Path;
 
 pub const COOLDIS_THREADS_PACKAGE: &str = "cooldis-threads";
 pub const COOLDIS_SCHEDULE_PACKAGE: &str = "cooldis-schedule";
+pub const COOLDIS_MESSAGING_PACKAGE: &str = "cooldis-messaging";
 pub const COOLDIS_PROCESS_PACKAGE: &str = "cooldis-process";
 pub const COOLDIS_NOTIFY_PACKAGE: &str = "cooldis-notify";
 pub const THREAD_SPAWN_OPERATION: &str = "thread_spawn";
@@ -29,6 +30,7 @@ pub const THREAD_CANCEL_OPERATION: &str = "thread_cancel";
 pub const MANDATE_START_OPERATION: &str = "mandate_start";
 pub const MANDATE_REVOKE_OPERATION: &str = "mandate_revoke";
 pub const MANDATE_LIST_OPERATION: &str = "mandate_list";
+pub const MESSAGE_REACT_OPERATION: &str = "message_react";
 pub const PROCESS_EXEC_OPERATION: &str = "process_exec";
 pub const PROCESS_POLL_OPERATION: &str = "process_poll";
 pub const PROCESS_WRITE_OPERATION: &str = "process_write";
@@ -40,6 +42,7 @@ pub const THREADS_CONTROL_CAPABILITY: &str = "threads.control";
 pub const THREADS_READ_CAPABILITY: &str = "threads.read";
 pub const SCHEDULE_MANAGE_CAPABILITY: &str = "schedule.manage";
 pub const SCHEDULE_READ_CAPABILITY: &str = "schedule.read";
+pub const MESSAGING_REACT_CAPABILITY: &str = "messaging.react";
 pub const PROCESS_SPAWN_CAPABILITY: &str = "process.spawn";
 pub const PROCESS_READ_CAPABILITY: &str = "process.read";
 pub const PROCESS_WRITE_CAPABILITY: &str = "process.write";
@@ -105,6 +108,40 @@ pub fn ensure_cooldis_schedule_published(
             name: COOLDIS_SCHEDULE_PACKAGE.to_string(),
             source: PublishedOperationSource::Kernel {
                 package: COOLDIS_SCHEDULE_PACKAGE.to_string(),
+            },
+            manifest: package.manifest,
+            interface: package.interface,
+            capability_grants: package.capability_grants,
+            metadata: BTreeMap::from([(
+                OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                Value::String(KERNEL_RUNTIME_KIND.to_string()),
+            )]),
+        })
+        .map(Some)?)
+}
+
+pub fn ensure_cooldis_messaging_published(
+    registry_root: Option<&Path>,
+) -> CooldisResult<Option<PublishedOperationRecord>> {
+    let Some(registry_root) = registry_root else {
+        eprintln!(
+            "cooldis app-server: no operation registry root configured; skipping cooldis-messaging kernel package"
+        );
+        return Ok(None);
+    };
+    let registry = LocalOperationRegistry::new(registry_root);
+    let package = cooldis_messaging_kernel_package();
+    let expected_hash = package.interface_hash()?;
+    if let Ok(existing) = registry.load_record(COOLDIS_MESSAGING_PACKAGE)
+        && existing.active_artifact_hash == expected_hash
+    {
+        return Ok(Some(existing));
+    }
+    Ok(registry
+        .publish_interface_record(PublishInterfaceOperationRequest {
+            name: COOLDIS_MESSAGING_PACKAGE.to_string(),
+            source: PublishedOperationSource::Kernel {
+                package: COOLDIS_MESSAGING_PACKAGE.to_string(),
             },
             manifest: package.manifest,
             interface: package.interface,
@@ -388,6 +425,100 @@ pub fn cooldis_schedule_kernel_package() -> KernelPackageDefinition {
     }
 }
 
+pub fn cooldis_messaging_kernel_package() -> KernelPackageDefinition {
+    let specs = messaging_operation_specs();
+    let manifest = WasmOperationManifest {
+        abi: "cooldis.operation/0.1".to_string(),
+        operations: specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| WasmOperationDefinition {
+                id: (index + 1) as u32,
+                name: spec.name.to_string(),
+                input: WasmOperationValueKind::Json,
+                output: WasmOperationValueKind::Json,
+                events: WasmOperationEventKind::None,
+                mode: WasmOperationMode::Sync,
+                required_capabilities: spec
+                    .capabilities
+                    .iter()
+                    .map(|capability| (*capability).to_string())
+                    .collect(),
+            })
+            .collect(),
+    };
+    let identity = ToolPackageIdentity {
+        name: COOLDIS_MESSAGING_PACKAGE.to_string(),
+        version: Some("1.0.0".to_string()),
+        description: Some(
+            "Content-addressed message actions implemented by the Cooldis kernel.".to_string(),
+        ),
+        owner: Some("cooldis".to_string()),
+    };
+    let runtime = ToolRuntimeContract {
+        kind: KERNEL_RUNTIME_KIND.to_string(),
+        state: None,
+        module_path: None,
+        bin_path: None,
+        release: None,
+        timeout_ms: None,
+        max_input_bytes: None,
+        max_output_bytes: None,
+    };
+    let operations = specs
+        .iter()
+        .map(|spec| {
+            let required_capabilities = spec
+                .capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect::<BTreeSet<_>>();
+            ToolOperationInterface {
+                name: spec.name.to_string(),
+                description: Some(spec.summary.to_string()),
+                input_schema: (spec.input_schema)(),
+                output_schema: (spec.output_schema)(),
+                required_capabilities: required_capabilities.clone(),
+                command: Some(ToolCommandContract {
+                    name: spec.name.to_string(),
+                    stdin: Some("json".to_string()),
+                    stdout: Some("json".to_string()),
+                }),
+                mcp: None,
+                manual: Some(ToolOperationManual {
+                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                    tool_name: COOLDIS_MESSAGING_PACKAGE.to_string(),
+                    operation_name: spec.name.to_string(),
+                    summary: spec.summary.to_string(),
+                    usage: vec![spec.name.to_string()],
+                    input_schema: (spec.input_schema)(),
+                    output_schema: (spec.output_schema)(),
+                    required_capabilities,
+                    examples: Vec::new(),
+                    exit_status: manual_exit_status(),
+                    generated: false,
+                    warnings: Vec::new(),
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let capability_grants = operations
+        .iter()
+        .flat_map(|operation| operation.required_capabilities.iter().cloned())
+        .collect();
+    KernelPackageDefinition {
+        manifest,
+        interface: ToolInterfaceContract {
+            schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
+            identity,
+            runtime,
+            operations,
+            fixtures: Vec::new(),
+        },
+        capability_grants,
+    }
+}
+
 pub fn cooldis_process_kernel_package() -> KernelPackageDefinition {
     let specs = process_operation_specs();
     let manifest = WasmOperationManifest {
@@ -597,6 +728,14 @@ struct ScheduleOperationSpec {
     output_schema: fn() -> Value,
 }
 
+struct MessagingOperationSpec {
+    name: &'static str,
+    summary: &'static str,
+    capabilities: &'static [&'static str],
+    input_schema: fn() -> Value,
+    output_schema: fn() -> Value,
+}
+
 struct ProcessOperationSpec {
     name: &'static str,
     summary: &'static str,
@@ -679,6 +818,16 @@ fn schedule_operation_specs() -> Vec<ScheduleOperationSpec> {
     ]
 }
 
+fn messaging_operation_specs() -> Vec<MessagingOperationSpec> {
+    vec![MessagingOperationSpec {
+        name: MESSAGE_REACT_OPERATION,
+        summary: "Request a reaction to a recent user message by quoting its content.",
+        capabilities: &[MESSAGING_REACT_CAPABILITY],
+        input_schema: message_react_input_schema,
+        output_schema: message_react_output_schema,
+    }]
+}
+
 fn process_operation_specs() -> Vec<ProcessOperationSpec> {
     vec![
         ProcessOperationSpec {
@@ -755,6 +904,16 @@ fn mandate_list_input_schema() -> Value {
             "thread_id": string_schema("Optional target Cooldis thread id; omitted means the calling thread.")
         }),
         &[],
+    )
+}
+
+fn message_react_input_schema() -> Value {
+    object_schema(
+        json!({
+            "quote": string_schema("A substring quoted from the target user message."),
+            "emoji": string_schema("Reaction emoji to request on the matched platform message.")
+        }),
+        &["quote", "emoji"],
     )
 }
 
@@ -1038,6 +1197,38 @@ fn mandate_list_output_schema() -> Value {
             }
         }),
         &["operation", "thread_id", "mandates"],
+    )
+}
+
+fn message_react_output_schema() -> Value {
+    object_schema(
+        json!({
+            "operation": {
+                "type": "string",
+                "enum": ["cooldis.message_react"],
+                "description": "Receipt operation name."
+            },
+            "status": {
+                "type": "string",
+                "enum": ["requested", "error"]
+            },
+            "egress_requested_event_id": string_schema("io.egress.requested event id, when requested."),
+            "message_id": string_schema("Resolved external platform message id, when requested."),
+            "emoji": string_schema("Requested reaction emoji."),
+            "quote": string_schema("Quote used for content addressing."),
+            "match_event_id": string_schema("Matched io.ingress.received event id."),
+            "error_code": string_schema("Stable resolver error code, when status is error."),
+            "error": string_schema("Human-readable resolver error."),
+            "candidates": {
+                "type": "array",
+                "description": "Candidate previews for ambiguous quotes.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        }),
+        &["operation", "status"],
     )
 }
 

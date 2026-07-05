@@ -7,10 +7,11 @@ use super::threads::{
 };
 use super::*;
 use crate::{
-    CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND,
-    LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
-    MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
+    CHANNEL_EMIT_OPERATION, COOLDIS_MESSAGING_PACKAGE, COOLDIS_NOTIFY_PACKAGE,
+    COOLDIS_PROCESS_PACKAGE, COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventOrigin,
+    KERNEL_RUNTIME_KIND, LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION,
+    MANDATE_REVOKE_OPERATION, MANDATE_START_OPERATION, MESSAGE_REACT_OPERATION,
+    MESSAGING_REACT_CAPABILITY, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
     PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
     PROCESS_WRITE_OPERATION, ProviderError, PublishSkillPackageRequest, PublishedOperationSource,
     SCHEDULE_MANAGE_CAPABILITY, SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION,
@@ -2299,6 +2300,33 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
             SCHEDULE_READ_CAPABILITY.to_string()
         ])
     );
+    let messaging_record = LocalOperationRegistry::new(&operation_registry_root)
+        .load_record(COOLDIS_MESSAGING_PACKAGE)
+        .expect("startup should publish cooldis-messaging");
+    assert!(matches!(
+        &messaging_record.source,
+        PublishedOperationSource::Kernel { package } if package == COOLDIS_MESSAGING_PACKAGE
+    ));
+    assert_eq!(
+        messaging_record
+            .metadata
+            .get(OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(Value::as_str),
+        Some(KERNEL_RUNTIME_KIND)
+    );
+    assert_eq!(
+        messaging_record
+            .manifest
+            .operations
+            .iter()
+            .map(|operation| operation.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![MESSAGE_REACT_OPERATION]
+    );
+    assert_eq!(
+        messaging_record.capability_grants,
+        BTreeSet::from([MESSAGING_REACT_CAPABILITY.to_string()])
+    );
     let process_record = LocalOperationRegistry::new(&operation_registry_root)
         .load_record(COOLDIS_PROCESS_PACKAGE)
         .expect("startup should publish cooldis-process");
@@ -2361,6 +2389,7 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
             operation_ref.contains(COOLDIS_PROCESS_PACKAGE)
                 || operation_ref.contains(COOLDIS_NOTIFY_PACKAGE)
                 || operation_ref.contains(COOLDIS_SCHEDULE_PACKAGE)
+                || operation_ref.contains(COOLDIS_MESSAGING_PACKAGE)
         })
     }));
     for operation in expected_operations {
@@ -6602,7 +6631,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
     let bindings = events[1].payload["operation_bindings"].as_array().unwrap();
-    assert_eq!(bindings.len(), 3);
+    assert_eq!(bindings.len(), 4);
     assert!(
         bindings
             .iter()
@@ -6638,6 +6667,12 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
             MANDATE_REVOKE_OPERATION.to_string(),
             MANDATE_LIST_OPERATION.to_string()
         ])
+    );
+    let messaging_binding =
+        manifest_operation_binding_by_name(&events[1].payload, COOLDIS_MESSAGING_PACKAGE);
+    assert_eq!(
+        json_array_string_set(&messaging_binding["operations"]),
+        BTreeSet::from([MESSAGE_REACT_OPERATION.to_string()])
     );
     let _ = std::fs::remove_dir_all(registry_root);
 }

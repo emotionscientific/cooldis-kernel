@@ -151,6 +151,12 @@ tool routing rules
 Tools should be referenced as published artifacts. The manifest should not copy
 tool artifacts into itself.
 
+First-party kernel tools are still operation artifacts. For example,
+`cooldis-messaging/message_react` is bound as
+`op://cooldis-messaging/message_react@sha256:<record-hash>` and requires the
+`messaging.react` grant. Its input is content-addressed (`quote`, `emoji`);
+platform message ids are resolved by the kernel from routed ingress facts.
+
 ### Resources
 
 Static or external artifacts made available to the agent, context builder, or

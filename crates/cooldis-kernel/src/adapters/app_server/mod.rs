@@ -28,10 +28,10 @@ use crate::{
     ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding, ToolUniverseCaller,
     ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent, TurnInput,
     TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualFile, bind_published_agent_record,
-    default_blob_registry_root_for_agent_registry_root, ensure_cooldis_notify_published,
-    ensure_cooldis_process_published, ensure_cooldis_schedule_published,
-    ensure_cooldis_threads_published, resolve_llm_provider_auth, seed_default_llm_providers,
-    stream_schema_registry_v1,
+    default_blob_registry_root_for_agent_registry_root, ensure_cooldis_messaging_published,
+    ensure_cooldis_notify_published, ensure_cooldis_process_published,
+    ensure_cooldis_schedule_published, ensure_cooldis_threads_published, resolve_llm_provider_auth,
+    seed_default_llm_providers, stream_schema_registry_v1,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cooldis_process::{
@@ -590,6 +590,7 @@ impl CooldisAppServer {
             agent_manifest_provider_surface_for_config(&config, &metadata_store)?;
         ensure_cooldis_threads_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_schedule_published(operation_registry_root_for_kernel_publish(&config))?;
+        ensure_cooldis_messaging_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_process_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_notify_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_default_manifest_published(&config, provider_surface.supports_streaming)?;

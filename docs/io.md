@@ -312,7 +312,9 @@ reply.
 
 Routes can project inline assistant text tags into platform actions before
 delivery. The tag grammar belongs in daemon TOML with the product route, not in
-the kernel:
+the kernel. Inline reaction projection is available for routes that opt into it,
+but routes that need targeted reactions should prefer the content-addressed
+`message_react` tool below:
 
 ```toml
 [[daemon.io.routes]]
@@ -336,6 +338,24 @@ A message containing only `[no_response]` becomes one `Silence` envelope and no
 text envelope. Invalid regexes fail daemon config validation with the rule
 index.
 
+Targeted reactions use the `cooldis-messaging` kernel package instead of inline
+assistant tags. The direct tool is:
+
+```text
+message_react { quote, emoji }
+required grant: messaging.react
+```
+
+The model quotes a substring of a recent user message; it does not supply a
+platform message id. The kernel scans recent routed user messages newest-first,
+normalizes case and whitespace, and requires exactly one match. No match returns
+`no message matching quote`; multiple matches return candidate previews so the
+model can retry with a longer quote. On success, the tool appends
+`io.egress.requested` with `egress_kind = PlatformAction { action = "reaction",
+payload = { message_id, emoji } }`, the matched ingress event id, the quote, and
+the source tool call id. The egress projector then delivers that requested event
+through the same retry, dead-letter, and receipt path as assistant output.
+
 `typing_simulation` is off by default. When enabled, the daemon emits a
 `typing` platform action before a text envelope and sleeps by
 `text_length / chars_per_second`, capped at 8 seconds.
@@ -346,7 +366,8 @@ The daemon does not deliver replies from a per-turn in-memory watcher. Each
 enabled route owns an egress projector task. The projector reads the route's
 bound thread event streams from a persisted cursor stored in the same SQLite
 state as the ingress queue, projects assistant output through the route's
-`egress_projection` rules, and calls the route adapter.
+`egress_projection` rules, picks up `io.egress.requested` events directly, and
+calls the route adapter.
 
 Successful delivery appends an `io.egress.delivered` event to the thread
 journal with the route id, egress kind, external message id returned by the

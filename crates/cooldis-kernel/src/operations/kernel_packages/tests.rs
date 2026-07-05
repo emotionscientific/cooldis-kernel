@@ -173,6 +173,57 @@ fn cooldis_schedule_package_declares_three_kernel_operations() {
 }
 
 #[test]
+fn cooldis_messaging_package_declares_message_react_operation() {
+    let package = cooldis_messaging_kernel_package();
+    let operations = package
+        .manifest
+        .operations
+        .iter()
+        .map(|operation| operation.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(operations, vec![MESSAGE_REACT_OPERATION]);
+    assert_eq!(package.interface.runtime.kind, KERNEL_RUNTIME_KIND);
+    assert_eq!(
+        package.capability_grants,
+        BTreeSet::from([MESSAGING_REACT_CAPABILITY.to_string()])
+    );
+    assert_eq!(package.interface.identity.name, COOLDIS_MESSAGING_PACKAGE);
+    assert_eq!(package.interface.identity.owner.as_deref(), Some("cooldis"));
+    assert_eq!(package.interface.identity.version.as_deref(), Some("1.0.0"));
+    assert_eq!(package.interface.operations.len(), operations.len());
+
+    let interface = &package.interface.operations[0];
+    assert_eq!(interface.name, MESSAGE_REACT_OPERATION);
+    assert_eq!(
+        interface.required_capabilities,
+        BTreeSet::from([MESSAGING_REACT_CAPABILITY.to_string()])
+    );
+    validate_json_schema_subset(
+        &interface.input_schema,
+        &format!("{}.{}.input", COOLDIS_MESSAGING_PACKAGE, interface.name),
+    )
+    .unwrap();
+    validate_json_schema_subset(
+        &interface.output_schema,
+        &format!("{}.{}.output", COOLDIS_MESSAGING_PACKAGE, interface.name),
+    )
+    .unwrap();
+    assert_eq!(
+        interface.command.as_ref().unwrap().stdin.as_deref(),
+        Some("json")
+    );
+    assert_eq!(
+        interface.command.as_ref().unwrap().stdout.as_deref(),
+        Some("json")
+    );
+    assert_eq!(
+        interface.manual.as_ref().unwrap().tool_name,
+        COOLDIS_MESSAGING_PACKAGE
+    );
+}
+
+#[test]
 fn cooldis_process_package_declares_four_kernel_operations() {
     let package = cooldis_process_kernel_package();
     let operations = package

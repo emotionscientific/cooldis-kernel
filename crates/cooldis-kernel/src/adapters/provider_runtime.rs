@@ -2,28 +2,29 @@ use crate::agent::contracts::sha256_hex;
 use crate::{
     AgentContextCompileInput, AgentContextCompilePolicy, AgentContextCompiler,
     AgentManifestStaticContextSegment, AgentRuntime, AgentRuntimeFactory, AgentToolRouter,
-    AllowAllToolPermissionGate, BashToolProvider, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent, CanonicalMessage,
-    CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError, CooldisResult,
-    EventKind, EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec, HookMutationWitness,
-    HookPipeline, HookRunRecord, KernelNotifyOperationProvider, KernelOperationDispatcher,
-    KernelProcessOperationProvider, KernelScheduleOperationProvider, KernelThreadOperationProvider,
-    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationProvenance,
-    OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient,
-    ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
-    ReplayTransformCounts, RuntimeEventKind, RuntimeModelRequestErrorClass,
-    RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
-    RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
-    SessionEntryId, SessionEntryKind, SessionStartHookRequest, StopHookRequest, SystemBlock,
-    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
-    ThinkingConfig, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
-    ThreadTerminalState, ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload,
-    ToolCallSubject, ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor,
-    ToolExecutionRequest, ToolPermissionDecision, ToolPermissionGate, TurnBudget, TurnContext,
-    TurnInput, TurnSubmissionMode, UserPromptSubmitHookRequest, VirtualBashRuntimeConfig,
-    active_manifest_bind_receipt, active_tool_controller_for_request,
-    compile_provider_request_context, decide_tool_call, deterministic_compaction_summary,
-    emit_runtime_event, normalize_history_for_target,
+    AllowAllToolPermissionGate, BashToolProvider, COOLDIS_MESSAGING_PACKAGE,
+    COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, COOLDIS_SCHEDULE_PACKAGE,
+    COOLDIS_THREADS_PACKAGE, CanonicalContent, CanonicalMessage, CompactionPolicy,
+    CompactionTrigger, CompiledAgentContext, CooldisError, CooldisResult, EventKind,
+    EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec, HookMutationWitness,
+    HookPipeline, HookRunRecord, KernelMessagingOperationProvider, KernelNotifyOperationProvider,
+    KernelOperationDispatcher, KernelProcessOperationProvider, KernelScheduleOperationProvider,
+    KernelThreadOperationProvider, KernelThreadSpawnAgentResolver, NewEventRecord,
+    NewObservationRecord, ObservationProvenance, OperationRegistry, PostCompactHookRequest,
+    PreCompactHookRequest, ProviderApi, ProviderClient, ProviderError, ProviderRequest,
+    ProviderRequestMode, ProviderStreamEvent, ReplayTransformCounts, RuntimeEventKind,
+    RuntimeModelRequestErrorClass, RuntimeModelRequestMode, RuntimeModelRequestPurpose,
+    RuntimePermissionDecision, RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel,
+    RuntimeUsage, SessionEntry, SessionEntryId, SessionEntryKind, SessionStartHookRequest,
+    StopHookRequest, SystemBlock, THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA,
+    THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA, ThinkingConfig, ThreadCommand, ThreadContext,
+    ThreadEvent, ThreadSignal, ThreadStatus, ThreadTerminalState, ToolCallCompletedPayload,
+    ToolCallDecision, ToolCallRequestedPayload, ToolCallSubject, ToolDecisionRequest,
+    ToolDefinition, ToolExecutionInterceptor, ToolExecutionRequest, ToolPermissionDecision,
+    ToolPermissionGate, TurnBudget, TurnContext, TurnInput, TurnSubmissionMode,
+    UserPromptSubmitHookRequest, VirtualBashRuntimeConfig, active_manifest_bind_receipt,
+    active_tool_controller_for_request, compile_provider_request_context, decide_tool_call,
+    deterministic_compaction_summary, emit_runtime_event, normalize_history_for_target,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -450,7 +451,7 @@ impl CanonicalProviderRuntime {
                     .await;
             }
             let schedule_dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
-                KernelScheduleOperationProvider::new(control, context.clone()),
+                KernelScheduleOperationProvider::new(control.clone(), context.clone()),
             );
             let _ = router
                 .operation_registry()
@@ -463,6 +464,23 @@ impl CanonicalProviderRuntime {
                     .set_kernel_dispatcher(
                         COOLDIS_SCHEDULE_PACKAGE,
                         Arc::clone(&schedule_dispatcher),
+                    )
+                    .await;
+            }
+            let messaging_dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
+                KernelMessagingOperationProvider::new(control, context.clone()),
+            );
+            let _ = router
+                .operation_registry()
+                .set_kernel_dispatcher(COOLDIS_MESSAGING_PACKAGE, Arc::clone(&messaging_dispatcher))
+                .await;
+            if let Some(config) = &self.bash_tool_config
+                && let Some(registry) = &config.operation_registry
+            {
+                let _ = registry
+                    .set_kernel_dispatcher(
+                        COOLDIS_MESSAGING_PACKAGE,
+                        Arc::clone(&messaging_dispatcher),
                     )
                     .await;
             }

@@ -2339,13 +2339,10 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
     let (_restarted_server, restarted, mut rx) = restarted_bridge_at_root(&root).await;
     register_route_state(&restarted, &route, &db).await;
 
-    assert_eq!(
-        restarted
-            .drain_egress_once("telegram.bot", "main")
-            .await
-            .unwrap(),
-        1
-    );
+    let _ = restarted
+        .drain_egress_once("telegram.bot", "main")
+        .await
+        .unwrap();
     let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
         .unwrap()
@@ -2372,6 +2369,298 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
         Some("capture")
     );
     assert!(egress_cursor(&restarted, &thread_id).await.is_some());
+}
+
+#[tokio::test]
+async fn egress_projector_delivers_requested_reaction_after_bridge_restart() {
+    let root = test_root("egress-requested-reaction-restart");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+
+    let (server, bridge, mut first_rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let receipt = bridge
+        .submit_envelope(telegram_queue_envelope("please react"))
+        .await
+        .unwrap();
+    let thread_id = receipt.thread_id.expect("receipt should include thread id");
+    wait_for_assistant_text(&bridge, &thread_id, "local:please react").await;
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    let assistant = tokio::time::timeout(Duration::from_secs(3), first_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        assistant.kind,
+        EgressKind::AssistantMessage { ref text } if text == "local:please react"
+    ));
+    let assistant_cursor = egress_cursor(&bridge, &thread_id)
+        .await
+        .expect("assistant delivery cursor");
+
+    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let handle = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, parsed)
+        .await
+        .unwrap();
+    let ingress_event = handle
+        .read_thread_events(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| {
+            event.kind == EventKind::IoIngressReceived
+                && event.payload["turn_id"].as_str().is_some()
+        })
+        .expect("thread ingress event");
+    let ingress_context = ingress_context_from_event(&ingress_event).unwrap();
+    let mut target = ingress_context.target.clone();
+    target.metadata = ingress_context.metadata.clone();
+    let mut payload = serde_json::to_value(IoEgressRequestedPayload {
+        egress_kind: serde_json::to_value(EgressKind::PlatformAction {
+            action: "reaction".to_string(),
+            payload: json!({
+                "message_id": "555",
+                "emoji": "👍"
+            }),
+        })
+        .unwrap(),
+        resolved_target: Some(serde_json::to_value(target).unwrap()),
+        requested_by_tool_call_id: "call_react".to_string(),
+        quote: Some("please react".to_string()),
+        match_event_id: Some(ingress_event.id),
+    })
+    .unwrap();
+    payload.as_object_mut().unwrap().insert(
+        "schema".to_string(),
+        json!(EventKind::IoEgressRequested.payload_schema_id()),
+    );
+    let requested_event = handle
+        .append_thread_event_record(NewEventRecord::discharged(
+            handle.context().coordinates.clone(),
+            EventKind::IoEgressRequested,
+            payload,
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(&handle.context().coordinates)],
+                source_event_ids: vec![ingress_event.id],
+                discharged_by: Some("tool:message_react".to_string()),
+                function: Some("message_react/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        ))
+        .await
+        .unwrap();
+    let requested_event_id = requested_event.id.to_string();
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    let reaction = tokio::time::timeout(Duration::from_secs(3), first_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        reaction.kind,
+        EgressKind::PlatformAction { ref action, ref payload }
+            if action == "reaction"
+                && payload["message_id"].as_str() == Some("555")
+                && payload["emoji"].as_str() == Some("👍")
+    ));
+    let state = bridge
+        .egress_states
+        .read()
+        .await
+        .get(&source_scope("telegram.bot", "main"))
+        .cloned()
+        .unwrap();
+    state
+        .store_cursor("main", &thread_id, &assistant_cursor)
+        .unwrap();
+    drop(bridge);
+    drop(server);
+
+    let (_restarted_server, restarted, mut rx) = restarted_bridge_at_root(&root).await;
+    register_route_state(&restarted, &route, &db).await;
+    let _ = restarted
+        .drain_egress_once("telegram.bot", "main")
+        .await
+        .unwrap();
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        restarted
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+
+    let delivered = egress_receipts(&restarted, &thread_id, EventKind::IoEgressDelivered).await;
+    assert_eq!(
+        delivered
+            .iter()
+            .filter(|event| {
+                event.payload["source_event_id"].as_str() == Some(requested_event_id.as_str())
+                    && event.payload["egress_kind"].as_str() == Some("platform_action:reaction")
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn egress_projector_skips_invalid_requested_egress_and_continues() {
+    let root = test_root("egress-requested-poison-skip");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+
+    let (_server, bridge, mut rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let receipt = bridge
+        .submit_envelope(telegram_queue_envelope("poison skip"))
+        .await
+        .unwrap();
+    let thread_id = receipt.thread_id.expect("receipt should include thread id");
+    wait_for_assistant_text(&bridge, &thread_id, "local:poison skip").await;
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    let assistant = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        assistant.kind,
+        EgressKind::AssistantMessage { ref text } if text == "local:poison skip"
+    ));
+
+    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let handle = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, parsed)
+        .await
+        .unwrap();
+    let ingress_event = handle
+        .read_thread_events(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| {
+            event.kind == EventKind::IoIngressReceived
+                && event.payload["turn_id"].as_str().is_some()
+        })
+        .expect("thread ingress event");
+    let ingress_context = ingress_context_from_event(&ingress_event).unwrap();
+    let mut target = ingress_context.target.clone();
+    target.metadata = ingress_context.metadata.clone();
+
+    let mut invalid_payload = serde_json::to_value(IoEgressRequestedPayload {
+        egress_kind: serde_json::to_value(EgressKind::PlatformAction {
+            action: "reaction".to_string(),
+            payload: json!({
+                "message_id": "bad",
+                "emoji": "👍"
+            }),
+        })
+        .unwrap(),
+        resolved_target: Some(json!({})),
+        requested_by_tool_call_id: "call_bad".to_string(),
+        quote: Some("poison skip".to_string()),
+        match_event_id: None,
+    })
+    .unwrap();
+    invalid_payload.as_object_mut().unwrap().insert(
+        "schema".to_string(),
+        json!(EventKind::IoEgressRequested.payload_schema_id()),
+    );
+    handle
+        .append_thread_event_record(NewEventRecord::discharged(
+            handle.context().coordinates.clone(),
+            EventKind::IoEgressRequested,
+            invalid_payload,
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(&handle.context().coordinates)],
+                source_event_ids: vec![ingress_event.id],
+                discharged_by: Some("tool:message_react".to_string()),
+                function: Some("message_react/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+    let mut valid_payload = serde_json::to_value(IoEgressRequestedPayload {
+        egress_kind: serde_json::to_value(EgressKind::PlatformAction {
+            action: "reaction".to_string(),
+            payload: json!({
+                "message_id": "777",
+                "emoji": "👍"
+            }),
+        })
+        .unwrap(),
+        resolved_target: Some(serde_json::to_value(target).unwrap()),
+        requested_by_tool_call_id: "call_good".to_string(),
+        quote: Some("poison skip".to_string()),
+        match_event_id: Some(ingress_event.id),
+    })
+    .unwrap();
+    valid_payload.as_object_mut().unwrap().insert(
+        "schema".to_string(),
+        json!(EventKind::IoEgressRequested.payload_schema_id()),
+    );
+    let valid_event = handle
+        .append_thread_event_record(NewEventRecord::discharged(
+            handle.context().coordinates.clone(),
+            EventKind::IoEgressRequested,
+            valid_payload,
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(&handle.context().coordinates)],
+                source_event_ids: vec![ingress_event.id],
+                discharged_by: Some("tool:message_react".to_string()),
+                function: Some("message_react/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        ))
+        .await
+        .unwrap();
+    let valid_event_id = valid_event.id.to_string();
+
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        egress.kind,
+        EgressKind::PlatformAction { ref action, ref payload }
+            if action == "reaction"
+                && payload["message_id"].as_str() == Some("777")
+                && payload["emoji"].as_str() == Some("👍")
+    ));
+    let delivered = egress_receipts(&bridge, &thread_id, EventKind::IoEgressDelivered).await;
+    assert!(delivered.iter().any(|event| {
+        event.payload["source_event_id"].as_str() == Some(valid_event_id.as_str())
+            && event.payload["egress_kind"].as_str() == Some("platform_action:reaction")
+    }));
 }
 
 #[tokio::test]

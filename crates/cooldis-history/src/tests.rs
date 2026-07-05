@@ -448,6 +448,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "grant.petitioned",
         "timer.fired",
         "io.ingress.received",
+        "io.egress.requested",
         "io.egress.delivered",
         "io.egress.failed",
         "admission.decided",
@@ -507,6 +508,10 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
     assert_eq!(
         EventKind::IoIngressReceived.payload_schema_id(),
         "cooldis.event.io.ingress.received/1"
+    );
+    assert_eq!(
+        EventKind::IoEgressRequested.payload_schema_id(),
+        "cooldis.event.io.egress.requested/1"
     );
     assert_eq!(
         EventKind::IoEgressDelivered.payload_schema_id(),
@@ -643,6 +648,32 @@ fn events_0_2_payload_fixtures_round_trip_and_validate() {
                 egress_kind: "telegram.reply".to_string(),
                 external_message_id: Some("message-2".to_string()),
                 attempts: 2,
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::IoEgressRequested,
+            serde_json::to_value(IoEgressRequestedPayload {
+                egress_kind: serde_json::json!({
+                    "type": "platform_action",
+                    "action": "reaction",
+                    "payload": {
+                        "message_id": "message-1",
+                        "emoji": "👍"
+                    }
+                }),
+                resolved_target: Some(serde_json::json!({
+                    "source": {"protocol": "telegram.bot", "instance_id": "main"},
+                    "conversation": {
+                        "external_conversation_id": "chat-1",
+                        "kind": "direct"
+                    },
+                    "actor": {"external_actor_id": "actor-1"},
+                    "metadata": {}
+                })),
+                requested_by_tool_call_id: "call_1".to_string(),
+                quote: Some("hello there".to_string()),
+                match_event_id: Some(ingress_event_id),
             })
             .unwrap(),
         ),
@@ -1446,6 +1477,40 @@ async fn in_memory_append_events_validate_stream_schema_before_mutation() {
     let appended = store.append_events(&stream_id, vec![valid]).await.unwrap();
     assert_eq!(appended.len(), 1);
     assert_eq!(appended[0].sequence.get(), 1);
+}
+
+#[tokio::test]
+async fn in_memory_append_events_validates_io_egress_requested_payload_schema() {
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let invalid = NewEventRecord::discharged(
+        coordinates.clone(),
+        EventKind::IoEgressRequested,
+        serde_json::json!({
+            "schema": EventKind::IoEgressRequested.payload_schema_id(),
+            "requested_by_tool_call_id": "call_1"
+        }),
+        EventProvenance {
+            source_streams: vec![stream_id.clone()],
+            discharged_by: Some("tool:message_react".to_string()),
+            function: Some("message_react/v1".to_string()),
+            ..EventProvenance::default()
+        },
+    );
+    let store = InMemorySessionStore::new();
+
+    let err = store
+        .append_events(&stream_id, vec![invalid])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, HistoryError::Codec(message) if message.contains("egress_kind")));
+    assert!(
+        store
+            .read_events(&stream_id, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
