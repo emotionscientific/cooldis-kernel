@@ -12,7 +12,9 @@ use cooldis_io_core::{
     IngressContent, IngressEnvelope, IngressSink, IoActor, IoAttachment, IoConversation,
     IoDedupeKey, IoError, IoProtocolAdapter, IoProtocolCapabilities, IoResult, IoSource, IoTarget,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeStruct,
+};
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeMap;
 
@@ -137,6 +139,14 @@ impl TelegramNormalizer {
             )));
         }
 
+        if let Some(reaction) = update.message_reaction.as_ref() {
+            return Ok(Some(self.envelope_from_message_reaction(
+                update.update_id,
+                reaction,
+                received_at_ms,
+            )));
+        }
+
         if let Some(callback) = update.callback_query.as_ref() {
             let Some(message) = callback.message.as_ref() else {
                 return Ok(None);
@@ -187,6 +197,43 @@ impl TelegramNormalizer {
 
         envelope.actor = actor.or_else(|| actor_from_message(message));
         envelope.attachments = message_attachments(message);
+        envelope
+    }
+
+    fn envelope_from_message_reaction(
+        &self,
+        update_id: i64,
+        reaction: &TelegramMessageReactionUpdated,
+        received_at_ms: u64,
+    ) -> IngressEnvelope {
+        let source = self.source();
+        let mut envelope = IngressEnvelope::new(
+            source.clone(),
+            conversation_from_chat(&reaction.chat, None),
+            IngressContent::Event {
+                kind: "telegram.message_reaction".to_string(),
+                payload: json!({
+                    "message_id": reaction.message_id,
+                    "old_reaction": reaction.old_reaction,
+                    "new_reaction": reaction.new_reaction,
+                }),
+            },
+            received_at_ms,
+        )
+        .with_dedupe_key(IoDedupeKey::for_source(
+            &source,
+            format!("update:{update_id}"),
+        ))
+        .with_metadata("telegram_update_id", update_id.to_string())
+        .with_metadata("telegram_update_kind", "message_reaction")
+        .with_metadata("telegram_message_id", reaction.message_id.to_string())
+        .with_metadata("telegram_message_date", reaction.date.to_string());
+
+        envelope.actor = reaction
+            .user
+            .as_ref()
+            .map(actor_from_user)
+            .or_else(|| reaction.actor_chat.as_ref().map(actor_from_chat));
         envelope
     }
 }
@@ -466,7 +513,24 @@ pub struct TelegramUpdate {
     #[serde(default)]
     pub edited_channel_post: Option<TelegramMessage>,
     #[serde(default)]
+    pub message_reaction: Option<TelegramMessageReactionUpdated>,
+    #[serde(default)]
     pub callback_query: Option<TelegramCallbackQuery>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramMessageReactionUpdated {
+    pub chat: TelegramChat,
+    pub message_id: i64,
+    #[serde(default)]
+    pub user: Option<TelegramUser>,
+    #[serde(default)]
+    pub actor_chat: Option<TelegramChat>,
+    pub date: i64,
+    #[serde(default)]
+    pub old_reaction: Vec<TelegramReactionType>,
+    #[serde(default)]
+    pub new_reaction: Vec<TelegramReactionType>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -597,10 +661,65 @@ pub struct TelegramSendStickerRequest {
     pub disable_notification: Option<bool>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TelegramReactionType {
     Emoji { emoji: String },
+    CustomEmoji { custom_emoji_id: String },
+    Other(JsonValue),
+}
+
+impl Serialize for TelegramReactionType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Emoji { emoji } => {
+                let mut state = serializer.serialize_struct("TelegramReactionType", 2)?;
+                state.serialize_field("type", "emoji")?;
+                state.serialize_field("emoji", emoji)?;
+                state.end()
+            }
+            Self::CustomEmoji { custom_emoji_id } => {
+                let mut state = serializer.serialize_struct("TelegramReactionType", 2)?;
+                state.serialize_field("type", "custom_emoji")?;
+                state.serialize_field("custom_emoji_id", custom_emoji_id)?;
+                state.end()
+            }
+            Self::Other(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TelegramReactionType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = JsonValue::deserialize(deserializer)?;
+        if let Some(object) = value.as_object() {
+            match object.get("type").and_then(JsonValue::as_str) {
+                Some("emoji") if object.len() == 2 => {
+                    if let Some(emoji) = object.get("emoji").and_then(JsonValue::as_str) {
+                        return Ok(Self::Emoji {
+                            emoji: emoji.to_string(),
+                        });
+                    }
+                }
+                Some("custom_emoji") if object.len() == 2 => {
+                    if let Some(custom_emoji_id) =
+                        object.get("custom_emoji_id").and_then(JsonValue::as_str)
+                    {
+                        return Ok(Self::CustomEmoji {
+                            custom_emoji_id: custom_emoji_id.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(Self::Other(value))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1147,6 +1266,196 @@ mod tests {
                 .map(String::as_str),
             Some("callback_query")
         );
+    }
+
+    #[test]
+    fn normalizes_message_reaction_as_event() {
+        let update: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 1002,
+            "message_reaction": {
+                "chat": {
+                    "id": 123,
+                    "type": "private",
+                    "first_name": "Ada"
+                },
+                "message_id": 555,
+                "user": {
+                    "id": 44,
+                    "is_bot": false,
+                    "first_name": "Lin",
+                    "username": "lin"
+                },
+                "date": 1777000003,
+                "old_reaction": [
+                    { "type": "emoji", "emoji": "👍" }
+                ],
+                "new_reaction": [
+                    { "type": "custom_emoji", "custom_emoji_id": "custom-1" },
+                    { "type": "emoji", "emoji": "❤️" }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let envelope = TelegramNormalizer::new("main")
+            .normalize_update(&update, 1)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            envelope
+                .actor
+                .as_ref()
+                .map(|actor| actor.external_actor_id.as_str()),
+            Some("telegram:user:44")
+        );
+        assert!(matches!(
+            envelope.content,
+            IngressContent::Event { ref kind, ref payload }
+                if kind == "telegram.message_reaction"
+                    && payload["message_id"] == 555
+                    && payload["old_reaction"] == json!([{ "type": "emoji", "emoji": "👍" }])
+                    && payload["new_reaction"] == json!([
+                        { "type": "custom_emoji", "custom_emoji_id": "custom-1" },
+                        { "type": "emoji", "emoji": "❤️" }
+                    ])
+        ));
+        assert_eq!(
+            envelope
+                .metadata
+                .get("telegram_update_kind")
+                .map(String::as_str),
+            Some("message_reaction")
+        );
+        assert_eq!(
+            envelope
+                .metadata
+                .get("telegram_message_id")
+                .map(String::as_str),
+            Some("555")
+        );
+    }
+
+    #[test]
+    fn message_reaction_unknown_reaction_type_stays_opaque() {
+        let update: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 1003,
+            "message_reaction": {
+                "chat": { "id": 123, "type": "private" },
+                "message_id": 556,
+                "date": 1777000004,
+                "old_reaction": [],
+                "new_reaction": [
+                    {
+                        "type": "paid",
+                        "emoji": "⭐",
+                        "amount": 1
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let envelope = TelegramNormalizer::new("main")
+            .normalize_update(&update, 1)
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            envelope.content,
+            IngressContent::Event { ref kind, ref payload }
+                if kind == "telegram.message_reaction"
+                    && payload["new_reaction"] == json!([
+                        {
+                            "type": "paid",
+                            "emoji": "⭐",
+                            "amount": 1
+                        }
+            ])
+        ));
+    }
+
+    #[test]
+    fn message_reaction_missing_actor_and_unknown_chat_type_still_normalizes() {
+        let update: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 1004,
+            "message_reaction": {
+                "chat": { "id": 123, "type": "forumish" },
+                "message_id": 557,
+                "date": 1777000005,
+                "old_reaction": [],
+                "new_reaction": []
+            }
+        }))
+        .unwrap();
+
+        let envelope = TelegramNormalizer::new("main")
+            .normalize_update(&update, 1)
+            .unwrap()
+            .unwrap();
+
+        assert!(envelope.actor.is_none());
+        assert_eq!(envelope.conversation.kind, ConversationKind::Group);
+        assert_eq!(
+            envelope
+                .conversation
+                .metadata
+                .get("telegram_chat_type")
+                .map(String::as_str),
+            Some("forumish")
+        );
+        assert!(matches!(
+            envelope.content,
+            IngressContent::Event { ref kind, ref payload }
+                if kind == "telegram.message_reaction"
+                    && payload["old_reaction"] == json!([])
+                    && payload["new_reaction"] == json!([])
+        ));
+    }
+
+    #[test]
+    fn message_reaction_emoji_egress_serializes_in_derived_field_order() {
+        let request = TelegramSetMessageReactionRequest {
+            chat_id: TelegramChatId::Id(123),
+            message_id: 555,
+            reaction: vec![TelegramReactionType::Emoji {
+                emoji: "👍".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"chat_id":123,"message_id":555,"reaction":[{"type":"emoji","emoji":"👍"}]}"#
+        );
+    }
+
+    #[test]
+    fn message_reaction_other_round_trips_opaque_json() {
+        let source = json!({
+            "type": "paid",
+            "emoji": "⭐",
+            "amount": 1,
+            "nested": { "ok": true }
+        });
+
+        let reaction: TelegramReactionType = serde_json::from_value(source.clone()).unwrap();
+
+        assert!(matches!(reaction, TelegramReactionType::Other(_)));
+        assert_eq!(serde_json::to_value(&reaction).unwrap(), source);
+    }
+
+    #[test]
+    fn message_reaction_known_type_with_extra_fields_stays_opaque() {
+        let source = json!({
+            "type": "emoji",
+            "emoji": "👍",
+            "future_field": "kept"
+        });
+
+        let reaction: TelegramReactionType = serde_json::from_value(source.clone()).unwrap();
+
+        assert!(matches!(reaction, TelegramReactionType::Other(_)));
+        assert_eq!(serde_json::to_value(&reaction).unwrap(), source);
     }
 
     #[test]

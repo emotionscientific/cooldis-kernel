@@ -55,6 +55,7 @@ id = "telegram-main"
 kind = "telegram.bot"
 enabled = true
 policy = "queue_per_conversation"
+reaction_policy = "observe_only"
 threading = "per_conversation"
 agent_ref = "agent://karl-dev@latest"
 egress_retry = { max_attempts = 5, base_backoff_ms = 500 }
@@ -79,9 +80,37 @@ Common route keys:
 | `kind` | Route adapter kind such as `telegram.bot` or `clock.tick`. |
 | `enabled` | Starts the route when true; disabled routes are parsed but not started. |
 | `policy` | Admission policy such as `queue_per_conversation`, `interrupt_on_new_dm`, or `fork_on_new_dm`. |
+| `reaction_policy` | Telegram-only admission policy for `message_reaction` updates; same values as `policy`, defaults to `observe_only`. |
 | `threading` | Scope selector such as `per_conversation`, `per_actor`, or `route_single_thread`. |
 | `agent_ref` | Optional published manifest ref, for example `agent://karl-dev@latest`. The daemon requires an `agent://` ref and fails startup if the ref does not resolve in the effective `daemon.registries.agents` root. Publish missing refs with `cooldis agent publish`. |
 | `egress_retry` | Per-route delivery retry limits for projected assistant output. |
+
+For Telegram routes, `reaction_policy` applies only to Telegram
+`message_reaction` updates. It uses the same values as `policy` and defaults to
+`observe_only`, so human reactions are witnessed as `io.ingress.received` plus
+`admission.decided` without starting a turn unless the route opts in, for
+example `reaction_policy = "queue_per_conversation"`. Ordinary message updates
+continue to use `policy`.
+
+Telegram only delivers `message_reaction` updates when the webhook is
+registered with that update kind:
+
+```sh
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://alice.example.com/telegram",
+    "secret_token": "'"$TELEGRAM_WEBHOOK_SECRET"'",
+    "allowed_updates": [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+      "callback_query",
+      "message_reaction"
+    ]
+  }'
+```
 
 Operation-backed agent manifests, including examples such as
 `examples/agents/researcher/`, resolve against the operation registry root

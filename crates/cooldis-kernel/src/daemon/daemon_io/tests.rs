@@ -180,6 +180,36 @@ fn telegram_queue_envelope_with_update(text: &str, update_id: &str) -> IngressEn
     .with_metadata("telegram_message_id", "555")
 }
 
+fn telegram_message_reaction_update(
+    update_id: i64,
+    message_id: i64,
+    emoji: &str,
+) -> TelegramUpdate {
+    serde_json::from_value(json!({
+        "update_id": update_id,
+        "message_reaction": {
+            "chat": {
+                "id": 123,
+                "type": "private",
+                "first_name": "Ada"
+            },
+            "message_id": message_id,
+            "user": {
+                "id": 42,
+                "is_bot": false,
+                "first_name": "Ada",
+                "username": "ada"
+            },
+            "date": 1777000000,
+            "old_reaction": [],
+            "new_reaction": [
+                { "type": "emoji", "emoji": emoji }
+            ]
+        }
+    }))
+    .unwrap()
+}
+
 fn coalesce_envelope(
     text: &str,
     update_id: &str,
@@ -307,6 +337,7 @@ fn route_with_egress_and_retry(
         kind: "telegram.bot".to_string(),
         enabled: true,
         policy: None,
+        reaction_policy: None,
         threading: None,
         agent_ref: None,
         coalesce_bursts: None,
@@ -857,6 +888,28 @@ async fn wait_for_user_text(
     }
 }
 
+async fn wait_for_user_text_containing(
+    bridge: &CooldisDaemonIoBridge,
+    coordinates: &ThreadCoordinates,
+    expected: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if user_texts_for(bridge, coordinates)
+            .await
+            .iter()
+            .any(|text| text.contains(expected))
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for user text containing {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn admission_source_ids(event: &crate::EventRecord) -> Vec<String> {
     event.payload["source_ingress_event_ids"]
         .as_array()
@@ -1392,6 +1445,203 @@ async fn queue_worker_processes_sqlite_backed_envelope() {
         EgressKind::AssistantMessage { ref text } if text.contains("hello queue")
     ));
     let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn telegram_reaction_ingress_defaults_observe_only_without_turn() {
+    let root = test_root("reaction-observe");
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("queue_per_conversation".to_string());
+    let sink = Arc::new(RouteIngressSink::new(bridge.direct_sink(), &route));
+    let adapter = TelegramWebhookAdapter::new("main");
+
+    let ack = adapter
+        .submit_update(
+            sink.as_ref(),
+            &telegram_message_reaction_update(7101, 555, "👍"),
+            now_ms(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(ack.accepted);
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let ingress = control_events
+        .iter()
+        .find(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .unwrap();
+    assert_eq!(ingress.payload["external_message_id"].as_str(), Some("555"));
+    let admission = control_events
+        .iter()
+        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .unwrap();
+    assert_eq!(admission.payload["decision"].as_str(), Some("observe"));
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .count(),
+        0
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn telegram_reaction_policy_queue_starts_turn_with_event_payload() {
+    let root = test_root("reaction-queue");
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("observe_only".to_string());
+    route.reaction_policy = Some("queue_per_conversation".to_string());
+    let sink = Arc::new(RouteIngressSink::new(bridge.direct_sink(), &route));
+    let adapter = TelegramWebhookAdapter::new("main");
+
+    let ack = adapter
+        .submit_update(
+            sink.as_ref(),
+            &telegram_message_reaction_update(7102, 556, "❤️"),
+            now_ms(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(ack.accepted);
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let admission = control_events
+        .iter()
+        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .unwrap();
+    assert_eq!(admission.payload["decision"].as_str(), Some("queue"));
+    wait_for_user_text_containing(&bridge, &coordinates, "telegram.message_reaction").await;
+    wait_for_user_text_containing(&bridge, &coordinates, "\"message_id\":556").await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn telegram_reaction_policy_does_not_change_message_updates() {
+    let envelopes = Arc::new(TokioMutex::new(Vec::new()));
+    let capture = Arc::new(CaptureSink {
+        envelopes: envelopes.clone(),
+    });
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("queue_per_conversation".to_string());
+    route.reaction_policy = Some("observe_only".to_string());
+    let sink = RouteIngressSink::new(capture, &route);
+
+    sink.submit(
+        telegram_queue_envelope("ordinary").with_metadata("telegram_update_kind", "message"),
+    )
+    .await
+    .unwrap();
+
+    let captured = envelopes.lock().await;
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_route_policy")
+            .map(String::as_str),
+        Some("queue_per_conversation")
+    );
+}
+
+#[tokio::test]
+async fn telegram_reaction_policy_ignores_spoofed_update_kind_on_message() {
+    let envelopes = Arc::new(TokioMutex::new(Vec::new()));
+    let capture = Arc::new(CaptureSink {
+        envelopes: envelopes.clone(),
+    });
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("queue_per_conversation".to_string());
+    route.reaction_policy = Some("observe_only".to_string());
+    let sink = RouteIngressSink::new(capture, &route);
+
+    sink.submit(
+        telegram_queue_envelope("ordinary")
+            .with_metadata("telegram_update_kind", "message_reaction"),
+    )
+    .await
+    .unwrap();
+
+    let captured = envelopes.lock().await;
+    assert_eq!(
+        captured[0]
+            .metadata
+            .get("cooldis_route_policy")
+            .map(String::as_str),
+        Some("queue_per_conversation")
+    );
+}
+
+#[tokio::test]
+async fn telegram_reaction_observe_only_bypasses_route_coalesce_in_queued_lane() {
+    let root = test_root("reaction-queue-observe-coalesce");
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("coalesce_bursts".to_string());
+    route.coalesce_bursts = Some(CooldisCoalesceBurstsConfig {
+        window_ms: 60_000,
+        max_batch: 8,
+    });
+    let db = root.join("reaction-queue.sqlite");
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    let sink = Arc::new(RouteIngressSink::new(queue.clone(), &route));
+    let adapter = TelegramWebhookAdapter::new("main");
+
+    let ack = adapter
+        .submit_update(
+            sink.as_ref(),
+            &telegram_message_reaction_update(7103, 557, "👍"),
+            now_ms(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(ack.accepted);
+    let worker = CooldisDaemonQueueWorker::new(queue, bridge.clone(), "reaction-worker", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let ingress_index = control_events
+        .iter()
+        .position(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .unwrap();
+    let admission_index = control_events
+        .iter()
+        .position(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .unwrap();
+    assert!(ingress_index < admission_index);
+    let admission = &control_events[admission_index];
+    assert_eq!(admission.payload["decision"].as_str(), Some("observe"));
+    assert_eq!(
+        admission.payload["source_ingress_event_ids"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .count(),
+        0
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
