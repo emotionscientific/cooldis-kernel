@@ -12,9 +12,31 @@ use crate::kernel::control_decision::{
     control_stream_id,
 };
 use crate::kernel::history::{
-    CanonicalContent, CanonicalMessage, CanonicalStopReason, EventKind, EventOrigin,
-    EventProvenance, EventRecord, EventRecordId, EventStore, EventStreamId, NewEventRecord,
-    ProviderApi, SessionEntryId, SessionEntryKind, SessionStore, ThreadBaseRef, ThreadForkReason,
+    CanonicalContent,
+    CanonicalMessage,
+    CanonicalStopReason,
+    EventKind,
+    EventOrigin,
+    EventProvenance,
+    EventRecord,
+    EventRecordId,
+    EventSequence,
+    EventStore,
+    EventStreamId,
+    HistoryError,
+    HistoryResult,
+    NewEventRecord,
+    NewObservationRecord,
+    ObservationRecord,
+    // lexicon-allow: observation_store - test wrapper must implement the history observation trait
+    ObservationStore,
+    ProviderApi,
+    SessionEntry,
+    SessionEntryId,
+    SessionEntryKind,
+    SessionStore,
+    ThreadBaseRef,
+    ThreadForkReason,
     TimerFiredPayload,
 };
 use crate::{
@@ -543,6 +565,119 @@ impl AgentRuntime for EchoRuntime {
                 }
             }
         }
+    }
+}
+
+#[derive(Clone)]
+struct AdmissionAppendFailingStore {
+    inner: InMemorySessionStore,
+}
+
+impl AdmissionAppendFailingStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemorySessionStore::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionStore for AdmissionAppendFailingStore {
+    async fn append(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        self.inner.append(coordinates, parent_entry_id, kind).await
+    }
+
+    async fn active_leaf(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> HistoryResult<Option<SessionEntryId>> {
+        self.inner.active_leaf(coordinates).await
+    }
+
+    async fn select_branch(
+        &self,
+        coordinates: &ThreadCoordinates,
+        leaf_entry_id: Option<SessionEntryId>,
+    ) -> HistoryResult<()> {
+        self.inner.select_branch(coordinates, leaf_entry_id).await
+    }
+
+    async fn build_context(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> HistoryResult<SessionContext> {
+        self.inner.build_context(coordinates).await
+    }
+
+    async fn clone_branch(
+        &self,
+        source_coordinates: &ThreadCoordinates,
+        source_leaf: Option<SessionEntryId>,
+        target_coordinates: &ThreadCoordinates,
+    ) -> HistoryResult<Option<SessionEntryId>> {
+        self.inner
+            .clone_branch(source_coordinates, source_leaf, target_coordinates)
+            .await
+    }
+
+    async fn fork_by_reference(
+        &self,
+        source_coordinates: &ThreadCoordinates,
+        target_coordinates: &ThreadCoordinates,
+        base: ThreadBaseRef,
+    ) -> HistoryResult<()> {
+        self.inner
+            .fork_by_reference(source_coordinates, target_coordinates, base)
+            .await
+    }
+}
+
+#[async_trait]
+impl EventStore for AdmissionAppendFailingStore {
+    async fn append_events(
+        &self,
+        stream_id: &EventStreamId,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        if records
+            .iter()
+            .any(|record| record.kind == EventKind::AdmissionDecided)
+        {
+            return Err(HistoryError::Storage("admission append failed".to_string()));
+        }
+        self.inner.append_events(stream_id, records).await
+    }
+
+    async fn read_events(
+        &self,
+        stream_id: &EventStreamId,
+        from_sequence: Option<EventSequence>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        self.inner.read_events(stream_id, from_sequence).await
+    }
+}
+
+#[async_trait]
+// lexicon-allow: observation_store - test wrapper must implement the history observation trait
+impl ObservationStore for AdmissionAppendFailingStore {
+    async fn append_observation(
+        &self,
+        record: NewObservationRecord,
+    ) -> HistoryResult<ObservationRecord> {
+        self.inner.append_observation(record).await
+    }
+
+    async fn list_observations(
+        &self,
+        scope: &ThreadCoordinates,
+        kind: Option<&str>,
+    ) -> HistoryResult<Vec<ObservationRecord>> {
+        self.inner.list_observations(scope, kind).await
     }
 }
 
@@ -1183,6 +1318,143 @@ async fn text_submit_helper_matches_structured_text_turn_canonical_record() {
     assert_eq!(
         canonical_user_content(&old.session_context().await.unwrap()),
         canonical_user_content(&new.session_context().await.unwrap())
+    );
+}
+
+#[tokio::test]
+async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "host-submit"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn", "hello")
+        .await
+        .unwrap();
+    assert_output(&mut events, "turn:hello").await;
+
+    let control_events = store
+        .read_events(&control_stream_id(&thread.context().coordinates), None)
+        .await
+        .unwrap();
+    let thread_events = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
+    assert_eq!(
+        admission.payload["schema"],
+        EventKind::AdmissionDecided.payload_schema_id()
+    );
+    assert_eq!(admission.payload["route_id"], "surface:host-submit");
+    assert_eq!(admission.payload["decision"], "queue");
+    assert_eq!(
+        admission.payload["admissible"],
+        serde_json::json!(["queue"])
+    );
+    assert_eq!(
+        admission.payload["source_ingress_event_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(admission.origin, EventOrigin::Discharged);
+    assert_eq!(
+        admission.provenance.discharged_by.as_deref(),
+        Some("policy:admission_surface:host-submit")
+    );
+    assert_eq!(
+        admission.provenance.function.as_deref(),
+        Some("surface_admission/v1")
+    );
+    assert_eq!(
+        admission.provenance.config_hash.as_deref(),
+        admission.payload["policy_hash"].as_str()
+    );
+}
+
+#[tokio::test]
+async fn failed_admission_append_prevents_runtime_host_turn_execution() {
+    let store = Arc::new(AdmissionAppendFailingStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "failed-admission"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&thread, ThreadStatus::Idle).await;
+    let mut events = thread.subscribe_events();
+
+    let err = host
+        .submit(thread.context().coordinates.thread_id, "turn", "blocked")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("admission append failed"),
+        "unexpected error: {err}"
+    );
+
+    let output = timeout(Duration::from_millis(100), async {
+        loop {
+            if let ThreadEvent::Output { text, .. } = events.recv().await.unwrap() {
+                return text;
+            }
+        }
+    })
+    .await;
+    assert!(
+        output.is_err(),
+        "turn executed after failed admission append"
+    );
+    assert!(thread.session_context().await.unwrap().entries.is_empty());
+}
+
+#[tokio::test]
+async fn closed_thread_rejection_does_not_append_admission() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(ExitRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "closed-submit"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&thread, ThreadStatus::Failed).await;
+
+    let err = host
+        .submit(
+            thread.context().coordinates.thread_id,
+            "turn-after-close",
+            "blocked",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, CooldisError::ThreadClosed(thread_id) if thread_id == thread.context().coordinates.thread_id)
+    );
+
+    let control_events = store
+        .read_events(&control_stream_id(&thread.context().coordinates), None)
+        .await
+        .unwrap();
+    assert!(
+        control_events
+            .iter()
+            .all(|event| event.kind != EventKind::AdmissionDecided),
+        "closed thread submit must not leave an orphan admission.decided"
     );
 }
 

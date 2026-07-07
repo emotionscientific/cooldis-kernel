@@ -20,6 +20,7 @@ use cooldis_runtime_contracts::{
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 impl RuntimeThreadHandle {
     pub fn context(&self) -> &ThreadContext {
@@ -278,6 +279,15 @@ impl RuntimeThreadHandle {
             .await
             .map_err(|_| CooldisError::ThreadClosed(thread_id))?;
         Ok(())
+    }
+
+    pub async fn reserve_command(&self) -> CooldisResult<mpsc::Permit<'_, ThreadCommand>> {
+        let thread_id = self.thread.context.coordinates.thread_id;
+        self.thread
+            .command_tx
+            .reserve()
+            .await
+            .map_err(|_| CooldisError::ThreadClosed(thread_id))
     }
 
     pub async fn record_signal(&self, signal: ThreadSignal) {
