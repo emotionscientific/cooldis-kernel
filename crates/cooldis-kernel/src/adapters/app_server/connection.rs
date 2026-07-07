@@ -2932,6 +2932,46 @@ impl CooldisAppServer {
         Ok(json!({}))
     }
 
+    async fn record_rpc_ingress_received(
+        &self,
+        handle: &RuntimeThreadHandle,
+        method: &str,
+        input: &[Value],
+    ) -> Result<crate::EventRecord, JsonRpcErrorError> {
+        let coordinates = handle.context().coordinates.clone();
+        let envelope_digest = crate::agent::manifest_bind::canonical_json_hash(&json!({
+            "method": method,
+            "input": input,
+        }))
+        .map_err(internal_error)?;
+        let payload = crate::IoIngressReceivedPayload {
+            route_id: Some(format!(
+                "surface:{}",
+                crate::kernel::admission::APP_SERVER_RPC_SURFACE
+            )),
+            dedupe_key: None,
+            external_conversation_id: None,
+            external_actor_id: None,
+            external_message_id: None,
+            envelope_digest,
+        };
+        let mut value = serde_json::to_value(payload).map_err(json_codec_error)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "schema".to_string(),
+                json!(crate::EventKind::IoIngressReceived.payload_schema_id()),
+            );
+        }
+        handle
+            .append_control_event(crate::NewEventRecord::witnessed(
+                coordinates,
+                crate::EventKind::IoIngressReceived,
+                value,
+            ))
+            .await
+            .map_err(internal_error)
+    }
+
     pub(super) async fn turn_start(
         &self,
         connection: &ConnectionState,
@@ -2939,7 +2979,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let handle = self.handle_for_thread(&params.thread_id).await?;
         let coordinates = handle.context().coordinates.clone();
-        connection.subscribe_thread(handle).await;
+        connection.subscribe_thread(handle.clone()).await;
         let turn_id = format!("turn-{}", Uuid::now_v7());
         let input = turn_input_from_values(&params.input)
             .with_provider(self.inner.model_provider.clone())
@@ -2958,6 +2998,17 @@ impl CooldisAppServer {
         } else {
             input
         };
+        let ingress_event = self
+            .record_rpc_ingress_received(&handle, "turn/start", &params.input)
+            .await?;
+        let admission = crate::kernel::admission::AdmissionGateContext::surface_default(
+            crate::kernel::admission::APP_SERVER_RPC_SURFACE,
+            vec![ingress_event.id],
+        )
+        .map_err(internal_error)?;
+        crate::kernel::admission::append_admission_decided(&handle, admission)
+            .await
+            .map_err(internal_error)?;
         let turn = {
             let mut state = self.inner.state.write().await;
             let thread = state
@@ -2977,11 +3028,12 @@ impl CooldisAppServer {
 
         self.inner
             .supervisor
-            .submit_turn_to_with_mode(
+            .submit_turn_to_with_admission(
                 &coordinates,
                 turn_id.clone(),
                 input,
                 TurnSubmissionMode::Queue,
+                None,
             )
             .await
             .map_err(internal_error)?;

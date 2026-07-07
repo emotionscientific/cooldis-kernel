@@ -138,6 +138,85 @@ fn thinking_params_reject_malformed_shapes() {
     }
 }
 
+#[tokio::test]
+async fn app_server_turn_start_records_surface_admission_before_execution() {
+    use crate::EventStore;
+
+    let app = test_app().await;
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn = app
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "admission rpc", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    let turn_id = turn["turn"]["id"].as_str().unwrap().to_string();
+    wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &turn_id).await;
+
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .unwrap()
+        .unwrap();
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let control_events = session_store
+        .read_events(&crate::control_stream_id(&lifecycle.coordinates), None)
+        .await
+        .unwrap();
+    let thread_events = session_store
+        .read_events(
+            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
+    assert_eq!(
+        admission.payload["schema"],
+        crate::EventKind::AdmissionDecided.payload_schema_id()
+    );
+    assert_eq!(admission.payload["route_id"], "surface:app-server-rpc");
+    assert_eq!(admission.payload["decision"], "queue");
+    assert_eq!(admission.payload["admissible"], json!(["queue"]));
+    let source_ids = admission.payload["source_ingress_event_ids"]
+        .as_array()
+        .unwrap();
+    assert_eq!(source_ids.len(), 1);
+    let source_id = source_ids[0].as_str().unwrap();
+    assert!(control_events.iter().any(|event| {
+        event.kind == crate::EventKind::IoIngressReceived && event.id.to_string() == source_id
+    }));
+    assert_eq!(admission.origin, EventOrigin::Discharged);
+    assert_eq!(
+        admission.provenance.discharged_by.as_deref(),
+        Some("policy:admission_surface:app-server-rpc")
+    );
+    assert_eq!(
+        admission.provenance.function.as_deref(),
+        Some("surface_admission/v1")
+    );
+    assert_eq!(
+        admission.provenance.config_hash.as_deref(),
+        admission.payload["policy_hash"].as_str()
+    );
+}
+
 #[test]
 fn assistant_content_projection_concatenates_thinking_chunks_like_streaming() {
     let messages = vec![
@@ -4420,12 +4499,37 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         control_stream["streamCursor"]["schema"].as_str(),
         Some("cooldis.stream.cursor/1")
     );
+    let redaction_export = app
+        .dispatch_request(
+            &connection,
+            "thread/debug/export",
+            Some(json!({
+                "threadId": thread_id,
+                "streams": ["control"],
+                "includeThread": false,
+                "maxEventsPerStream": 3,
+            })),
+        )
+        .await
+        .unwrap();
+    let redaction_control = redaction_export["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stream| stream["selector"].as_str() == Some("control"))
+        .unwrap();
+    let mandate_export = redaction_control["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"].as_str() == Some("mandate.started"))
+        .unwrap();
     assert_eq!(
-        control_stream["data"][0]["payload"]["api_key"].as_str(),
+        mandate_export["payload"]["api_key"].as_str(),
         Some("[REDACTED]")
     );
     assert!(
-        export["redaction"]["redactedKeys"]
+        redaction_export["redaction"]["redactedKeys"]
             .as_array()
             .unwrap()
             .contains(&json!("api_key"))

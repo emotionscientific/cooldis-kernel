@@ -88,6 +88,32 @@ async fn codex_tui_driver_runs_prompt_against_app_server() {
             .iter()
             .any(|notification| { notification.method == "item/agentMessage/delta" })
     );
+    let control_page = client
+        .request(
+            "thread/events/list",
+            json!({
+                "threadId": completed.thread_id,
+                "stream": "control",
+            }),
+        )
+        .await
+        .unwrap();
+    let thread_page = client
+        .request(
+            "thread/events/list",
+            json!({
+                "threadId": completed.thread_id,
+            }),
+        )
+        .await
+        .unwrap();
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_values(
+        control_page["data"].as_array().unwrap(),
+        thread_page["data"].as_array().unwrap(),
+    );
+    assert_eq!(admission["payload"]["route_id"], "surface:app-server-rpc");
+    assert_eq!(admission["payload"]["decision"], "queue");
+    assert_eq!(admission["payload"]["admissible"], json!(["queue"]));
 
     client.close().await.unwrap();
     server_task.abort();

@@ -1,5 +1,8 @@
 use crate::CompactionTrigger;
 use crate::agent::manifest_bind::BoundCouplingSet;
+use crate::kernel::admission::{
+    AdmissionGateContext, HOST_SUBMIT_SURFACE, append_admission_decided,
+};
 use crate::kernel::control_decision::{TurnContinuationDecision, TurnContinuationDecisionRequest};
 use crate::kernel::history::{InMemorySessionStore, RuntimeStore, SessionContext, ThreadBaseRef};
 use cooldis_agent::CooldisAgentError;
@@ -569,10 +572,12 @@ impl RuntimeHost {
                     *accepted_event_id,
                 )
                 .await?;
-                self.submit(
+                self.submit_turn_with_admission(
                     thread_id,
                     next_turn_id.clone(),
-                    request_payload.next_turn_input,
+                    TurnInput::text(request_payload.next_turn_input),
+                    TurnSubmissionMode::Queue,
+                    None,
                 )
                 .await?;
             }
@@ -620,8 +625,14 @@ impl RuntimeHost {
                     accepted.id,
                 )
                 .await?;
-                self.submit(thread_id, next_turn_id.clone(), next_turn_input)
-                    .await?;
+                self.submit_turn_with_admission(
+                    thread_id,
+                    next_turn_id.clone(),
+                    TurnInput::text(next_turn_input),
+                    TurnSubmissionMode::Queue,
+                    None,
+                )
+                .await?;
                 Ok(LoopContinuationReceipt::Accepted {
                     loop_id,
                     parent_turn_id,
@@ -660,6 +671,19 @@ impl RuntimeHost {
         input: TurnInput,
         mode: TurnSubmissionMode,
     ) -> CooldisResult<()> {
+        let admission = AdmissionGateContext::surface_default(HOST_SUBMIT_SURFACE, Vec::new())?;
+        self.submit_turn_with_admission(thread_id, turn_id, input, mode, Some(admission))
+            .await
+    }
+
+    pub(crate) async fn submit_turn_with_admission(
+        &self,
+        thread_id: ThreadId,
+        turn_id: impl Into<String>,
+        input: TurnInput,
+        mode: TurnSubmissionMode,
+        admission: Option<AdmissionGateContext>,
+    ) -> CooldisResult<()> {
         let turn_id = turn_id.into();
         let thread = self.get_thread(thread_id).await?;
         if mode == TurnSubmissionMode::Queue
@@ -680,6 +704,9 @@ impl RuntimeHost {
                     message,
                 });
             }
+        }
+        if let Some(admission) = admission {
+            append_admission_decided(&thread, admission).await?;
         }
         let turn_sequence = thread.next_turn_sequence();
         thread

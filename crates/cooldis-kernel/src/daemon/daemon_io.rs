@@ -1,7 +1,8 @@
 use crate::agent::manifest_bind::canonical_json_hash;
+use crate::kernel::admission::{AdmissionGateContext, append_admission_decided};
 use crate::{
-    AdmissionDecidedPayload, AdmissionDecision as EventAdmissionDecision, CLOCK_TICK_ROUTE_KIND,
-    CanonicalContent, CanonicalMessage, CooldisAppServer, CooldisCoalesceBurstsConfig,
+    AdmissionDecision as EventAdmissionDecision, CLOCK_TICK_ROUTE_KIND, CanonicalContent,
+    CanonicalMessage, CooldisAppServer, CooldisCoalesceBurstsConfig,
     CooldisEgressProjectionRuleConfig, CooldisEgressRetryConfig, CooldisError,
     CooldisIoRouteConfig, CooldisResult, CooldisSupervisor, CooldisTypingSimulationConfig,
     EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore,
@@ -1013,43 +1014,18 @@ impl CooldisDaemonIoBridge {
             .await
             .map_err(cooldis_bridge_error)?;
         let route_id = route_id_for_envelope(envelope);
-        let payload = AdmissionDecidedPayload {
-            route_id: route_id.clone(),
-            policy_hash: policy_hash.to_string(),
-            decision: if coalesced {
+        let context = AdmissionGateContext::route_policy(
+            route_id,
+            policy_hash.to_string(),
+            if coalesced {
                 EventAdmissionDecision::Coalesce
             } else {
                 event_admission_decision(decision)
             },
-            admissible: Some(admissible_decisions_for_envelope(envelope)),
-            source_ingress_event_ids: ingress_event_ids.clone(),
-        };
-        let mut value = serde_json::to_value(payload).map_err(|err| {
-            IoError::Bridge(format!("admission.decided payload codec failed: {err}"))
-        })?;
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "schema".to_string(),
-                json!(EventKind::AdmissionDecided.payload_schema_id()),
-            );
-        }
-        handle
-            .append_control_event(NewEventRecord::discharged(
-                coordinates.clone(),
-                EventKind::AdmissionDecided,
-                value,
-                EventProvenance {
-                    source_streams: vec![crate::EventStreamId::new(format!(
-                        "control:{}",
-                        coordinates.thread_id
-                    ))],
-                    source_event_ids: ingress_event_ids,
-                    discharged_by: Some(format!("policy:admission_route:{route_id}")),
-                    function: Some("admission_route/v1".to_string()),
-                    config_hash: Some(policy_hash.to_string()),
-                    ..EventProvenance::default()
-                },
-            ))
+            admissible_decisions_for_envelope(envelope),
+            ingress_event_ids,
+        );
+        append_admission_decided(&handle, context)
             .await
             .map_err(cooldis_bridge_error)
     }
@@ -1222,11 +1198,12 @@ impl CooldisDaemonIoBridge {
             .await
             .insert(target.address.scope_key(), child_key.to_string());
         self.supervisor
-            .submit_turn_to_with_mode(
+            .submit_turn_to_with_admission(
                 &child_coordinates,
                 child_key.to_string(),
                 self.runtime_input(input),
                 TurnSubmissionMode::Queue,
+                None,
             )
             .await
             .map_err(cooldis_bridge_error)?;
@@ -1827,11 +1804,12 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                     .await
                     .insert(target.address.scope_key(), turn_id.clone());
                 self.supervisor
-                    .submit_turn_to_with_mode(
+                    .submit_turn_to_with_admission(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
                         TurnSubmissionMode::Queue,
+                        None,
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
@@ -1850,11 +1828,12 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                     .await
                     .insert(target.address.scope_key(), turn_id.clone());
                 self.supervisor
-                    .submit_turn_to_with_mode(
+                    .submit_turn_to_with_admission(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
                         TurnSubmissionMode::Steer,
+                        None,
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
@@ -1882,11 +1861,12 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                         .await
                         .insert(target.address.scope_key(), turn_id.clone());
                     self.supervisor
-                        .submit_turn_to_with_mode(
+                        .submit_turn_to_with_admission(
                             &coordinates,
                             turn_id.clone(),
                             self.runtime_input(input),
                             TurnSubmissionMode::Interrupt,
+                            None,
                         )
                         .await
                         .map_err(cooldis_bridge_error)?;

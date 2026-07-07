@@ -293,6 +293,34 @@ child-thread creation rules
 The model cannot grant itself new powers. Publish and start must validate that
 declared tools, resources, couplings, and effects are allowed.
 
+### Admission
+
+There is one admission law: no turn entry is scheduled unless the admissible set
+and selected decision have first been recorded. Turn-starting surfaces project
+that law as `admission.decided` on the thread's control stream before the
+runtime command is enqueued. Daemon ingress records its route policy context
+(`route_id`, route policy hash, admissible route decisions, and source
+`io.ingress.received` event ids) and then schedules through the already-admitted
+runtime path so it cannot double emit.
+
+Non-daemon turn-starting surfaces use the `surface:<name>` route convention. The
+app-server RPC path records `surface:app-server-rpc`; direct
+`RuntimeHost::submit*` records `surface:host-submit`. Their policy hash is the
+canonical hash of the declared trivial surface policy, not an empty string. The
+current journal schema has queue/steer/interrupt/fork/observe/reject/coalesce
+decision values, so the trivial admitted surface policy lowers to
+`decision = "queue"` with `admissible = ["queue"]`. App-server RPC first
+witnesses the input as `io.ingress.received` and names that event in
+`source_ingress_event_ids`; direct host submit has no ingress event, so its
+source list is intentionally empty. CLI chat submits through the operator RPC
+path and inherits the app-server surface admission record.
+
+In-loop continuations use the same admission law through the continuation gate:
+`turn.continuation.accepted` or `turn.continuation.rejected` records the
+decision over the requested continuation. Those event kinds remain distinct for
+now. Event-kind unification between continuation decisions and
+`admission.decided` is a named roadmap item, not part of the current schema.
+
 ### Topology And Delegation
 
 How this agent may create or interact with child threads.
