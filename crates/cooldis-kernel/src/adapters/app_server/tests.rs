@@ -2718,7 +2718,7 @@ streaming = false
 }
 
 #[tokio::test]
-async fn folder_first_prompt_reaches_route_bound_agent_provider_request() {
+async fn explicit_context_folder_first_prompt_reaches_route_bound_agent_provider_request() {
     let root = unique_test_root("app-server-folder-first-prompt");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -2759,14 +2759,36 @@ type = "direct_tool"
 id = "lookup"
 tool_name = "lookup"
 operation_ref = "op://lookup/lookup@sha256:{operation_hash}"
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = {{ stream = "thread", since = "anchor|start" }}
+budget_share = 0.75
 "#,
             operation_hash = operation.active_artifact_hash
         ),
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    let record = LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
+    let prompt_ref = record.resolved_manifest["resources"][0]["ref"]
+        .as_str()
+        .unwrap();
+    let prompt_hash = prompt_ref
+        .strip_prefix("resource://artifact/sha256:")
+        .unwrap();
+    let expected_prompt_digest = format!("sha256:{prompt_hash}");
 
     let client = Arc::new(InspectingCapsuleClient::default());
     let provider_client: Arc<dyn ProviderClient> = client.clone();
@@ -2847,10 +2869,30 @@ operation_ref = "op://lookup/lookup@sha256:{operation_hash}"
         wait_for_event_kind(&app, &connection, &thread_id, "context.compile.completed").await;
     let segment = &context_page["data"][0]["payload"]["static_context_segments"][0];
     assert_eq!(segment["id"].as_str(), Some("identity"));
-    assert!(
-        segment["content_sha256"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
+    assert_eq!(
+        segment["content_sha256"].as_str(),
+        Some(expected_prompt_digest.as_str())
+    );
+    let bind_page = app
+        .dispatch_request(
+            &connection,
+            "thread/events/list",
+            Some(json!({
+                "threadId": thread_id,
+                "kinds": ["manifest.bind.completed"],
+            })),
+        )
+        .await
+        .unwrap();
+    let bound_segment = &bind_page["data"][0]["payload"]["static_context_segments"][0];
+    assert_eq!(bound_segment["id"].as_str(), Some("identity"));
+    assert_eq!(
+        bound_segment["content_sha256"].as_str(),
+        Some(expected_prompt_digest.as_str())
+    );
+    assert_eq!(
+        bound_segment["content_sha256"].as_str(),
+        segment["content_sha256"].as_str()
     );
     let _ = std::fs::remove_dir_all(root);
 }

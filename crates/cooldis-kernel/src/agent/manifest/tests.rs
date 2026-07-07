@@ -77,6 +77,26 @@ ref = "{resource_ref}"
     )
 }
 
+fn folder_first_manifest_source(name: &str, context: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "{name}"
+version = "1.0.0"
+description = "Checks a release branch."
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+{context}
+"#
+    )
+}
+
 fn seed_operation_record(
     root: &Path,
     name: &str,
@@ -155,6 +175,234 @@ fn seed_tailcat_operation_root(label: &str) -> PathBuf {
     let operation_root = temp_root(label);
     seed_operation_record(&operation_root, "tailcat", hash(), &[("cat", &[])]);
     operation_root
+}
+
+#[test]
+fn folder_first_prompt_lowers_into_explicit_context_pipeline() {
+    let root = temp_root("folder-first-explicit-context");
+    let project = root.join("agent");
+    fs::create_dir_all(project.join("prompts")).unwrap();
+    let prompt_text = "You are the folder-first explicit context agent.\n";
+    fs::write(project.join("prompts/system.md"), prompt_text).unwrap();
+    let source = folder_first_manifest_source(
+        "release-verifier",
+        r#"
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = { stream = "thread", since = "anchor|start" }
+budget_share = 0.75
+"#,
+    );
+    let manifest_path = project.join("cooldis.agent.toml");
+    fs::write(&manifest_path, source).unwrap();
+    let blob_root = root.join("blobs");
+
+    let plan = AgentPublishPlan::from_path_with_blob_registry(&manifest_path, &blob_root).unwrap();
+
+    assert_eq!(plan.resource_count, 1);
+    let resource = &plan.resolved_manifest["resources"][0];
+    assert_eq!(resource["name"].as_str(), Some("identity"));
+    let prompt_ref = resource["ref"].as_str().unwrap();
+    assert!(prompt_ref.starts_with("resource://artifact/sha256:"));
+    let context_sources = plan.resolved_manifest["context"]["sources"]
+        .as_array()
+        .unwrap();
+    assert_eq!(context_sources[0]["id"].as_str(), Some("identity"));
+    assert_eq!(context_sources[0]["input"].as_str(), Some("identity"));
+    assert_eq!(context_sources[1]["id"].as_str(), Some("history"));
+    assert_eq!(context_sources[1]["budget_share"].as_f64(), Some(0.75));
+    assert!(
+        plan.resolved_refs
+            .iter()
+            .any(|resolved| resolved.declared == prompt_ref)
+    );
+    let (_record, published_prompt) = LocalBlobRegistry::new(blob_root)
+        .load_text_ref(prompt_ref)
+        .unwrap();
+    assert_eq!(published_prompt, prompt_text);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn folder_first_prompt_rejects_explicit_identity_input() {
+    let root = temp_root("folder-first-identity-input");
+    let project = root.join("agent");
+    fs::create_dir_all(project.join("prompts")).unwrap();
+    fs::write(
+        project.join("prompts/system.md"),
+        "Prompt from folder-first file.\n",
+    )
+    .unwrap();
+    let source = folder_first_manifest_source(
+        "release-verifier",
+        r#"
+[[resources]]
+name = "declared_prompt"
+kind = "blob"
+ref = "resource://declared-prompt@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+input = "declared_prompt"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = { stream = "thread", since = "anchor|start" }
+budget_share = "rest"
+"#,
+    );
+    let manifest_path = project.join("cooldis.agent.toml");
+    fs::write(&manifest_path, source).unwrap();
+
+    let err = AgentPublishPlan::from_path_with_blob_registry(&manifest_path, root.join("blobs"))
+        .unwrap_err();
+
+    let text = err.to_string();
+    assert!(text.contains("prompts/system.md"));
+    assert!(text.contains("identity"));
+    assert!(text.contains("drop the input"));
+    assert!(text.contains("move the file out of prompts/system.md"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn folder_first_prompt_rejects_declared_identity_resource_with_legal_escape_hatch() {
+    let root = temp_root("folder-first-identity-resource");
+    let project = root.join("agent");
+    fs::create_dir_all(project.join("prompts")).unwrap();
+    fs::write(
+        project.join("prompts/system.md"),
+        "Prompt from folder-first file.\n",
+    )
+    .unwrap();
+    let source = folder_first_manifest_source(
+        "release-verifier",
+        r#"
+[[resources]]
+name = "identity"
+kind = "blob"
+ref = "resource://declared-prompt@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = { stream = "thread", since = "anchor|start" }
+budget_share = "rest"
+"#,
+    );
+    let manifest_path = project.join("cooldis.agent.toml");
+    fs::write(&manifest_path, source).unwrap();
+    let blob_root = root.join("blobs");
+
+    let err =
+        AgentPublishPlan::from_path_with_blob_registry(&manifest_path, &blob_root).unwrap_err();
+
+    let text = err.to_string();
+    assert!(text.contains("already declares resource \"identity\""));
+    assert!(text.contains("remove or rename that resource"));
+    assert!(text.contains("point the identity static source at a declared resource explicitly"));
+    assert!(!blob_root.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn folder_first_prompt_validates_before_publishing_blob() {
+    let root = temp_root("folder-first-invalid-context");
+    let project = root.join("agent");
+    fs::create_dir_all(project.join("prompts")).unwrap();
+    fs::write(
+        project.join("prompts/system.md"),
+        "Prompt from folder-first file.\n",
+    )
+    .unwrap();
+    let source = folder_first_manifest_source(
+        "release-verifier",
+        r#"
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = { stream = "thread", since = "anchor|start" }
+budget_share = 1.25
+"#,
+    );
+    let manifest_path = project.join("cooldis.agent.toml");
+    fs::write(&manifest_path, source).unwrap();
+    let blob_root = root.join("blobs");
+
+    let err =
+        AgentPublishPlan::from_path_with_blob_registry(&manifest_path, &blob_root).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("budget_share fraction must be in (0, 1]")
+    );
+    assert!(!blob_root.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn non_folder_first_inputless_identity_static_source_still_rejects() {
+    let source = folder_first_manifest_source(
+        "release-verifier",
+        r#"
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = { stream = "thread", since = "anchor|start" }
+budget_share = "rest"
+"#,
+    );
+
+    let err = AgentPublishPlan::from_source(&source).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("static context source \"identity\" requires input")
+    );
 }
 
 #[test]

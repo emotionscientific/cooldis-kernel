@@ -48,7 +48,8 @@ agent://release-verifier@0.3.1
 Mutable names can exist for ergonomics, but they should lower to immutable
 records at publish or run time. In a folder-first agent project,
 `prompts/system.md` lowers to a blob resource and is wired into the `identity`
-static context source:
+static context source, including when the manifest declares an explicit
+`[context]` pipeline whose `identity` static source leaves `input` unset:
 
 ```text
 agent publish
@@ -226,7 +227,11 @@ record selection over discharged events
 
 Context pipelines consume resources, discharged events, and thread history.
 Blob access belongs to resources and grants; blob inclusion in a prompt
-belongs to the pipeline.
+belongs to the pipeline. When `prompts/system.md` exists, declaring an
+explicit `input` on the `identity` static source is rejected because prompt
+provenance would be ambiguous; either leave `input` unset for folder-first
+lowering or move the file out of `prompts/system.md` and point at a declared
+resource explicitly.
 
 ### Observations And Memory
 

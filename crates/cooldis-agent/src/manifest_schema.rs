@@ -60,6 +60,16 @@ impl AgentManifestSchema {
     /// it. Reserved sections are rejected with errors naming the deferral;
     /// unknown keys anywhere fail closed.
     pub fn from_toml_value(value: &toml::Value) -> CooldisResult<Self> {
+        let manifest = Self::from_toml_value_unvalidated(value)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Parse a manifest TOML document into the typed V1 schema before
+    /// cross-field validation. This is only for kernel lowerers that fill in
+    /// source-derived fields before running [`AgentManifestSchema::validate`].
+    #[doc(hidden)]
+    pub fn from_toml_value_unvalidated(value: &toml::Value) -> CooldisResult<Self> {
         let table = value.as_table().ok_or_else(|| {
             CooldisError::RuntimeFactory("agent manifest must be a TOML table".to_string())
         })?;
@@ -118,7 +128,6 @@ impl AgentManifestSchema {
             policies,
             runtime,
         };
-        manifest.validate()?;
         Ok(manifest)
     }
 

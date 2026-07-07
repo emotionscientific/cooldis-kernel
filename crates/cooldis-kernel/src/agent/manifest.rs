@@ -18,6 +18,8 @@ use uuid::Uuid;
 const AGENT_RECORD_SCHEMA_VERSION: u32 = 1;
 const AGENT_MANIFEST_KIND: &str = "cooldis.agent-manifest";
 const FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE: &str = "identity";
+const FOLDER_FIRST_SYSTEM_PROMPT_PREFLIGHT_REF: &str =
+    "resource://artifact/sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 pub fn default_operations_registry_root() -> PathBuf {
     PathBuf::from(".cooldis/operations")
@@ -480,8 +482,17 @@ impl AgentPublishPlan {
     ) -> CooldisResult<Self> {
         let prompt_path = manifest_dir.join("prompts/system.md");
         Self::from_source_with_manifest(source, |value| {
-            let mut manifest = AgentManifestSchema::from_toml_value(value)?;
-            lower_folder_first_system_prompt(&mut manifest, &prompt_path, blob_registry_root)?;
+            let mut manifest = AgentManifestSchema::from_toml_value_unvalidated(value)?;
+            let lowering = prevalidate_folder_first_system_prompt(&manifest, &prompt_path)?;
+            lower_folder_first_system_prompt(
+                &mut manifest,
+                &prompt_path,
+                blob_registry_root,
+                lowering,
+            )?;
+            if lowering == FolderFirstPromptLowering::Lower {
+                manifest.validate()?;
+            }
             Ok(manifest)
         })
     }
@@ -964,13 +975,49 @@ fn compile_resolved_refs(manifest: &AgentManifestSchema) -> Vec<AgentManifestRes
     refs
 }
 
-fn lower_folder_first_system_prompt(
-    manifest: &mut AgentManifestSchema,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderFirstPromptLowering {
+    Lower,
+    Skip,
+}
+
+fn prevalidate_folder_first_system_prompt(
+    manifest: &AgentManifestSchema,
     prompt_path: &Path,
-    blob_registry_root: &Path,
-) -> CooldisResult<()> {
-    if !prompt_path.exists() || !identity_static_source_has_empty_input(manifest) {
-        return Ok(());
+) -> CooldisResult<FolderFirstPromptLowering> {
+    let lowering = folder_first_system_prompt_lowering(manifest, prompt_path)?;
+    match lowering {
+        FolderFirstPromptLowering::Skip => manifest.validate()?,
+        FolderFirstPromptLowering::Lower => {
+            let mut lowered = manifest.clone();
+            inject_folder_first_system_prompt_resource(
+                &mut lowered,
+                FOLDER_FIRST_SYSTEM_PROMPT_PREFLIGHT_REF.to_string(),
+            )?;
+            lowered.validate()?;
+        }
+    }
+    Ok(lowering)
+}
+
+fn folder_first_system_prompt_lowering(
+    manifest: &AgentManifestSchema,
+    prompt_path: &Path,
+) -> CooldisResult<FolderFirstPromptLowering> {
+    if !prompt_path.exists() {
+        return Ok(FolderFirstPromptLowering::Skip);
+    }
+    match identity_static_source_input(manifest) {
+        Some(Some(input)) => {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "folder-first prompt lowering found {}, but the identity static context source already declares input {input:?}; drop the input so prompts/system.md can lower to the identity resource, or move the file out of prompts/system.md to keep the explicit input",
+                prompt_path.display()
+            )));
+        }
+        Some(None) => {}
+        None => {
+            return Ok(FolderFirstPromptLowering::Skip);
+        }
     }
     if manifest
         .resources
@@ -978,36 +1025,52 @@ fn lower_folder_first_system_prompt(
         .any(|resource| resource.name == FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE)
     {
         return Err(CooldisError::RuntimeFactory(format!(
-            "folder-first prompt lowering wants to create resource {:?}, but the manifest already declares that resource; either point the identity static source at it explicitly or rename the resource",
+            "folder-first prompt lowering found {}, but the manifest already declares resource {:?}; remove or rename that resource so prompts/system.md can lower to the identity resource, or move the file out of prompts/system.md and point the identity static source at a declared resource explicitly",
+            prompt_path.display(),
             FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE
         )));
     }
+    Ok(FolderFirstPromptLowering::Lower)
+}
+
+fn lower_folder_first_system_prompt(
+    manifest: &mut AgentManifestSchema,
+    prompt_path: &Path,
+    blob_registry_root: &Path,
+    lowering: FolderFirstPromptLowering,
+) -> CooldisResult<()> {
+    if lowering == FolderFirstPromptLowering::Skip {
+        return Ok(());
+    }
     let blob = LocalBlobRegistry::new(blob_registry_root)
         .publish_file(prompt_path, Some(FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE))?;
+    inject_folder_first_system_prompt_resource(manifest, blob.ref_uri)
+}
+
+fn inject_folder_first_system_prompt_resource(
+    manifest: &mut AgentManifestSchema,
+    reference: String,
+) -> CooldisResult<()> {
     manifest.resources.push(AgentManifestResource {
         name: FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE.to_string(),
         kind: AgentManifestResourceKind::Blob,
-        reference: blob.ref_uri,
+        reference,
         mount: AgentManifestResourceMount::Context,
         mode: AgentManifestResourceMode::Read,
     });
     let mut context = manifest.effective_context_pipeline();
     resolve_identity_static_source(&mut context)?;
     manifest.context = Some(context);
-    manifest.validate()?;
     Ok(())
 }
 
-fn identity_static_source_has_empty_input(manifest: &AgentManifestSchema) -> bool {
+fn identity_static_source_input(manifest: &AgentManifestSchema) -> Option<Option<String>> {
     manifest
         .effective_context_pipeline()
         .sources
-        .iter()
-        .any(|source| {
-            source.id == "identity"
-                && source.assembler == KERNEL_ASSEMBLER_STATIC
-                && source.input.is_none()
-        })
+        .into_iter()
+        .find(|source| source.id == "identity" && source.assembler == KERNEL_ASSEMBLER_STATIC)
+        .map(|source| source.input)
 }
 
 fn resolve_identity_static_source(context: &mut AgentManifestContextPipeline) -> CooldisResult<()> {

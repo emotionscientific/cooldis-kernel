@@ -36,14 +36,20 @@ cooldis agent run agent://release-verifier@latest --input "check the branch"
 The generated manifest is valid immediately for planning. `prompts/system.md`
 is the folder-first system prompt: `agent plan` and `agent publish` lower it to
 an immutable blob resource and wire it into the `identity` static context source
-when that source has no explicit input. `components/couplings.toml`
-contains the frozen V1 coupling template ids: async queue, completion callback,
-context spill/truncate/summarize, memory preview, schedule/retry/deadletter,
-permission/control, prompt steering, and channel ingress/egress. Custom
-operation packages live under `operations/` and should be published first; then
-add their pinned `op://...@sha256:<hash>` refs to `cooldis.agent.toml` before
-publishing the agent. `cooldis agent init --out path.toml` keeps the old
-single-manifest file form for compatibility.
+when that source has no explicit input. This works for the synthesized default
+pipeline and for an explicit `[context]` pipeline that leaves the `identity`
+static source input unset so other sources can declare their own
+`budget_share`. If `prompts/system.md` exists and the explicit `identity`
+source also declares an `input`, planning and publishing reject it as ambiguous:
+drop the input to use folder-first lowering, or move the file out of
+`prompts/system.md` and point at a declared resource explicitly.
+`components/couplings.toml` contains the frozen V1 coupling template ids: async
+queue, completion callback, context spill/truncate/summarize, memory preview,
+schedule/retry/deadletter, permission/control, prompt steering, and channel
+ingress/egress. Custom operation packages live under `operations/` and should
+be published first; then add their pinned `op://...@sha256:<hash>` refs to
+`cooldis.agent.toml` before publishing the agent. `cooldis agent init --out
+path.toml` keeps the old single-manifest file form for compatibility.
 
 `plan` is the dry-run boundary for agent records. It parses the source manifest,
 validates the identity envelope, resolves the canonical JSON shape, computes

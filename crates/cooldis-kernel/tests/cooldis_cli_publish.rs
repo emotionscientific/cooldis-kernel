@@ -197,6 +197,98 @@ fn cooldis_cli_init_creates_folder_first_agent_project() {
 }
 
 #[test]
+fn cooldis_cli_agent_plan_publish_accepts_explicit_folder_first_context() {
+    let workspace = temp_dir("agent-explicit-folder-context");
+    let project = workspace.join("explicit-runner");
+    fs::create_dir_all(project.join("prompts")).unwrap();
+    let prompt_text = "You are the explicit folder-first runner.\n";
+    fs::write(project.join("prompts/system.md"), prompt_text).unwrap();
+    let manifest_path = project.join("cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "explicit-runner"
+version = "0.1.0"
+description = "Uses an explicit folder-first context pipeline."
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[runtime]
+default_cwd = "."
+streaming = false
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = { stream = "thread", since = "anchor|start" }
+budget_share = 0.75
+"#,
+    )
+    .unwrap();
+    let registry_root = workspace.join("agents");
+    let operation_registry_root = workspace.join("operations");
+
+    let plan = run_cooldis([
+        "agent",
+        "plan",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let plan_context_line = plan
+        .lines()
+        .find(|line| line.starts_with("context_source: identity -> "))
+        .unwrap_or_else(|| panic!("plan output did not include identity context source:\n{plan}"))
+        .to_string();
+    assert!(plan.contains("resources: 1"));
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    assert!(publish.contains("published agent://explicit-runner@0.1.0"));
+    assert!(publish.contains(&plan_context_line));
+
+    let record = agent_record(&registry_root, "explicit-runner");
+    assert_eq!(record.resource_count, 1);
+    let prompt_ref = record.resolved_manifest["resources"][0]["ref"]
+        .as_str()
+        .unwrap();
+    assert!(plan_context_line.contains(prompt_ref));
+    assert_eq!(
+        record.resolved_manifest["context"]["sources"][1]["budget_share"].as_f64(),
+        Some(0.75)
+    );
+    let (_prompt_record, published_prompt) = LocalBlobRegistry::new(workspace.join("blobs"))
+        .load_text_ref(prompt_ref)
+        .unwrap();
+    assert_eq!(published_prompt, prompt_text);
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
 fn cooldis_cli_blob_publish_is_idempotent() {
     let root = temp_dir("blob-publish-cli");
     let file = root.join("system.md");
