@@ -1422,6 +1422,43 @@ async fn failed_admission_append_prevents_runtime_host_turn_execution() {
 }
 
 #[tokio::test]
+async fn closed_thread_rejection_does_not_append_admission() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(ExitRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "closed-submit"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&thread, ThreadStatus::Failed).await;
+
+    let err = host
+        .submit(
+            thread.context().coordinates.thread_id,
+            "turn-after-close",
+            "blocked",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, CooldisError::ThreadClosed(thread_id) if thread_id == thread.context().coordinates.thread_id)
+    );
+
+    let control_events = store
+        .read_events(&control_stream_id(&thread.context().coordinates), None)
+        .await
+        .unwrap();
+    assert!(
+        control_events
+            .iter()
+            .all(|event| event.kind != EventKind::AdmissionDecided),
+        "closed thread submit must not leave an orphan admission.decided"
+    );
+}
+
+#[tokio::test]
 async fn structured_image_turn_maps_to_canonical_user_content() {
     let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
     let thread = host

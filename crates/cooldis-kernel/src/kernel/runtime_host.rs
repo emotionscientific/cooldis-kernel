@@ -705,17 +705,16 @@ impl RuntimeHost {
                 });
             }
         }
+        let command_permit = thread.reserve_command().await?;
         if let Some(admission) = admission {
             append_admission_decided(&thread, admission).await?;
         }
         let turn_sequence = thread.next_turn_sequence();
-        thread
-            .send(ThreadCommand::Submit {
-                turn_id: turn_id.clone(),
-                input,
-                mode,
-            })
-            .await?;
+        command_permit.send(ThreadCommand::Submit {
+            turn_id: turn_id.clone(),
+            input,
+            mode,
+        });
         self.spawn_turn_timeout_watchdog(thread.clone(), turn_sequence);
         thread
             .record_signal(ThreadSignal::user_submit(

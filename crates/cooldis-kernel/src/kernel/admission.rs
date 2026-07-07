@@ -131,13 +131,16 @@ pub(crate) fn assert_admission_precedes_turn_records<'a>(
         !turn_events.is_empty(),
         "thread stream missing executed turn session entry"
     );
+    let admission_key = event_order_key(admission);
     for event in turn_events {
+        let event_key = event_order_key(event);
         assert!(
-            admission.created_at_ms <= event.created_at_ms,
-            "admission.decided at {} must precede executed turn event {} at {}",
+            admission_key < event_key,
+            "admission.decided {} at {} must precede executed turn event {} at {}",
+            admission.id,
             admission.created_at_ms,
             event.id,
-            event.created_at_ms
+            event.created_at_ms,
         );
     }
     admission
@@ -156,6 +159,7 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
         .get("atMs")
         .and_then(Value::as_i64)
         .expect("admission.decided missing atMs");
+    let admission_key = value_order_key(admission);
     let turn_events = thread_events
         .iter()
         .filter(|event| event.get("kind").and_then(Value::as_str) == Some("session.entry.appended"))
@@ -169,10 +173,47 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
             .get("atMs")
             .and_then(Value::as_i64)
             .expect("turn event missing atMs");
+        let event_key = value_order_key(event);
         assert!(
-            admission_ms <= event_ms,
+            admission_key < event_key,
             "admission.decided at {admission_ms} must precede executed turn event at {event_ms}"
         );
     }
     admission
+}
+
+#[cfg(test)]
+fn event_order_key(event: &EventRecord) -> (i64, String) {
+    (event.created_at_ms, event.id.to_string())
+}
+
+#[cfg(test)]
+fn value_order_key(event: &Value) -> (i64, String) {
+    let at_ms = event
+        .get("atMs")
+        .and_then(Value::as_i64)
+        .expect("event missing atMs");
+    let event_id = event
+        .get("eventId")
+        .and_then(Value::as_str)
+        .expect("event missing eventId")
+        .to_string();
+    (at_ms, event_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn admission_order_key_breaks_same_millisecond_ties_with_event_id() {
+        let first = EventRecordId::from_uuid(Uuid::now_v7());
+        let second = EventRecordId::from_uuid(Uuid::now_v7());
+
+        assert!(
+            (1_772_650_000_000_i64, first.to_string())
+                < (1_772_650_000_000_i64, second.to_string())
+        );
+    }
 }
