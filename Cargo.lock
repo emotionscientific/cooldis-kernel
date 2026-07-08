@@ -555,9 +555,14 @@ dependencies = [
 name = "cooldis-guest-sdk"
 version = "0.1.0"
 dependencies = [
+ "cooldis-guest-sdk-macros",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "cooldis-guest-sdk-macros"
+version = "0.1.0"
 
 [[package]]
 name = "cooldis-history"

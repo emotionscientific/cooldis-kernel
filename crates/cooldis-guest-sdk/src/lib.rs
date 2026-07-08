@@ -10,6 +10,20 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+mod contract;
+pub mod testkit;
+
+pub use contract::{CouplingContext, Discharge, GuestError, OperationContext};
+pub use cooldis_guest_sdk_macros::{coupling, operation};
+
+/// One-line import for guest crates:
+/// `use cooldis_guest_sdk::prelude::*;`
+pub mod prelude {
+    pub use crate::contract::{CouplingContext, Discharge, GuestError, OperationContext};
+    pub use crate::{coupling, operation};
+    pub use serde::{Deserialize, Serialize};
+}
+
 pub const OPERATION_ABI: &str = "cooldis.operation/0.1";
 pub const HTTP_ABI: &str = "cooldis.net.http/0.1";
 pub const COUPLING_INVOCATION_ABI: &str = "cooldis.coupling.invocation/0.1";
