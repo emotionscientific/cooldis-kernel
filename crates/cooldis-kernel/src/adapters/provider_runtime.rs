@@ -757,19 +757,27 @@ async fn run_idle_provider_command(
                 );
                 return true;
             }
-            match services.append_user_turn_input(coordinates, &input).await {
+            let turn_source_event_id = match services
+                .append_user_turn_input(coordinates, &input)
+                .await
+            {
                 Ok(entry) => {
-                    if let Err(err) =
-                        append_turn_submitted_event(services, coordinates, &turn_id, &entry).await
-                    {
-                        let _ = status.send(ThreadStatus::Failed);
-                        let _ = events.send(ThreadEvent::Failed {
-                            thread_id,
-                            message: err.to_string(),
-                        });
-                        return true;
-                    }
+                    let submitted =
+                        match append_turn_submitted_event(services, coordinates, &turn_id, &entry)
+                            .await
+                        {
+                            Ok(submitted) => submitted,
+                            Err(err) => {
+                                let _ = status.send(ThreadStatus::Failed);
+                                let _ = events.send(ThreadEvent::Failed {
+                                    thread_id,
+                                    message: err.to_string(),
+                                });
+                                return true;
+                            }
+                        };
                     let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                    submitted.id
                 }
                 Err(err) => {
                     let _ = status.send(ThreadStatus::Failed);
@@ -779,12 +787,13 @@ async fn run_idle_provider_command(
                     });
                     return true;
                 }
-            }
+            };
             run_provider_turn(
                 runtime,
                 thread_context,
                 turn_id,
                 input,
+                turn_source_event_id,
                 coordinates,
                 services,
                 thread_id,
@@ -844,12 +853,13 @@ async fn run_idle_provider_command(
             )
             .await
             {
-                Ok(ToolResumeOutcome::Resumed) => {
+                Ok(ToolResumeOutcome::Resumed { source_event_id }) => {
                     run_provider_turn(
                         runtime,
                         thread_context,
                         turn_id,
                         TurnInput::text(""),
+                        source_event_id,
                         coordinates,
                         services,
                         thread_id,
@@ -1021,7 +1031,7 @@ async fn run_compaction(
     let source_context = services
         .build_session_context(turn_context.coordinates())
         .await?;
-    services
+    let (summary_event, _) = services
         .record_context_summary_checkpoint(
             turn_context.coordinates(),
             &source_context.entries,
@@ -1030,11 +1040,18 @@ async fn run_compaction(
         )
         .await?;
     let entry = services
-        .append_session_entry(
+        .append_session_entry_with_provenance(
             turn_context.coordinates(),
             None,
             SessionEntryKind::Compaction {
                 summary: summary.clone(),
+            },
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(turn_context.coordinates())],
+                source_event_ids: vec![summary_event.id],
+                discharged_by: Some("projection:context-summarizer".to_string()),
+                function: Some("session_entry_compaction/v1".to_string()),
+                ..EventProvenance::default()
             },
         )
         .await?;
@@ -1475,6 +1492,7 @@ async fn run_provider_turn(
     thread_context: &ThreadContext,
     turn_id: String,
     turn_input: TurnInput,
+    turn_source_event_id: EventRecordId,
     coordinates: &crate::ThreadCoordinates,
     services: &RuntimeServices,
     thread_id: crate::ThreadId,
@@ -1698,12 +1716,13 @@ async fn run_provider_turn(
                         }
                     }
                     match services
-                        .append_session_entry(
+                        .append_agent_loop_session_entry(
                             coordinates,
                             None,
                             SessionEntryKind::Message {
                                 message: message.clone(),
                             },
+                            vec![turn_source_event_id],
                         )
                         .await
                     {
@@ -1900,7 +1919,7 @@ enum ToolAppendOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolResumeOutcome {
-    Resumed,
+    Resumed { source_event_id: EventRecordId },
     StillWaiting,
     AlreadyCompleted,
 }
@@ -2096,7 +2115,7 @@ async fn resume_pending_tool_call(
             Ok(ToolResumeOutcome::StillWaiting)
         }
         ToolCallDecision::Allow { consumed_fact_id } => {
-            append_turn_resumed_event(
+            let resumed = append_turn_resumed_event(
                 services,
                 &thread_context.coordinates,
                 turn_id,
@@ -2122,15 +2141,18 @@ async fn resume_pending_tool_call(
                 request.tool_name,
                 request.arguments,
                 request.snapshot_id,
+                resumed.id,
             )
             .await?;
-            Ok(ToolResumeOutcome::Resumed)
+            Ok(ToolResumeOutcome::Resumed {
+                source_event_id: resumed.id,
+            })
         }
         ToolCallDecision::Rewrite {
             consumed_fact_id,
             arguments,
         } => {
-            append_turn_resumed_event(
+            let resumed = append_turn_resumed_event(
                 services,
                 &thread_context.coordinates,
                 turn_id,
@@ -2156,16 +2178,19 @@ async fn resume_pending_tool_call(
                 request.tool_name,
                 arguments,
                 request.snapshot_id,
+                resumed.id,
             )
             .await?;
-            Ok(ToolResumeOutcome::Resumed)
+            Ok(ToolResumeOutcome::Resumed {
+                source_event_id: resumed.id,
+            })
         }
         ToolCallDecision::Deny {
             consumed_fact_id,
             reason,
             ..
         } => {
-            append_turn_resumed_event(
+            let resumed = append_turn_resumed_event(
                 services,
                 &thread_context.coordinates,
                 turn_id,
@@ -2187,9 +2212,12 @@ async fn resume_pending_tool_call(
                 request.tool_name,
                 request.snapshot_id,
                 reason,
+                resumed.id,
             )
             .await?;
-            Ok(ToolResumeOutcome::Resumed)
+            Ok(ToolResumeOutcome::Resumed {
+                source_event_id: resumed.id,
+            })
         }
     }
 }
@@ -2276,6 +2304,7 @@ async fn append_tool_results(
                         tool_name,
                         active_snapshot_id,
                         "tool controller did not emit a terminal decision".to_string(),
+                        request_event.id,
                     )
                     .await?;
                     continue;
@@ -2297,6 +2326,7 @@ async fn append_tool_results(
                         tool_name,
                         active_snapshot_id,
                         reason,
+                        request_event.id,
                     )
                     .await?;
                     continue;
@@ -2330,6 +2360,7 @@ async fn append_tool_results(
             tool_name,
             arguments,
             active_snapshot_id,
+            request_event.id,
         )
         .await?;
     }
@@ -2346,6 +2377,7 @@ async fn execute_tool_call_with_interceptor(
     tool_name: String,
     arguments: Value,
     snapshot_id: String,
+    source_event_id: EventRecordId,
 ) -> CooldisResult<()> {
     let witness_coordinates = turn_context.coordinates().clone();
     let outcome =
@@ -2433,6 +2465,7 @@ async fn execute_tool_call_with_interceptor(
         snapshot_id,
         outcome.result,
         Some(outcome.duration_ms),
+        source_event_id,
     )
     .await?;
     append_hook_contexts(
@@ -2610,6 +2643,7 @@ async fn append_denied_tool_result(
     tool_name: String,
     snapshot_id: String,
     reason: String,
+    source_event_id: EventRecordId,
 ) -> CooldisResult<()> {
     emit_runtime_event(
         events,
@@ -2637,6 +2671,7 @@ async fn append_denied_tool_result(
         snapshot_id,
         result,
         Some(0),
+        source_event_id,
     )
     .await
 }
@@ -2819,6 +2854,7 @@ async fn append_tool_result_message(
     snapshot_id: String,
     result: CanonicalMessage,
     duration_ms: Option<u64>,
+    source_event_id: EventRecordId,
 ) -> CooldisResult<()> {
     let success = match &result {
         CanonicalMessage::ToolResult { is_error, .. } => !is_error,
@@ -2826,12 +2862,13 @@ async fn append_tool_result_message(
     };
     let output = text_from_message(&result);
     let entry = services
-        .append_session_entry(
+        .append_agent_loop_session_entry(
             coordinates,
             None,
             SessionEntryKind::Message {
                 message: result.clone(),
             },
+            vec![source_event_id],
         )
         .await?;
     let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });

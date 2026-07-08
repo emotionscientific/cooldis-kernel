@@ -2437,6 +2437,14 @@ pub trait SessionStore: Send + Sync {
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry>;
 
+    async fn append_with_provenance(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: EventProvenance,
+    ) -> HistoryResult<SessionEntry>;
+
     async fn active_leaf(
         &self,
         coordinates: &ThreadCoordinates,
@@ -2557,33 +2565,19 @@ impl SessionStore for InMemorySessionStore {
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry> {
-        let mut inner = self.inner.write().await;
-        let thread_id = coordinates.thread_id;
-        let parent_entry_id = match parent_entry_id {
-            Some(parent) => {
-                let entries = inner.entries.entry(thread_id).or_default();
-                let parent_entry = entries
-                    .get(&parent)
-                    .ok_or(HistoryError::EntryNotFound(parent))?;
-                validate_entry_coordinates(coordinates, parent_entry)?;
-                Some(parent)
-            }
-            None => inner.active_leaf.get(&thread_id).copied(),
-        };
+        self.append_inner(coordinates, parent_entry_id, kind, None)
+            .await
+    }
 
-        let entry = SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
-        inner
-            .entries
-            .entry(thread_id)
-            .or_default()
-            .insert(entry.entry_id, entry.clone());
-        inner.active_leaf.insert(thread_id, entry.entry_id);
-        append_in_memory_event(
-            &mut inner,
-            &EventStreamId::for_thread(coordinates),
-            session_entry_event(&entry),
-        )?;
-        Ok(entry)
+    async fn append_with_provenance(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: EventProvenance,
+    ) -> HistoryResult<SessionEntry> {
+        self.append_inner(coordinates, parent_entry_id, kind, Some(provenance))
+            .await
     }
 
     async fn active_leaf(
@@ -2704,6 +2698,44 @@ impl SessionStore for InMemorySessionStore {
         inner.active_leaf.remove(&target_coordinates.thread_id);
         inner.bases.insert(target_coordinates.thread_id, base);
         Ok(())
+    }
+}
+
+impl InMemorySessionStore {
+    async fn append_inner(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: Option<EventProvenance>,
+    ) -> HistoryResult<SessionEntry> {
+        let mut inner = self.inner.write().await;
+        let thread_id = coordinates.thread_id;
+        let parent_entry_id = match parent_entry_id {
+            Some(parent) => {
+                let entries = inner.entries.entry(thread_id).or_default();
+                let parent_entry = entries
+                    .get(&parent)
+                    .ok_or(HistoryError::EntryNotFound(parent))?;
+                validate_entry_coordinates(coordinates, parent_entry)?;
+                Some(parent)
+            }
+            None => inner.active_leaf.get(&thread_id).copied(),
+        };
+
+        let entry = SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
+        inner
+            .entries
+            .entry(thread_id)
+            .or_default()
+            .insert(entry.entry_id, entry.clone());
+        inner.active_leaf.insert(thread_id, entry.entry_id);
+        append_in_memory_event(
+            &mut inner,
+            &EventStreamId::for_thread(coordinates),
+            session_entry_event_with_optional_provenance(&entry, provenance),
+        )?;
+        Ok(entry)
     }
 }
 
@@ -2996,6 +3028,20 @@ fn append_in_memory_event(
 }
 
 pub fn session_entry_event(entry: &SessionEntry) -> NewEventRecord {
+    session_entry_event_with_optional_provenance(entry, None)
+}
+
+pub fn session_entry_event_with_provenance(
+    entry: &SessionEntry,
+    provenance: EventProvenance,
+) -> NewEventRecord {
+    session_entry_event_with_optional_provenance(entry, Some(provenance))
+}
+
+fn session_entry_event_with_optional_provenance(
+    entry: &SessionEntry,
+    provenance: Option<EventProvenance>,
+) -> NewEventRecord {
     let mut payload = serde_json::json!({
         "entry_id": entry.entry_id.to_string(),
         "parent_entry_id": entry.parent_entry_id.map(|id| id.to_string()),
@@ -3018,15 +3064,15 @@ pub fn session_entry_event(entry: &SessionEntry) -> NewEventRecord {
             payload,
         );
     }
+    let provenance = provenance.unwrap_or_else(|| EventProvenance {
+        discharged_by: Some("session-store:append".to_string()),
+        ..EventProvenance::default()
+    });
     NewEventRecord::discharged(
         entry.coordinates.clone(),
         EventKind::SessionEntryAppended,
         payload,
-        EventProvenance {
-            source_streams: vec![EventStreamId::for_thread(&entry.coordinates)],
-            discharged_by: Some("propagator:agent-loop".to_string()),
-            ..EventProvenance::default()
-        },
+        provenance,
     )
 }
 

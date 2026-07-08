@@ -592,6 +592,18 @@ impl SessionStore for AdmissionAppendFailingStore {
         self.inner.append(coordinates, parent_entry_id, kind).await
     }
 
+    async fn append_with_provenance(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: EventProvenance,
+    ) -> HistoryResult<SessionEntry> {
+        self.inner
+            .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
+            .await
+    }
+
     async fn active_leaf(
         &self,
         coordinates: &ThreadCoordinates,

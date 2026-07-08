@@ -1407,6 +1407,70 @@ async fn discharged_events_without_provenance_are_rejected() {
 }
 
 #[tokio::test]
+async fn loop_discharged_session_entry_records_triggering_event_id() {
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let store = InMemorySessionStore::new();
+    let submitted = store
+        .append_events(
+            &stream_id,
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::TurnSubmitted,
+                serde_json::json!({
+                    "schema": EventKind::TurnSubmitted.payload_schema_id(),
+                    "turn_id": "turn-1",
+                }),
+            )],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+
+    let assistant_entry = store
+        .append_with_provenance(
+            &coordinates,
+            None,
+            SessionEntryKind::Message {
+                message: CanonicalMessage::assistant(
+                    "test-provider",
+                    ProviderApi::OpenAIResponses,
+                    "model-1",
+                    vec![CanonicalContent::text("hello back")],
+                    CanonicalStopReason::EndTurn,
+                ),
+            },
+            EventProvenance {
+                source_streams: vec![stream_id.clone()],
+                source_event_ids: vec![submitted.id],
+                discharged_by: Some("propagator:agent-loop".to_string()),
+                function: Some("session_entry_append/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let events = store.read_events(&stream_id, None).await.unwrap();
+    let assistant_event = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["entry_id"] == assistant_entry.entry_id.to_string()
+        })
+        .unwrap();
+    assert_eq!(assistant_event.origin, EventOrigin::Discharged);
+    assert_eq!(
+        assistant_event.provenance.source_event_ids,
+        vec![submitted.id]
+    );
+    assert_eq!(
+        assistant_event.provenance.discharged_by.as_deref(),
+        Some("propagator:agent-loop")
+    );
+}
+
+#[tokio::test]
 async fn in_memory_append_events_rejects_partial_batch_without_mutation() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let stream_id = EventStreamId::for_thread(&coordinates);

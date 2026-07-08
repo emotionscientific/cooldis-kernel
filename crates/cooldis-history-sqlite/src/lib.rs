@@ -6,8 +6,8 @@ use cooldis_history::{
     SessionContextSourceCut, SessionEntry, SessionEntryId, SessionEntryKind, SessionStore,
     ThreadBaseRef, ThreadForkReason, append_model_visible_messages, codec_error,
     coordinates_with_thread_id, decode_entry, parse_event_origin, parse_thread_id, parse_uuid,
-    session_entry_event, session_entry_is_user_authored, storage_error, validate_entry_coordinates,
-    validate_new_event, validate_thread_base_ref,
+    session_entry_event, session_entry_event_with_provenance, session_entry_is_user_authored,
+    storage_error, validate_entry_coordinates, validate_new_event, validate_thread_base_ref,
 };
 use cooldis_runtime_contracts::{ThreadCheckpointId, ThreadCoordinates, ThreadId};
 use rusqlite::{OptionalExtension, params};
@@ -83,38 +83,19 @@ impl SessionStore for SqliteSessionStore {
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry> {
-        let mut connection = self.lock_connection()?;
-        let tx = connection.transaction().map_err(storage_error)?;
-        let thread_id = coordinates.thread_id.to_string();
-        let parent_entry_id = match parent_entry_id {
-            Some(parent) => {
-                let parent_entry = sqlite_load_entry(&tx, &thread_id, parent)?
-                    .ok_or(HistoryError::EntryNotFound(parent))?;
-                validate_entry_coordinates(coordinates, &parent_entry)?;
-                Some(parent)
-            }
-            None => sqlite_active_leaf_entry(&tx, &thread_id)?
-                .map(|entry| {
-                    validate_entry_coordinates(coordinates, &entry)?;
-                    Ok(entry.entry_id)
-                })
-                .transpose()?,
-        };
+        self.append_inner(coordinates, parent_entry_id, kind, None)
+            .await
+    }
 
-        let entry = SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
-        sqlite_insert_entry(&tx, &entry)?;
-        tx.execute(
-            "INSERT INTO active_leaves (thread_id, entry_id)
-             VALUES (?1, ?2)
-             ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
-            params![
-                entry.coordinates.thread_id.to_string(),
-                entry.entry_id.to_string()
-            ],
-        )
-        .map_err(storage_error)?;
-        tx.commit().map_err(storage_error)?;
-        Ok(entry)
+    async fn append_with_provenance(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: EventProvenance,
+    ) -> HistoryResult<SessionEntry> {
+        self.append_inner(coordinates, parent_entry_id, kind, Some(provenance))
+            .await
     }
 
     async fn active_leaf(
@@ -249,6 +230,49 @@ impl SessionStore for SqliteSessionStore {
         sqlite_insert_thread_base(&tx, &base)?;
         tx.commit().map_err(storage_error)?;
         Ok(())
+    }
+}
+
+impl SqliteSessionStore {
+    async fn append_inner(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: Option<EventProvenance>,
+    ) -> HistoryResult<SessionEntry> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection.transaction().map_err(storage_error)?;
+        let thread_id = coordinates.thread_id.to_string();
+        let parent_entry_id = match parent_entry_id {
+            Some(parent) => {
+                let parent_entry = sqlite_load_entry(&tx, &thread_id, parent)?
+                    .ok_or(HistoryError::EntryNotFound(parent))?;
+                validate_entry_coordinates(coordinates, &parent_entry)?;
+                Some(parent)
+            }
+            None => sqlite_active_leaf_entry(&tx, &thread_id)?
+                .map(|entry| {
+                    validate_entry_coordinates(coordinates, &entry)?;
+                    Ok(entry.entry_id)
+                })
+                .transpose()?,
+        };
+
+        let entry = SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
+        sqlite_insert_entry_with_optional_provenance(&tx, &entry, provenance)?;
+        tx.execute(
+            "INSERT INTO active_leaves (thread_id, entry_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
+            params![
+                entry.coordinates.thread_id.to_string(),
+                entry.entry_id.to_string()
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(entry)
     }
 }
 
@@ -389,6 +413,9 @@ fn init_sqlite_schema(connection: &rusqlite::Connection) -> HistoryResult<()> {
     sqlite_migrate_event_records_schema(connection)
 }
 
+/// Migrates legacy event rows honestly: reconstructed provenance names this
+/// migration and does not impersonate the runtime component that may have
+/// produced the original unversioned row.
 fn sqlite_migrate_event_records_schema(connection: &rusqlite::Connection) -> HistoryResult<()> {
     let mut added_identity_column = false;
     let mut added_origin_column = false;
@@ -466,6 +493,8 @@ fn sqlite_migrate_event_records_schema(connection: &rusqlite::Connection) -> His
         return Ok(());
     }
 
+    const ORIGIN_BACKFILL_MIGRATION: &str = "migration:origin-backfill@v1";
+
     let mut rows_to_backfill = Vec::new();
     {
         let mut statement = connection
@@ -492,7 +521,7 @@ fn sqlite_migrate_event_records_schema(connection: &rusqlite::Connection) -> His
         }
     }
 
-    for (event_id, stream_id, kind, payload_json) in rows_to_backfill {
+    for (event_id, _stream_id, kind, payload_json) in rows_to_backfill {
         let (origin, provenance) = if kind == EventKind::SessionEntryAppended.as_str() {
             match serde_json::from_str::<SessionEntry>(&payload_json) {
                 Ok(entry) if session_entry_is_user_authored(&entry.kind) => {
@@ -501,8 +530,7 @@ fn sqlite_migrate_event_records_schema(connection: &rusqlite::Connection) -> His
                 _ => (
                     EventOrigin::Discharged,
                     EventProvenance {
-                        source_streams: vec![EventStreamId::new(stream_id.clone())],
-                        discharged_by: Some("propagator:agent-loop".to_string()),
+                        discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
                         ..EventProvenance::default()
                     },
                 ),
@@ -511,9 +539,7 @@ fn sqlite_migrate_event_records_schema(connection: &rusqlite::Connection) -> His
             (
                 EventOrigin::Discharged,
                 EventProvenance {
-                    source_streams: vec![EventStreamId::new(stream_id.clone())],
-                    discharged_by: Some("projection:context-compiler".to_string()),
-                    function: Some("naive_assembly/v1".to_string()),
+                    discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
                     ..EventProvenance::default()
                 },
             )
@@ -584,6 +610,14 @@ fn sqlite_active_leaf_entry(
 }
 
 fn sqlite_insert_entry(tx: &rusqlite::Transaction<'_>, entry: &SessionEntry) -> HistoryResult<()> {
+    sqlite_insert_entry_with_optional_provenance(tx, entry, None)
+}
+
+fn sqlite_insert_entry_with_optional_provenance(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &SessionEntry,
+    provenance: Option<EventProvenance>,
+) -> HistoryResult<()> {
     let entry_json = serde_json::to_string(entry).map_err(codec_error)?;
     tx.execute(
         "INSERT INTO session_entries (
@@ -611,7 +645,10 @@ fn sqlite_insert_entry(tx: &rusqlite::Transaction<'_>, entry: &SessionEntry) -> 
     sqlite_insert_event(
         tx,
         &EventStreamId::for_thread(&entry.coordinates),
-        session_entry_event(entry),
+        match provenance {
+            Some(provenance) => session_entry_event_with_provenance(entry, provenance),
+            None => session_entry_event(entry),
+        },
     )?;
     Ok(())
 }

@@ -1,8 +1,9 @@
 use crate::{
     AgentRuntime, AgentRuntimeFactory, CanonicalContent, CanonicalMessage, CanonicalStopReason,
-    CooldisError, CooldisResult, ProviderApi, RuntimeEventKind, RuntimeServices,
-    RuntimeTerminalState, SessionEntryKind, ThreadCommand, ThreadContext, ThreadCoordinates,
-    ThreadEvent, ThreadSignal, ThreadStatus, TurnSubmissionMode, emit_runtime_event,
+    CooldisError, CooldisResult, EventRecordId, EventStreamId, ProviderApi, RuntimeEventKind,
+    RuntimeServices, RuntimeTerminalState, SessionEntryKind, ThreadCommand, ThreadContext,
+    ThreadCoordinates, ThreadEvent, ThreadSignal, ThreadStatus, TurnSubmissionMode,
+    emit_runtime_event,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -536,8 +537,12 @@ async fn mirror_codex_output(
     text: String,
     model: Option<&str>,
 ) -> CooldisResult<crate::SessionEntry> {
+    let source_event_ids = latest_thread_event_id(services, coordinates)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
     services
-        .append_session_entry(
+        .append_agent_loop_session_entry(
             coordinates,
             None,
             SessionEntryKind::Message {
@@ -549,8 +554,24 @@ async fn mirror_codex_output(
                     CanonicalStopReason::EndTurn,
                 ),
             },
+            source_event_ids,
         )
         .await
+}
+
+async fn latest_thread_event_id(
+    services: &RuntimeServices,
+    coordinates: &ThreadCoordinates,
+) -> CooldisResult<Option<EventRecordId>> {
+    let events = services
+        .runtime_store()
+        .read_events(&EventStreamId::for_thread(coordinates), None)
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?;
+    Ok(events
+        .into_iter()
+        .max_by_key(|event| event.sequence.get())
+        .map(|event| event.id))
 }
 
 #[cfg(test)]

@@ -1825,6 +1825,23 @@ async fn runtime_persists_tool_request_and_completion_facts() {
         )
         .await
         .unwrap();
+    let submitted = records
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::TurnSubmitted
+                && event.origin == crate::EventOrigin::Witnessed
+                && event.payload["turn_id"].as_str() == Some("turn-1")
+        })
+        .expect("turn submission should be durable");
+    let assistant_session_entry = records
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.origin == crate::EventOrigin::Discharged
+                && event.provenance.source_event_ids == vec![submitted.id]
+        })
+        .expect("assistant session entry should cite the submitted turn");
+    assert_ne!(assistant_session_entry.id, submitted.id);
     let request = records
         .iter()
         .find(|event| event.kind == EventKind::ToolCallRequested)
@@ -1844,6 +1861,11 @@ async fn runtime_persists_tool_request_and_completion_facts() {
         !request.provenance.source_event_ids.is_empty(),
         "tool requests should point back to the assistant session entry"
     );
+    assert!(records.iter().any(|event| {
+        event.kind == EventKind::SessionEntryAppended
+            && event.origin == crate::EventOrigin::Discharged
+            && event.provenance.source_event_ids == vec![request.id]
+    }));
     let completed = records
         .iter()
         .find(|event| event.kind == EventKind::ToolCallCompleted)
@@ -1851,11 +1873,6 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     assert_eq!(completed.origin, crate::EventOrigin::Witnessed);
     assert_eq!(completed.payload["tool_name"].as_str(), Some("echo_search"));
     assert_eq!(completed.payload["success"].as_bool(), Some(true));
-    assert!(records.iter().any(|event| {
-        event.kind == EventKind::TurnSubmitted
-            && event.origin == crate::EventOrigin::Witnessed
-            && event.payload["turn_id"].as_str() == Some("turn-1")
-    }));
     assert!(records.iter().any(|event| {
         event.kind == EventKind::TurnCompleted
             && event.origin == crate::EventOrigin::Discharged

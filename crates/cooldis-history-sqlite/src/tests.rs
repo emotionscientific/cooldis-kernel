@@ -962,19 +962,21 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
     assert_eq!(
         events[1].provenance,
         EventProvenance {
-            source_streams: vec![stream_id.clone()],
-            discharged_by: Some("propagator:agent-loop".to_string()),
+            discharged_by: Some("migration:origin-backfill@v1".to_string()),
             ..EventProvenance::default()
         }
     );
+    assert_ne!(
+        events[1].provenance.discharged_by.as_deref(),
+        Some("propagator:agent-loop")
+    );
+    assert!(events[1].provenance.source_event_ids.is_empty());
     assert_eq!(events[2].kind, EventKind::ContextCompileCompleted);
     assert_eq!(events[2].origin, EventOrigin::Discharged);
     assert_eq!(
         events[2].provenance,
         EventProvenance {
-            source_streams: vec![stream_id.clone()],
-            discharged_by: Some("projection:context-compiler".to_string()),
-            function: Some("naive_assembly/v1".to_string()),
+            discharged_by: Some("migration:origin-backfill@v1".to_string()),
             ..EventProvenance::default()
         }
     );

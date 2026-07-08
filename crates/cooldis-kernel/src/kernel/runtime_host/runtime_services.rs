@@ -127,6 +127,46 @@ impl RuntimeServices {
             .map_err(|err| CooldisError::History(err.to_string()))
     }
 
+    pub async fn append_session_entry_with_provenance(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: EventProvenance,
+    ) -> CooldisResult<SessionEntry> {
+        self.runtime_store
+            .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))
+    }
+
+    pub async fn append_agent_loop_session_entry(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        source_event_ids: Vec<EventRecordId>,
+    ) -> CooldisResult<SessionEntry> {
+        if source_event_ids.is_empty() {
+            return Err(CooldisError::History(
+                "agent-loop session entry requires source_event_ids".to_string(),
+            ));
+        }
+        self.append_session_entry_with_provenance(
+            coordinates,
+            parent_entry_id,
+            kind,
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(coordinates)],
+                source_event_ids,
+                discharged_by: Some("propagator:agent-loop".to_string()),
+                function: Some("session_entry_append/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        )
+        .await
+    }
+
     pub async fn append_user_message(
         &self,
         coordinates: &ThreadCoordinates,

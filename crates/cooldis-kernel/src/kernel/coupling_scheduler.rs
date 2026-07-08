@@ -831,7 +831,7 @@ mod tests {
     use super::*;
     use crate::{
         BoundCoupling, BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSet,
-        BoundCouplingSink, CouplingRole, EventKind, EventStore, EventStreamId,
+        BoundCouplingSink, CouplingRole, EventKind, EventProvenance, EventStore, EventStreamId,
         InMemorySessionStore, NewEventRecord, ThreadCoordinates,
     };
     use async_trait::async_trait;
@@ -970,6 +970,66 @@ mod tests {
             .unwrap();
         assert_eq!(chained.activation.root_event_id, root);
         assert_eq!(chained.activation.depth, 1);
+    }
+
+    #[tokio::test]
+    async fn loop_discharged_session_entry_depth_uses_triggering_event_id() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let thread_stream = EventStreamId::for_thread(&coordinates);
+        let submitted = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::TurnSubmitted,
+            json!({
+                "schema": EventKind::TurnSubmitted.payload_schema_id(),
+                "turn_id": "t1",
+            }),
+        );
+        let submitted_id = submitted.id;
+        let session_entry = NewEventRecord::discharged(
+            coordinates.clone(),
+            EventKind::SessionEntryAppended,
+            json!({
+                "entry_id": "entry-1",
+                "parent_entry_id": null,
+                "entry_kind": "message",
+            }),
+            EventProvenance {
+                source_streams: vec![thread_stream.clone()],
+                source_event_ids: vec![submitted_id],
+                discharged_by: Some("propagator:agent-loop".to_string()),
+                function: Some("session_entry_append/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        );
+        let appended = store
+            .append_events(&thread_stream, vec![submitted, session_entry])
+            .await
+            .unwrap();
+        let executor = RecordingExecutor::default();
+        let scheduler = CouplingScheduler::new(&store, &executor);
+
+        scheduler
+            .run_batch(
+                &BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![test_coupling(
+                        "mirror_session",
+                        EventKind::SessionEntryAppended,
+                        "control",
+                    )],
+                ),
+                vec![appended[1].clone()],
+            )
+            .await
+            .unwrap();
+
+        let calls = executor.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].activation.trigger_event_id, appended[1].id);
+        assert_eq!(calls[0].activation.root_event_id, submitted_id);
+        assert_ne!(calls[0].activation.root_event_id, appended[1].id);
+        assert_eq!(calls[0].activation.depth, 1);
     }
 
     #[tokio::test]
