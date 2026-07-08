@@ -480,3 +480,15 @@ the first network/tool interface.
 Process, VFS, and claim semantics remain separate design work. The public V1
 contract keeps the network/tool ABI first and treats POSIX-shaped execution as a
 later compatibility layer.
+
+## Encoding Trajectory
+
+The V1 guest encoding is core Wasm with JSON over linear memory. The
+WebAssembly component model (WIT) is the named successor, and the migration is
+planned, not pending discovery: the SDK macro layer is the compatibility
+boundary, the wire encoding is a private detail of the macro expansion, and
+the component migration swaps the expansion and the host executor without
+touching guest source, manifests, or recorded operation contracts.
+
+See [ADR 0002](adr/0002-guest-encoding-v1-component-model-later.md) for the
+decision, the reasons components are not V1, and the migration triggers.

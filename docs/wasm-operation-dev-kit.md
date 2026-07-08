@@ -341,6 +341,16 @@ That later lane needs trusted builder identity, source provenance, compatibility
 checks, scoped promotion policy, rollback semantics, audit receipts, and optional
 human approval before flipping active bindings.
 
+## Encoding Trajectory
+
+The dev kit authors against the SDK contract (typed functions plus
+`cooldis-guest-sdk`), never against the raw JSON-over-linear-memory encoding.
+The WebAssembly component model (WIT) is the planned successor encoding;
+because the SDK macro layer owns the wire format, that migration is a
+recompile for guest authors, not a rewrite. Decision, rationale, and
+migration triggers live in
+[ADR 0002](adr/0002-guest-encoding-v1-component-model-later.md).
+
 ## Non-Goals
 
 - No arbitrary in-process TypeScript extension execution.
@@ -348,3 +358,5 @@ human approval before flipping active bindings.
 - No advisory skill treated as enforcement policy.
 - No remote compiler service in V0.
 - No marketplace trust/signature model in V0.
+- No guest source hand-writing raw ABI exports once the SDK macro layer
+  lands; the SDK contract is the only supported authoring surface.
