@@ -607,9 +607,16 @@ impl AgentPublishPlan {
         for resolved_ref in &self.resolved_refs {
             resolved_ref.validate()?;
             if resolved_ref.status == AgentManifestRefStatus::UnresolvedOffline {
+                let hint = if resolved_ref.declared.starts_with("op://")
+                    && !resolved_ref.declared.contains("@sha256:")
+                {
+                    "; pass --resolve-ops to pin op:// authoring refs from the operations registry before agent publish"
+                } else {
+                    ""
+                };
                 return Err(CooldisError::RuntimeFactory(format!(
-                    "published agent record contains unresolved artifact ref {:?}",
-                    resolved_ref.declared
+                    "published agent record contains unresolved artifact ref {:?}{hint}",
+                    resolved_ref.declared,
                 )));
             }
         }

@@ -1246,7 +1246,7 @@ fn verify_operation_ref_for_subject(
     let parsed = parse_operation_ref(operation_ref)?;
     let artifact_hash = parsed.artifact_hash.clone().ok_or_else(|| {
         CooldisError::RuntimeFactory(format!(
-            "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} must be content-addressed with @sha256:<hash>"
+            "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} must be content-addressed with @sha256:<hash>; for agent publish, pass --resolve-ops to pin op:// authoring refs from the operations registry"
         ))
     })?;
     let registry = LocalOperationRegistry::new(operation_registry_root);

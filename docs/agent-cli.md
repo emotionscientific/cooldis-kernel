@@ -15,7 +15,7 @@ cooldis init release-verifier
 cooldis agent plan release-verifier/cooldis.agent.toml \
   --operations-registry-root .cooldis/operations
 cooldis agent publish release-verifier/cooldis.agent.toml \
-  --operations-registry-root .cooldis/operations
+  --resolve-ops --operations-registry-root .cooldis/operations
 cooldis blob publish release-verifier/prompts/system.md --name identity
 cooldis agent list
 cooldis agent show agent://release-verifier@0.1.0
@@ -47,9 +47,11 @@ drop the input to use folder-first lowering, or move the file out of
 queue, completion callback, context spill/truncate/summarize, memory preview,
 schedule/retry/deadletter, permission/control, prompt steering, and channel
 ingress/egress. Custom operation packages live under `operations/` and should
-be published first; then add their pinned `op://...@sha256:<hash>` refs to
-`cooldis.agent.toml` before publishing the agent. `cooldis agent init --out
-path.toml` keeps the old single-manifest file form for compatibility.
+be published first; then add pinned `op://...@sha256:<hash>` refs to
+`cooldis.agent.toml`, or use `cooldis agent publish --resolve-ops` to rewrite
+`op://name` and `op://name@latest` authoring refs to the active pinned hash
+before publishing the agent. `cooldis agent init --out path.toml` keeps the old
+single-manifest file form for compatibility.
 
 `plan` is the dry-run boundary for agent records. It parses the source manifest,
 validates the identity envelope, resolves the canonical JSON shape, computes
@@ -74,7 +76,13 @@ name a local operation record, pin a published version hash, select either the
 whole record or a declared operation, and declare grants that cover the selected
 operation requirements. Use `--operations-registry-root <dir>` when the
 operations registry is not the conventional `.cooldis/operations` root. Missing
-or fabricated operation refs reject before the agent record is written.
+or fabricated operation refs reject before the agent record is written. Passing
+`--resolve-ops` is an authoring convenience only: unpinned `op://name` and
+`op://name@latest` rows are resolved against the local operations registry's
+active published record, the manifest file is rewritten to
+`op://name@sha256:<hash>` before normal publish verification runs, and each
+rewrite is printed. Published agent records and stored manifests always carry
+pinned operation refs; runtime never looks up `@latest` for operation tools.
 
 `cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]`
 publishes an arbitrary file as an immutable blob artifact and prints the

@@ -1363,6 +1363,185 @@ operation_ref = "op://tailcat@sha256:{TEST_OPERATION_HASH}"
 }
 
 #[test]
+fn cooldis_cli_agent_publish_resolve_ops_pins_unpinned_manifest_refs() {
+    let workspace = temp_dir("agent-resolve-ops");
+    let manifest_path = workspace.join("resolve-ops.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+# keep this comment across value rewrites
+[agent]
+name = "resolve-ops"
+version = "0.1.0"
+description = "Pins operation refs during publish."
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "bash_tool"
+id = "tailcat"
+command = "cat"
+operation_ref = "op://tailcat"
+
+[[tools]]
+type = "direct_tool"
+id = "exporter"
+tool_name = "export"
+operation_ref = "op://analytics/export@latest"
+"#,
+    )
+    .unwrap();
+    let registry_root = temp_dir("agent-resolve-ops-registry");
+    let operation_registry_root = temp_dir("agent-resolve-ops-operation-registry");
+    seed_operation_record(
+        &operation_registry_root,
+        "tailcat",
+        TEST_OPERATION_HASH,
+        &[("cat", &[])],
+    );
+    seed_operation_record(
+        &operation_registry_root,
+        "analytics",
+        &"f".repeat(64),
+        &[("export", &[])],
+    );
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--resolve-ops",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let tailcat_ref = format!("op://tailcat@sha256:{TEST_OPERATION_HASH}");
+    let analytics_ref = format!("op://analytics/export@sha256:{}", "f".repeat(64));
+    assert!(publish.contains(&format!(
+        "resolved operation_ref: op://tailcat -> {tailcat_ref}"
+    )));
+    assert!(publish.contains(&format!(
+        "resolved operation_ref: op://analytics/export@latest -> {analytics_ref}"
+    )));
+    assert!(publish.contains("published agent://resolve-ops@0.1.0"));
+
+    let rewritten = fs::read_to_string(&manifest_path).unwrap();
+    assert!(rewritten.contains("# keep this comment across value rewrites"));
+    assert!(rewritten.contains(&format!("operation_ref = \"{tailcat_ref}\"")));
+    assert!(rewritten.contains(&format!("operation_ref = \"{analytics_ref}\"")));
+    assert!(!rewritten.contains("operation_ref = \"op://tailcat\""));
+    assert!(!rewritten.contains("operation_ref = \"op://analytics/export@latest\""));
+
+    let record = agent_record(&registry_root, "resolve-ops");
+    assert_eq!(record.tool_refs[0].reference, tailcat_ref);
+    assert_eq!(record.tool_refs[1].reference, analytics_ref);
+}
+
+#[test]
+fn cooldis_cli_agent_publish_unpinned_ops_without_resolve_hint_fails() {
+    let workspace = temp_dir("agent-unpinned-op-hint");
+    let manifest_path = workspace.join("unresolved.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "unresolved"
+version = "0.1.0"
+description = "Fails without resolve-ops."
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "bash_tool"
+id = "tailcat"
+command = "cat"
+operation_ref = "op://tailcat"
+"#,
+    )
+    .unwrap();
+    let registry_root = temp_dir("agent-unpinned-op-hint-registry");
+    let operation_registry_root = temp_dir("agent-unpinned-op-hint-operation-registry");
+    seed_operation_record(
+        &operation_registry_root,
+        "tailcat",
+        TEST_OPERATION_HASH,
+        &[("cat", &[])],
+    );
+
+    let publish = run_cooldis_failed([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let err = stderr(&publish);
+    assert!(err.contains("unresolved artifact ref"));
+    assert!(err.contains("--resolve-ops"));
+}
+
+#[test]
+fn cooldis_cli_agent_publish_resolve_ops_unknown_name_writes_nothing() {
+    let workspace = temp_dir("agent-resolve-ops-unknown");
+    let manifest_path = workspace.join("unknown.cooldis.agent.toml");
+    let source = r#"
+[agent]
+name = "unknown"
+version = "0.1.0"
+description = "Does not rewrite when resolution is ambiguous."
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "bash_tool"
+id = "missing"
+command = "cat"
+operation_ref = "op://missing"
+"#;
+    fs::write(&manifest_path, source).unwrap();
+    let registry_root = temp_dir("agent-resolve-ops-unknown-registry");
+    let operation_registry_root = temp_dir("agent-resolve-ops-unknown-operation-registry");
+    seed_operation_record(
+        &operation_registry_root,
+        "tailcat",
+        TEST_OPERATION_HASH,
+        &[("cat", &[])],
+    );
+
+    let publish = run_cooldis_failed([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--resolve-ops",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let err = stderr(&publish);
+    assert!(err.contains("was not found in the local operation registry"));
+    assert_eq!(fs::read_to_string(&manifest_path).unwrap(), source);
+    assert!(
+        LocalAgentRegistry::new(&registry_root)
+            .list_records()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn cooldis_cli_tool_list_prints_records_and_empty_absent_root() {
     let registry_root = temp_dir("tool-list-registry");
     let record = seed_operation_record(

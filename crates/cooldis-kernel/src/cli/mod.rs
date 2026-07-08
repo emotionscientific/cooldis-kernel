@@ -385,6 +385,16 @@ async fn agent_publish(args: Vec<OsString>) -> CooldisResult<()> {
         .ok_or_else(|| usage_error("agent publish requires <manifest>"))?;
     let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let operations_registry_root = agent_operations_registry_root(options.operations_registry_root);
+    if options.resolve_ops {
+        let resolutions =
+            resolve_manifest_operation_refs(&manifest_path, &operations_registry_root)?;
+        for resolution in &resolutions {
+            println!(
+                "resolved operation_ref: {} -> {}",
+                resolution.declared, resolution.resolved
+            );
+        }
+    }
     let record = registry
         .publish_manifest_path_with_operation_registry(manifest_path, operations_registry_root)?;
     println!("published {}", record.ref_uri);
@@ -416,6 +426,310 @@ async fn agent_publish(args: Vec<OsString>) -> CooldisResult<()> {
     );
     println!("record: {}", registry.record_path(&record.name)?.display());
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestOperationRef {
+    tool_id: String,
+    reference: String,
+    grants: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OperationRefResolution {
+    declared: String,
+    resolved: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnpinnedOperationRef {
+    record_name: String,
+    operation_name: Option<String>,
+}
+
+fn resolve_manifest_operation_refs(
+    manifest_path: &Path,
+    operation_registry_root: &Path,
+) -> CooldisResult<Vec<OperationRefResolution>> {
+    let source = fs::read_to_string(manifest_path).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to read agent manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+    let operation_refs = manifest_operation_refs_from_source(&source)?;
+    let registry = LocalOperationRegistry::new(operation_registry_root);
+    let mut resolutions = Vec::new();
+    let mut replacements = BTreeMap::new();
+    for operation_ref in operation_refs {
+        let Some(parsed) = parse_resolvable_operation_ref(&operation_ref.reference)? else {
+            continue;
+        };
+        let record = registry.load_record(&parsed.record_name).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "tool {:?} operation_ref {:?} was not found in the local operation registry: {err}; seed the operation registry or fix the op:// record name",
+                operation_ref.tool_id,
+                operation_ref.reference
+            ))
+        })?;
+        let resolved = format!(
+            "op://{}{}@sha256:{}",
+            parsed.record_name,
+            parsed
+                .operation_name
+                .as_deref()
+                .map(|operation| format!("/{operation}"))
+                .unwrap_or_default(),
+            record.active_artifact_hash
+        );
+        crate::agent::manifest_bind::verify_operation_ref(
+            &operation_ref.tool_id,
+            &resolved,
+            &operation_ref.grants,
+            operation_registry_root,
+        )?;
+        match replacements.get(&operation_ref.reference) {
+            Some(existing) if existing != &resolved => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "operation_ref {:?} resolved inconsistently to {:?} and {:?}",
+                    operation_ref.reference, existing, resolved
+                )));
+            }
+            Some(_) => {}
+            None => {
+                replacements.insert(operation_ref.reference.clone(), resolved.clone());
+                resolutions.push(OperationRefResolution {
+                    declared: operation_ref.reference,
+                    resolved,
+                });
+            }
+        }
+    }
+    if replacements.is_empty() {
+        return Ok(resolutions);
+    }
+    let rewritten = rewrite_operation_ref_values(&source, &replacements, manifest_path)?;
+    write_text_atomically(
+        manifest_path,
+        format!("agent manifest operation refs {}", manifest_path.display()),
+        &rewritten,
+    )?;
+    Ok(resolutions)
+}
+
+fn manifest_operation_refs_from_source(source: &str) -> CooldisResult<Vec<ManifestOperationRef>> {
+    let value: toml::Value = toml::from_str(source)
+        .map_err(|err| CooldisError::RuntimeFactory(format!("invalid agent manifest: {err}")))?;
+    let Some(tools) = value.get("tools").and_then(toml::Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut refs = Vec::new();
+    for tool in tools {
+        let Some(table) = tool.as_table() else {
+            continue;
+        };
+        let Some(reference) = table.get("operation_ref").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let tool_id = table
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("<unknown>")
+            .to_string();
+        let grants = table
+            .get("grants")
+            .and_then(toml::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        refs.push(ManifestOperationRef {
+            tool_id,
+            reference: reference.to_string(),
+            grants,
+        });
+    }
+    Ok(refs)
+}
+
+fn parse_resolvable_operation_ref(reference: &str) -> CooldisResult<Option<UnpinnedOperationRef>> {
+    let Some(body) = reference.strip_prefix("op://") else {
+        return Ok(None);
+    };
+    if reference.contains("@sha256:") {
+        return Ok(None);
+    }
+    let body = body.strip_suffix("@latest").unwrap_or(body);
+    if body.contains('@') {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "operation_ref {reference:?} cannot be resolved by --resolve-ops; use op://<record>, op://<record>/<operation>, op://<record>@latest, or op://<record>/<operation>@latest"
+        )));
+    }
+    let segments = body.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        [record_name] if !record_name.is_empty() => Ok(Some(UnpinnedOperationRef {
+            record_name: (*record_name).to_string(),
+            operation_name: None,
+        })),
+        [record_name, operation_name] if !record_name.is_empty() && !operation_name.is_empty() => {
+            Ok(Some(UnpinnedOperationRef {
+                record_name: (*record_name).to_string(),
+                operation_name: Some((*operation_name).to_string()),
+            }))
+        }
+        _ => Err(CooldisError::RuntimeFactory(format!(
+            "operation_ref {reference:?} must match op://<record>, op://<record>/<operation>, op://<record>@latest, or op://<record>/<operation>@latest"
+        ))),
+    }
+}
+
+fn rewrite_operation_ref_values(
+    source: &str,
+    replacements: &BTreeMap<String, String>,
+    manifest_path: &Path,
+) -> CooldisResult<String> {
+    let mut touched = BTreeSet::new();
+    let mut rewritten = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        rewritten.push_str(&rewrite_operation_ref_line(
+            line,
+            replacements,
+            &mut touched,
+        ));
+    }
+    let missing = replacements
+        .keys()
+        .filter(|reference| !touched.contains(*reference))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "failed to rewrite operation_ref value(s) {} in {}; --resolve-ops supports single-line operation_ref string values",
+            missing.join(", "),
+            manifest_path.display()
+        )));
+    }
+    Ok(rewritten)
+}
+
+fn rewrite_operation_ref_line(
+    line: &str,
+    replacements: &BTreeMap<String, String>,
+    touched: &mut BTreeSet<String>,
+) -> String {
+    let mut index = 0;
+    let bytes = line.as_bytes();
+    while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+        index += 1;
+    }
+    if !line[index..].starts_with("operation_ref") {
+        return line.to_string();
+    }
+    let mut cursor = index + "operation_ref".len();
+    if line[cursor..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return line.to_string();
+    }
+    while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'=') {
+        return line.to_string();
+    }
+    cursor += 1;
+    while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
+        cursor += 1;
+    }
+    let Some(&quote) = bytes.get(cursor) else {
+        return line.to_string();
+    };
+    if quote != b'"' && quote != b'\'' {
+        return line.to_string();
+    }
+    let value_start = cursor + 1;
+    let mut value_end = value_start;
+    while value_end < bytes.len() {
+        if bytes[value_end] == quote
+            && (quote == b'\'' || !is_escaped_basic_string_quote(bytes, value_end))
+        {
+            break;
+        }
+        value_end += 1;
+    }
+    if value_end >= bytes.len() {
+        return line.to_string();
+    }
+    let value = &line[value_start..value_end];
+    let Some(replacement) = replacements.get(value) else {
+        return line.to_string();
+    };
+    touched.insert(value.to_string());
+    let mut rewritten = String::with_capacity(line.len() + replacement.len());
+    rewritten.push_str(&line[..value_start]);
+    rewritten.push_str(replacement);
+    rewritten.push_str(&line[value_end..]);
+    rewritten
+}
+
+fn is_escaped_basic_string_quote(bytes: &[u8], quote_index: usize) -> bool {
+    let mut backslashes = 0;
+    let mut index = quote_index;
+    while index > 0 {
+        index -= 1;
+        if bytes[index] == b'\\' {
+            backslashes += 1;
+        } else {
+            break;
+        }
+    }
+    backslashes % 2 == 1
+}
+
+fn write_text_atomically(path: &Path, label: String, body: &str) -> CooldisResult<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to create {label} directory {}: {err}",
+            parent.display()
+        ))
+    })?;
+    let tmp_path = parent.join(format!(".cooldis.tmp.{}", Uuid::now_v7()));
+    {
+        let mut file = fs::File::create(&tmp_path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to create temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        file.write_all(body.as_bytes()).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to write temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        file.sync_all().map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to sync temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+    }
+    fs::rename(&tmp_path, path).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to atomically install {label} {}: {err}",
+            path.display()
+        ))
+    })
 }
 
 async fn agent_list(args: Vec<OsString>) -> CooldisResult<()> {
@@ -3050,6 +3364,7 @@ struct AgentManifestArgs {
     manifest_path: Option<PathBuf>,
     registry_root: Option<PathBuf>,
     operations_registry_root: Option<PathBuf>,
+    resolve_ops: bool,
     help: bool,
 }
 
@@ -3375,11 +3690,13 @@ fn parse_agent_manifest_args(
     let mut manifest_path = None;
     let mut registry_root = None;
     let mut operations_registry_root = None;
+    let mut resolve_ops = false;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
+            "--resolve-ops" if command == "agent publish" => resolve_ops = true,
             "--registry-root" => {
                 registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
             }
@@ -3406,6 +3723,7 @@ fn parse_agent_manifest_args(
         manifest_path,
         registry_root,
         operations_registry_root,
+        resolve_ops,
         help,
     })
 }
@@ -6226,11 +6544,13 @@ fn print_agent_publish_help() {
         "cooldis agent publish\n\
 \n\
 Usage:\n\
-  cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
+  cooldis agent publish <manifest> [--resolve-ops] [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
 \n\
 Reruns the agent plan and writes an immutable published agent record. Every\n\
 op:// tool ref must exist in the operations registry and its row grants must\n\
-cover the selected operation requirements.\n"
+cover the selected operation requirements. --resolve-ops rewrites op://name\n\
+or op://name@latest authoring refs in the manifest file to pinned\n\
+op://name@sha256:<hash> refs before publish verification runs.\n"
     );
 }
 
