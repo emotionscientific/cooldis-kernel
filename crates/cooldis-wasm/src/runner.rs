@@ -73,23 +73,18 @@ impl WasmRuntimeFactory {
 
     pub async fn validate_operation_artifact(&self) -> CooldisWasmResult<WasmOperationManifest> {
         let module = self.load_module().await?;
-        validate_module_imports(&module, self.config.host_import_policy)?;
-        let manifest = load_operation_manifest(&self.engine, &module, &self.config)
-            .await?
-            .ok_or_else(|| {
-                CooldisWasmError::RuntimeFactory(format!(
-                    "wasm operation artifact must export {DESCRIBE_EXPORT}; legacy handle_turn modules cannot be published as operations"
-                ))
-            })?;
-        if !module
-            .exports()
-            .any(|export| export.name() == CALL_OPERATION_EXPORT)
-        {
-            return Err(CooldisWasmError::RuntimeFactory(format!(
-                "wasm operation artifact must export {CALL_OPERATION_EXPORT}"
-            )));
-        }
-        Ok(manifest)
+        validate_operation_module(&self.engine, &module, &self.config).await
+    }
+
+    pub async fn build_validated_operation_runtime(&self) -> CooldisWasmResult<WasmModuleRuntime> {
+        let module = self.load_module().await?;
+        let manifest = validate_operation_module(&self.engine, &module, &self.config).await?;
+        Ok(WasmModuleRuntime {
+            config: self.config.clone(),
+            engine: Arc::clone(&self.engine),
+            module,
+            manifest: Some(manifest),
+        })
     }
 
     pub async fn invoke_operation_bytes(
@@ -147,6 +142,30 @@ impl WasmRuntimeFactory {
     }
 }
 
+async fn validate_operation_module(
+    engine: &Engine,
+    module: &Module,
+    config: &WasmRuntimeConfig,
+) -> CooldisWasmResult<WasmOperationManifest> {
+    validate_module_imports(module, config.host_import_policy)?;
+    let manifest = load_operation_manifest(engine, module, config)
+        .await?
+        .ok_or_else(|| {
+            CooldisWasmError::RuntimeFactory(format!(
+                "wasm operation artifact must export {DESCRIBE_EXPORT}; legacy handle_turn modules cannot be published as operations"
+            ))
+        })?;
+    if !module
+        .exports()
+        .any(|export| export.name() == CALL_OPERATION_EXPORT)
+    {
+        return Err(CooldisWasmError::RuntimeFactory(format!(
+            "wasm operation artifact must export {CALL_OPERATION_EXPORT}"
+        )));
+    }
+    Ok(manifest)
+}
+
 fn configure_wasmtime_engine(engine_config: &mut Config) {
     // Wasmtime's default macOS Mach-port trap handler owns a process-global
     // helper thread. Under the parallel lib test harness that thread has
@@ -181,6 +200,27 @@ pub struct WasmModuleRuntime {
 }
 
 impl WasmModuleRuntime {
+    pub async fn invoke_operation_bytes(
+        &self,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+    ) -> CooldisWasmResult<WasmOperationOutput> {
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            CooldisWasmError::RuntimeExecution(format!(
+                "wasm module does not export {DESCRIBE_EXPORT}"
+            ))
+        })?;
+        execute_operation(
+            &self.engine,
+            &self.module,
+            &self.config,
+            manifest,
+            operation_name,
+            input.into(),
+        )
+        .await
+    }
+
     pub async fn execute_turn(&self, input: String) -> CooldisWasmResult<String> {
         if let Some(manifest) = &self.manifest {
             let output = execute_operation(

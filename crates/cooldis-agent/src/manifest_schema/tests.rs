@@ -290,12 +290,7 @@ fn reserved_and_deferred_resource_kinds_are_named() {
     .unwrap();
     assert_eq!(manifest.resources[0].reference, skill_ref);
 
-    let err = parse(
-        &valid_manifest()
-            .replace("kind = \"blob\"", "kind = \"skill\"")
-            .replace("resource://system-prompt@", "resource://system-prompt@"),
-    )
-    .unwrap_err();
+    let err = parse(&valid_manifest().replace("kind = \"blob\"", "kind = \"skill\"")).unwrap_err();
     assert!(err.to_string().contains("skill://"));
 }
 

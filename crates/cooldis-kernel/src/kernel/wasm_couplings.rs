@@ -6,21 +6,39 @@ use async_trait::async_trait;
 use cooldis_abi::{
     COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, CouplingDischarge as AbiCouplingDischarge,
     CouplingInvocation as AbiCouplingInvocation, CouplingInvocationEvent, CouplingInvocationMeta,
-    InvocationContext,
+    InvocationContext, WasmOperationManifest,
 };
-use cooldis_wasm::{WasmHostImportPolicy, WasmRuntimeFactory};
+use cooldis_wasm::{WasmHostImportPolicy, WasmModuleRuntime, WasmRuntimeFactory};
+use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
+const WASM_COUPLING_CACHE_CAPACITY: usize = 32;
+
+#[derive(Clone)]
 pub struct WasmCouplingExecutor {
     operation_registry_root: PathBuf,
+    cache: Arc<Mutex<WasmCouplingCache>>,
+}
+
+impl fmt::Debug for WasmCouplingExecutor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WasmCouplingExecutor")
+            .field("operation_registry_root", &self.operation_registry_root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WasmCouplingExecutor {
     pub fn new(operation_registry_root: impl Into<PathBuf>) -> Self {
         Self {
             operation_registry_root: operation_registry_root.into(),
+            cache: Arc::new(Mutex::new(WasmCouplingCache::new(
+                WASM_COUPLING_CACHE_CAPACITY,
+            ))),
         }
     }
 
@@ -30,6 +48,11 @@ impl WasmCouplingExecutor {
 
     pub fn operation_registry_root(&self) -> &Path {
         &self.operation_registry_root
+    }
+
+    #[cfg(test)]
+    fn cache_stats(&self) -> WasmCouplingCacheStats {
+        self.cache.lock().unwrap().stats()
     }
 }
 
@@ -47,47 +70,34 @@ impl CouplingExecutor for WasmCouplingExecutor {
                     request.coupling.id
                 ))
             })?;
-        let registry = LocalOperationRegistry::new(&self.operation_registry_root);
-        let record = registry
-            .load_version_record(
-                &request.coupling.function.name,
-                &request.coupling.function.artifact_hash,
-            )
-            .map_err(|err| {
-                CooldisError::RuntimeFactory(format!(
-                    "wasm coupling {:?} operation {}@sha256:{} was not found: {err}",
-                    request.coupling.id,
-                    request.coupling.function.name,
-                    request.coupling.function.artifact_hash
-                ))
-            })?;
-        if record.manifest.operation(&operation_name).is_none() {
-            return Err(CooldisError::RuntimeFactory(format!(
-                "wasm coupling {:?} operation record {:?} does not expose {:?}",
-                request.coupling.id, record.name, operation_name
-            )));
-        }
-        let mut config = registry.load_runtime_config_for_published_record(&record)?;
-        config.operation_name = operation_name.clone();
-        config.capability_grants.clear();
-        config.invocation_context = InvocationContext::anonymous();
-        config.secrets.clear();
-        config.vfs = None;
-        config.host_import_policy = WasmHostImportPolicy::PureCompute;
-
+        let key = WasmCouplingCacheKey::new(
+            request.coupling.function.name.clone(),
+            request.coupling.function.artifact_hash.clone(),
+        );
+        let cached = { self.cache.lock().unwrap().get(&key) };
+        let cached = match cached {
+            Some(cached) => cached,
+            None => {
+                let filled = self
+                    .fill_cache_entry(&request, &operation_name, &key)
+                    .await?;
+                self.cache.lock().unwrap().insert(key.clone(), filled)
+            }
+        };
+        ensure_operation_exposed(
+            &request.coupling.id,
+            &key.operation_name,
+            &cached.manifest,
+            &operation_name,
+        )?;
         let input = encode_invocation(&request)?;
-        let factory = WasmRuntimeFactory::new(config)?;
-        factory.validate_operation_artifact().await.map_err(|err| {
-            CooldisError::RuntimeExecution(format!(
-                "trap: wasm coupling {:?} violates pure-compute import policy: {err}",
-                request.coupling.id
-            ))
-        })?;
         let output = match request.coupling.budget.max_ms {
             Some(max_ms) => {
                 match tokio::time::timeout(
                     Duration::from_millis(max_ms),
-                    factory.invoke_operation_bytes(&operation_name, input),
+                    cached
+                        .runtime
+                        .invoke_operation_bytes(&operation_name, input),
                 )
                 .await
                 {
@@ -112,7 +122,8 @@ impl CouplingExecutor for WasmCouplingExecutor {
                     }
                 }
             }
-            None => factory
+            None => cached
+                .runtime
                 .invoke_operation_bytes(&operation_name, input)
                 .await
                 .map_err(|err| {
@@ -124,6 +135,178 @@ impl CouplingExecutor for WasmCouplingExecutor {
         };
         decode_discharge(&request.coupling.id, &output.output)
     }
+}
+
+impl WasmCouplingExecutor {
+    async fn fill_cache_entry(
+        &self,
+        request: &CouplingInvocation,
+        operation_name: &str,
+        key: &WasmCouplingCacheKey,
+    ) -> CooldisResult<CachedWasmCoupling> {
+        let registry = LocalOperationRegistry::new(&self.operation_registry_root);
+        let record = registry
+            .load_version_record(&key.operation_name, &key.artifact_hash)
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "wasm coupling {:?} operation {}@sha256:{} was not found: {err}",
+                    request.coupling.id, key.operation_name, key.artifact_hash
+                ))
+            })?;
+        ensure_operation_exposed(
+            &request.coupling.id,
+            &record.name,
+            &record.manifest,
+            operation_name,
+        )?;
+        let mut config = registry.load_runtime_config_for_published_record(&record)?;
+        config.operation_name = operation_name.to_string();
+        config.capability_grants.clear();
+        config.invocation_context = InvocationContext::anonymous();
+        config.secrets.clear();
+        config.vfs = None;
+        config.host_import_policy = WasmHostImportPolicy::PureCompute;
+
+        let factory = WasmRuntimeFactory::new(config)?;
+        let runtime = factory
+            .build_validated_operation_runtime()
+            .await
+            .map_err(|err| {
+                CooldisError::RuntimeExecution(format!(
+                    "trap: wasm coupling {:?} violates pure-compute import policy: {err}",
+                    request.coupling.id
+                ))
+            })?;
+        Ok(CachedWasmCoupling {
+            runtime: Arc::new(runtime),
+            manifest: record.manifest,
+        })
+    }
+}
+
+/// Immutable cache key for a published Wasm operation artifact. The artifact
+/// hash is content-addressed, so entries never need invalidation; the bounded
+/// map only evicts to cap memory across many distinct artifacts.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct WasmCouplingCacheKey {
+    operation_name: String,
+    artifact_hash: String,
+}
+
+impl WasmCouplingCacheKey {
+    fn new(operation_name: String, artifact_hash: String) -> Self {
+        Self {
+            operation_name,
+            artifact_hash,
+        }
+    }
+}
+
+struct CachedWasmCoupling {
+    runtime: Arc<WasmModuleRuntime>,
+    manifest: WasmOperationManifest,
+}
+
+struct WasmCouplingCache {
+    capacity: usize,
+    entries: HashMap<WasmCouplingCacheKey, Arc<CachedWasmCoupling>>,
+    lru: VecDeque<WasmCouplingCacheKey>,
+    #[cfg(test)]
+    stats: WasmCouplingCacheStats,
+}
+
+impl WasmCouplingCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            #[cfg(test)]
+            stats: WasmCouplingCacheStats::default(),
+        }
+    }
+
+    fn get(&mut self, key: &WasmCouplingCacheKey) -> Option<Arc<CachedWasmCoupling>> {
+        let cached = self.entries.get(key).cloned()?;
+        self.touch(key);
+        #[cfg(test)]
+        {
+            self.stats.hits += 1;
+        }
+        Some(cached)
+    }
+
+    fn insert(
+        &mut self,
+        key: WasmCouplingCacheKey,
+        entry: CachedWasmCoupling,
+    ) -> Arc<CachedWasmCoupling> {
+        if let Some(cached) = self.entries.get(&key).cloned() {
+            self.touch(&key);
+            return cached;
+        }
+        self.evict_until_room();
+        let cached = Arc::new(entry);
+        self.entries.insert(key.clone(), Arc::clone(&cached));
+        self.lru.push_back(key);
+        #[cfg(test)]
+        {
+            self.stats.fills += 1;
+        }
+        cached
+    }
+
+    fn touch(&mut self, key: &WasmCouplingCacheKey) {
+        if let Some(position) = self.lru.iter().position(|candidate| candidate == key) {
+            self.lru.remove(position);
+        }
+        self.lru.push_back(key.clone());
+    }
+
+    fn evict_until_room(&mut self) {
+        while self.entries.len() >= self.capacity {
+            let Some(evicted) = self.lru.pop_front() else {
+                break;
+            };
+            if self.entries.remove(&evicted).is_some() {
+                #[cfg(test)]
+                {
+                    self.stats.evictions += 1;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn stats(&self) -> WasmCouplingCacheStats {
+        WasmCouplingCacheStats {
+            entries: self.entries.len(),
+            ..self.stats
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct WasmCouplingCacheStats {
+    entries: usize,
+    fills: usize,
+    hits: usize,
+    evictions: usize,
+}
+
+fn ensure_operation_exposed(
+    coupling_id: &str,
+    record_name: &str,
+    manifest: &WasmOperationManifest,
+    operation_name: &str,
+) -> CooldisResult<()> {
+    if manifest.operation(operation_name).is_none() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "wasm coupling {coupling_id:?} operation record {record_name:?} does not expose {operation_name:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn encode_invocation(request: &CouplingInvocation) -> CooldisResult<Vec<u8>> {
@@ -583,6 +766,44 @@ mod tests {
                 .any(|run| run.status == CouplingRunStatus::Skipped
                     && run.reason.as_deref() == Some("depth_limit_exhausted"))
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn wasm_coupling_reuses_validated_runtime_for_same_artifact() {
+        let root = temp_dir("wasm-coupling-cache");
+        let output = json!({
+            "abi": COUPLING_DISCHARGE_ABI,
+            "events": [{
+                "stream": "derived:counter",
+                "kind": "placement.decision",
+                "payload": {"count": 1}
+            }]
+        });
+        let operation = publish_coupling_operation(&root, "counter", "run", &output).await;
+        let store = InMemorySessionStore::default();
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let coupling = test_coupling(
+            "org.example.counter",
+            "counter",
+            "run",
+            &operation,
+            "derived:counter",
+            vec![EventKind::PlacementDecision],
+        );
+        let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+        let executor = WasmCouplingExecutor::new(&root);
+        let scheduler = CouplingScheduler::new(&store, &executor);
+
+        let first = append_turn_completed(&store, &coordinates).await;
+        scheduler.run_batch(&coupling_set, first).await.unwrap();
+        let second = append_turn_completed(&store, &coordinates).await;
+        scheduler.run_batch(&coupling_set, second).await.unwrap();
+
+        let stats = executor.cache_stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.fills, 1);
+        assert_eq!(stats.hits, 1);
         let _ = fs::remove_dir_all(root);
     }
 

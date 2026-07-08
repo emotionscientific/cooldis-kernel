@@ -1005,7 +1005,7 @@ pub(super) fn resolve_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
 
 pub(super) fn normalize_registry_roots(config: &mut CooldisAppServerConfig) {
     let blob_registry_root_was_default =
-        config.blob_registry_root == PathBuf::from(DEFAULT_BLOB_REGISTRY_ROOT);
+        config.blob_registry_root == Path::new(DEFAULT_BLOB_REGISTRY_ROOT);
     config.agent_registry_root = resolve_path_against_cwd(&config.cwd, &config.agent_registry_root);
     config.blob_registry_root = if blob_registry_root_was_default {
         default_blob_registry_root_for_agent_registry_root(&config.agent_registry_root)

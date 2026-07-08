@@ -2001,7 +2001,7 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     let latest_admission = control_events
         .iter()
         .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
-        .last()
+        .next_back()
         .unwrap();
     assert_eq!(
         latest_admission.payload["decision"].as_str(),
@@ -2025,7 +2025,7 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     let latest_ingress_context = thread_events
         .iter()
         .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
-        .last()
+        .next_back()
         .unwrap();
     assert_eq!(
         latest_ingress_context.payload["ingress_metadata"]["cooldis_coalesced_batch_size"].as_str(),
@@ -2253,7 +2253,7 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
     let observe_admission = control_events_after
         .iter()
         .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
-        .last()
+        .next_back()
         .unwrap();
     assert_eq!(
         observe_admission.payload["decision"].as_str(),

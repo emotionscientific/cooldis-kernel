@@ -713,8 +713,12 @@ pub struct AgentManifestCouplingTrigger {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingQuota {
+    /// Maximum non-skipped coupling runs admitted during one scheduler cycle.
     #[serde(default)]
     pub per_turn: Option<u32>,
+    /// Maximum non-skipped coupling runs admitted over the thread lifetime.
+    /// The kernel derives this count from the thread journal instead of a
+    /// separate persisted quota store.
     #[serde(default)]
     pub per_thread: Option<u32>,
 }
