@@ -1168,6 +1168,10 @@ pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidatio
         context_read_plan_set_payload_schema_v1(),
     )?;
     registry.register(
+        EventKind::ThreadSpawnRequested.payload_schema_id(),
+        thread_spawn_requested_payload_schema_v1(),
+    )?;
+    registry.register(
         EventKind::ThreadSpawned.payload_schema_id(),
         thread_spawned_payload_schema_v1(),
     )?;
@@ -1640,6 +1644,27 @@ fn thread_spawned_payload_schema_v1() -> Value {
                     }
                 }
             }
+        }
+    })
+}
+
+fn thread_spawn_requested_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": [
+            "parent_thread_id",
+            "child_agent_ref",
+            "initial_submission",
+            "correlation_id"
+        ],
+        "additionalProperties": true,
+        "properties": {
+            "parent_thread_id": {"type": "string"},
+            "parent_turn_id": {"type": "string"},
+            "child_agent_ref": {"type": "string"},
+            "initial_submission": {"type": "string"},
+            "correlation_id": {"type": "string"},
+            "block_parent": {"type": "boolean"}
         }
     })
 }

@@ -253,7 +253,7 @@ pub async fn bind_published_agent_record(
     let static_context_segments = bind_static_context_sources(&manifest, blob_registry_root)?;
     let bound_skills = bind_skill_resources(&manifest.resources, skill_registry_root)?;
     let couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
-    enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings)?;
+    enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings, &couplings)?;
     let operation_names = bound_tools
         .operation_bindings
         .iter()
@@ -954,20 +954,29 @@ async fn bind_tools(
 fn enforce_child_agent_policy(
     manifest: &AgentManifestSchema,
     operation_bindings: &[AgentManifestOperationBinding],
+    couplings: &[BoundCoupling],
 ) -> CooldisResult<()> {
     if manifest.policies.allow_child_agents {
         return Ok(());
     }
-    let declares_thread_spawn = operation_bindings.iter().any(|binding| {
+    let tool_declares_thread_spawn = operation_bindings.iter().any(|binding| {
         binding.name == COOLDIS_THREADS_PACKAGE
             && binding
                 .grants
                 .iter()
                 .any(|grant| grant == THREADS_SPAWN_CAPABILITY)
     });
+    let coupling_declares_thread_spawn = couplings.iter().any(|coupling| {
+        coupling.id == crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
+            && coupling
+                .grants
+                .iter()
+                .any(|grant| grant == THREADS_SPAWN_CAPABILITY)
+    });
+    let declares_thread_spawn = tool_declares_thread_spawn || coupling_declares_thread_spawn;
     if declares_thread_spawn {
         return Err(CooldisError::RuntimeFactory(
-            "agent manifest policies.allow_child_agents = false but a cooldis-threads row grants threads.spawn; remove thread_spawn or set allow_child_agents = true".to_string(),
+            "agent manifest policies.allow_child_agents = false but a child-thread operation or supervisor coupling grants threads.spawn; remove thread_spawn/std::supervisor.spawn or set allow_child_agents = true".to_string(),
         ));
     }
     Ok(())

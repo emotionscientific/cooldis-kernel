@@ -4,8 +4,8 @@ use crate::agent::manifest_schema::{
 };
 use crate::{
     AgentManifestCompactionDefaults, AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol,
-    LocalSkillRegistry, PublishSkillPackageRequest, ToolDefinition, ToolUniverseDiscovery,
-    WitnessedToolContract,
+    LocalSkillRegistry, PublishSkillPackageRequest, STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+    THREADS_SPAWN_CAPABILITY, ToolDefinition, ToolUniverseDiscovery, WitnessedToolContract,
 };
 use async_trait::async_trait;
 use std::fs;
@@ -993,6 +993,12 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
     let operation_root = root.join("operations");
     let operation =
         publish_multi_operation_record(&operation_root, "stdlib_policy", &[("run", vec![])]).await;
+    let spawn_operation = publish_multi_operation_record(
+        &operation_root,
+        "stdlib_supervisor_spawn",
+        &[("run", vec![THREADS_SPAWN_CAPABILITY])],
+    )
+    .await;
     let surface = AgentManifestProviderSurface::single("local_offline", "echo")
         .with_supports_streaming(false);
 
@@ -1006,19 +1012,35 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
         } else {
             &template.source.stream
         };
+        let (function_ref, grant, policy) = if template.id == STD_SUPERVISOR_SPAWN_TEMPLATE_ID {
+            (
+                format!(
+                    "op://stdlib_supervisor_spawn/run@sha256:{}",
+                    spawn_operation.active_artifact_hash
+                ),
+                THREADS_SPAWN_CAPABILITY,
+                "\n[policies]\nallow_child_agents = true\n",
+            )
+        } else {
+            (
+                format!(
+                    "op://stdlib_policy/run@sha256:{}",
+                    operation.active_artifact_hash
+                ),
+                "",
+                "",
+            )
+        };
         let record = publish_agent_manifest(
             &root,
-            &manifest_with_coupling(
+            &(manifest_with_coupling(
                 &format!(
                     "runtime_{}",
                     template.id.replace("std::", "").replace(['.', ':'], "_")
                 ),
                 &template.id,
-                &format!(
-                    "op://stdlib_policy/run@sha256:{}",
-                    operation.active_artifact_hash
-                ),
-                "",
+                &function_ref,
+                grant,
                 &template.trigger_kinds[0].to_string(),
                 source_stream,
                 &template.source.kinds[0].to_string(),
@@ -1033,7 +1055,7 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
                 )
                 .unwrap(),
                 "",
-            ),
+            ) + policy),
         );
 
         let bound = bind_published_agent_record(
@@ -1077,11 +1099,7 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
             .iter()
             .map(|template| template.id.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "std::io.channel_ingress",
-            "std::io.channel_egress",
-            "std::supervisor.spawn",
-        ]
+        vec!["std::io.channel_ingress", "std::io.channel_egress",]
     );
 
     for template in non_executable {
@@ -1137,6 +1155,57 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
             "{diagnostic}"
         );
     }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn manifest_supervisor_spawn_coupling_honors_child_agent_policy() {
+    let root = temp_dir("manifest-bind-supervisor-spawn-policy");
+    let operation_root = root.join("operations");
+    let operation = publish_multi_operation_record(
+        &operation_root,
+        "stdlib_supervisor_spawn",
+        &[("run", vec![THREADS_SPAWN_CAPABILITY])],
+    )
+    .await;
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+    let manifest = manifest_with_coupling(
+        "blocked_supervisor_spawn",
+        STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+        &format!(
+            "op://stdlib_supervisor_spawn/run@sha256:{}",
+            operation.active_artifact_hash
+        ),
+        THREADS_SPAWN_CAPABILITY,
+        "turn.submitted",
+        "thread",
+        "turn.submitted",
+        "control",
+        "[\"thread.spawn.requested\", \"turn.waiting\"]",
+        r#"initial_submission = "delegate work""#,
+    ) + "\n[policies]\nallow_child_agents = false\n";
+    let record = publish_agent_manifest(&root, &manifest);
+
+    let err = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap_err();
+
+    let diagnostic = err.to_string();
+    assert!(diagnostic.contains("allow_child_agents = false"));
+    assert!(diagnostic.contains("std::supervisor.spawn"));
+    assert!(diagnostic.contains("threads.spawn"));
     let _ = fs::remove_dir_all(root);
 }
 

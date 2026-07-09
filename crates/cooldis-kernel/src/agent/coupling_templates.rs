@@ -385,6 +385,7 @@ fn coupling_template_runtime_executable(id: &str) -> bool {
             | "std::permission.tool_gate"
             | "std::prompt.dynamic_instructions"
             | "std::schedule.cron"
+            | "std::supervisor.spawn"
             | "std::supervisor.child_completion"
             | "std::retry.with_budget"
             | "std::failure.deadletter"
@@ -428,6 +429,7 @@ mod tests {
                 "std::prompt.steer",
                 "std::prompt.dynamic_instructions",
                 "std::schedule.cron",
+                "std::supervisor.spawn",
                 "std::supervisor.child_completion",
                 "std::retry.with_budget",
                 "std::failure.deadletter"

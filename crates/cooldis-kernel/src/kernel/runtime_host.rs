@@ -33,7 +33,7 @@ mod turn;
 pub use kernel_control::{
     AgentProcessCheckpointReceipt, AgentProcessChildRef, AgentProcessChildrenReceipt,
     AgentProcessLifecycleReceipt, AgentProcessSpawnReceipt, AgentProcessStatusReceipt,
-    AgentProcessSubmitReceipt, AgentProcessWaitReceipt, RuntimeKernelControl,
+    AgentProcessSubmitReceipt, AgentProcessWaitReceipt, RuntimeKernelControl, ThreadSpawnWitness,
 };
 pub use loop_continuation::LoopContinuationReceipt;
 use loop_continuation::{

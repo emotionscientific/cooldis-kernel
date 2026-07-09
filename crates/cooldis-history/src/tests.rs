@@ -487,6 +487,10 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         "cooldis.event.context.read_plan.set/1"
     );
     assert_eq!(
+        EventKind::ThreadSpawnRequested.payload_schema_id(),
+        "cooldis.event.thread.spawn.requested/1"
+    );
+    assert_eq!(
         EventKind::ThreadSpawned.payload_schema_id(),
         "cooldis.event.thread.spawned/1"
     );
@@ -550,6 +554,18 @@ fn events_0_2_payload_fixtures_round_trip_and_validate() {
     let registry = stream_schema_registry_v1().unwrap();
 
     let cases = [
+        (
+            EventKind::ThreadSpawnRequested,
+            serde_json::to_value(ThreadSpawnRequestedPayload {
+                parent_thread_id,
+                parent_turn_id: Some("turn-parent".to_string()),
+                child_agent_ref: "agent://release-worker".to_string(),
+                initial_submission: "collect release evidence".to_string(),
+                correlation_id: "spawn-release-worker-1".to_string(),
+                block_parent: true,
+            })
+            .unwrap(),
+        ),
         (
             EventKind::ThreadSpawned,
             serde_json::to_value(ThreadSpawnedPayload {

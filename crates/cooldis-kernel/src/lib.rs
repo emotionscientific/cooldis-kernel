@@ -65,6 +65,7 @@ pub mod kernel {
     pub mod secret_store;
     pub mod stdlib_couplings;
     pub mod supervisor;
+    pub mod thread_spawn_projector;
     pub mod wasm_couplings;
 }
 
@@ -309,9 +310,9 @@ pub use kernel::history::{
     StreamAppendAckV1, StreamBackendCapabilitiesV1, StreamBackendKindV1, StreamCursorV1,
     StreamRecordEnvelopeV1, StreamRouteProfile, StreamRoutingDecisionV1, StreamRoutingKeysV1,
     StreamStorageScopeV1, ThinkingMetadata, ThinkingProvider, ThreadBaseRef, ThreadForkReason,
-    ThreadJoinedPayload, ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload,
-    ThreadSpawnedPayload, ThreadTerminalState, TimerFiredPayload, stream_schema_registry_v1,
-    validate_context_payload_schema_v1,
+    ThreadJoinedPayload, ThreadSpawnRequestedPayload, ThreadSpawnedForkPayload,
+    ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload, ThreadTerminalState,
+    TimerFiredPayload, stream_schema_registry_v1, validate_context_payload_schema_v1,
 };
 pub use kernel::mandate_lifecycle::{
     ActiveMandate, MIN_MANDATE_INTERVAL_MS, MandateRevokeReceipt, MandateRevokeStatus,
@@ -344,8 +345,9 @@ pub use kernel::runtime_host::{
     ThreadContext, ThreadCoordinates, ThreadEvent, ThreadId, ThreadInitiationSource,
     ThreadInteractionKind, ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus,
     ThreadLineage, ThreadScope, ThreadSignal, ThreadSignalId, ThreadSignalKind,
-    ThreadSpawnAttribution, ThreadStatus, ThreadTopology, TurnBudget, TurnContent, TurnContext,
-    TurnContextSnapshot, TurnInput, TurnSubmissionMode, emit_runtime_event,
+    ThreadSpawnAttribution, ThreadSpawnWitness, ThreadStatus, ThreadTopology, TurnBudget,
+    TurnContent, TurnContext, TurnContextSnapshot, TurnInput, TurnSubmissionMode,
+    emit_runtime_event,
 };
 pub use kernel::secret_store::{
     ManifestSecretResolution, RedactedSecretValue, ResolvedSecret, SecretResolver,
@@ -368,6 +370,10 @@ pub use kernel::supervisor::{
     CooldisSupervisor, SessionSnapshot, SupervisorLifecycleSnapshot, SupervisorSnapshot,
     TenantLifecycleSnapshot, TenantRegistration, TenantRuntimeConfig, TenantRuntimeContext,
     TenantRuntimeContextDescriptor, TenantSnapshot, ThreadStartRequest,
+};
+pub use kernel::thread_spawn_projector::{
+    ThreadSpawnProjected, ThreadSpawnProjectionFailure, ThreadSpawnProjectionReceipt,
+    ThreadSpawnProjector,
 };
 pub use kernel::wasm_couplings::WasmCouplingExecutor;
 pub use operations::kernel_packages::{

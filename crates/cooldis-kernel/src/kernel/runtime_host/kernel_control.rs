@@ -12,8 +12,8 @@ use crate::agent::contracts::{
 };
 use crate::agent::manifest_bind::{BoundCouplingSet, coupling_set_content_hash};
 use crate::kernel::history::{
-    EventKind, EventRecord, EventRecordId, EventSequence, NewEventRecord, SessionContext,
-    ThreadSpawnedPayload,
+    EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId,
+    NewEventRecord, SessionContext, ThreadSpawnedPayload,
 };
 use crate::kernel::mandate_lifecycle::{
     ActiveMandate, MandateRevokeReceipt, MandateStartReceipt, MandateStartRequest,
@@ -48,6 +48,7 @@ async fn append_thread_spawned_event(
     parent: &RuntimeThreadHandle,
     caller: &ThreadContext,
     child: &RuntimeThreadHandle,
+    witness: ThreadSpawnWitness,
 ) -> CooldisResult<EventRecord> {
     let metadata = &child.context().metadata;
     let child_manifest_hash = metadata
@@ -88,7 +89,7 @@ async fn append_thread_spawned_event(
         .transpose()?;
     let payload = ThreadSpawnedPayload {
         parent_thread_id: caller.coordinates.thread_id,
-        parent_turn_id: None,
+        parent_turn_id: witness.parent_turn_id.clone(),
         child_thread_id: child.context().coordinates.thread_id,
         child_manifest_hash,
         child_policy_hash,
@@ -104,14 +105,32 @@ async fn append_thread_spawned_event(
             "schema".to_string(),
             serde_json::json!(EventKind::ThreadSpawned.payload_schema_id()),
         );
+        if let Some(correlation_id) = &witness.correlation_id {
+            object.insert(
+                "correlation_id".to_string(),
+                serde_json::json!(correlation_id),
+            );
+        }
     }
-    parent
-        .append_control_event(NewEventRecord::witnessed(
-            caller.coordinates.clone(),
-            EventKind::ThreadSpawned,
-            value,
-        ))
-        .await
+    let mut record =
+        NewEventRecord::witnessed(caller.coordinates.clone(), EventKind::ThreadSpawned, value);
+    if let (Some(stream_id), Some(event_id)) = (witness.request_stream_id, witness.request_event_id)
+    {
+        record.provenance = EventProvenance {
+            source_streams: vec![stream_id],
+            source_event_ids: vec![event_id],
+            ..EventProvenance::default()
+        };
+    }
+    parent.append_control_event(record).await
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThreadSpawnWitness {
+    pub parent_turn_id: Option<String>,
+    pub correlation_id: Option<String>,
+    pub request_stream_id: Option<EventStreamId>,
+    pub request_event_id: Option<EventRecordId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -251,7 +270,25 @@ impl RuntimeKernelControl {
         caller: &ThreadContext,
         task_name: Option<String>,
         input: TurnInput,
+        metadata: BTreeMap<String, String>,
+    ) -> CooldisResult<AgentProcessSpawnReceipt> {
+        self.spawn_child_with_witness(
+            caller,
+            task_name,
+            input,
+            metadata,
+            ThreadSpawnWitness::default(),
+        )
+        .await
+    }
+
+    pub async fn spawn_child_with_witness(
+        &self,
+        caller: &ThreadContext,
+        task_name: Option<String>,
+        input: TurnInput,
         mut metadata: BTreeMap<String, String>,
+        witness: ThreadSpawnWitness,
     ) -> CooldisResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
         let coordinates = ThreadCoordinates::new(
@@ -278,7 +315,7 @@ impl RuntimeKernelControl {
             .await?;
         let child_thread_id = child.context().coordinates.thread_id;
         let parent = host.get_thread(caller.coordinates.thread_id).await?;
-        if let Err(err) = append_thread_spawned_event(&parent, caller, &child).await {
+        if let Err(err) = append_thread_spawned_event(&parent, caller, &child, witness).await {
             let _ = host.shutdown_thread(child_thread_id).await;
             return Err(err);
         }
