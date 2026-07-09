@@ -253,6 +253,11 @@ pub enum EventKind {
     CouplingRunFailed,
     /// A placement controller selected where execution should run.
     PlacementDecision,
+    /// A coupling proposed spawning supervised child work. A durable
+    /// projector consumes the request, performs the spawn through the
+    /// thread/turn kernel package, and the kernel witnesses `thread.spawned`
+    /// — the same requested/projector grammar as IO egress.
+    ThreadSpawnRequested,
     /// A parent thread spawned a child thread with the recorded manifest,
     /// policy, grants, and input digest.
     ThreadSpawned,
@@ -312,6 +317,7 @@ impl EventKind {
             Self::CouplingRunCompleted,
             Self::CouplingRunFailed,
             Self::PlacementDecision,
+            Self::ThreadSpawnRequested,
             Self::ThreadSpawned,
             Self::ThreadJoined,
             Self::PolicyBound,
@@ -357,6 +363,7 @@ impl EventKind {
             Self::CouplingRunCompleted => "coupling.run.completed",
             Self::CouplingRunFailed => "coupling.run.failed",
             Self::PlacementDecision => "placement.decision",
+            Self::ThreadSpawnRequested => "thread.spawn.requested",
             Self::ThreadSpawned => "thread.spawned",
             Self::ThreadJoined => "thread.joined",
             Self::PolicyBound => "policy.bound",
@@ -404,6 +411,7 @@ impl EventKind {
             Self::CouplingRunCompleted => "cooldis.event.coupling.run.completed/1",
             Self::CouplingRunFailed => "cooldis.event.coupling.run.failed/1",
             Self::PlacementDecision => "cooldis.event.placement.decision/1",
+            Self::ThreadSpawnRequested => "cooldis.event.thread.spawn.requested/1",
             Self::ThreadSpawned => "cooldis.event.thread.spawned/1",
             Self::ThreadJoined => "cooldis.event.thread.joined/1",
             Self::PolicyBound => "cooldis.event.policy.bound/1",
@@ -453,6 +461,7 @@ impl std::str::FromStr for EventKind {
             "coupling.run.completed" => Ok(Self::CouplingRunCompleted),
             "coupling.run.failed" => Ok(Self::CouplingRunFailed),
             "placement.decision" => Ok(Self::PlacementDecision),
+            "thread.spawn.requested" => Ok(Self::ThreadSpawnRequested),
             "thread.spawned" => Ok(Self::ThreadSpawned),
             "thread.joined" => Ok(Self::ThreadJoined),
             "policy.bound" => Ok(Self::PolicyBound),
@@ -520,6 +529,28 @@ pub enum AdmissionDecision {
     Observe,
     Reject,
     Coalesce,
+}
+
+/// Payload of `thread.spawn.requested`: a coupling's proposal to spawn
+/// supervised child work. The projector that consumes it performs the spawn
+/// under the parent's `threads.spawn` grant and `allow_child_agents` policy —
+/// the coupling route grants no authority of its own.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThreadSpawnRequestedPayload {
+    pub parent_thread_id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_turn_id: Option<String>,
+    /// Registry ref of the agent manifest the child runs under.
+    pub child_agent_ref: String,
+    /// The child's first turn input.
+    pub initial_submission: String,
+    /// Joins this request to the resulting `thread.spawned` and to the
+    /// supervisor's completion fold.
+    pub correlation_id: String,
+    /// When true the supervisor also discharges `turn.waiting` for the
+    /// parent, which resumes on the child-completion fold.
+    #[serde(default)]
+    pub block_parent: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

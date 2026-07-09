@@ -442,6 +442,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "coupling.run.completed",
         "coupling.run.failed",
         "placement.decision",
+        "thread.spawn.requested",
         "thread.spawned",
         "thread.joined",
         "policy.bound",

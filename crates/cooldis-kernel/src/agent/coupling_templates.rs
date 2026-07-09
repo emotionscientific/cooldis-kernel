@@ -259,7 +259,11 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
                 "thread",
                 &[EventKind::TurnSubmitted, EventKind::ToolCallRequested],
                 "control",
-                &[EventKind::TurnWaiting, EventKind::CouplingRunCompleted],
+                &[
+                    EventKind::ThreadSpawnRequested,
+                    EventKind::TurnWaiting,
+                    EventKind::CouplingRunCompleted,
+                ],
                 false,
                 false,
                 "Spawn supervised child work through the thread/turn kernel package.",
