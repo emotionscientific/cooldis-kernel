@@ -85,6 +85,16 @@ pub enum HistoryError {
         actual_sequence: Option<i64>,
         actual_event_id: Option<EventRecordId>,
     },
+    #[error(
+        "fenced append to {stream_id} expected next sequence {expected_next_sequence}, stream is at {actual_next_sequence}"
+    )]
+    AppendFenceConflict {
+        stream_id: EventStreamId,
+        expected_next_sequence: i64,
+        actual_next_sequence: i64,
+    },
+    #[error("this event store does not support fenced appends")]
+    FencedAppendUnsupported,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -2537,6 +2547,31 @@ pub trait EventStore: Send + Sync {
         stream_id: &EventStreamId,
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>>;
+
+    /// Append `records` only if the stream's next sequence equals
+    /// `expected_next_sequence` (sequences are 1-based; an empty stream
+    /// expects 1).
+    ///
+    /// On mismatch this returns [`HistoryError::AppendFenceConflict`] and
+    /// appends nothing — never a partial batch. The check and the append are
+    /// atomic with respect to every other append on the same store, so a
+    /// caller that read the stream, decided, and appends through this fence
+    /// cannot race a concurrent writer past its decision (ADR 0001 append
+    /// fencing). Use plain [`EventStore::append_events`] where last-writer
+    /// semantics are correct.
+    ///
+    /// Stores that cannot honor the atomicity contract keep this default
+    /// body, which fails closed with
+    /// [`HistoryError::FencedAppendUnsupported`].
+    async fn append_events_fenced(
+        &self,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        let _ = (stream_id, expected_next_sequence, records);
+        Err(HistoryError::FencedAppendUnsupported)
+    }
 
     async fn read_events(
         &self,
