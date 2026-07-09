@@ -21,6 +21,17 @@ fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
         .collect()
 }
 
+fn message_timestamps(messages: &[CanonicalMessage]) -> Vec<i64> {
+    messages
+        .iter()
+        .map(|message| match message {
+            CanonicalMessage::User { timestamp_ms, .. }
+            | CanonicalMessage::Assistant { timestamp_ms, .. }
+            | CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn append_only_context_follows_active_branch() {
     let store = InMemorySessionStore::new();
@@ -371,6 +382,61 @@ async fn compaction_clears_prior_model_visible_messages() {
         message_texts(&context.messages),
         vec!["Compacted conversation summary:\nold summary"]
     );
+}
+
+#[test]
+fn model_visible_context_rebuild_preserves_persisted_timestamps() {
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let mut old = SessionEntry::new(
+        coordinates.clone(),
+        None,
+        SessionEntryKind::Message {
+            message: CanonicalMessage::User {
+                content: vec![CanonicalContent::text("old")],
+                timestamp_ms: 10,
+            },
+        },
+    );
+    old.created_at_ms = 10;
+    let mut compacted = SessionEntry::new(
+        coordinates.clone(),
+        Some(old.entry_id),
+        SessionEntryKind::Compaction {
+            summary: "old summary".to_string(),
+        },
+    );
+    compacted.created_at_ms = 20;
+    let mut hook = SessionEntry::new(
+        coordinates,
+        Some(compacted.entry_id),
+        SessionEntryKind::CustomContextMessage {
+            message: CanonicalMessage::User {
+                content: vec![CanonicalContent::text("persisted hook context")],
+                timestamp_ms: 30,
+            },
+        },
+    );
+    hook.created_at_ms = 30;
+    let entries = vec![old, compacted, hook];
+    let reopened_entries = entries
+        .iter()
+        .map(|entry| decode_entry(&serde_json::to_string(entry).unwrap()).unwrap())
+        .collect::<Vec<_>>();
+
+    let mut first = Vec::new();
+    append_model_visible_messages(&entries, &mut first);
+    let mut reopened = Vec::new();
+    append_model_visible_messages(&reopened_entries, &mut reopened);
+
+    assert_eq!(first, reopened);
+    assert_eq!(
+        message_texts(&first),
+        vec![
+            "Compacted conversation summary:\nold summary",
+            "persisted hook context"
+        ]
+    );
+    assert_eq!(message_timestamps(&first), vec![20, 30]);
 }
 
 #[tokio::test]

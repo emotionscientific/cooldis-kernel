@@ -38,6 +38,57 @@ fn context_compilation_is_deterministic_and_reports_drops() {
 }
 
 #[test]
+fn synthetic_context_rebuild_preserves_persisted_timestamps() {
+    let mut input = compile_input(
+        vec![
+            SessionEntryKind::Message {
+                message: user_message_at("old", 100),
+            },
+            SessionEntryKind::Compaction {
+                summary: "old facts".to_string(),
+            },
+            SessionEntryKind::CustomContextMessage {
+                message: user_message_at("persisted hook", 300),
+            },
+        ],
+        AgentContextCompilePolicy::unbounded(),
+    );
+    input.session_entries[0].created_at_ms = 100;
+    input.session_entries[1].created_at_ms = 200;
+    input.session_entries[2].created_at_ms = 300;
+    input.turn_anchor_timestamp_ms = 400;
+    input.environment_contexts = vec!["environment".to_string()];
+    input.hook_contexts = vec!["active hook".to_string()];
+    input.turn_context.model_visible_context = vec!["turn context".to_string()];
+    input.attachments.push(AgentContextAttachment {
+        path: PathBuf::from("notes.md"),
+        mime_type: None,
+        size_bytes: None,
+        sha256: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let first = AgentContextCompiler::compile(input.clone());
+    let reopened = AgentContextCompiler::compile(input);
+
+    assert_eq!(first, reopened);
+    assert_eq!(
+        message_texts(&first.messages),
+        vec![
+            "Compacted conversation summary:\nold facts",
+            "persisted hook",
+            "active hook",
+            "turn context",
+            "<attachments>\npath=notes.md\n</attachments>",
+        ]
+    );
+    assert_eq!(
+        message_timestamps(&first.messages),
+        vec![200, 300, 400, 400, 400]
+    );
+}
+
+#[test]
 fn compaction_entry_replaces_prior_model_visible_context() {
     let input = compile_input(
         vec![
@@ -89,6 +140,7 @@ fn environment_and_attachment_inputs_are_explicit_context() {
             "<attachments>\npath=notes.md mime_type=text/markdown size_bytes=42\n</attachments>"
         ]
     );
+    assert_eq!(message_timestamps(&compiled.messages), vec![123, 123]);
 }
 
 #[test]
@@ -243,6 +295,7 @@ fn compile_input(
         system: vec![SystemBlock::text("system")],
         static_system_sources: Vec::new(),
         session_entries: entries,
+        turn_anchor_timestamp_ms: 123,
         turn_context: TurnContextSnapshot {
             turn_id: "turn".to_string(),
             trace_id: "trace".to_string(),
@@ -272,6 +325,24 @@ fn compile_input(
         )],
         policy,
     }
+}
+
+fn user_message_at(text: &str, timestamp_ms: i64) -> CanonicalMessage {
+    CanonicalMessage::User {
+        content: vec![CanonicalContent::text(text)],
+        timestamp_ms,
+    }
+}
+
+fn message_timestamps(messages: &[CanonicalMessage]) -> Vec<i64> {
+    messages
+        .iter()
+        .map(|message| match message {
+            CanonicalMessage::User { timestamp_ms, .. }
+            | CanonicalMessage::Assistant { timestamp_ms, .. }
+            | CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
+        })
+        .collect()
 }
 
 fn static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
