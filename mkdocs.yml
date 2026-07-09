@@ -13,6 +13,7 @@ theme:
 nav:
   - Overview: index.md
   - Getting Started: getting-started.md
+  - CLI: cli.md
   - Concepts:
       - Declarative Agents: concepts/declarative-agents.md
       - Local To Managed Deployment: concepts/local-to-managed.md

@@ -1,5 +1,8 @@
 use crate::CompactionTrigger;
 use crate::agent::manifest_bind::BoundCouplingSet;
+use crate::kernel::admission::{
+    AdmissionGateContext, HOST_SUBMIT_SURFACE, append_admission_decided,
+};
 use crate::kernel::control_decision::{TurnContinuationDecision, TurnContinuationDecisionRequest};
 use crate::kernel::history::{InMemorySessionStore, RuntimeStore, SessionContext, ThreadBaseRef};
 use cooldis_agent::CooldisAgentError;
@@ -8,6 +11,7 @@ use cooldis_process::CooldisProcessError;
 use cooldis_vbash::CooldisVirtualBashError;
 use cooldis_wasm::CooldisWasmError;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -29,7 +33,7 @@ mod turn;
 pub use kernel_control::{
     AgentProcessCheckpointReceipt, AgentProcessChildRef, AgentProcessChildrenReceipt,
     AgentProcessLifecycleReceipt, AgentProcessSpawnReceipt, AgentProcessStatusReceipt,
-    AgentProcessSubmitReceipt, AgentProcessWaitReceipt, RuntimeKernelControl,
+    AgentProcessSubmitReceipt, AgentProcessWaitReceipt, RuntimeKernelControl, ThreadSpawnWitness,
 };
 pub use loop_continuation::LoopContinuationReceipt;
 use loop_continuation::{
@@ -58,6 +62,10 @@ pub use cooldis_runtime_contracts::{
 pub type CooldisResult<T> = Result<T, CooldisError>;
 
 pub const THREAD_BOUND_COUPLING_SET_METADATA: &str = "cooldis.agent.bound_coupling_set";
+pub const THREAD_AGENT_MANIFEST_HASH_METADATA: &str = "cooldis.agent.manifest_hash";
+pub const THREAD_SPAWN_GRANTED_METADATA: &str = "cooldis.thread_spawn.granted";
+pub const THREAD_SPAWN_INPUTS_HASH_METADATA: &str = "cooldis.thread_spawn.inputs_hash";
+pub const THREAD_OPERATION_REGISTRY_ROOT_METADATA: &str = "cooldis.agent.operation_registry_root";
 
 #[derive(Debug, Error)]
 pub enum CooldisError {
@@ -176,6 +184,13 @@ fn bound_coupling_set_from_metadata(
         .map_err(|err| {
             CooldisError::RuntimeFactory(format!("thread bound coupling set is invalid: {err}"))
         })
+}
+
+fn operation_registry_root_from_metadata(metadata: &BTreeMap<String, String>) -> Option<PathBuf> {
+    metadata
+        .get(THREAD_OPERATION_REGISTRY_ROOT_METADATA)
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Clone)]
@@ -339,6 +354,9 @@ impl RuntimeHost {
         .with_kernel_control(self.kernel_control());
         if let Some(coupling_set) = bound_coupling_set_from_metadata(&context.metadata)? {
             services = services.with_bound_coupling_set(coupling_set);
+        }
+        if let Some(root) = operation_registry_root_from_metadata(&context.metadata) {
+            services = services.with_operation_registry_root(root);
         }
         let runtime_services = services.clone();
 
@@ -554,10 +572,12 @@ impl RuntimeHost {
                     *accepted_event_id,
                 )
                 .await?;
-                self.submit(
+                self.submit_turn_with_admission(
                     thread_id,
                     next_turn_id.clone(),
-                    request_payload.next_turn_input,
+                    TurnInput::text(request_payload.next_turn_input),
+                    TurnSubmissionMode::Queue,
+                    None,
                 )
                 .await?;
             }
@@ -605,8 +625,14 @@ impl RuntimeHost {
                     accepted.id,
                 )
                 .await?;
-                self.submit(thread_id, next_turn_id.clone(), next_turn_input)
-                    .await?;
+                self.submit_turn_with_admission(
+                    thread_id,
+                    next_turn_id.clone(),
+                    TurnInput::text(next_turn_input),
+                    TurnSubmissionMode::Queue,
+                    None,
+                )
+                .await?;
                 Ok(LoopContinuationReceipt::Accepted {
                     loop_id,
                     parent_turn_id,
@@ -645,6 +671,19 @@ impl RuntimeHost {
         input: TurnInput,
         mode: TurnSubmissionMode,
     ) -> CooldisResult<()> {
+        let admission = AdmissionGateContext::surface_default(HOST_SUBMIT_SURFACE, Vec::new())?;
+        self.submit_turn_with_admission(thread_id, turn_id, input, mode, Some(admission))
+            .await
+    }
+
+    pub(crate) async fn submit_turn_with_admission(
+        &self,
+        thread_id: ThreadId,
+        turn_id: impl Into<String>,
+        input: TurnInput,
+        mode: TurnSubmissionMode,
+        admission: Option<AdmissionGateContext>,
+    ) -> CooldisResult<()> {
         let turn_id = turn_id.into();
         let thread = self.get_thread(thread_id).await?;
         if mode == TurnSubmissionMode::Queue
@@ -666,14 +705,16 @@ impl RuntimeHost {
                 });
             }
         }
+        let command_permit = thread.reserve_command().await?;
+        if let Some(admission) = admission {
+            append_admission_decided(&thread, admission).await?;
+        }
         let turn_sequence = thread.next_turn_sequence();
-        thread
-            .send(ThreadCommand::Submit {
-                turn_id: turn_id.clone(),
-                input,
-                mode,
-            })
-            .await?;
+        command_permit.send(ThreadCommand::Submit {
+            turn_id: turn_id.clone(),
+            input,
+            mode,
+        });
         self.spawn_turn_timeout_watchdog(thread.clone(), turn_sequence);
         thread
             .record_signal(ThreadSignal::user_submit(

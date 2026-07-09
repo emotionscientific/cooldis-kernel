@@ -1436,19 +1436,35 @@ async fn stdlib_retry_with_budget_coupling_receipts_match_fixture() {
 async fn stdlib_schedule_cron_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
     let control_stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let accepted = mandate_started_event(
+    let accepted_mandate = schedule_mandate_started_event(
         coordinates.clone(),
         control_stream_id.clone(),
         event_record_id(80),
         6,
-        1,
     );
-    let exhausted = mandate_started_event(
-        coordinates,
+    let accepted = timer_fired_event(
+        coordinates.clone(),
         control_stream_id.clone(),
         event_record_id(81),
         7,
-        3,
+        accepted_mandate.id,
+        1,
+        "2026-01-01T00:01:00.000Z",
+    );
+    let exhausted_mandate = schedule_mandate_started_event(
+        coordinates.clone(),
+        control_stream_id.clone(),
+        event_record_id(82),
+        8,
+    );
+    let exhausted = timer_fired_event(
+        coordinates,
+        control_stream_id.clone(),
+        event_record_id(83),
+        9,
+        exhausted_mandate.id,
+        2,
+        "2026-01-01T00:02:00.000Z",
     );
     let executor = StdlibCouplingExecutor;
     let schedule_coupling = std_schedule_cron_bound_coupling();
@@ -1465,8 +1481,8 @@ async fn stdlib_schedule_cron_coupling_receipts_match_fixture() {
             },
             coupling: schedule_coupling.clone(),
             trigger_event: accepted.clone(),
-            source_cut: coupling_source_cut(&control_stream_id, 6),
-            source_events: vec![accepted],
+            source_cut: coupling_source_cut(&control_stream_id, 7),
+            source_events: vec![accepted_mandate, accepted],
         })
         .await
         .unwrap();
@@ -1483,8 +1499,8 @@ async fn stdlib_schedule_cron_coupling_receipts_match_fixture() {
             },
             coupling: schedule_coupling,
             trigger_event: exhausted.clone(),
-            source_cut: coupling_source_cut(&control_stream_id, 7),
-            source_events: vec![exhausted],
+            source_cut: coupling_source_cut(&control_stream_id, 9),
+            source_events: vec![exhausted_mandate, exhausted],
         })
         .await
         .unwrap();
@@ -2524,12 +2540,16 @@ fn std_schedule_cron_bound_coupling() -> BoundCoupling {
     BoundCoupling {
         id: STD_SCHEDULE_CRON_TEMPLATE_ID.to_string(),
         role: CouplingRole::Controller,
-        trigger_kind: EventKind::MandateStarted,
+        trigger_kind: EventKind::TimerFired,
         trigger_match: BTreeMap::new(),
         trigger_quota: AgentManifestCouplingQuota::default(),
         source_selectors: vec![BoundCouplingSelector {
             stream: "control".to_string(),
-            kinds: vec![EventKind::MandateStarted, EventKind::MandateRevoked],
+            kinds: vec![
+                EventKind::MandateStarted,
+                EventKind::MandateRevoked,
+                EventKind::TimerFired,
+            ],
             scope: None,
             since: None,
         }],
@@ -2556,6 +2576,7 @@ fn std_schedule_cron_bound_coupling() -> BoundCoupling {
         },
         config: json!({
             "max_occurrences": 2,
+            "schedule_id": "nightly-summary",
             "loop_id": "loop-nightly",
             "parent_turn_id": "turn-nightly-root",
             "next_turn_input": "run scheduled nightly summary",
@@ -2687,13 +2708,13 @@ fn tool_call_requested_event(
     }
 }
 
-fn mandate_started_event(
+fn schedule_mandate_started_event(
     coordinates: ThreadCoordinates,
     stream_id: EventStreamId,
     id: EventRecordId,
     sequence: i64,
-    occurrence: u32,
 ) -> EventRecord {
+    let thread_id = coordinates.thread_id.to_string();
     EventRecord {
         id,
         stream_id,
@@ -2705,10 +2726,52 @@ fn mandate_started_event(
         provenance: EventProvenance::default(),
         payload: json!({
             "schema": EventKind::MandateStarted.payload_schema_id(),
+            "subject": {
+                "thread_id": thread_id.clone(),
+                "loop_id": "loop-nightly"
+            },
             "mandate_id": "mandate-nightly-summary",
-            "schedule_id": "nightly-summary",
-            "occurrence": occurrence,
-            "reason": "nightly summary requested"
+            "snapshot_id": "schedule.v1",
+            "thread_id": thread_id,
+            "schedule": {
+                "interval": {
+                    "every_ms": 60000
+                }
+            },
+            "max_occurrences": 2,
+            "catch_up": "skip_missed",
+            "input_template": "run scheduled nightly summary for {scheduled_for}"
+        }),
+    }
+}
+
+fn timer_fired_event(
+    coordinates: ThreadCoordinates,
+    stream_id: EventStreamId,
+    id: EventRecordId,
+    sequence: i64,
+    mandate_event_id: EventRecordId,
+    occurrence_index: u64,
+    scheduled_for: &str,
+) -> EventRecord {
+    EventRecord {
+        id,
+        stream_id: stream_id.clone(),
+        sequence: EventSequence::new(sequence),
+        coordinates,
+        created_at_ms: 1_771_718_400_080 + sequence,
+        kind: EventKind::TimerFired,
+        origin: EventOrigin::Witnessed,
+        provenance: EventProvenance {
+            source_streams: vec![stream_id],
+            source_event_ids: vec![mandate_event_id],
+            ..EventProvenance::default()
+        },
+        payload: json!({
+            "mandate_event_id": mandate_event_id.to_string(),
+            "scheduled_for": scheduled_for,
+            "occurrence_index": occurrence_index,
+            "catch_up": false
         }),
     }
 }

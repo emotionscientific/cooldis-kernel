@@ -157,8 +157,8 @@ The same contract should project into:
 
 ```text
 cooldis <command> --help                 short human help
-cooldis man <published-tool> [operation] structured human/agent reference
-cooldis man <published-tool> --json      token-efficient machine reference
+cooldis tool manual <published-tool> [operation] structured human/agent reference
+cooldis tool manual <published-tool> --json      token-efficient machine reference
 virtual bash: man <command>              thread-visible live command contract
 ToolDefinition.description               compact model-facing description
 MCP description/schema                   compatibility projection

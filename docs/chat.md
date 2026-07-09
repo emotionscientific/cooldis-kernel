@@ -1,17 +1,15 @@
-# Cooldis Operator Console
+# Cooldis Chat
 
-`cooldis operator` is the bundled local terminal console for operating a
-Cooldis app-server session. It is intentionally an RPC client over the
-app-server boundary, not a privileged runtime path. By default it launches a
-private local app-server; with `--attach` it connects to an existing endpoint.
+`cooldis chat` is the bundled local terminal console for operating a Cooldis
+app-server session. It is intentionally an RPC client over the app-server
+boundary, not a privileged runtime path. By default it launches a private local
+app-server; with `--attach` it connects to an existing endpoint.
 
 ```text
-cooldis operator [PROMPT] [--config <file>] [--cwd <path>]
-cooldis operator [PROMPT] --attach <unix://path|ws://host:port[/rpc]>
-cooldis operator [PROMPT] --provider <provider> [--model <model>] ...
+cooldis chat [PROMPT] [--config <file>] [--cwd <path>]
+cooldis chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>
+cooldis chat [PROMPT] --provider <provider> [--model <model>] ...
 ```
-
-`cooldis dev tui` remains as a developer alias for the same implementation.
 
 ## Included Surface
 
@@ -30,7 +28,7 @@ cooldis operator [PROMPT] --provider <provider> [--model <model>] ...
 
 ## Known Limits
 
-The V1 operator console deliberately does not implement shell escape or
+The V1 chat console deliberately does not implement shell escape or
 `command/exec`, full themes, mouse support, file mentions, autocomplete,
 external editor handoff, export/copy, OpenTUI/web frontend mode, or rich tool
 detail panels. Those remain separate product decisions. The current goal is a

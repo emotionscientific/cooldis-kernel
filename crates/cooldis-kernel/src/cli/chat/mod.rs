@@ -1,7 +1,7 @@
 use super::{
     ChatArgs, PrivateAppServer, notification_delta, notification_error_message,
     notification_matches_thread_turn, notification_thread_id, notification_turn_error_message,
-    notification_turn_id, parse_chat_args, print_dev_tui_help, print_operator_help, usage_error,
+    notification_turn_id, parse_chat_args, print_chat_help, usage_error,
 };
 use crate::{
     CodexTuiConnectConfig, CodexTuiEvent, CodexTuiThread, CooldisOperatorClient, CooldisResult,
@@ -29,56 +29,49 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum OperatorInvocation {
-    Public,
-    DevAlias,
+pub(super) enum ChatInvocation {
+    Chat,
 }
 
-impl OperatorInvocation {
+impl ChatInvocation {
     fn print_help(self) {
         match self {
-            OperatorInvocation::Public => print_operator_help(),
-            OperatorInvocation::DevAlias => print_dev_tui_help(),
+            ChatInvocation::Chat => print_chat_help(),
         }
     }
 
     fn client_name(self) -> &'static str {
         match self {
-            OperatorInvocation::Public => "cooldis-operator",
-            OperatorInvocation::DevAlias => "cooldis-dev-tui",
+            ChatInvocation::Chat => "cooldis-chat",
         }
     }
 
     fn private_connection_label(self) -> &'static str {
         match self {
-            OperatorInvocation::Public => "local/private",
-            OperatorInvocation::DevAlias => "local/private dev-alias",
+            ChatInvocation::Chat => "local/private",
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum OperatorAttachTarget {
+pub(super) enum ChatAttachTarget {
     Unix(PathBuf),
     WebSocket(String),
 }
 
-pub(super) async fn run(args: Vec<OsString>, invocation: OperatorInvocation) -> CooldisResult<()> {
+pub(super) async fn run(args: Vec<OsString>, invocation: ChatInvocation) -> CooldisResult<()> {
     let options = parse_chat_args(args)?;
     if options.help {
         invocation.print_help();
         return Ok(());
     }
-    run_operator_console(options, invocation).await
+    run_chat_console(options, invocation).await
 }
 
-async fn run_operator_console(
-    options: ChatArgs,
-    invocation: OperatorInvocation,
-) -> CooldisResult<()> {
+async fn run_chat_console(options: ChatArgs, invocation: ChatInvocation) -> CooldisResult<()> {
     if let Some(raw_attach) = options.attach.clone() {
         let target = parse_attach_target(&raw_attach)?;
-        return run_attached_operator(options, invocation, target).await;
+        return run_attached_chat(options, invocation, target).await;
     }
 
     let launched = PrivateAppServer::start(&options).await?;
@@ -86,12 +79,10 @@ async fn run_operator_console(
     let result = async {
         #[cfg(unix)]
         {
-            let client = CooldisOperatorClient::connect_unix(
-                socket_path,
-                operator_connect_config(invocation),
-            )
-            .await?;
-            run_operator_client(
+            let client =
+                CooldisOperatorClient::connect_unix(socket_path, chat_connect_config(invocation))
+                    .await?;
+            run_chat_client(
                 client,
                 options.prompt,
                 invocation.private_connection_label().to_string(),
@@ -102,7 +93,7 @@ async fn run_operator_console(
         {
             let _ = socket_path;
             Err(usage_error(
-                "private operator app-server sockets require a Unix platform",
+                "private chat app-server sockets require a Unix platform",
             ))
         }
     }
@@ -111,20 +102,20 @@ async fn run_operator_console(
     result
 }
 
-async fn run_attached_operator(
+async fn run_attached_chat(
     options: ChatArgs,
-    invocation: OperatorInvocation,
-    target: OperatorAttachTarget,
+    invocation: ChatInvocation,
+    target: ChatAttachTarget,
 ) -> CooldisResult<()> {
     match target {
-        OperatorAttachTarget::Unix(path) => {
+        ChatAttachTarget::Unix(path) => {
             #[cfg(unix)]
             {
                 let label = format!("attach unix://{}", path.display());
                 let client =
-                    CooldisOperatorClient::connect_unix(path, operator_connect_config(invocation))
+                    CooldisOperatorClient::connect_unix(path, chat_connect_config(invocation))
                         .await?;
-                run_operator_client(client, options.prompt, label).await
+                run_chat_client(client, options.prompt, label).await
             }
             #[cfg(not(unix))]
             {
@@ -132,26 +123,26 @@ async fn run_attached_operator(
                 Err(usage_error("--attach unix://... requires a Unix platform"))
             }
         }
-        OperatorAttachTarget::WebSocket(url) => {
+        ChatAttachTarget::WebSocket(url) => {
             let label = format!("attach {url}");
             let client = CooldisOperatorClient::<TcpStream>::connect_websocket(
                 &url,
-                operator_connect_config(invocation),
+                chat_connect_config(invocation),
             )
             .await?;
-            run_operator_client(client, options.prompt, label).await
+            run_chat_client(client, options.prompt, label).await
         }
     }
 }
 
-fn operator_connect_config(invocation: OperatorInvocation) -> CodexTuiConnectConfig {
+fn chat_connect_config(invocation: ChatInvocation) -> CodexTuiConnectConfig {
     CodexTuiConnectConfig {
         client_name: invocation.client_name().to_string(),
         ..CodexTuiConnectConfig::default()
     }
 }
 
-async fn run_operator_client<S>(
+async fn run_chat_client<S>(
     mut client: CooldisOperatorClient<S>,
     initial_prompt: Option<String>,
     connection_label: String,
@@ -159,19 +150,19 @@ async fn run_operator_client<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let session = bootstrap_operator_client(&mut client, connection_label).await?;
+    let session = bootstrap_chat_client(&mut client, connection_label).await?;
     let thread = client.thread_start(json!({})).await?;
-    let mut state = OperatorTuiState::new(thread, session);
-    let run_result = run_operator_tui(&mut client, &mut state, initial_prompt).await;
+    let mut state = ChatTuiState::new(thread, session);
+    let run_result = run_chat_tui(&mut client, &mut state, initial_prompt).await;
     let close_result = client.close().await;
     run_result?;
     close_result
 }
 
-async fn bootstrap_operator_client<S>(
+async fn bootstrap_chat_client<S>(
     client: &mut CooldisOperatorClient<S>,
     connection_label: String,
-) -> CooldisResult<OperatorSessionInfo>
+) -> CooldisResult<ChatSessionInfo>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -198,7 +189,7 @@ where
         .and_then(|config| config.get("model"))
         .and_then(Value::as_str)
         .unwrap_or("model");
-    Ok(OperatorSessionInfo {
+    Ok(ChatSessionInfo {
         connection_label,
         cwd,
         model_label: format!("{provider}/{model}"),
@@ -206,15 +197,15 @@ where
     })
 }
 
-pub(super) fn parse_attach_target(raw: &str) -> CooldisResult<OperatorAttachTarget> {
+pub(super) fn parse_attach_target(raw: &str) -> CooldisResult<ChatAttachTarget> {
     if let Some(path) = raw.strip_prefix("unix://") {
         if path.is_empty() {
             return Err(usage_error("--attach unix:// requires a socket path"));
         }
-        return Ok(OperatorAttachTarget::Unix(PathBuf::from(path)));
+        return Ok(ChatAttachTarget::Unix(PathBuf::from(path)));
     }
     if raw.starts_with("ws://") {
-        return Ok(OperatorAttachTarget::WebSocket(raw.to_string()));
+        return Ok(ChatAttachTarget::WebSocket(raw.to_string()));
     }
     Err(usage_error(
         "--attach must be unix://path or ws://host:port[/rpc]",
@@ -222,7 +213,7 @@ pub(super) fn parse_attach_target(raw: &str) -> CooldisResult<OperatorAttachTarg
 }
 
 #[derive(Clone, Debug)]
-struct OperatorSessionInfo {
+struct ChatSessionInfo {
     connection_label: String,
     cwd: String,
     model_label: String,
@@ -230,7 +221,7 @@ struct OperatorSessionInfo {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OperatorLineRole {
+enum ChatLineRole {
     User,
     Assistant,
     System,
@@ -239,27 +230,27 @@ enum OperatorLineRole {
     Lifecycle,
 }
 
-impl OperatorLineRole {
+impl ChatLineRole {
     fn label(self) -> &'static str {
         match self {
-            OperatorLineRole::User => "you",
-            OperatorLineRole::Assistant => "assistant",
-            OperatorLineRole::System => "system",
-            OperatorLineRole::Error => "error",
-            OperatorLineRole::Thinking => "thinking",
-            OperatorLineRole::Lifecycle => "event",
+            ChatLineRole::User => "you",
+            ChatLineRole::Assistant => "assistant",
+            ChatLineRole::System => "system",
+            ChatLineRole::Error => "error",
+            ChatLineRole::Thinking => "thinking",
+            ChatLineRole::Lifecycle => "event",
         }
     }
 }
 
 #[derive(Clone, Debug)]
-struct OperatorLine {
-    role: OperatorLineRole,
+struct ChatLine {
+    role: ChatLineRole,
     text: String,
 }
 
 #[derive(Debug)]
-struct OperatorTuiState {
+struct ChatTuiState {
     thread_id: String,
     thread_name: Option<String>,
     connection_label: String,
@@ -268,7 +259,7 @@ struct OperatorTuiState {
     models: Vec<String>,
     input: String,
     cursor: usize,
-    history: Vec<OperatorLine>,
+    history: Vec<ChatLine>,
     active_turn_id: Option<String>,
     active_assistant_index: Option<usize>,
     active_thinking_index: Option<usize>,
@@ -277,8 +268,8 @@ struct OperatorTuiState {
     no_color: bool,
 }
 
-impl OperatorTuiState {
-    fn new(thread: CodexTuiThread, session: OperatorSessionInfo) -> Self {
+impl ChatTuiState {
+    fn new(thread: CodexTuiThread, session: ChatSessionInfo) -> Self {
         let mut state = Self {
             thread_id: thread.id.clone(),
             thread_name: thread_name(&thread.raw),
@@ -305,8 +296,8 @@ impl OperatorTuiState {
         state
     }
 
-    fn push(&mut self, role: OperatorLineRole, text: impl Into<String>) {
-        self.history.push(OperatorLine {
+    fn push(&mut self, role: ChatLineRole, text: impl Into<String>) {
+        self.history.push(ChatLine {
             role,
             text: text.into(),
         });
@@ -314,24 +305,24 @@ impl OperatorTuiState {
     }
 
     fn push_user(&mut self, text: impl Into<String>) {
-        self.push(OperatorLineRole::User, text);
+        self.push(ChatLineRole::User, text);
     }
 
     fn push_system(&mut self, text: impl Into<String>) {
-        self.push(OperatorLineRole::System, text);
+        self.push(ChatLineRole::System, text);
     }
 
     fn push_error(&mut self, text: impl Into<String>) {
-        self.push(OperatorLineRole::Error, text);
+        self.push(ChatLineRole::Error, text);
     }
 
     fn push_lifecycle(&mut self, text: impl Into<String>) {
-        self.push(OperatorLineRole::Lifecycle, text);
+        self.push(ChatLineRole::Lifecycle, text);
     }
 
     fn begin_assistant(&mut self) {
         let index = self.history.len();
-        self.push(OperatorLineRole::Assistant, String::new());
+        self.push(ChatLineRole::Assistant, String::new());
         self.active_assistant_index = Some(index);
     }
 
@@ -340,7 +331,7 @@ impl OperatorTuiState {
             return;
         }
         let index = self.history.len();
-        self.push(OperatorLineRole::Thinking, String::new());
+        self.push(ChatLineRole::Thinking, String::new());
         self.active_thinking_index = Some(index);
     }
 
@@ -539,11 +530,11 @@ pub(super) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, S
     }
 }
 
-struct OperatorTerminal {
+struct ChatTerminal {
     terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
 }
 
-impl OperatorTerminal {
+impl ChatTerminal {
     fn enter() -> CooldisResult<Self> {
         enable_raw_mode()
             .map_err(|err| usage_error(format!("failed to enable raw mode: {err}")))?;
@@ -564,7 +555,7 @@ impl OperatorTerminal {
     }
 }
 
-impl Drop for OperatorTerminal {
+impl Drop for ChatTerminal {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let _ = execute!(
@@ -576,28 +567,28 @@ impl Drop for OperatorTerminal {
     }
 }
 
-async fn run_operator_tui<S>(
+async fn run_chat_tui<S>(
     client: &mut CooldisOperatorClient<S>,
-    state: &mut OperatorTuiState,
+    state: &mut ChatTuiState,
     initial_prompt: Option<String>,
 ) -> CooldisResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut terminal = OperatorTerminal::enter()?;
+    let mut terminal = ChatTerminal::enter()?;
     let mut events = EventStream::new();
 
     if let Some(prompt) = initial_prompt {
-        submit_operator_input(client, state, prompt).await?;
+        submit_chat_input(client, state, prompt).await?;
     }
 
     loop {
-        draw_operator_tui(&mut terminal.terminal, state)?;
+        draw_chat_tui(&mut terminal.terminal, state)?;
         tokio::select! {
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        if handle_operator_key(client, state, key).await? {
+                        if handle_chat_key(client, state, key).await? {
                             break;
                         }
                     }
@@ -613,7 +604,7 @@ where
                 }
             }
             app_event = client.next_event() => {
-                handle_operator_app_event(state, app_event?).await?;
+                handle_chat_app_event(state, app_event?).await?;
             }
         }
     }
@@ -621,9 +612,9 @@ where
     Ok(())
 }
 
-fn draw_operator_tui(
+fn draw_chat_tui(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    state: &OperatorTuiState,
+    state: &ChatTuiState,
 ) -> CooldisResult<()> {
     terminal
         .draw(|frame| {
@@ -646,9 +637,9 @@ fn draw_operator_tui(
             let start = end.saturating_sub(history_height.max(1));
             let history = all_history[start..end].to_vec();
             let title = if state.no_color {
-                "Cooldis operator".to_string()
+                "Cooldis chat".to_string()
             } else {
-                "Cooldis operator".to_string()
+                "Cooldis chat".to_string()
             };
             let history_block = Paragraph::new(history)
                 .block(Block::default().title(title).borders(Borders::ALL))
@@ -677,9 +668,9 @@ fn draw_operator_tui(
         .map_err(|err| usage_error(format!("failed to draw terminal: {err}")))
 }
 
-async fn handle_operator_key<S>(
+async fn handle_chat_key<S>(
     client: &mut CooldisOperatorClient<S>,
-    state: &mut OperatorTuiState,
+    state: &mut ChatTuiState,
     key: KeyEvent,
 ) -> CooldisResult<bool>
 where
@@ -773,7 +764,7 @@ where
 
 async fn submit_or_handle_slash<S>(
     client: &mut CooldisOperatorClient<S>,
-    state: &mut OperatorTuiState,
+    state: &mut ChatTuiState,
     input: String,
 ) -> CooldisResult<bool>
 where
@@ -782,7 +773,7 @@ where
     match parse_slash_command(&input) {
         Ok(Some(command)) => handle_slash_command(client, state, command).await,
         Ok(None) => {
-            submit_operator_input(client, state, input).await?;
+            submit_chat_input(client, state, input).await?;
             Ok(false)
         }
         Err(message) => {
@@ -794,7 +785,7 @@ where
 
 async fn handle_slash_command<S>(
     client: &mut CooldisOperatorClient<S>,
-    state: &mut OperatorTuiState,
+    state: &mut ChatTuiState,
     command: SlashCommand,
 ) -> CooldisResult<bool>
 where
@@ -864,9 +855,9 @@ where
     Ok(false)
 }
 
-async fn submit_operator_input<S>(
+async fn submit_chat_input<S>(
     client: &mut CooldisOperatorClient<S>,
-    state: &mut OperatorTuiState,
+    state: &mut ChatTuiState,
     input: String,
 ) -> CooldisResult<()>
 where
@@ -890,7 +881,7 @@ where
 
 async fn interrupt_active_turn<S>(
     client: &mut CooldisOperatorClient<S>,
-    state: &mut OperatorTuiState,
+    state: &mut ChatTuiState,
 ) -> CooldisResult<bool>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -904,13 +895,13 @@ where
     Ok(true)
 }
 
-async fn handle_operator_app_event(
-    state: &mut OperatorTuiState,
+async fn handle_chat_app_event(
+    state: &mut ChatTuiState,
     event: CodexTuiEvent,
 ) -> CooldisResult<()> {
     match event {
         CodexTuiEvent::Notification(notification) => {
-            handle_operator_notification(state, notification);
+            handle_chat_notification(state, notification);
         }
         CodexTuiEvent::Error(error) => {
             state.push_error(format!(
@@ -924,7 +915,7 @@ async fn handle_operator_app_event(
     Ok(())
 }
 
-fn handle_operator_notification(state: &mut OperatorTuiState, notification: JsonRpcNotification) {
+fn handle_chat_notification(state: &mut ChatTuiState, notification: JsonRpcNotification) {
     let active_matches = state.active_turn_id.as_deref().is_some_and(|turn_id| {
         notification_matches_thread_turn(&notification, &state.thread_id, turn_id)
     });
@@ -980,7 +971,7 @@ fn handle_operator_notification(state: &mut OperatorTuiState, notification: Json
     }
 }
 
-fn ensure_idle(state: &mut OperatorTuiState, command: &str) -> bool {
+fn ensure_idle(state: &mut ChatTuiState, command: &str) -> bool {
     if state.active_turn_id.is_some() {
         state.push_error(format!(
             "{command} is unavailable during an active turn; use /interrupt"
@@ -990,7 +981,7 @@ fn ensure_idle(state: &mut OperatorTuiState, command: &str) -> bool {
     true
 }
 
-fn push_sessions(state: &mut OperatorTuiState, threads: &Value) {
+fn push_sessions(state: &mut ChatTuiState, threads: &Value) {
     let Some(data) = threads.get("data").and_then(Value::as_array) else {
         state.push_error("thread/list returned an unexpected shape");
         return;
@@ -1032,7 +1023,7 @@ fn push_sessions(state: &mut OperatorTuiState, threads: &Value) {
     }
 }
 
-fn history_lines(state: &OperatorTuiState) -> Vec<Line<'static>> {
+fn history_lines(state: &ChatTuiState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for entry in &state.history {
         let style = role_style(entry.role, state.no_color);
@@ -1059,17 +1050,17 @@ fn history_lines(state: &OperatorTuiState) -> Vec<Line<'static>> {
     lines
 }
 
-fn role_style(role: OperatorLineRole, no_color: bool) -> Style {
+fn role_style(role: ChatLineRole, no_color: bool) -> Style {
     if no_color {
         return Style::default();
     }
     match role {
-        OperatorLineRole::User => Style::default().fg(Color::Cyan),
-        OperatorLineRole::Assistant => Style::default().fg(Color::Green),
-        OperatorLineRole::System => Style::default().fg(Color::Yellow),
-        OperatorLineRole::Error => Style::default().fg(Color::Red),
-        OperatorLineRole::Thinking => Style::default().fg(Color::Magenta),
-        OperatorLineRole::Lifecycle => Style::default().fg(Color::DarkGray),
+        ChatLineRole::User => Style::default().fg(Color::Cyan),
+        ChatLineRole::Assistant => Style::default().fg(Color::Green),
+        ChatLineRole::System => Style::default().fg(Color::Yellow),
+        ChatLineRole::Error => Style::default().fg(Color::Red),
+        ChatLineRole::Thinking => Style::default().fg(Color::Magenta),
+        ChatLineRole::Lifecycle => Style::default().fg(Color::DarkGray),
     }
 }
 

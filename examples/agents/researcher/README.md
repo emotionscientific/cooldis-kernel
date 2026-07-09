@@ -9,7 +9,7 @@ manifest) in any agent picker.
 
 ## What it declares
 
-- **Model profile** `default` over `provider://local/default`,
+- **Model profile** `default` over `provider://local`,
   `model://local/default` — replace these with a configured provider catalog
   entry when running against a live model.
 - **Tools** (bash surface, content-addressed pins into the operation

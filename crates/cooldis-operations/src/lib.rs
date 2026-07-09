@@ -1,9 +1,13 @@
+pub mod blob_store;
 pub mod operation_registry;
 pub mod operation_store;
+pub mod skill_package;
 pub mod tool_package;
 
+pub use blob_store::*;
 pub use operation_registry::*;
 pub use operation_store::*;
+pub use skill_package::*;
 pub use tool_package::*;
 
 use cooldis_abi::{

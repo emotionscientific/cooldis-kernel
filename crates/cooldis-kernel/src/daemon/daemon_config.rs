@@ -1,5 +1,6 @@
-use crate::{AppServerListenAddr, CooldisError, CooldisResult};
+use crate::{AgentRecordRef, AppServerListenAddr, CooldisError, CooldisResult};
 use cooldis_io_core::{IngressPersistenceConfig, IngressPersistenceMode};
+use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -8,12 +9,30 @@ use std::path::{Path, PathBuf};
 const DEFAULT_SQLITE_QUEUE_PATH: &str = ".cooldis/queue/ingress.sqlite";
 const DEFAULT_SERVICE_LABEL: &str = "com.cooldis.daemon";
 const DEFAULT_TELEGRAM_WEBHOOK_PATH: &str = "/telegram";
+const ROUTE_POLICY_VALUES: &[&str] = &[
+    "queue_per_conversation",
+    "observe_only",
+    "reject",
+    "steer",
+    "steer_when_active",
+    "interrupt",
+    "interrupt_on_new_dm",
+    "fork",
+    "fork_on_new_dm",
+    "coalesce_bursts",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedCooldisDaemonConfig {
     pub config: CooldisDaemonConfig,
     pub path: Option<PathBuf>,
     pub base_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CooldisProjectDiscovery {
+    pub root: PathBuf,
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -250,11 +269,18 @@ impl CooldisIoConfig {
         self.ingress.validate("io.ingress", errors);
 
         let mut route_ids = BTreeSet::new();
+        let mut clock_route_count = 0;
         for route in &self.routes {
             route.validate(errors);
             if !route.id.trim().is_empty() && !route_ids.insert(route.id.clone()) {
                 errors.push(format!("io.routes id {:?} is duplicated", route.id));
             }
+            if route.kind == "clock.tick" {
+                clock_route_count += 1;
+            }
+        }
+        if clock_route_count > 1 {
+            errors.push("io.routes supports at most one clock.tick route".to_string());
         }
     }
 
@@ -353,9 +379,21 @@ pub struct CooldisIoRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_policies: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce_bursts: Option<CooldisCoalesceBurstsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<CooldisIngressConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_projection: Vec<CooldisEgressProjectionRuleConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing_simulation: Option<CooldisTypingSimulationConfig>,
+    #[serde(default, skip_serializing_if = "CooldisEgressRetryConfig::is_default")]
+    pub egress_retry: CooldisEgressRetryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<CooldisTelegramRouteConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -370,8 +408,80 @@ impl CooldisIoRouteConfig {
         if self.kind.trim().is_empty() {
             errors.push(format!("io.routes {:?} kind cannot be empty", self.id));
         }
+        if let Some(agent_ref) = &self.agent_ref {
+            if agent_ref.trim().is_empty() {
+                errors.push(format!("io.routes.{}.agent_ref cannot be empty", self.id));
+            } else if !agent_ref.starts_with("agent://") {
+                errors.push(format!(
+                    "io.routes.{}.agent_ref must be an agent:// ref",
+                    self.id
+                ));
+            } else if let Err(err) = AgentRecordRef::parse(agent_ref) {
+                errors.push(format!(
+                    "io.routes.{}.agent_ref must be an agent:// ref: {err}",
+                    self.id
+                ));
+            }
+        }
         if let Some(ingress) = &self.ingress {
             ingress.validate(&format!("io.routes.{}", self.id), errors);
+        }
+        if let Some(policy) = &self.policy {
+            validate_route_policy(&format!("io.routes.{}", self.id), "policy", policy, errors);
+        }
+        if let Some(content_policies) = &self.content_policies {
+            for (kind, policy) in content_policies {
+                validate_route_policy(
+                    &format!("io.routes.{}", self.id),
+                    &format!("content_policies.{kind}"),
+                    policy,
+                    errors,
+                );
+            }
+        }
+        if self.policy.as_deref() == Some("coalesce_bursts") && self.coalesce_bursts.is_none() {
+            errors.push(format!(
+                "io.routes.{}.policy coalesce_bursts requires coalesce_bursts config",
+                self.id
+            ));
+        }
+        if let Some(content_policies) = &self.content_policies {
+            for (kind, policy) in content_policies {
+                if policy == "coalesce_bursts" && self.coalesce_bursts.is_none() {
+                    errors.push(format!(
+                        "io.routes.{}.content_policies.{kind} coalesce_bursts requires coalesce_bursts config",
+                        self.id
+                    ));
+                }
+            }
+        }
+        if let Some(coalesce) = &self.coalesce_bursts {
+            coalesce.validate(&format!("io.routes.{}.coalesce_bursts", self.id), errors);
+        }
+        for (index, rule) in self.egress_projection.iter().enumerate() {
+            let scope = format!("io.routes.{}.egress_projection[{index}]", self.id);
+            if rule.pattern.trim().is_empty() {
+                errors.push(format!("{scope}.pattern cannot be empty"));
+            } else if let Err(err) = Regex::new(&rule.pattern) {
+                errors.push(format!("{scope}.pattern invalid regex: {err}"));
+            }
+            if rule.action.trim().is_empty() {
+                errors.push(format!("{scope}.action cannot be empty"));
+            }
+        }
+        if let Some(typing) = &self.typing_simulation
+            && typing.chars_per_second == 0
+        {
+            errors.push(format!(
+                "io.routes.{}.typing_simulation.chars_per_second must be greater than zero",
+                self.id
+            ));
+        }
+        if self.egress_retry.max_attempts == 0 {
+            errors.push(format!(
+                "io.routes.{}.egress_retry.max_attempts must be greater than zero",
+                self.id
+            ));
         }
         if self.kind == "telegram.bot" {
             match &self.telegram {
@@ -385,11 +495,78 @@ impl CooldisIoRouteConfig {
                 None => {}
             }
         }
+        if self.kind == "clock.tick" && self.telegram.is_some() {
+            errors.push(format!(
+                "io.routes {:?} kind clock.tick does not accept telegram config",
+                self.id
+            ));
+        }
     }
 
     fn resolve_paths(&mut self, base: &Path) {
         if let Some(ingress) = &mut self.ingress {
             ingress.resolve_paths(base);
+        }
+    }
+}
+
+fn validate_route_policy(scope: &str, field: &str, policy: &str, errors: &mut Vec<String>) {
+    if ROUTE_POLICY_VALUES.contains(&policy) {
+        return;
+    }
+    errors.push(format!(
+        "{scope}.{field} must be one of {}, got {policy:?}",
+        ROUTE_POLICY_VALUES.join(", ")
+    ));
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisCoalesceBurstsConfig {
+    pub window_ms: u64,
+    pub max_batch: usize,
+}
+
+impl CooldisCoalesceBurstsConfig {
+    fn validate(&self, scope: &str, errors: &mut Vec<String>) {
+        if self.window_ms == 0 {
+            errors.push(format!("{scope}.window_ms must be greater than zero"));
+        }
+        if self.max_batch == 0 {
+            errors.push(format!("{scope}.max_batch must be greater than zero"));
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisEgressProjectionRuleConfig {
+    pub pattern: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisTypingSimulationConfig {
+    pub chars_per_second: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CooldisEgressRetryConfig {
+    #[serde(default = "default_egress_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_egress_base_backoff_ms")]
+    pub base_backoff_ms: u64,
+}
+
+impl CooldisEgressRetryConfig {
+    fn is_default(value: &Self) -> bool {
+        *value == Self::default()
+    }
+}
+
+impl Default for CooldisEgressRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_egress_max_attempts(),
+            base_backoff_ms: default_egress_base_backoff_ms(),
         }
     }
 }
@@ -539,48 +716,60 @@ impl CooldisDaemonServiceSpec {
 }
 
 pub fn load_cooldis_daemon_config(path: Option<&Path>) -> CooldisResult<LoadedCooldisDaemonConfig> {
-    let (path, base_dir, text) = match path {
-        Some(path) => {
-            let text = read_config_text(path)?;
-            let base = path
-                .parent()
+    match path {
+        Some(path) => load_cooldis_daemon_config_layers(
+            &[path.to_path_buf()],
+            path.parent()
                 .unwrap_or_else(|| Path::new("."))
-                .to_path_buf();
-            (Some(path.to_path_buf()), base, text)
-        }
-        None => match discover_cooldis_daemon_config_path()? {
-            Some(path) => {
-                let text = read_config_text(&path)?;
-                let base = path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_path_buf();
-                (Some(path), base, text)
-            }
-            None => {
-                let base_dir = std::env::current_dir().map_err(|err| {
-                    CooldisError::RuntimeFactory(format!(
-                        "failed to read current working directory: {err}"
-                    ))
-                })?;
-                return Ok(LoadedCooldisDaemonConfig {
+                .to_path_buf(),
+        ),
+        None => {
+            let cwd = std::env::current_dir().map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read current working directory: {err}"
+                ))
+            })?;
+            let project = discover_cooldis_project(&cwd)?;
+            match project.config_path {
+                Some(path) => load_cooldis_daemon_config_layers(&[path], project.root),
+                None => Ok(LoadedCooldisDaemonConfig {
                     config: CooldisDaemonConfig::default(),
                     path: None,
-                    base_dir,
-                });
+                    base_dir: project.root,
+                }),
             }
-        },
-    };
+        }
+    }
+}
 
-    validate_config_extension(path.as_deref())?;
-    let mut config = decode_daemon_config(&text)?;
-    config.resolve_paths(&base_dir);
+pub fn load_cooldis_daemon_config_layers(
+    paths: &[PathBuf],
+    fallback_base_dir: PathBuf,
+) -> CooldisResult<LoadedCooldisDaemonConfig> {
+    let mut config = CooldisDaemonConfig::default();
+    let mut loaded_path = None;
+    let mut loaded_base_dir = fallback_base_dir;
+
+    for path in paths {
+        validate_config_extension(Some(path.as_path()))?;
+        let text = read_config_text(path)?;
+        let base_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let presence = daemon_config_presence(&text)?;
+        let mut layer = decode_daemon_config(&text)?;
+        layer.resolve_paths(&base_dir);
+        merge_daemon_config_layer(&mut config, layer, presence);
+        loaded_path = Some(path.clone());
+        loaded_base_dir = base_dir;
+    }
+
     config.validate()?;
-
     Ok(LoadedCooldisDaemonConfig {
         config,
-        path,
-        base_dir,
+        path: loaded_path,
+        base_dir: loaded_base_dir,
     })
 }
 
@@ -589,11 +778,230 @@ pub fn default_cooldis_daemon_socket_path() -> PathBuf {
 }
 
 pub fn discover_cooldis_daemon_config_path() -> CooldisResult<Option<PathBuf>> {
-    let path = PathBuf::from("cooldis.toml");
-    if path.exists() {
-        return Ok(Some(path));
+    let cwd = std::env::current_dir().map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to read current working directory: {err}"))
+    })?;
+    discover_cooldis_project(&cwd).map(|project| project.config_path)
+}
+
+pub fn discover_cooldis_project(start: &Path) -> CooldisResult<CooldisProjectDiscovery> {
+    let mut start = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read current working directory: {err}"
+                ))
+            })?
+            .join(start)
+    };
+    if start.is_file() {
+        start = start
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
     }
-    Ok(None)
+
+    for dir in start.ancestors() {
+        let candidate = dir.join("cooldis.toml");
+        if candidate.is_file() {
+            return Ok(CooldisProjectDiscovery {
+                root: dir.to_path_buf(),
+                config_path: Some(candidate),
+            });
+        }
+    }
+
+    for dir in start.ancestors() {
+        if dir.join(".cooldis").is_dir() {
+            return Ok(CooldisProjectDiscovery {
+                root: dir.to_path_buf(),
+                config_path: None,
+            });
+        }
+    }
+
+    Ok(CooldisProjectDiscovery {
+        root: start,
+        config_path: None,
+    })
+}
+
+#[derive(Default)]
+struct DaemonConfigPresence {
+    runtime: RuntimePresence,
+    app_server: AppServerPresence,
+    registries: RegistriesPresence,
+    operations: OperationsPresence,
+    provider: ProviderPresence,
+    io: bool,
+}
+
+#[derive(Default)]
+struct RuntimePresence {
+    cwd: bool,
+    runtime_home: bool,
+    state_home: bool,
+}
+
+#[derive(Default)]
+struct AppServerPresence {
+    listen: bool,
+}
+
+#[derive(Default)]
+struct RegistriesPresence {
+    operations: bool,
+    agents: bool,
+}
+
+#[derive(Default)]
+struct OperationsPresence {
+    global_operation_names: bool,
+    load_all_active_when_unbound: bool,
+}
+
+#[derive(Default)]
+struct ProviderPresence {
+    provider: bool,
+    base_url: bool,
+    api_key: bool,
+    api_key_env: bool,
+    region: bool,
+    aws_access_key_id: bool,
+    aws_secret_access_key: bool,
+    aws_session_token: bool,
+    model: bool,
+    max_tokens: bool,
+    stream: bool,
+    env_file: bool,
+}
+
+fn daemon_config_presence(text: &str) -> CooldisResult<DaemonConfigPresence> {
+    let root: toml::Table = toml::from_str(text).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to parse Cooldis daemon config: {err}"))
+    })?;
+    let table = root
+        .get("daemon")
+        .and_then(toml::Value::as_table)
+        .unwrap_or(&root);
+
+    Ok(DaemonConfigPresence {
+        runtime: RuntimePresence {
+            cwd: section_has_key(table, "runtime", "cwd"),
+            runtime_home: section_has_key(table, "runtime", "runtime_home"),
+            state_home: section_has_key(table, "runtime", "state_home"),
+        },
+        app_server: AppServerPresence {
+            listen: section_has_key(table, "app_server", "listen"),
+        },
+        registries: RegistriesPresence {
+            operations: section_has_key(table, "registries", "operations"),
+            agents: section_has_key(table, "registries", "agents"),
+        },
+        operations: OperationsPresence {
+            global_operation_names: section_has_key(table, "operations", "global_operation_names"),
+            load_all_active_when_unbound: section_has_key(
+                table,
+                "operations",
+                "load_all_active_when_unbound",
+            ),
+        },
+        provider: ProviderPresence {
+            provider: section_has_key(table, "provider", "provider"),
+            base_url: section_has_key(table, "provider", "base_url"),
+            api_key: section_has_key(table, "provider", "api_key"),
+            api_key_env: section_has_key(table, "provider", "api_key_env"),
+            region: section_has_key(table, "provider", "region"),
+            aws_access_key_id: section_has_key(table, "provider", "aws_access_key_id"),
+            aws_secret_access_key: section_has_key(table, "provider", "aws_secret_access_key"),
+            aws_session_token: section_has_key(table, "provider", "aws_session_token"),
+            model: section_has_key(table, "provider", "model"),
+            max_tokens: section_has_key(table, "provider", "max_tokens"),
+            stream: section_has_key(table, "provider", "stream"),
+            env_file: section_has_key(table, "provider", "env_file"),
+        },
+        io: table.contains_key("io"),
+    })
+}
+
+fn section_has_key(table: &toml::Table, section: &str, key: &str) -> bool {
+    table
+        .get(section)
+        .and_then(toml::Value::as_table)
+        .is_some_and(|section| section.contains_key(key))
+}
+
+fn merge_daemon_config_layer(
+    config: &mut CooldisDaemonConfig,
+    mut layer: CooldisDaemonConfig,
+    presence: DaemonConfigPresence,
+) {
+    if presence.runtime.cwd {
+        config.runtime.cwd = layer.runtime.cwd.take();
+    }
+    if presence.runtime.runtime_home {
+        config.runtime.runtime_home = layer.runtime.runtime_home.take();
+    }
+    if presence.runtime.state_home {
+        config.runtime.state_home = layer.runtime.state_home.take();
+    }
+    if presence.app_server.listen {
+        config.app_server.listen = layer.app_server.listen;
+    }
+    if presence.registries.operations {
+        config.registries.operations = layer.registries.operations.take();
+    }
+    if presence.registries.agents {
+        config.registries.agents = layer.registries.agents.take();
+    }
+    if presence.operations.global_operation_names {
+        config.operations.global_operation_names = layer.operations.global_operation_names;
+    }
+    if presence.operations.load_all_active_when_unbound {
+        config.operations.load_all_active_when_unbound =
+            layer.operations.load_all_active_when_unbound;
+    }
+    if presence.provider.provider {
+        config.provider.provider = layer.provider.provider.take();
+    }
+    if presence.provider.base_url {
+        config.provider.base_url = layer.provider.base_url.take();
+    }
+    if presence.provider.api_key {
+        config.provider.api_key = layer.provider.api_key.take();
+    }
+    if presence.provider.api_key_env {
+        config.provider.api_key_env = layer.provider.api_key_env.take();
+    }
+    if presence.provider.region {
+        config.provider.region = layer.provider.region.take();
+    }
+    if presence.provider.aws_access_key_id {
+        config.provider.aws_access_key_id = layer.provider.aws_access_key_id.take();
+    }
+    if presence.provider.aws_secret_access_key {
+        config.provider.aws_secret_access_key = layer.provider.aws_secret_access_key.take();
+    }
+    if presence.provider.aws_session_token {
+        config.provider.aws_session_token = layer.provider.aws_session_token.take();
+    }
+    if presence.provider.model {
+        config.provider.model = layer.provider.model.take();
+    }
+    if presence.provider.max_tokens {
+        config.provider.max_tokens = layer.provider.max_tokens.take();
+    }
+    if presence.provider.stream {
+        config.provider.stream = layer.provider.stream;
+    }
+    if presence.provider.env_file {
+        config.provider.env_file = layer.provider.env_file.take();
+    }
+    if presence.io {
+        config.io = layer.io;
+    }
 }
 
 pub fn render_cooldis_daemon_service(
@@ -836,6 +1244,14 @@ fn default_app_server_listen() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_egress_max_attempts() -> u32 {
+    5
+}
+
+fn default_egress_base_backoff_ms() -> u64 {
+    500
 }
 
 fn default_telegram_webhook_path() -> String {

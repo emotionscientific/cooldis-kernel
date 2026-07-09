@@ -65,6 +65,7 @@
     "std::prompt.steer",
     "std::prompt.dynamic_instructions",
     "std::schedule.cron",
+    "std::supervisor.spawn",
     "std::supervisor.child_completion",
     "std::retry.with_budget",
     "std::failure.deadletter"

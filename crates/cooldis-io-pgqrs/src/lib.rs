@@ -11,11 +11,14 @@ use cooldis_io_core::{
     IngressQueueStore, IngressSink, IoError, IoResult, LeasedIngressEnvelope,
 };
 use pgqrs::error::Error as PgqrsError;
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const INGRESS_PAYLOAD_KIND: &str = "cooldis.ingress.v1";
 const DEFAULT_QUEUE_NAME: &str = "cooldis-ingress";
+const INGRESS_QUEUE_MAX_OBJECT_DEPTH: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PgqrsQueueConfig {
@@ -67,13 +70,17 @@ pub struct PgqrsIngressQueue {
     producer: pgqrs::Producer,
     consumer: pgqrs::Consumer,
     config: PgqrsQueueConfig,
+    sqlite_dedupe_path: Option<PathBuf>,
 }
 
 impl PgqrsIngressQueue {
     pub async fn connect(config: PgqrsQueueConfig) -> IoResult<Self> {
         ensure_sqlite_file_exists(&config.dsn)?;
 
-        let store = pgqrs::connect(&config.dsn).await.map_err(queue_error)?;
+        let store_config = pgqrs_store_config(&config.dsn);
+        let store = pgqrs::connect_with_config(&store_config)
+            .await
+            .map_err(queue_error)?;
         pgqrs::admin(&store).install().await.map_err(queue_error)?;
 
         match pgqrs::admin(&store).create_queue(&config.queue_name).await {
@@ -81,21 +88,24 @@ impl PgqrsIngressQueue {
             Err(err) => return Err(queue_error(err)),
         }
 
-        let producer = pgqrs::store::Store::producer_ephemeral(
-            &store,
-            &config.queue_name,
-            pgqrs::store::Store::config(&store),
-        )
-        .await
-        .map_err(queue_error)?;
+        let producer =
+            pgqrs::store::Store::producer_ephemeral(&store, &config.queue_name, &store_config)
+                .await
+                .map_err(queue_error)?;
         let consumer = pgqrs::store::Store::consumer_ephemeral(&store, &config.queue_name)
             .await
             .map_err(queue_error)?;
+
+        let sqlite_dedupe_path = sqlite_path_from_dsn(&config.dsn);
+        if let Some(path) = &sqlite_dedupe_path {
+            ensure_sqlite_dedupe_table(path)?;
+        }
 
         Ok(Self {
             producer,
             consumer,
             config,
+            sqlite_dedupe_path,
         })
     }
 
@@ -117,15 +127,83 @@ impl PgqrsIngressQueue {
     }
 }
 
+fn pgqrs_store_config(dsn: &str) -> pgqrs::Config {
+    let mut config = pgqrs::Config::default();
+    config.dsn = dsn.to_string();
+    config.validation_config.max_object_depth = INGRESS_QUEUE_MAX_OBJECT_DEPTH;
+    config
+}
+
 #[async_trait]
 impl IngressSink for PgqrsIngressQueue {
     async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        let claimed = self.try_claim_dedupe_key(&envelope)?;
+        if !claimed {
+            return Ok(IngressAck::rejected(&envelope, "duplicate dedupe key"));
+        }
+
         let ack = IngressAck::accepted(&envelope);
         let payload = serde_json::to_value(IngressQueuePayload::new(envelope))
             .map_err(|err| IoError::Queue(format!("encode ingress envelope: {err}")))?;
 
-        self.producer.enqueue(&payload).await.map_err(queue_error)?;
+        if let Err(err) = self.producer.enqueue(&payload).await.map_err(queue_error) {
+            self.release_dedupe_key(&ack.dedupe_key)?;
+            return Err(err);
+        }
         Ok(ack)
+    }
+}
+
+impl PgqrsIngressQueue {
+    fn try_claim_dedupe_key(&self, envelope: &IngressEnvelope) -> IoResult<bool> {
+        let Some(path) = &self.sqlite_dedupe_path else {
+            return Ok(true);
+        };
+        let Some(dedupe_key) = &envelope.dedupe_key else {
+            return Ok(true);
+        };
+        let connection = rusqlite::Connection::open(path)
+            .map_err(|err| IoError::Queue(format!("open sqlite dedupe store: {err}")))?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|err| IoError::Queue(format!("configure sqlite dedupe store: {err}")))?;
+        ensure_sqlite_dedupe_schema(&connection)?;
+        let inserted = connection
+            .execute(
+                "INSERT OR IGNORE INTO cooldis_ingress_dedupe
+                    (queue_name, dedupe_key, envelope_id, inserted_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    self.config.queue_name.as_str(),
+                    dedupe_key.stable_key(),
+                    envelope.id.as_str(),
+                    now_ms() as i64
+                ],
+            )
+            .map_err(|err| IoError::Queue(format!("claim ingress dedupe key: {err}")))?;
+        Ok(inserted == 1)
+    }
+
+    fn release_dedupe_key(
+        &self,
+        dedupe_key: &Option<cooldis_io_core::IoDedupeKey>,
+    ) -> IoResult<()> {
+        let Some(path) = &self.sqlite_dedupe_path else {
+            return Ok(());
+        };
+        let Some(dedupe_key) = dedupe_key else {
+            return Ok(());
+        };
+        let connection = rusqlite::Connection::open(path)
+            .map_err(|err| IoError::Queue(format!("open sqlite dedupe store: {err}")))?;
+        connection
+            .execute(
+                "DELETE FROM cooldis_ingress_dedupe
+                 WHERE queue_name = ?1 AND dedupe_key = ?2",
+                params![self.config.queue_name.as_str(), dedupe_key.stable_key()],
+            )
+            .map_err(|err| IoError::Queue(format!("release ingress dedupe key: {err}")))?;
+        Ok(())
     }
 }
 
@@ -177,6 +255,25 @@ impl IngressQueueStore for PgqrsIngressQueue {
     async fn complete_ingress(&self, message_id: &str) -> IoResult<()> {
         let id = parse_message_id(message_id)?;
         self.consumer.archive(id).await.map_err(queue_error)?;
+        Ok(())
+    }
+
+    async fn hold_ingress_until(&self, message_id: &str, visible_at_ms: u64) -> IoResult<()> {
+        let id = parse_message_id(message_id)?;
+        let visible_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            visible_at_ms.min(i64::MAX as u64) as i64,
+        )
+        .ok_or_else(|| IoError::Queue(format!("invalid visibility timestamp {visible_at_ms}ms")))?;
+        let released = self
+            .consumer
+            .release_with_visibility(id, visible_at)
+            .await
+            .map_err(queue_error)?;
+        if !released {
+            return Err(IoError::Queue(format!(
+                "message {message_id} was not held until {visible_at_ms}"
+            )));
+        }
         Ok(())
     }
 
@@ -247,6 +344,44 @@ fn ensure_sqlite_file_exists(dsn: &str) -> IoResult<()> {
         })?;
     }
     Ok(())
+}
+
+fn sqlite_path_from_dsn(dsn: &str) -> Option<PathBuf> {
+    let path = dsn.strip_prefix("sqlite://")?;
+    if path == ":memory:" || path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+fn ensure_sqlite_dedupe_table(path: &Path) -> IoResult<()> {
+    let connection = rusqlite::Connection::open(path)
+        .map_err(|err| IoError::Queue(format!("open sqlite dedupe store: {err}")))?;
+    ensure_sqlite_dedupe_schema(&connection)
+}
+
+fn ensure_sqlite_dedupe_schema(connection: &rusqlite::Connection) -> IoResult<()> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS cooldis_ingress_dedupe (
+                queue_name TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                envelope_id TEXT NOT NULL,
+                inserted_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (queue_name, dedupe_key)
+            );
+            "#,
+        )
+        .map_err(|err| IoError::Queue(format!("initialize sqlite dedupe table: {err}")))?;
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn queue_error(err: PgqrsError) -> IoError {
@@ -334,6 +469,49 @@ mod tests {
         );
         assert_eq!(leased_again[0].lease_owner.as_deref(), Some("worker-2"));
         assert!(leased_again[0].attempt >= 2);
+    }
+
+    #[tokio::test]
+    async fn sqlite_queue_rejects_duplicate_dedupe_key_on_submit() {
+        let path = test_db_path("dedupe");
+        let queue =
+            PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&path, "cooldis-ingress"))
+                .await
+                .unwrap();
+        let source = IoSource::new("clock.tick", "main");
+        let first = IngressEnvelope::new(
+            source.clone(),
+            IoConversation::new("thread:one", ConversationKind::System),
+            IngressContent::Event {
+                kind: "timer.fired".to_string(),
+                payload: serde_json::json!({}),
+            },
+            1_777_000_000_000,
+        )
+        .with_dedupe_key(IoDedupeKey::for_source(&source, "mandate:0"));
+        let duplicate = IngressEnvelope::new(
+            source.clone(),
+            IoConversation::new("thread:one", ConversationKind::System),
+            IngressContent::Event {
+                kind: "timer.fired".to_string(),
+                payload: serde_json::json!({}),
+            },
+            1_777_000_000_001,
+        )
+        .with_dedupe_key(IoDedupeKey::for_source(&source, "mandate:0"));
+
+        assert!(queue.submit(first).await.unwrap().accepted);
+        let duplicate_ack = queue.submit(duplicate).await.unwrap();
+        assert!(!duplicate_ack.accepted);
+        assert_eq!(
+            duplicate_ack.reason.as_deref(),
+            Some("duplicate dedupe key")
+        );
+
+        let leased = queue.lease_default("worker-1", 10).await.unwrap();
+        assert_eq!(leased.len(), 1);
+        queue.complete_ingress(&leased[0].message_id).await.unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

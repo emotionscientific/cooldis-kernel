@@ -34,10 +34,11 @@ env_file = ".env"
 mode = "best_effort_direct"
 
 [[daemon.io.routes]]
-id = "operator-tui"
+id = "chat-tui"
 kind = "websocket.tui"
 policy = "steer_when_active"
 threading = "selected_thread"
+agent_ref = "agent://karl-dev@latest"
 "#,
     )
     .unwrap();
@@ -55,9 +56,142 @@ threading = "selected_thread"
         loaded.config.io.ingress.persistence.mode,
         IngressPersistenceMode::BestEffortDirect
     );
-    assert_eq!(loaded.config.io.routes[0].id, "operator-tui");
+    assert_eq!(loaded.config.io.routes[0].id, "chat-tui");
+    assert_eq!(
+        loaded.config.io.routes[0].agent_ref.as_deref(),
+        Some("agent://karl-dev@latest")
+    );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loads_route_egress_projection_and_typing_simulation() {
+    let root = temp_root("egress-projection");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("cooldis.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[daemon.io.routes]]
+id = "telegram-main"
+kind = "websocket.tui"
+egress_projection = [
+  { pattern = '\[sticker:(?P<file_id>[^\]]+)\]', action = "sticker" },
+  { pattern = '\[no_response\]', action = "silence" },
+]
+typing_simulation = { chars_per_second = 25 }
+egress_retry = { max_attempts = 7, base_backoff_ms = 250 }
+"#,
+    )
+    .unwrap();
+
+    let loaded = load_cooldis_daemon_config(Some(&path)).unwrap();
+    let route = &loaded.config.io.routes[0];
+
+    assert_eq!(route.egress_projection.len(), 2);
+    assert_eq!(route.egress_projection[0].action, "sticker");
+    assert_eq!(
+        route
+            .typing_simulation
+            .as_ref()
+            .map(|config| config.chars_per_second),
+        Some(25)
+    );
+    assert_eq!(route.egress_retry.max_attempts, 7);
+    assert_eq!(route.egress_retry.base_backoff_ms, 250);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_egress_projection_regex_reports_rule_index() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "telegram-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: None,
+        content_policies: None,
+        threading: None,
+        agent_ref: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: vec![CooldisEgressProjectionRuleConfig {
+            pattern: "[bad".to_string(),
+            action: "sticker".to_string(),
+        }],
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(
+        errors.iter().any(|error| {
+            error.contains("io.routes.telegram-main.egress_projection[0].pattern")
+        })
+    );
+}
+
+#[test]
+fn validates_route_agent_ref_syntax() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "telegram-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: None,
+        content_policies: None,
+        threading: None,
+        agent_ref: Some("karl-dev".to_string()),
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("io.routes.telegram-main.agent_ref"))
+    );
+}
+
+#[test]
+fn validates_coalesce_bursts_route_config() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "coalesce-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: Some("steer_when_active".to_string()),
+        content_policies: None,
+        threading: None,
+        agent_ref: None,
+        coalesce_bursts: Some(CooldisCoalesceBurstsConfig {
+            window_ms: 0,
+            max_batch: 0,
+        }),
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(errors.iter().any(|error| error.contains("window_ms")));
+    assert!(errors.iter().any(|error| error.contains("max_batch")));
 }
 
 #[test]
@@ -94,6 +228,123 @@ agents = "{}"
     let encoded = toml::to_string(&loaded.config).unwrap();
     let decoded = decode_daemon_config(&encoded).unwrap();
     assert_eq!(decoded.registries, loaded.config.registries);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn discovers_project_root_from_nearest_config_then_dot_cooldis() {
+    let root = temp_root("project-discovery");
+    let workspace = root.join("workspace");
+    let nested = workspace.join("src/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(workspace.join(".cooldis")).unwrap();
+
+    let discovered = discover_cooldis_project(&nested).unwrap();
+    assert_eq!(discovered.root, workspace);
+    assert_eq!(discovered.config_path, None);
+
+    let configured = root.join("configured");
+    let configured_nested = configured.join("a/b");
+    std::fs::create_dir_all(&configured_nested).unwrap();
+    std::fs::write(configured.join("cooldis.toml"), "").unwrap();
+
+    let discovered = discover_cooldis_project(&configured_nested).unwrap();
+    assert_eq!(discovered.root, configured);
+    assert_eq!(
+        discovered.config_path,
+        Some(discovered.root.join("cooldis.toml"))
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn layered_toml_config_preserves_earlier_values_until_overridden() {
+    let root = temp_root("layered");
+    let user_root = root.join("user");
+    let project_root = root.join("project");
+    let explicit_root = root.join("explicit");
+    std::fs::create_dir_all(&user_root).unwrap();
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&explicit_root).unwrap();
+    let user_config = user_root.join("config.toml");
+    let project_config = project_root.join("cooldis.toml");
+    let explicit_config = explicit_root.join("override.toml");
+    std::fs::write(
+        &user_config,
+        r#"
+[daemon.runtime]
+state_home = "user-state"
+
+[daemon.provider]
+provider = "openai_compatible"
+model = "user-model"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &project_config,
+        r#"
+[daemon.runtime]
+runtime_home = ".cooldis/runtime"
+
+[daemon.registries]
+agents = ".cooldis/agents"
+
+[daemon.provider]
+model = "project-model"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &explicit_config,
+        r#"
+[daemon.runtime]
+cwd = "explicit-work"
+
+[daemon.provider]
+stream = true
+"#,
+    )
+    .unwrap();
+
+    let loaded = load_cooldis_daemon_config_layers(
+        &[
+            user_config.clone(),
+            project_config.clone(),
+            explicit_config.clone(),
+        ],
+        root.clone(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        loaded.config.runtime.cwd,
+        Some(explicit_root.join("explicit-work"))
+    );
+    assert_eq!(
+        loaded.config.runtime.runtime_home,
+        Some(project_root.join(".cooldis/runtime"))
+    );
+    assert_eq!(
+        loaded.config.runtime.state_home,
+        Some(user_root.join("user-state"))
+    );
+    assert_eq!(
+        loaded.config.registries.agents,
+        Some(project_root.join(".cooldis/agents"))
+    );
+    assert_eq!(
+        loaded.config.provider.provider.as_deref(),
+        Some("openai_compatible")
+    );
+    assert_eq!(
+        loaded.config.provider.model.as_deref(),
+        Some("project-model")
+    );
+    assert_eq!(loaded.config.provider.stream, Some(true));
+    assert_eq!(loaded.path.as_deref(), Some(explicit_config.as_path()));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -234,8 +485,14 @@ fn validates_bad_queue_and_route_config() {
         kind: "".to_string(),
         enabled: true,
         policy: None,
+        content_policies: None,
         threading: None,
+        agent_ref: None,
+        coalesce_bursts: None,
         ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
         telegram: None,
         metadata: BTreeMap::new(),
     });
@@ -321,8 +578,14 @@ fn validates_telegram_route_shape() {
         kind: "telegram.bot".to_string(),
         enabled: true,
         policy: None,
+        content_policies: None,
         threading: None,
+        agent_ref: None,
+        coalesce_bursts: None,
         ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
         telegram: Some(CooldisTelegramRouteConfig {
             listen: Some("127.0.0.1:9000".to_string()),
             path: "telegram".to_string(),
@@ -337,4 +600,129 @@ fn validates_telegram_route_shape() {
 
     let errors = config.validation_errors();
     assert!(errors.iter().any(|error| error.contains("path")));
+}
+
+#[test]
+fn invalid_content_policy_names_field() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "telegram-main".to_string(),
+        kind: "telegram.bot".to_string(),
+        enabled: false,
+        policy: None,
+        content_policies: Some(BTreeMap::from([(
+            "external.event".to_string(),
+            "wake_everything".to_string(),
+        )])),
+        agent_ref: None,
+        threading: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(errors.iter().any(|error| {
+        error.contains("io.routes.telegram-main.content_policies.external.event")
+            && error.contains("wake_everything")
+    }));
+}
+
+#[test]
+fn valid_content_policies_are_route_kind_lenient() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "tui-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: Some("queue_per_conversation".to_string()),
+        content_policies: Some(BTreeMap::from([(
+            "external.event".to_string(),
+            "observe_only".to_string(),
+        )])),
+        agent_ref: None,
+        threading: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(
+        errors
+            .iter()
+            .all(|error| !error.contains("content_policies")),
+        "valid content_policies should not be route-kind-gated: {errors:?}"
+    );
+}
+
+#[test]
+fn content_policy_coalesce_requires_coalesce_config() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "event-main".to_string(),
+        kind: "websocket.tui".to_string(),
+        enabled: true,
+        policy: None,
+        content_policies: Some(BTreeMap::from([(
+            "external.event".to_string(),
+            "coalesce_bursts".to_string(),
+        )])),
+        agent_ref: None,
+        threading: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: None,
+        metadata: BTreeMap::new(),
+    });
+
+    let errors = config.validation_errors();
+
+    assert!(errors.iter().any(|error| {
+        error.contains("io.routes.event-main.content_policies.external.event")
+            && error.contains("requires coalesce_bursts config")
+    }));
+}
+
+#[test]
+fn validates_single_clock_tick_route() {
+    let mut config = CooldisDaemonConfig::default();
+    for id in ["clock-main", "clock-backup"] {
+        config.io.routes.push(CooldisIoRouteConfig {
+            id: id.to_string(),
+            kind: "clock.tick".to_string(),
+            enabled: true,
+            policy: None,
+            content_policies: None,
+            threading: None,
+            agent_ref: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: CooldisEgressRetryConfig::default(),
+            telegram: None,
+            metadata: BTreeMap::new(),
+        });
+    }
+
+    let errors = config.validation_errors();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("at most one clock.tick route"))
+    );
 }

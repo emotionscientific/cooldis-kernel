@@ -1,23 +1,26 @@
 use crate::agent::contracts::sha256_hex;
 use crate::{
-    AgentContextCompileInput, AgentContextCompilePolicy, AgentContextCompiler, AgentRuntime,
-    AgentRuntimeFactory, AgentToolRouter, AllowAllToolPermissionGate, BashToolProvider,
-    COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent,
-    CanonicalMessage, CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError,
-    CooldisResult, EventKind, EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec,
+    AgentContextCompileInput, AgentContextCompilePolicy, AgentContextCompiler,
+    AgentManifestStaticContextSegment, AgentRuntime, AgentRuntimeFactory, AgentToolRouter,
+    AllowAllToolPermissionGate, BashToolProvider, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent, CanonicalMessage,
+    CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError, CooldisResult,
+    EventKind, EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec, HookMutationWitness,
     HookPipeline, HookRunRecord, KernelNotifyOperationProvider, KernelOperationDispatcher,
-    KernelProcessOperationProvider, KernelThreadOperationProvider, KernelThreadSpawnAgentResolver,
-    NewEventRecord, OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi,
-    ProviderClient, ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
+    KernelProcessOperationProvider, KernelScheduleOperationProvider, KernelThreadOperationProvider,
+    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationProvenance,
+    OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient,
+    ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
     ReplayTransformCounts, RuntimeEventKind, RuntimeModelRequestErrorClass,
     RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
     RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
     SessionEntryId, SessionEntryKind, SessionStartHookRequest, StopHookRequest, SystemBlock,
+    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
     ThinkingConfig, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
-    ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload, ToolCallSubject,
-    ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor, ToolExecutionRequest,
-    ToolPermissionDecision, ToolPermissionGate, TurnBudget, TurnContext, TurnInput,
-    TurnSubmissionMode, UserPromptSubmitHookRequest, VirtualBashRuntimeConfig,
+    ThreadTerminalState, ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload,
+    ToolCallSubject, ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor,
+    ToolExecutionRequest, ToolPermissionDecision, ToolPermissionGate, TurnBudget, TurnContext,
+    TurnInput, TurnSubmissionMode, UserPromptSubmitHookRequest, VirtualBashRuntimeConfig,
     active_manifest_bind_receipt, active_tool_controller_for_request,
     compile_provider_request_context, decide_tool_call, deterministic_compaction_summary,
     emit_runtime_event, normalize_history_for_target,
@@ -33,6 +36,9 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 const MAX_TOOL_ROUTER_ROUNDS: usize = 8;
+const HOOK_MUTATION_WITNESS_OBSERVATION_KIND: &str = "host.hook.mutation_witnessed";
+const HOOK_MUTATION_WITNESS_OBSERVATION_SCHEMA_V1: &str =
+    "cooldis.observation.host_hook_mutation/1";
 
 fn default_process_dispatcher_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -212,6 +218,7 @@ impl CanonicalProviderRuntimeFactory {
         self
     }
 
+    // lexicon-allow: hook - existing host debug hook API name retained for compatibility.
     pub fn with_hook_pipeline(mut self, hook_pipeline: Arc<HookPipeline>) -> Self {
         self.hook_pipeline = Some(hook_pipeline);
         self
@@ -426,7 +433,7 @@ impl CanonicalProviderRuntime {
             self.strict_tool_router_unknowns = false;
         }
         if let Some(control) = control.clone() {
-            let mut provider = KernelThreadOperationProvider::new(control, context.clone());
+            let mut provider = KernelThreadOperationProvider::new(control.clone(), context.clone());
             if let Some(resolver) = &self.thread_spawn_agent_resolver {
                 provider = provider.with_agent_resolver(Arc::clone(resolver));
             }
@@ -440,6 +447,23 @@ impl CanonicalProviderRuntime {
             {
                 let _ = registry
                     .set_kernel_dispatcher(COOLDIS_THREADS_PACKAGE, Arc::clone(&dispatcher))
+                    .await;
+            }
+            let schedule_dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
+                KernelScheduleOperationProvider::new(control.clone(), context.clone()),
+            );
+            let _ = router
+                .operation_registry()
+                .set_kernel_dispatcher(COOLDIS_SCHEDULE_PACKAGE, Arc::clone(&schedule_dispatcher))
+                .await;
+            if let Some(config) = &self.bash_tool_config
+                && let Some(registry) = &config.operation_registry
+            {
+                let _ = registry
+                    .set_kernel_dispatcher(
+                        COOLDIS_SCHEDULE_PACKAGE,
+                        Arc::clone(&schedule_dispatcher),
+                    )
                     .await;
             }
         }
@@ -508,6 +532,7 @@ impl CanonicalProviderRuntime {
             )
             .await;
         emit_hook_records(events, coordinates, &outcome.records);
+        append_hook_mutation_witnesses(services, coordinates, outcome.mutation_witnesses).await?;
         append_hook_contexts(
             services,
             coordinates,
@@ -555,12 +580,17 @@ impl CanonicalProviderRuntime {
         let instruction_contexts = services
             .build_instruction_read_plan_contexts(coordinates)
             .await?;
-        let environment_contexts = memory_contexts
-            .into_iter()
+        let skill_context_segments = skill_context_segments_from_thread(&turn_context.thread)?;
+        let static_context_segments = static_context_segments_from_thread(&turn_context.thread)?;
+        let environment_contexts = skill_context_segments
+            .iter()
+            .map(|segment| segment.content.clone())
+            .chain(memory_contexts)
             .chain(instruction_contexts)
             .collect::<Vec<_>>();
         let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
             system: self.config.system.clone(),
+            static_system_sources: static_context_segments.clone(),
             session_entries: session_entries.clone(),
             turn_context: turn_context.snapshot(),
             hook_contexts: steering_contexts,
@@ -611,6 +641,7 @@ impl CanonicalProviderRuntime {
         let receipt_payload = context_compile_receipt_payload(
             &session_entries,
             &compiled_context,
+            &context_receipt_static_segments(&static_context_segments, &skill_context_segments),
             &agent_diagnostics,
             &replay_transform,
             provider_dropped_messages,
@@ -726,19 +757,27 @@ async fn run_idle_provider_command(
                 );
                 return true;
             }
-            match services.append_user_turn_input(coordinates, &input).await {
+            let turn_source_event_id = match services
+                .append_user_turn_input(coordinates, &input)
+                .await
+            {
                 Ok(entry) => {
-                    if let Err(err) =
-                        append_turn_submitted_event(services, coordinates, &turn_id, &entry).await
-                    {
-                        let _ = status.send(ThreadStatus::Failed);
-                        let _ = events.send(ThreadEvent::Failed {
-                            thread_id,
-                            message: err.to_string(),
-                        });
-                        return true;
-                    }
+                    let submitted =
+                        match append_turn_submitted_event(services, coordinates, &turn_id, &entry)
+                            .await
+                        {
+                            Ok(submitted) => submitted,
+                            Err(err) => {
+                                let _ = status.send(ThreadStatus::Failed);
+                                let _ = events.send(ThreadEvent::Failed {
+                                    thread_id,
+                                    message: err.to_string(),
+                                });
+                                return true;
+                            }
+                        };
                     let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                    submitted.id
                 }
                 Err(err) => {
                     let _ = status.send(ThreadStatus::Failed);
@@ -748,12 +787,13 @@ async fn run_idle_provider_command(
                     });
                     return true;
                 }
-            }
+            };
             run_provider_turn(
                 runtime,
                 thread_context,
                 turn_id,
                 input,
+                turn_source_event_id,
                 coordinates,
                 services,
                 thread_id,
@@ -813,12 +853,13 @@ async fn run_idle_provider_command(
             )
             .await
             {
-                Ok(ToolResumeOutcome::Resumed) => {
+                Ok(ToolResumeOutcome::Resumed { source_event_id }) => {
                     run_provider_turn(
                         runtime,
                         thread_context,
                         turn_id,
                         TurnInput::text(""),
+                        source_event_id,
                         coordinates,
                         services,
                         thread_id,
@@ -895,12 +936,17 @@ async fn run_auto_compaction_if_needed(
     let instruction_contexts = services
         .build_instruction_read_plan_contexts(coordinates)
         .await?;
-    let environment_contexts = memory_contexts
-        .into_iter()
+    let skill_context_segments = skill_context_segments_from_thread(thread_context)?;
+    let static_context_segments = static_context_segments_from_thread(thread_context)?;
+    let environment_contexts = skill_context_segments
+        .iter()
+        .map(|segment| segment.content.clone())
+        .chain(memory_contexts)
         .chain(instruction_contexts)
         .collect::<Vec<_>>();
     let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
         system: runtime.config.system.clone(),
+        static_system_sources: static_context_segments,
         session_entries: context.entries,
         turn_context: runtime
             .turn_context(
@@ -957,6 +1003,12 @@ async fn run_compaction(
             )
             .await;
         emit_hook_records(events, turn_context.coordinates(), &outcome.records);
+        append_hook_mutation_witnesses(
+            services,
+            turn_context.coordinates(),
+            outcome.mutation_witnesses,
+        )
+        .await?;
         if outcome.should_stop {
             emit_runtime_event(
                 events,
@@ -979,7 +1031,7 @@ async fn run_compaction(
     let source_context = services
         .build_session_context(turn_context.coordinates())
         .await?;
-    services
+    let (summary_event, _) = services
         .record_context_summary_checkpoint(
             turn_context.coordinates(),
             &source_context.entries,
@@ -988,11 +1040,18 @@ async fn run_compaction(
         )
         .await?;
     let entry = services
-        .append_session_entry(
+        .append_session_entry_with_provenance(
             turn_context.coordinates(),
             None,
             SessionEntryKind::Compaction {
                 summary: summary.clone(),
+            },
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(turn_context.coordinates())],
+                source_event_ids: vec![summary_event.id],
+                discharged_by: Some("projection:context-summarizer".to_string()),
+                function: Some("session_entry_compaction/v1".to_string()),
+                ..EventProvenance::default()
             },
         )
         .await?;
@@ -1018,6 +1077,12 @@ async fn run_compaction(
             )
             .await;
         emit_hook_records(events, turn_context.coordinates(), &outcome.records);
+        append_hook_mutation_witnesses(
+            services,
+            turn_context.coordinates(),
+            outcome.mutation_witnesses,
+        )
+        .await?;
         if outcome.should_stop {
             emit_runtime_event(
                 events,
@@ -1427,6 +1492,7 @@ async fn run_provider_turn(
     thread_context: &ThreadContext,
     turn_id: String,
     turn_input: TurnInput,
+    turn_source_event_id: EventRecordId,
     coordinates: &crate::ThreadCoordinates,
     services: &RuntimeServices,
     thread_id: crate::ThreadId,
@@ -1456,6 +1522,19 @@ async fn run_provider_turn(
             )
             .await;
         emit_hook_records(events, coordinates, &outcome.records);
+        if let Err(err) =
+            append_hook_mutation_witnesses(services, coordinates, outcome.mutation_witnesses).await
+        {
+            fail_provider_turn(
+                coordinates,
+                thread_id,
+                events,
+                status,
+                "hook_pipeline",
+                err.to_string(),
+            );
+            return true;
+        }
         if let Err(err) = append_hook_contexts(
             services,
             coordinates,
@@ -1637,12 +1716,13 @@ async fn run_provider_turn(
                         }
                     }
                     match services
-                        .append_session_entry(
+                        .append_agent_loop_session_entry(
                             coordinates,
                             None,
                             SessionEntryKind::Message {
                                 message: message.clone(),
                             },
+                            vec![turn_source_event_id],
                         )
                         .await
                     {
@@ -1778,7 +1858,9 @@ async fn run_provider_turn(
             );
             return true;
         }
-        if let Err(err) = append_turn_completed_event(services, coordinates, &turn_id).await {
+        if let Err(err) =
+            append_turn_completed_event(services, &turn_context.thread, &turn_id).await
+        {
             fail_provider_turn(
                 coordinates,
                 thread_id,
@@ -1837,7 +1919,7 @@ enum ToolAppendOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolResumeOutcome {
-    Resumed,
+    Resumed { source_event_id: EventRecordId },
     StillWaiting,
     AlreadyCompleted,
 }
@@ -1872,9 +1954,75 @@ fn tool_calls_from_message(message: &CanonicalMessage) -> Vec<ProviderToolCall> 
     }
 }
 
+fn skill_context_segments_from_thread(
+    thread: &ThreadContext,
+) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    let Some(raw) = thread
+        .metadata
+        .get(THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+    else {
+        return Ok(Vec::new());
+    };
+    let segments =
+        serde_json::from_str::<Vec<AgentManifestStaticContextSegment>>(raw).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "thread manifest skill context segments are invalid: {err}"
+            ))
+        })?;
+    for segment in &segments {
+        let expected = sha256_hex(segment.content.as_bytes());
+        if segment.content_sha256 != expected {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "thread manifest skill context segment {:?} content hash mismatch: expected {}, got {}",
+                segment.id, expected, segment.content_sha256
+            )));
+        }
+    }
+    Ok(segments)
+}
+
+fn static_context_segments_from_thread(
+    thread: &ThreadContext,
+) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    let Some(raw) = thread
+        .metadata
+        .get(THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+    else {
+        return Ok(Vec::new());
+    };
+    let segments =
+        serde_json::from_str::<Vec<AgentManifestStaticContextSegment>>(raw).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "thread manifest static context segments are invalid: {err}"
+            ))
+        })?;
+    for segment in &segments {
+        let expected = sha256_hex(segment.content.as_bytes());
+        if segment.content_sha256 != expected {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "thread manifest static context segment {:?} content hash mismatch: expected {}, got {}",
+                segment.id, expected, segment.content_sha256
+            )));
+        }
+    }
+    Ok(segments)
+}
+
+fn context_receipt_static_segments(
+    static_context_segments: &[AgentManifestStaticContextSegment],
+    skill_context_segments: &[AgentManifestStaticContextSegment],
+) -> Vec<AgentManifestStaticContextSegment> {
+    static_context_segments
+        .iter()
+        .chain(skill_context_segments)
+        .cloned()
+        .collect()
+}
+
 fn context_compile_receipt_payload(
     session_entries: &[SessionEntry],
     compiled_context: &CompiledAgentContext,
+    static_context_segments: &[AgentManifestStaticContextSegment],
     diagnostics: &crate::AgentContextCompilationDiagnostics,
     replay_transform: &ReplayTransformCounts,
     provider_dropped_messages: usize,
@@ -1887,6 +2035,20 @@ fn context_compile_receipt_payload(
         .map_err(|err| CooldisError::History(format!("context receipt codec failed: {err}")))?;
     let replay_transform = serde_json::to_value(replay_transform)
         .map_err(|err| CooldisError::History(format!("context receipt codec failed: {err}")))?;
+    let static_context_segments = static_context_segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "id": &segment.id,
+                "assembler": &segment.assembler,
+                "input": &segment.input,
+                "pinned": segment.pinned,
+                "budget_share": segment.budget_share,
+                "ref_uri": &segment.ref_uri,
+                "content_sha256": &segment.content_sha256,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "strategy": "naive_assembly",
         "strategy_version": "v1",
@@ -1898,6 +2060,7 @@ fn context_compile_receipt_payload(
         "system_block_count": compiled_context.system.len(),
         "message_count": compiled_context.messages.len(),
         "tool_count": compiled_context.tools.len(),
+        "static_context_segments": static_context_segments,
         "diagnostics": diagnostics,
         "replay_transform": replay_transform,
         "provider_dropped_messages": provider_dropped_messages,
@@ -1952,7 +2115,7 @@ async fn resume_pending_tool_call(
             Ok(ToolResumeOutcome::StillWaiting)
         }
         ToolCallDecision::Allow { consumed_fact_id } => {
-            append_turn_resumed_event(
+            let resumed = append_turn_resumed_event(
                 services,
                 &thread_context.coordinates,
                 turn_id,
@@ -1978,15 +2141,18 @@ async fn resume_pending_tool_call(
                 request.tool_name,
                 request.arguments,
                 request.snapshot_id,
+                resumed.id,
             )
             .await?;
-            Ok(ToolResumeOutcome::Resumed)
+            Ok(ToolResumeOutcome::Resumed {
+                source_event_id: resumed.id,
+            })
         }
         ToolCallDecision::Rewrite {
             consumed_fact_id,
             arguments,
         } => {
-            append_turn_resumed_event(
+            let resumed = append_turn_resumed_event(
                 services,
                 &thread_context.coordinates,
                 turn_id,
@@ -2012,16 +2178,19 @@ async fn resume_pending_tool_call(
                 request.tool_name,
                 arguments,
                 request.snapshot_id,
+                resumed.id,
             )
             .await?;
-            Ok(ToolResumeOutcome::Resumed)
+            Ok(ToolResumeOutcome::Resumed {
+                source_event_id: resumed.id,
+            })
         }
         ToolCallDecision::Deny {
             consumed_fact_id,
             reason,
             ..
         } => {
-            append_turn_resumed_event(
+            let resumed = append_turn_resumed_event(
                 services,
                 &thread_context.coordinates,
                 turn_id,
@@ -2043,9 +2212,12 @@ async fn resume_pending_tool_call(
                 request.tool_name,
                 request.snapshot_id,
                 reason,
+                resumed.id,
             )
             .await?;
-            Ok(ToolResumeOutcome::Resumed)
+            Ok(ToolResumeOutcome::Resumed {
+                source_event_id: resumed.id,
+            })
         }
     }
 }
@@ -2132,6 +2304,7 @@ async fn append_tool_results(
                         tool_name,
                         active_snapshot_id,
                         "tool controller did not emit a terminal decision".to_string(),
+                        request_event.id,
                     )
                     .await?;
                     continue;
@@ -2153,6 +2326,7 @@ async fn append_tool_results(
                         tool_name,
                         active_snapshot_id,
                         reason,
+                        request_event.id,
                     )
                     .await?;
                     continue;
@@ -2186,6 +2360,7 @@ async fn append_tool_results(
             tool_name,
             arguments,
             active_snapshot_id,
+            request_event.id,
         )
         .await?;
     }
@@ -2202,18 +2377,27 @@ async fn execute_tool_call_with_interceptor(
     tool_name: String,
     arguments: Value,
     snapshot_id: String,
+    source_event_id: EventRecordId,
 ) -> CooldisResult<()> {
-    let outcome = interceptor
-        .execute(
-            ToolExecutionRequest {
-                turn_context,
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-                arguments,
-            },
-            |spec| emit_hook_started(events, turn_context.coordinates(), spec),
-        )
-        .await?;
+    let witness_coordinates = turn_context.coordinates().clone();
+    let outcome =
+        interceptor
+            .execute_with_witnessing(
+                ToolExecutionRequest {
+                    turn_context,
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    arguments,
+                },
+                |spec| emit_hook_started(events, turn_context.coordinates(), spec),
+                |witnesses| {
+                    let coordinates = witness_coordinates.clone();
+                    async move {
+                        append_hook_mutation_witnesses(services, &coordinates, witnesses).await
+                    }
+                },
+            )
+            .await?;
     emit_hook_records(events, turn_context.coordinates(), &outcome.hook_records);
     if let Some(permission_decision) = &outcome.permission_decision {
         let (decision, reason) = match permission_decision {
@@ -2281,6 +2465,7 @@ async fn execute_tool_call_with_interceptor(
         snapshot_id,
         outcome.result,
         Some(outcome.duration_ms),
+        source_event_id,
     )
     .await?;
     append_hook_contexts(
@@ -2342,11 +2527,12 @@ async fn existing_turn_submitted_event(
 
 async fn append_turn_completed_event(
     services: &RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    thread_context: &ThreadContext,
     turn_id: &str,
 ) -> CooldisResult<crate::EventRecord> {
+    let coordinates = &thread_context.coordinates;
     let latest_source_id = latest_thread_event_id(services, coordinates).await?;
-    services
+    let completed = services
         .append_thread_event(
             coordinates,
             NewEventRecord::discharged(
@@ -2364,7 +2550,16 @@ async fn append_turn_completed_event(
                 },
             ),
         )
-        .await
+        .await?;
+    services
+        .append_thread_joined_event_if_spawned(
+            thread_context,
+            ThreadTerminalState::Completed,
+            None,
+            Some(completed.id),
+        )
+        .await?;
+    Ok(completed)
 }
 
 async fn append_turn_resumed_event(
@@ -2448,6 +2643,7 @@ async fn append_denied_tool_result(
     tool_name: String,
     snapshot_id: String,
     reason: String,
+    source_event_id: EventRecordId,
 ) -> CooldisResult<()> {
     emit_runtime_event(
         events,
@@ -2475,6 +2671,7 @@ async fn append_denied_tool_result(
         snapshot_id,
         result,
         Some(0),
+        source_event_id,
     )
     .await
 }
@@ -2657,6 +2854,7 @@ async fn append_tool_result_message(
     snapshot_id: String,
     result: CanonicalMessage,
     duration_ms: Option<u64>,
+    source_event_id: EventRecordId,
 ) -> CooldisResult<()> {
     let success = match &result {
         CanonicalMessage::ToolResult { is_error, .. } => !is_error,
@@ -2664,12 +2862,13 @@ async fn append_tool_result_message(
     };
     let output = text_from_message(&result);
     let entry = services
-        .append_session_entry(
+        .append_agent_loop_session_entry(
             coordinates,
             None,
             SessionEntryKind::Message {
                 message: result.clone(),
             },
+            vec![source_event_id],
         )
         .await?;
     let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
@@ -2730,6 +2929,43 @@ async fn append_hook_contexts(
     Ok(())
 }
 
+async fn append_hook_mutation_witnesses(
+    services: &RuntimeServices,
+    coordinates: &crate::ThreadCoordinates,
+    witnesses: Vec<HookMutationWitness>,
+) -> CooldisResult<()> {
+    if witnesses.is_empty() {
+        return Ok(());
+    }
+    let store = services.runtime_store();
+    for witness in witnesses {
+        let mut payload = serde_json::to_value(&witness)
+            .map_err(|err| CooldisError::History(format!("hook witness codec failed: {err}")))?;
+        if let Some(payload) = payload.as_object_mut() {
+            payload.insert(
+                "schema".to_string(),
+                serde_json::json!(HOOK_MUTATION_WITNESS_OBSERVATION_SCHEMA_V1),
+            );
+            payload.insert("witnessing".to_string(), serde_json::json!(true));
+        }
+        let record = NewObservationRecord::new(
+            HOOK_MUTATION_WITNESS_OBSERVATION_KIND,
+            coordinates.clone(),
+            payload,
+        )
+        .with_provenance(ObservationProvenance {
+            derivation_strategy: "host.hook.mutation_witnessing".to_string(),
+            derivation_version: "v1".to_string(),
+            ..ObservationProvenance::default()
+        });
+        store
+            .append_observation(record)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+    }
+    Ok(())
+}
+
 fn steering_context(turn_id: &str, input: &TurnInput) -> Option<String> {
     let text = input.text_projection();
     if text.trim().is_empty() {
@@ -2761,6 +2997,12 @@ async fn run_stop_hooks(
         )
         .await;
     emit_hook_records(events, turn_context.coordinates(), &outcome.records);
+    append_hook_mutation_witnesses(
+        services,
+        turn_context.coordinates(),
+        outcome.mutation_witnesses,
+    )
+    .await?;
     append_hook_contexts(
         services,
         turn_context.coordinates(),

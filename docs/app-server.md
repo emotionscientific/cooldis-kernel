@@ -1,4 +1,4 @@
-# Cooldis RPC Control Plane And Dev Chat
+# Cooldis RPC Control Plane
 
 Cooldis owns an app-server control plane with a Codex-shaped transport so local
 clients can exercise the Cooldis kernel without importing Codex as a runtime
@@ -40,34 +40,34 @@ The direct app-server command currently uses the deterministic local/offline
 provider. The TCP WebSocket listener also serves `GET /healthz` and `GET
 /readyz` with a small JSON `200 OK` response.
 
-`cooldis dev chat` starts a private app server on a temporary Unix socket and
-connects Cooldis' owned Codex-shaped test client to it:
+`cooldis console` starts the same loopback app-server shape for local browser
+operation, binds `127.0.0.1:<port>`, serves the bundled Svelte console from `/`,
+and keeps JSON-RPC on `/rpc`. Each console process generates a session token,
+injects it into `index.html`, and rejects `/rpc` WebSocket upgrades that do not
+present the token in the query string or `Sec-WebSocket-Protocol`.
+
+`cooldis chat` starts the bundled terminal console. It launches a private app
+server on a temporary Unix socket by default, or attaches to an existing
+endpoint with `--attach`:
 
 ```sh
-cargo run --bin cooldis -- dev chat
+cargo run --bin cooldis -- chat
+cargo run --bin cooldis -- chat --attach unix:///tmp/cooldis.sock
 ```
 
-With no prompt, `cooldis dev chat` opens a small line REPL:
-
-```text
-Cooldis chat. Type /quit to exit.
-> hello
-assistant> ...
-```
-
-With a prompt argument, it sends one turn and exits:
+With a prompt argument, it opens the terminal console and submits that prompt:
 
 ```sh
-cargo run --bin cooldis -- dev chat "hello from cooldis"
+cargo run --bin cooldis -- chat "hello from cooldis"
 ```
 
-`cooldis dev rpc` connects to a running daemon's WebSocket app server instead
+`cooldis debug rpc` connects to a running daemon's WebSocket app server instead
 of starting a private one. It is useful for protocol debugging and for checking
 the live daemon state from scripts:
 
 ```sh
-cargo run --bin cooldis -- dev rpc call thread/list
-cargo run --bin cooldis -- dev rpc call thread/read '{"threadId":"...","includeTurns":false}'
+cargo run --bin cooldis -- debug rpc call thread/list
+cargo run --bin cooldis -- debug rpc call thread/read '{"threadId":"...","includeTurns":false}'
 ```
 
 By default it connects to `ws://127.0.0.1:49200/rpc`. Pass `--url` for another
@@ -75,14 +75,14 @@ running WebSocket endpoint, or `--config` to read `daemon.app_server.listen`
 from a `cooldis.toml`:
 
 ```sh
-cargo run --bin cooldis -- dev rpc turn --new "hello from the daemon"
-cargo run --bin cooldis -- dev rpc turn --thread <thread-id> --json "resume here"
-cargo run --bin cooldis -- dev rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
+cargo run --bin cooldis -- debug rpc turn --new "hello from the daemon"
+cargo run --bin cooldis -- debug rpc turn --thread <thread-id> --json "resume here"
+cargo run --bin cooldis -- debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 ```
 
 ## Provider Config
 
-The dev chat command can point its private app-server runtime at a live
+The chat command can point its private app-server runtime at a live
 provider endpoint. Put non-secret settings in a local `cooldis.json`:
 
 ```json
@@ -101,13 +101,13 @@ provider endpoint. Put non-secret settings in a local `cooldis.json`:
 Then run interactive chat:
 
 ```sh
-cargo run --bin cooldis -- dev chat
+cargo run --bin cooldis -- chat
 ```
 
 Or pass the provider config on the command line:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider openai \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -145,8 +145,8 @@ Anthropic Messages-compatible endpoints use the Anthropic provider shape:
 }
 ```
 
-AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` path and AWS
-SigV4 credentials:
+AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` and
+`InvokeModelWithResponseStream` paths with AWS SigV4 credentials:
 
 ```json
 {
@@ -154,7 +154,7 @@ SigV4 credentials:
     "provider": "anthropic_bedrock",
     "region": "us-east-1",
     "model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "stream": false,
+    "stream": true,
     "max_tokens": 4096
   }
 }
@@ -169,8 +169,9 @@ requires it. `anthropic_bedrock` reads credentials from `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and
 `AWS_BEDROCK_REGION`/`AWS_REGION`/`AWS_DEFAULT_REGION`. For the local shared
 1Password item, run the child command through `scripts/with-bedrock-env.sh`.
-Streaming is disabled for this path until Cooldis has an AWS event-stream
-decoder for `InvokeModelWithResponseStream`.
+Streaming uses `InvokeModelWithResponseStream` and decodes AWS
+`application/vnd.amazon.eventstream` frames into the same Anthropic Messages
+stream events as the native Anthropic adapter.
 
 Provider config resolution is:
 
@@ -184,19 +185,19 @@ Provider config resolution is:
 - models resolve from `model`, command line flags, or provider-specific local
   env;
 - `max_tokens` defaults to `4096`;
-- streaming defaults to enabled except for `anthropic_bedrock`, which defaults
-  to non-streaming.
+- streaming defaults to enabled for hosted providers, including
+  `anthropic_bedrock`; local/offline mode remains non-streaming.
 
 Keep real secrets in the environment or a local ignored env file, not in
 committed `cooldis.json`.
 
-The app-server also opens the internal metadata store at
-`state_home/metadata.sqlite3` on startup. It seeds provider catalog records,
-resolves catalog-backed provider credentials, and persists thread
-lifecycle/topology records for local `thread/start`, fork paths, and
-kernel-spawned child threads created through `cooldis-threads`. Plain OpenAI Compatible
-config can use that catalog-backed provider path instead of requiring the
-endpoint shape to be rebuilt from config each time.
+The app-server opens project metadata at `state_home/metadata.sqlite3` and user
+metadata at `user_state_home/metadata.sqlite3` on startup. Project metadata owns
+provider catalog rows, MCP source records, and thread lifecycle/topology records
+for local `thread/start`, fork paths, and kernel-spawned child threads created
+through `cooldis-threads`. User metadata owns provider credentials and named
+secret values. Plain OpenAI Compatible config can use the catalog-backed
+provider path while resolving API keys from the user auth store.
 
 ## Thread Residency
 
@@ -239,9 +240,9 @@ child store. Its result also includes `fork.sourceCut`, with
 
 `parentThreadId` remains the topology/control parent. `forkedFromId` is kept as
 a compatibility lineage alias on thread objects. New clients should use
-`fork.sourceCut` as the exact split point. Policy-level
-`AdmissionDecision::Fork` is still not wired through the daemon bridge in this
-release.
+`fork.sourceCut` as the exact split point. Daemon IO routes can also select
+`fork_on_new_dm`; the bridge uses the same checkpoint fork lineage and records
+the fork with `thread.spawned`.
 
 ## Manifest Starts
 
@@ -353,6 +354,13 @@ If no operation registry root is configured, or if the conventional default root
 is absent, the method returns an empty `data` array. Registry I/O or record
 decoding failures return JSON-RPC errors.
 
+At startup, the app-server synthesizes first-party kernel operation records into
+the configured registry: `cooldis-threads`, `cooldis-schedule`,
+`cooldis-process`, and `cooldis-notify`. The default manifest binds the
+thread-control package only; agents that need other first-party operations bind
+the corresponding `op://...@sha256:<record-hash>` explicitly with the required
+grants.
+
 ### `model/list`
 
 Params: none.
@@ -365,6 +373,54 @@ the configured default when the catalog omits it. Exactly one entry has
 
 A missing catalog provider or invalid provider metadata returns a JSON-RPC
 error during app-server setup or method handling.
+
+### `modelProvider/list`
+
+Params: none.
+
+Result: `{ "data": [...], "nextCursor": null }`. Each entry is a redacted model
+provider endpoint record: `providerId`, `api`, `baseUrl`, optional
+`displayName`, redacted `auth`, `authHeader`, redacted `headers`, `models`,
+`metadata`, timestamps, `configuredAuth` from the user auth store, and
+`isActiveProvider`. Model rows include `modelId`, optional model-level
+`api`/`baseUrl`, token limits, input modalities, redacted headers, metadata,
+and `isDefault` when it matches the runtime default model.
+
+### `modelProvider/read`
+
+Params: `{ "providerId": "wafer" }`.
+
+Result: `{ "provider": { ... } }` with the same redacted shape as
+`modelProvider/list`. Unknown provider ids fail with a JSON-RPC error.
+
+### `modelProvider/upsert`
+
+Params: `{ "provider": { "providerId": "...", "api": "open_ai_chat_completions",
+"baseUrl": "https://...", "displayName": "...", "auth": { "type": "env",
+"name": "PROVIDER_API_KEY" }, "authHeader": true, "headers": { "X-Provider":
+{ "type": "literal", "value": "..." } }, "models": [...], "metadata": {} } }`.
+
+Result: `{ "provider": { ... } }` with the redacted stored record. This method
+creates or replaces provider metadata only. It rejects inline API keys and
+command-backed auth or header values; use `modelProvider/auth/set` for stored
+credentials.
+
+### `modelProvider/delete`
+
+Params: `{ "providerId": "wafer" }`.
+
+Result: `{ "deleted": true, "providerId": "wafer" }`. Deleting a provider also
+removes any user-stored credential for the same provider id and clears stale
+project-store credential rows if present.
+
+### `modelProvider/auth/status`
+
+Params: `{ "providerId": "wafer" }`, or `{}` to list all provider auth statuses.
+
+Result: `{ "auth": { ... } | null, "data": [...], "nextCursor": null }`.
+Entries report `providerId`, optional `displayName`, whether a credential is
+configured, its non-secret source/label, and whether the provider uses an auth
+header. Credential values are never returned.
 
 ### `mcpSource/list`
 
@@ -465,6 +521,42 @@ may be available.
 Unknown thread ids and malformed cursors fail with JSON-RPC errors. A valid
 thread with no matching events returns an empty `data` array and null cursors.
 
+### `mandate/start`
+
+Params:
+`{ "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder." }`.
+Only `threadId` and `schedule` are required. The schedule union is externally
+tagged: `{ "cron": { "expr": "0 9 * * *", "tz": "America/Los_Angeles" } }`,
+`{ "interval": { "every_ms": 60000 } }`, or
+`{ "at": { "when": "2026-07-04T18:00:00Z" } }`. `catchUp` defaults to
+`"skip_missed"` and may also be `"coalesce_missed"`.
+
+Result:
+`{ "mandateEventId": "...", "streamId": "control:<threadId>", "sequence": 1 }`.
+The method appends a witnessed `mandate.started` fact to the thread control
+stream. Cron expressions are parsed before append, cron time zones must be
+IANA names, interval schedules must be at least 60 seconds, and `at` schedules
+in the past are rejected unless `catchUp = "coalesce_missed"`.
+
+### `mandate/list`
+
+Params: `{ "threadId": "..." }`.
+
+Result:
+`{ "data": [{ "mandateEventId": "...", "mandateId": "...", "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder.", "createdAtMs": 0, "streamId": "control:<threadId>", "sequence": 1 }], "nextCursor": null }`.
+The projection folds active `mandate.started` facts minus matching
+`mandate.revoked` facts from the thread control stream.
+
+### `mandate/revoke`
+
+Params: `{ "threadId": "...", "mandateEventId": "..." }`.
+
+Result:
+`{ "status": "revoked" | "already_revoked", "mandateEventId": "...", "revokedEventId": "...", "streamId": "control:<threadId>", "sequence": 2 }`.
+The method appends a witnessed `mandate.revoked` fact linked to the start event.
+Revoking an already revoked mandate is an idempotent no-op success and returns
+the original revoke event id.
+
 ### `thread/couplings/list`
 
 Params: `{ "threadId": "...", "limit": 100 }`.
@@ -556,7 +648,7 @@ JSON keys such as `api_key`, `token`, `secret`, `authorization`, `password`, and
 bearer credentials. The `redaction.redactedKeys` array records which key names
 were redacted in the bundle.
 
-This method is the V1 operator evidence bundle surface. It is not a browser-safe
+This method is the V1 support evidence bundle surface. It is not a browser-safe
 subscription stream and does not replace the authority stream store.
 
 ### `thread/read`
@@ -595,6 +687,7 @@ The V1 app-server implements the Codex TUI-critical request subset:
   `thread/list`, `thread/loaded/list`, `thread/events/list`,
   `thread/couplings/list`, `thread/approvals/list`, `thread/waiting/list`,
   `thread/debug/export`;
+- `mandate/start`, `mandate/revoke`, `mandate/list`;
 - `approval/resolve`;
 - `thread/name/set`, `thread/metadata/update`, `thread/compact/start`,
   `thread/unsubscribe`;
@@ -603,6 +696,9 @@ The V1 app-server implements the Codex TUI-critical request subset:
 Schema-valid friendly stubs keep the client calm for catalog/config surfaces
 such as `skills/list`, `plugin/list`, `hooks/list`,
 `account/rateLimits/read`, `config/read`, and `configRequirements/read`.
+`hooks/list` returns `witnessing: true` to report that mutating host debug hook
+outcomes are witnessed before they take effect; it does not expose a manifest
+hook catalog.
 `mcpServerStatus/list` remains as a compatibility alias for `mcpSource/list`.
 `config/read` additionally reports the app-server's
 absolute working directory as `config.cwd`, so clients can discover a real
@@ -653,13 +749,13 @@ cargo run --bin cooldis-live-smoke
 Run a one-shot local/offline chat proof:
 
 ```sh
-cargo run --bin cooldis -- dev chat "hello from local chat"
+cargo run --bin cooldis -- chat "hello from local chat"
 ```
 
 Run an OpenAI Responses-compatible chat proof with a local env file:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider openai \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -677,7 +773,7 @@ COOL_CHAT_OPENAI_OK
 Run an OpenAI Chat Completions-compatible proof:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider openai_chat_completions \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -688,7 +784,7 @@ cargo run --bin cooldis -- dev chat \
 Run an Anthropic Messages proof:
 
 ```sh
-cargo run --bin cooldis -- dev chat \
+cargo run --bin cooldis -- chat \
   --provider anthropic \
   --api-key-env ANTHROPIC_API_KEY \
   --model claude-sonnet-4-5-20250929 \
@@ -698,9 +794,8 @@ cargo run --bin cooldis -- dev chat \
 Run an Anthropic Bedrock proof:
 
 ```sh
-scripts/with-bedrock-env.sh cargo run --bin cooldis -- dev chat \
+scripts/with-bedrock-env.sh cargo run --bin cooldis -- chat \
   --provider anthropic_bedrock \
   --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
-  --no-stream \
   "Reply with exactly COOL_CHAT_BEDROCK_OK and no other text."
 ```

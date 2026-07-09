@@ -3,45 +3,50 @@ use crate::{
     APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
     APP_SERVER_BIFROST_PROVIDER, APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentManifestRefStatus, AppServerListenAddr,
-    AppServerProviderConfig, CapsuleBindingsConfig, CodexTuiConnectConfig, CodexTuiEvent,
-    CodexTuiTestClient, CooldisAppServer, CooldisAppServerConfig, CooldisDaemonIoBridge,
+    AppServerProviderConfig, BoundCoupling, BoundCouplingSet, CapsuleBindingsConfig,
+    CodexTuiConnectConfig, CodexTuiEvent, CodexTuiTestClient, ConsoleAssetConfig, CooldisAppServer,
+    CooldisAppServerConfig, CooldisDaemonClockRoute, CooldisDaemonIoBridge,
     CooldisDaemonQueueWorker, CooldisDaemonServiceSpec, CooldisDaemonServiceTarget, CooldisError,
     CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProviderConfig,
-    CooldisResult, CooldisVfs, EventKind, EventStore, EventStreamId, HostFileSystem,
+    CooldisResult, CooldisVfs, CouplingRunStatus, CouplingScheduler, CouplingSchedulerCycleReceipt,
+    EventKind, EventRecord, EventSequence, EventStore, EventStreamId, HostFileSystem,
     HostFileSystemMode, JsonRpcNotification, LlmProviderAuthStore, LlmProviderCatalogStore,
-    LoadedCooldisDaemonConfig, LocalAgentRegistry, LocalOperationRegistry, McpRemoteServerConfig,
-    McpRemoteToolProvider, McpRemoteTransport, PublishOperationRequest, PublishedAgentRecord,
+    LoadedCooldisDaemonConfig, LocalAgentRegistry, LocalBlobRegistry, LocalOperationRegistry,
+    LocalSkillRegistry, McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport,
+    NewEventRecord, PublishOperationRequest, PublishSkillPackageRequest, PublishedAgentRecord,
     PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
     RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore,
-    SqliteSecretStore, SqliteSessionStore, TelegramWebhookServer, TelegramWebhookServerConfig,
-    ThreadId, ThreadMetadataStore, ToolBuildReceipt, ToolFixtureRun, ToolInterfaceContract,
-    ToolManualExitStatus, ToolOperationManual, ToolPackageSource, WasmOperationManifest,
+    SqliteSecretStore, SqliteSessionStore, StreamRecordEnvelopeV1, SystemDaemonClock,
+    TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore,
+    ToolBuildReceipt, ToolFixtureRun, ToolInterfaceContract, ToolManualExitStatus,
+    ToolOperationManual, ToolPackageSource, WasmOperationManifest, WasmOperationValueKind,
     WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
     agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
+    default_blob_registry_root, default_blob_registry_root_for_agent_registry_root,
     default_operations_registry_root, discover_cooldis_daemon_config_path,
-    install_cooldis_daemon_service, load_cooldis_daemon_config, render_cooldis_daemon_service,
-    required_secret_names, resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
+    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
+    load_cooldis_daemon_config_layers, render_cooldis_daemon_service, required_secret_names,
+    resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
 };
 use bashkit::InMemoryFs;
+use cooldis_abi::{COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI};
 use cooldis_io_core::{IngressPersistenceMode, IngressSink};
 use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig};
 use cooldis_io_telegram::{TELEGRAM_PROTOCOL, TelegramBotClient, TelegramEgressAdapter};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
-#[cfg(unix)]
-use tokio::net::UnixStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-mod operator;
+mod chat;
 
 pub async fn run() -> CooldisResult<()> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -66,62 +71,195 @@ pub async fn run() -> CooldisResult<()> {
 
     let command = args.remove(0);
     match command.to_string_lossy().as_ref() {
+        "commands" => {
+            print_commands_help();
+            Ok(())
+        }
+        "help" => run_help(args),
         "init" => agent_init(args).await,
         "agent" => run_agent(args).await,
+        "blob" => run_blob(args).await,
+        "coupling" => run_coupling(args).await,
         "tool" => run_tool(args).await,
-        "man" => run_man(args).await,
+        "skill" => run_skill(args).await,
         "secret" => run_secret(args).await,
-        "provider" => run_provider(args).await,
-        "op" => Err(usage_error(
-            "cooldis op has been removed; use cooldis tool instead",
-        )),
-        "thread" => run_thread(args).await,
-        "operator" => run_operator(args).await,
-        "dev" => run_dev(args).await,
+        "auth" => run_auth(args).await,
+        "console" => run_console(args).await,
+        "chat" => run_chat(args).await,
+        "debug" => run_debug(args).await,
         "daemon" => run_daemon(args).await,
         "rpc" => run_rpc(args).await,
-        "app-server" => Err(usage_error(
-            "cooldis app-server has been removed; use cooldis rpc instead",
-        )),
-        "chat" => Err(usage_error("cooldis chat has moved to cooldis dev chat")),
-        "tui" => Err(usage_error("cooldis tui has moved to cooldis dev tui")),
         other => Err(usage_error(format!(
             "unknown command {other:?}; use `cooldis --help`"
         ))),
     }
 }
 
-async fn run_dev(mut args: Vec<OsString>) -> CooldisResult<()> {
+fn run_help(args: Vec<OsString>) -> CooldisResult<()> {
+    let path = args
+        .into_iter()
+        .filter(|arg| arg != "--help" && arg != "-h")
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    if path.is_empty() {
+        print_help();
+        return Ok(());
+    }
+    print_command_help(&path)
+}
+
+fn print_command_help(path: &[String]) -> CooldisResult<()> {
+    match path {
+        [command] if command == "commands" => print_commands_help(),
+        [command] if command == "help" => print_help_help(),
+        [command] if command == "console" => print_console_help(),
+        [command] if command == "chat" => print_chat_help(),
+        [command] if command == "init" => print_agent_init_help(),
+        [command] if command == "agent" => print_agent_help(),
+        [command] if command == "coupling" => print_coupling_help(),
+        [command, subcommand] if command == "coupling" && subcommand == "init" => {
+            print_coupling_init_help()
+        }
+        [command, subcommand] if command == "coupling" && subcommand == "run" => {
+            print_coupling_run_help()
+        }
+        [command] if command == "blob" => print_blob_help(),
+        [command, subcommand] if command == "blob" && subcommand == "publish" => {
+            print_blob_publish_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "init" => {
+            print_agent_init_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "plan" => {
+            print_agent_plan_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "publish" => {
+            print_agent_publish_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "list" => {
+            print_agent_list_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "show" => {
+            print_agent_show_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "run" => {
+            print_agent_run_help()
+        }
+        [command] if command == "tool" => print_tool_help(),
+        [command] if command == "skill" => print_skill_help(),
+        [command, subcommand] if command == "skill" && subcommand == "publish" => {
+            print_skill_publish_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "build" => {
+            print_tool_build_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "list" => {
+            print_tool_list_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "publish" => {
+            print_tool_publish_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "run" => print_tool_run_help(),
+        [command, subcommand] if command == "tool" && subcommand == "manual" => {
+            print_tool_manual_help()
+        }
+        [command, subcommand] if command == "tool" && subcommand == "source" => {
+            print_tool_source_help()
+        }
+        [command, subcommand, action] if command == "tool" && subcommand == "source" => {
+            match action.as_str() {
+                "add" => print_tool_source_add_help(),
+                "discover" => print_tool_source_discover_help(),
+                "list" => print_tool_source_list_help(),
+                "show" => print_tool_source_show_help(),
+                "remove" => print_tool_source_remove_help(),
+                other => {
+                    return Err(usage_error(format!(
+                        "unknown tool source help command {other:?}"
+                    )));
+                }
+            }
+        }
+        [command] if command == "auth" => print_auth_help(),
+        [command, subcommand] if command == "auth" && subcommand == "status" => {
+            print_auth_status_help()
+        }
+        [command, subcommand] if command == "auth" && subcommand == "set" => print_auth_set_help(),
+        [command, subcommand] if command == "auth" && subcommand == "delete" => {
+            print_auth_delete_help()
+        }
+        [command] if command == "secret" => print_secret_help(),
+        [command, subcommand] if command == "secret" && subcommand == "import" => {
+            print_secret_import_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "set" => {
+            print_secret_set_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "list" => {
+            print_secret_list_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "status" => {
+            print_secret_status_help()
+        }
+        [command, subcommand] if command == "secret" && subcommand == "delete" => {
+            print_secret_delete_help()
+        }
+        [command] if command == "rpc" => print_rpc_help(),
+        [command] if command == "debug" => print_debug_help(),
+        [command, subcommand] if command == "debug" && subcommand == "rpc" => {
+            print_debug_rpc_help()
+        }
+        [command] if command == "daemon" => print_daemon_help(),
+        [command, subcommand] if command == "daemon" && subcommand == "run" => print_daemon_help(),
+        [command, subcommand, action]
+            if command == "daemon" && subcommand == "config" && action == "validate" =>
+        {
+            print_daemon_help()
+        }
+        [command, subcommand, _action] if command == "daemon" && subcommand == "service" => {
+            print_daemon_help()
+        }
+        _ => {
+            return Err(usage_error(format!(
+                "unknown help command {:?}; use `cooldis commands`",
+                path.join(" ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn run_debug(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
             .first()
             .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        print_dev_help();
+        print_debug_help();
         return Ok(());
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "chat" => run_dev_chat(args).await,
-        "tui" => run_dev_tui(args).await,
-        "rpc" => run_dev_rpc(args).await,
-        other => Err(usage_error(format!("unknown dev subcommand {other:?}"))),
+        "rpc" => run_debug_rpc(args).await,
+        other => Err(usage_error(format!(
+            "unknown debug subcommand {other:?}; use `cooldis debug --help`"
+        ))),
     }
 }
 
-async fn run_operator(args: Vec<OsString>) -> CooldisResult<()> {
-    operator::run(args, operator::OperatorInvocation::Public).await
+async fn run_chat(args: Vec<OsString>) -> CooldisResult<()> {
+    chat::run(args, chat::ChatInvocation::Chat).await
 }
 
-async fn run_man(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_man_args(args)?;
+async fn tool_manual(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_tool_manual_args(args)?;
     if options.help {
-        print_man_help();
+        print_tool_manual_help();
         return Ok(());
     }
     let tool_name = options
         .tool_name
-        .ok_or_else(|| usage_error("man requires <published-tool>"))?;
+        .ok_or_else(|| usage_error("tool manual requires <published-tool>"))?;
     let registry_root = options.registry_root.unwrap_or_else(default_registry_root);
     let registry = LocalOperationRegistry::new(registry_root);
     let record = registry.load_record(&tool_name)?;
@@ -157,8 +295,53 @@ async fn run_agent(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
-async fn run_dev_tui(args: Vec<OsString>) -> CooldisResult<()> {
-    operator::run(args, operator::OperatorInvocation::DevAlias).await
+async fn run_coupling(mut args: Vec<OsString>) -> CooldisResult<()> {
+    if args.is_empty()
+        || args
+            .first()
+            .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_coupling_help();
+        return Ok(());
+    }
+    let subcommand = args.remove(0);
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        match subcommand.to_string_lossy().as_ref() {
+            "init" => print_coupling_init_help(),
+            "run" => print_coupling_run_help(),
+            other => {
+                return Err(usage_error(format!(
+                    "unknown coupling subcommand {other:?}"
+                )));
+            }
+        }
+        return Ok(());
+    }
+    match subcommand.to_string_lossy().as_ref() {
+        "init" => coupling_init(args).await,
+        "run" => coupling_run(args).await,
+        _ => Err(usage_error(format!(
+            "unknown coupling subcommand {subcommand:?}"
+        ))),
+    }
+}
+
+async fn coupling_init(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_coupling_init_args(args)?;
+    if options.help {
+        print_coupling_init_help();
+        return Ok(());
+    }
+    let name = options
+        .name
+        .ok_or_else(|| usage_error("coupling init requires <name>"))?;
+    let root = options.out_path.unwrap_or_else(|| PathBuf::from(&name));
+    write_coupling_project(&name, &root, options.force)?;
+    println!("{}", root.display());
+    Ok(())
 }
 
 async fn agent_init(args: Vec<OsString>) -> CooldisResult<()> {
@@ -245,7 +428,10 @@ async fn agent_plan(args: Vec<OsString>) -> CooldisResult<()> {
             }
         }
     }
-    println!("writes: none");
+    for line in agent_context_source_lines(&plan.resolved_manifest) {
+        println!("{line}");
+    }
+    println!("writes: agent record none");
     Ok(())
 }
 
@@ -260,6 +446,16 @@ async fn agent_publish(args: Vec<OsString>) -> CooldisResult<()> {
         .ok_or_else(|| usage_error("agent publish requires <manifest>"))?;
     let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let operations_registry_root = agent_operations_registry_root(options.operations_registry_root);
+    if options.resolve_ops {
+        let resolutions =
+            resolve_manifest_operation_refs(&manifest_path, &operations_registry_root)?;
+        for resolution in &resolutions {
+            println!(
+                "resolved operation_ref: {} -> {}",
+                resolution.declared, resolution.resolved
+            );
+        }
+    }
     let record = registry
         .publish_manifest_path_with_operation_registry(manifest_path, operations_registry_root)?;
     println!("published {}", record.ref_uri);
@@ -281,6 +477,9 @@ async fn agent_publish(args: Vec<OsString>) -> CooldisResult<()> {
             content_hash
         );
     }
+    for line in agent_context_source_lines(&record.resolved_manifest) {
+        println!("{line}");
+    }
     println!(
         "alias: {} -> {}",
         crate::agent_ref_uri(record.namespace.as_deref(), &record.name, "latest"),
@@ -288,6 +487,310 @@ async fn agent_publish(args: Vec<OsString>) -> CooldisResult<()> {
     );
     println!("record: {}", registry.record_path(&record.name)?.display());
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestOperationRef {
+    tool_id: String,
+    reference: String,
+    grants: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OperationRefResolution {
+    declared: String,
+    resolved: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnpinnedOperationRef {
+    record_name: String,
+    operation_name: Option<String>,
+}
+
+fn resolve_manifest_operation_refs(
+    manifest_path: &Path,
+    operation_registry_root: &Path,
+) -> CooldisResult<Vec<OperationRefResolution>> {
+    let source = fs::read_to_string(manifest_path).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to read agent manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+    let operation_refs = manifest_operation_refs_from_source(&source)?;
+    let registry = LocalOperationRegistry::new(operation_registry_root);
+    let mut resolutions = Vec::new();
+    let mut replacements = BTreeMap::new();
+    for operation_ref in operation_refs {
+        let Some(parsed) = parse_resolvable_operation_ref(&operation_ref.reference)? else {
+            continue;
+        };
+        let record = registry.load_record(&parsed.record_name).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "tool {:?} operation_ref {:?} was not found in the local operation registry: {err}; seed the operation registry or fix the op:// record name",
+                operation_ref.tool_id,
+                operation_ref.reference
+            ))
+        })?;
+        let resolved = format!(
+            "op://{}{}@sha256:{}",
+            parsed.record_name,
+            parsed
+                .operation_name
+                .as_deref()
+                .map(|operation| format!("/{operation}"))
+                .unwrap_or_default(),
+            record.active_artifact_hash
+        );
+        crate::agent::manifest_bind::verify_operation_ref(
+            &operation_ref.tool_id,
+            &resolved,
+            &operation_ref.grants,
+            operation_registry_root,
+        )?;
+        match replacements.get(&operation_ref.reference) {
+            Some(existing) if existing != &resolved => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "operation_ref {:?} resolved inconsistently to {:?} and {:?}",
+                    operation_ref.reference, existing, resolved
+                )));
+            }
+            Some(_) => {}
+            None => {
+                replacements.insert(operation_ref.reference.clone(), resolved.clone());
+                resolutions.push(OperationRefResolution {
+                    declared: operation_ref.reference,
+                    resolved,
+                });
+            }
+        }
+    }
+    if replacements.is_empty() {
+        return Ok(resolutions);
+    }
+    let rewritten = rewrite_operation_ref_values(&source, &replacements, manifest_path)?;
+    write_text_atomically(
+        manifest_path,
+        format!("agent manifest operation refs {}", manifest_path.display()),
+        &rewritten,
+    )?;
+    Ok(resolutions)
+}
+
+fn manifest_operation_refs_from_source(source: &str) -> CooldisResult<Vec<ManifestOperationRef>> {
+    let value: toml::Value = toml::from_str(source)
+        .map_err(|err| CooldisError::RuntimeFactory(format!("invalid agent manifest: {err}")))?;
+    let Some(tools) = value.get("tools").and_then(toml::Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut refs = Vec::new();
+    for tool in tools {
+        let Some(table) = tool.as_table() else {
+            continue;
+        };
+        let Some(reference) = table.get("operation_ref").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let tool_id = table
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("<unknown>")
+            .to_string();
+        let grants = table
+            .get("grants")
+            .and_then(toml::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        refs.push(ManifestOperationRef {
+            tool_id,
+            reference: reference.to_string(),
+            grants,
+        });
+    }
+    Ok(refs)
+}
+
+fn parse_resolvable_operation_ref(reference: &str) -> CooldisResult<Option<UnpinnedOperationRef>> {
+    let Some(body) = reference.strip_prefix("op://") else {
+        return Ok(None);
+    };
+    if reference.contains("@sha256:") {
+        return Ok(None);
+    }
+    let body = body.strip_suffix("@latest").unwrap_or(body);
+    if body.contains('@') {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "operation_ref {reference:?} cannot be resolved by --resolve-ops; use op://<record>, op://<record>/<operation>, op://<record>@latest, or op://<record>/<operation>@latest"
+        )));
+    }
+    let segments = body.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        [record_name] if !record_name.is_empty() => Ok(Some(UnpinnedOperationRef {
+            record_name: (*record_name).to_string(),
+            operation_name: None,
+        })),
+        [record_name, operation_name] if !record_name.is_empty() && !operation_name.is_empty() => {
+            Ok(Some(UnpinnedOperationRef {
+                record_name: (*record_name).to_string(),
+                operation_name: Some((*operation_name).to_string()),
+            }))
+        }
+        _ => Err(CooldisError::RuntimeFactory(format!(
+            "operation_ref {reference:?} must match op://<record>, op://<record>/<operation>, op://<record>@latest, or op://<record>/<operation>@latest"
+        ))),
+    }
+}
+
+fn rewrite_operation_ref_values(
+    source: &str,
+    replacements: &BTreeMap<String, String>,
+    manifest_path: &Path,
+) -> CooldisResult<String> {
+    let mut touched = BTreeSet::new();
+    let mut rewritten = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        rewritten.push_str(&rewrite_operation_ref_line(
+            line,
+            replacements,
+            &mut touched,
+        ));
+    }
+    let missing = replacements
+        .keys()
+        .filter(|reference| !touched.contains(*reference))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "failed to rewrite operation_ref value(s) {} in {}; --resolve-ops supports single-line operation_ref string values",
+            missing.join(", "),
+            manifest_path.display()
+        )));
+    }
+    Ok(rewritten)
+}
+
+fn rewrite_operation_ref_line(
+    line: &str,
+    replacements: &BTreeMap<String, String>,
+    touched: &mut BTreeSet<String>,
+) -> String {
+    let mut index = 0;
+    let bytes = line.as_bytes();
+    while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+        index += 1;
+    }
+    if !line[index..].starts_with("operation_ref") {
+        return line.to_string();
+    }
+    let mut cursor = index + "operation_ref".len();
+    if line[cursor..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return line.to_string();
+    }
+    while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'=') {
+        return line.to_string();
+    }
+    cursor += 1;
+    while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
+        cursor += 1;
+    }
+    let Some(&quote) = bytes.get(cursor) else {
+        return line.to_string();
+    };
+    if quote != b'"' && quote != b'\'' {
+        return line.to_string();
+    }
+    let value_start = cursor + 1;
+    let mut value_end = value_start;
+    while value_end < bytes.len() {
+        if bytes[value_end] == quote
+            && (quote == b'\'' || !is_escaped_basic_string_quote(bytes, value_end))
+        {
+            break;
+        }
+        value_end += 1;
+    }
+    if value_end >= bytes.len() {
+        return line.to_string();
+    }
+    let value = &line[value_start..value_end];
+    let Some(replacement) = replacements.get(value) else {
+        return line.to_string();
+    };
+    touched.insert(value.to_string());
+    let mut rewritten = String::with_capacity(line.len() + replacement.len());
+    rewritten.push_str(&line[..value_start]);
+    rewritten.push_str(replacement);
+    rewritten.push_str(&line[value_end..]);
+    rewritten
+}
+
+fn is_escaped_basic_string_quote(bytes: &[u8], quote_index: usize) -> bool {
+    let mut backslashes = 0;
+    let mut index = quote_index;
+    while index > 0 {
+        index -= 1;
+        if bytes[index] == b'\\' {
+            backslashes += 1;
+        } else {
+            break;
+        }
+    }
+    backslashes % 2 == 1
+}
+
+fn write_text_atomically(path: &Path, label: String, body: &str) -> CooldisResult<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to create {label} directory {}: {err}",
+            parent.display()
+        ))
+    })?;
+    let tmp_path = parent.join(format!(".cooldis.tmp.{}", Uuid::now_v7()));
+    {
+        let mut file = fs::File::create(&tmp_path).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to create temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        file.write_all(body.as_bytes()).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to write temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        file.sync_all().map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to sync temp {label} {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+    }
+    fs::rename(&tmp_path, path).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to atomically install {label} {}: {err}",
+            path.display()
+        ))
+    })
 }
 
 async fn agent_list(args: Vec<OsString>) -> CooldisResult<()> {
@@ -351,7 +854,10 @@ async fn agent_run(args: Vec<OsString>) -> CooldisResult<()> {
     let mut config = CooldisAppServerConfig::local(listen, cwd);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    config.agent_registry_root = agent_registry_root(options.registry_root.clone());
+    let agent_registry_root = agent_registry_root(options.registry_root.clone());
+    config.blob_registry_root =
+        default_blob_registry_root_for_agent_registry_root(&agent_registry_root);
+    config.agent_registry_root = agent_registry_root;
     let state_home = config.state_home.clone();
     let app = CooldisAppServer::new_local(config).await?;
     let thread_start = app
@@ -375,121 +881,82 @@ async fn agent_run(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-async fn run_dev_chat(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_chat_args(args)?;
-    if options.help {
-        print_dev_chat_help();
-        return Ok(());
-    }
-    if options.attach.is_some() {
-        return Err(usage_error(
-            "--attach is only supported by cooldis operator and cooldis dev tui",
-        ));
-    }
-
-    let launched = PrivateAppServer::start(&options).await?;
-    let socket_path = launched.socket_path().to_path_buf();
-    let mut client = CodexTuiTestClient::connect_unix(
-        socket_path,
-        CodexTuiConnectConfig {
-            client_name: "cooldis-cli".to_string(),
-            ..CodexTuiConnectConfig::default()
-        },
-    )
-    .await?;
-    bootstrap_chat_client(&mut client).await?;
-
-    match options.prompt {
-        Some(prompt) => {
-            let thread = client.thread_start(json!({})).await?;
-            let turn = client.turn_start_text(&thread.id, &prompt).await?;
-            stream_turn_to_stdout(&mut client, &thread.id, &turn.id).await?;
-        }
-        None => run_chat_repl(&mut client).await?,
-    }
-
-    client.close().await?;
-    launched.shutdown();
-    Ok(())
-}
-
-/// `cooldis dev rpc` — protocol-level debug client for a RUNNING daemon's
-/// app-server websocket (unlike `dev chat`/`dev tui`, which launch a private
-/// in-process app-server). Connects with `CodexTuiTestClient::connect_websocket`,
+/// `cooldis debug rpc` — protocol-level debug client for a RUNNING daemon's
+/// app-server websocket. Connects with `CodexTuiTestClient::connect_websocket`,
 /// performs the initialize handshake, then dispatches a subcommand.
-async fn run_dev_rpc(mut args: Vec<OsString>) -> CooldisResult<()> {
+async fn run_debug_rpc(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
             .first()
             .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        print_dev_rpc_help();
+        print_debug_rpc_help();
         return Ok(());
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "call" => run_dev_rpc_call(args).await,
-        "turn" => run_dev_rpc_turn(args).await,
-        "tail" => run_dev_rpc_tail(args).await,
+        "call" => run_debug_rpc_call(args).await,
+        "turn" => run_debug_rpc_turn(args).await,
+        "tail" => run_debug_rpc_tail(args).await,
         other => Err(usage_error(format!(
-            "unknown dev rpc subcommand {other:?}; use `cooldis dev rpc --help`"
+            "unknown debug rpc subcommand {other:?}; use `cooldis debug rpc --help`"
         ))),
     }
 }
 
-/// Endpoint selection shared by all `dev rpc` subcommands:
+/// Endpoint selection shared by all `debug rpc` subcommands:
 /// `--url <ws://…>` wins; else `--config <cooldis.toml>` reads
 /// `daemon.app_server.listen`; else default `ws://127.0.0.1:49200/rpc`.
 /// `--url` and `--config` together is a usage error.
 #[derive(Debug)]
-struct DevRpcEndpointArgs {
+struct DebugRpcEndpointArgs {
     url: Option<String>,
     config: Option<PathBuf>,
 }
 
 #[derive(Debug)]
-struct DevRpcCallArgs {
+struct DebugRpcCallArgs {
     method: String,
     params: Value,
-    endpoint: DevRpcEndpointArgs,
+    endpoint: DebugRpcEndpointArgs,
 }
 
 #[derive(Debug)]
-enum DevRpcThreadTarget {
+enum DebugRpcThreadTarget {
     New,
     Existing(String),
 }
 
 #[derive(Debug)]
-struct DevRpcTurnArgs {
-    target: DevRpcThreadTarget,
+struct DebugRpcTurnArgs {
+    target: DebugRpcThreadTarget,
     json: bool,
     text: String,
-    endpoint: DevRpcEndpointArgs,
+    endpoint: DebugRpcEndpointArgs,
 }
 
 #[derive(Debug)]
-struct DevRpcTailArgs {
+struct DebugRpcTailArgs {
     thread_id: String,
-    endpoint: DevRpcEndpointArgs,
+    endpoint: DebugRpcEndpointArgs,
 }
 
-enum DevRpcTurnStreamResult {
+enum DebugRpcTurnStreamResult {
     Completed,
     TurnError(String),
 }
 
-const DEV_RPC_DEFAULT_URL: &str = "ws://127.0.0.1:49200/rpc";
-const DEV_RPC_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+const DEBUG_RPC_DEFAULT_URL: &str = "ws://127.0.0.1:49200/rpc";
+const DEBUG_RPC_TURN_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// One-shot JSON-RPC request: `cooldis dev rpc call <method> [PARAMS_JSON]`.
+/// One-shot JSON-RPC request: `cooldis debug rpc call <method> [PARAMS_JSON]`.
 /// PARAMS_JSON is an inline JSON object (omitted = no params). Prints the
 /// result pretty-printed to stdout. A JSON-RPC error response prints the error
 /// to stderr and exits 1 (transport failures likewise).
-async fn run_dev_rpc_call(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_dev_rpc_call_args(args)?;
-    let url = resolve_dev_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_dev_rpc_client(&url).await?;
+async fn run_debug_rpc_call(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_debug_rpc_call_args(args)?;
+    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&url).await?;
     let result = client.request(&options.method, options.params).await?;
     serde_json::to_writer_pretty(std::io::stdout(), &result)
         .map_err(|err| usage_error(format!("failed to encode JSON-RPC result: {err}")))?;
@@ -498,24 +965,24 @@ async fn run_dev_rpc_call(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-/// Run one turn and stream it: `cooldis dev rpc turn (--thread <id> | --new) [--json] <text>`.
+/// Run one turn and stream it: `cooldis debug rpc turn (--thread <id> | --new) [--json] <text>`.
 /// `--thread` resumes the existing thread (thread/resume, excludeTurns true);
 /// `--new` starts a fresh one and prints its id to stderr. Default output mode
 /// streams agent-message delta text to stdout as it arrives (flushed per
 /// delta), terminated by a newline at turn completion. `--json` instead emits
 /// every notification scoped to the thread as one JSON object per line.
 /// Exit codes: 0 turn completed, 2 turn error, 1 transport/protocol failure.
-async fn run_dev_rpc_turn(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_dev_rpc_turn_args(args)?;
-    let url = resolve_dev_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_dev_rpc_client(&url).await?;
+async fn run_debug_rpc_turn(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_debug_rpc_turn_args(args)?;
+    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&url).await?;
     let thread_id = match &options.target {
-        DevRpcThreadTarget::New => {
+        DebugRpcThreadTarget::New => {
             let thread = client.thread_start(json!({})).await?;
             eprintln!("{}", thread.id);
             thread.id
         }
-        DevRpcThreadTarget::Existing(thread_id) => {
+        DebugRpcThreadTarget::Existing(thread_id) => {
             client
                 .request(
                     "thread/resume",
@@ -530,24 +997,24 @@ async fn run_dev_rpc_turn(args: Vec<OsString>) -> CooldisResult<()> {
     };
     let turn = client.turn_start_text(&thread_id, &options.text).await?;
     let stream_result =
-        stream_dev_rpc_turn(&mut client, &thread_id, &turn.id, options.json).await?;
+        stream_debug_rpc_turn(&mut client, &thread_id, &turn.id, options.json).await?;
     let _ = client.close().await;
     match stream_result {
-        DevRpcTurnStreamResult::Completed => Ok(()),
-        DevRpcTurnStreamResult::TurnError(message) => {
+        DebugRpcTurnStreamResult::Completed => Ok(()),
+        DebugRpcTurnStreamResult::TurnError(message) => {
             eprintln!("{message}");
             std::process::exit(2);
         }
     }
 }
 
-/// Subscribe and watch: `cooldis dev rpc tail --thread <id>`.
+/// Subscribe and watch: `cooldis debug rpc tail --thread <id>`.
 /// Resumes the thread for the subscription, then prints every received
 /// notification as one JSON object per line until Ctrl-C/EOF.
-async fn run_dev_rpc_tail(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_dev_rpc_tail_args(args)?;
-    let url = resolve_dev_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_dev_rpc_client(&url).await?;
+async fn run_debug_rpc_tail(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_debug_rpc_tail_args(args)?;
+    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&url).await?;
     client
         .request(
             "thread/resume",
@@ -575,14 +1042,14 @@ async fn run_dev_rpc_tail(args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
-fn print_dev_rpc_help() {
+fn print_debug_rpc_help() {
     println!(
-        "cooldis dev rpc\n\
+        "cooldis debug rpc\n\
 \n\
 Usage:\n\
-  cooldis dev rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]\n\
-  cooldis dev rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]\n\
-  cooldis dev rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]\n\
+  cooldis debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]\n\
+  cooldis debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]\n\
+  cooldis debug rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]\n\
 \n\
 Protocol-level debug client for a running daemon's app-server websocket.\n\
 Defaults to ws://127.0.0.1:49200/rpc when neither --url nor --config is given.\n\
@@ -591,8 +1058,8 @@ notifications as JSONL with --json); tail prints notifications until Ctrl-C.\n"
     );
 }
 
-fn parse_dev_rpc_call_args(args: Vec<OsString>) -> CooldisResult<DevRpcCallArgs> {
-    let mut endpoint = DevRpcEndpointArgs {
+fn parse_debug_rpc_call_args(args: Vec<OsString>) -> CooldisResult<DebugRpcCallArgs> {
+    let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
     };
@@ -603,43 +1070,43 @@ fn parse_dev_rpc_call_args(args: Vec<OsString>) -> CooldisResult<DevRpcCallArgs>
             "--url" => endpoint.url = Some(required_string_value(&mut iter, "--url")?),
             "--config" => endpoint.config = Some(required_path_value(&mut iter, "--config")?),
             other if other.starts_with('-') => {
-                return Err(dev_rpc_usage_error(format!(
-                    "unknown dev rpc call argument {other:?}"
+                return Err(debug_rpc_usage_error(format!(
+                    "unknown debug rpc call argument {other:?}"
                 )));
             }
             _ => positionals.push(arg.to_string_lossy().to_string()),
         }
     }
-    validate_dev_rpc_endpoint_args(&endpoint)?;
+    validate_debug_rpc_endpoint_args(&endpoint)?;
     let method = positionals
         .first()
         .cloned()
-        .ok_or_else(|| dev_rpc_usage_error("cooldis dev rpc call requires <method>"))?;
+        .ok_or_else(|| debug_rpc_usage_error("cooldis debug rpc call requires <method>"))?;
     if positionals.len() > 2 {
-        return Err(dev_rpc_usage_error(
-            "cooldis dev rpc call accepts at most one PARAMS_JSON argument",
+        return Err(debug_rpc_usage_error(
+            "cooldis debug rpc call accepts at most one PARAMS_JSON argument",
         ));
     }
     let params = match positionals.get(1) {
         Some(raw) => serde_json::from_str(raw).map_err(|err| {
-            dev_rpc_usage_error(format!("invalid PARAMS_JSON for dev rpc call: {err}"))
+            debug_rpc_usage_error(format!("invalid PARAMS_JSON for debug rpc call: {err}"))
         })?,
         None => json!({}),
     };
     if !params.is_object() {
-        return Err(dev_rpc_usage_error(
-            "PARAMS_JSON for dev rpc call must be a JSON object",
+        return Err(debug_rpc_usage_error(
+            "PARAMS_JSON for debug rpc call must be a JSON object",
         ));
     }
-    Ok(DevRpcCallArgs {
+    Ok(DebugRpcCallArgs {
         method,
         params,
         endpoint,
     })
 }
 
-fn parse_dev_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DevRpcTurnArgs> {
-    let mut endpoint = DevRpcEndpointArgs {
+fn parse_debug_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DebugRpcTurnArgs> {
+    let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
     };
@@ -656,32 +1123,34 @@ fn parse_dev_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DevRpcTurnArgs>
             "--new" => new_thread = true,
             "--json" => json = true,
             other if other.starts_with('-') => {
-                return Err(dev_rpc_usage_error(format!(
-                    "unknown dev rpc turn argument {other:?}"
+                return Err(debug_rpc_usage_error(format!(
+                    "unknown debug rpc turn argument {other:?}"
                 )));
             }
             _ => positionals.push(arg.to_string_lossy().to_string()),
         }
     }
-    validate_dev_rpc_endpoint_args(&endpoint)?;
+    validate_debug_rpc_endpoint_args(&endpoint)?;
     let target = match (thread_id, new_thread) {
         (Some(_), true) => {
-            return Err(dev_rpc_usage_error(
-                "cooldis dev rpc turn requires exactly one of --thread or --new",
+            return Err(debug_rpc_usage_error(
+                "cooldis debug rpc turn requires exactly one of --thread or --new",
             ));
         }
-        (Some(thread_id), false) => DevRpcThreadTarget::Existing(thread_id),
-        (None, true) => DevRpcThreadTarget::New,
+        (Some(thread_id), false) => DebugRpcThreadTarget::Existing(thread_id),
+        (None, true) => DebugRpcThreadTarget::New,
         (None, false) => {
-            return Err(dev_rpc_usage_error(
-                "cooldis dev rpc turn requires exactly one of --thread or --new",
+            return Err(debug_rpc_usage_error(
+                "cooldis debug rpc turn requires exactly one of --thread or --new",
             ));
         }
     };
     if positionals.is_empty() {
-        return Err(dev_rpc_usage_error("cooldis dev rpc turn requires <text>"));
+        return Err(debug_rpc_usage_error(
+            "cooldis debug rpc turn requires <text>",
+        ));
     }
-    Ok(DevRpcTurnArgs {
+    Ok(DebugRpcTurnArgs {
         target,
         json,
         text: positionals.join(" "),
@@ -689,8 +1158,8 @@ fn parse_dev_rpc_turn_args(args: Vec<OsString>) -> CooldisResult<DevRpcTurnArgs>
     })
 }
 
-fn parse_dev_rpc_tail_args(args: Vec<OsString>) -> CooldisResult<DevRpcTailArgs> {
-    let mut endpoint = DevRpcEndpointArgs {
+fn parse_debug_rpc_tail_args(args: Vec<OsString>) -> CooldisResult<DebugRpcTailArgs> {
+    let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
     };
@@ -702,31 +1171,32 @@ fn parse_dev_rpc_tail_args(args: Vec<OsString>) -> CooldisResult<DevRpcTailArgs>
             "--config" => endpoint.config = Some(required_path_value(&mut iter, "--config")?),
             "--thread" => thread_id = Some(required_string_value(&mut iter, "--thread")?),
             other => {
-                return Err(dev_rpc_usage_error(format!(
-                    "unknown dev rpc tail argument {other:?}"
+                return Err(debug_rpc_usage_error(format!(
+                    "unknown debug rpc tail argument {other:?}"
                 )));
             }
         }
     }
-    validate_dev_rpc_endpoint_args(&endpoint)?;
-    Ok(DevRpcTailArgs {
-        thread_id: thread_id
-            .ok_or_else(|| dev_rpc_usage_error("cooldis dev rpc tail requires --thread <id>"))?,
+    validate_debug_rpc_endpoint_args(&endpoint)?;
+    Ok(DebugRpcTailArgs {
+        thread_id: thread_id.ok_or_else(|| {
+            debug_rpc_usage_error("cooldis debug rpc tail requires --thread <id>")
+        })?,
         endpoint,
     })
 }
 
-fn validate_dev_rpc_endpoint_args(endpoint: &DevRpcEndpointArgs) -> CooldisResult<()> {
+fn validate_debug_rpc_endpoint_args(endpoint: &DebugRpcEndpointArgs) -> CooldisResult<()> {
     if endpoint.url.is_some() && endpoint.config.is_some() {
-        return Err(dev_rpc_usage_error(
-            "cooldis dev rpc accepts --url or --config, not both",
+        return Err(debug_rpc_usage_error(
+            "cooldis debug rpc accepts --url or --config, not both",
         ));
     }
     Ok(())
 }
 
-fn resolve_dev_rpc_endpoint(endpoint: &DevRpcEndpointArgs) -> CooldisResult<String> {
-    validate_dev_rpc_endpoint_args(endpoint)?;
+fn resolve_debug_rpc_endpoint(endpoint: &DebugRpcEndpointArgs) -> CooldisResult<String> {
+    validate_debug_rpc_endpoint_args(endpoint)?;
     if let Some(url) = &endpoint.url {
         return Ok(url.clone());
     }
@@ -739,27 +1209,27 @@ fn resolve_dev_rpc_endpoint(endpoint: &DevRpcEndpointArgs) -> CooldisResult<Stri
             }
         }
     }
-    Ok(DEV_RPC_DEFAULT_URL.to_string())
+    Ok(DEBUG_RPC_DEFAULT_URL.to_string())
 }
 
-async fn connect_dev_rpc_client(url: &str) -> CooldisResult<CodexTuiTestClient<TcpStream>> {
+async fn connect_debug_rpc_client(url: &str) -> CooldisResult<CodexTuiTestClient<TcpStream>> {
     CodexTuiTestClient::connect_websocket(
         url,
         CodexTuiConnectConfig {
-            client_name: "cooldis-dev-rpc".to_string(),
+            client_name: "cooldis-debug-rpc".to_string(),
             ..CodexTuiConnectConfig::default()
         },
     )
     .await
 }
 
-async fn stream_dev_rpc_turn(
+async fn stream_debug_rpc_turn(
     client: &mut CodexTuiTestClient<TcpStream>,
     thread_id: &str,
     turn_id: &str,
     json_output: bool,
-) -> CooldisResult<DevRpcTurnStreamResult> {
-    let deadline = tokio::time::sleep(DEV_RPC_TURN_TIMEOUT);
+) -> CooldisResult<DebugRpcTurnStreamResult> {
+    let deadline = tokio::time::sleep(DEBUG_RPC_TURN_TIMEOUT);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -769,7 +1239,7 @@ async fn stream_dev_rpc_turn(
                 }
                 return Err(usage_error(format!(
                     "timed out after {}s waiting for turn {turn_id}",
-                    DEV_RPC_TURN_TIMEOUT.as_secs()
+                    DEBUG_RPC_TURN_TIMEOUT.as_secs()
                 )));
             }
             event = client.next_event() => {
@@ -790,7 +1260,7 @@ async fn stream_dev_rpc_turn(
                             if !json_output {
                                 println!();
                             }
-                            return Ok(DevRpcTurnStreamResult::TurnError(
+                            return Ok(DebugRpcTurnStreamResult::TurnError(
                                 notification_turn_error_message(&notification),
                             ));
                         }
@@ -800,7 +1270,7 @@ async fn stream_dev_rpc_turn(
                             if !json_output {
                                 println!();
                             }
-                            return Ok(DevRpcTurnStreamResult::Completed);
+                            return Ok(DebugRpcTurnStreamResult::Completed);
                         }
                     }
                     CodexTuiEvent::Error(error) => {
@@ -877,8 +1347,11 @@ fn notification_turn_error_message(notification: &JsonRpcNotification) -> String
         .unwrap_or_else(|| notification_error_message(notification))
 }
 
-fn dev_rpc_usage_error(message: impl Into<String>) -> CooldisError {
-    usage_error(format!("{}\nUsage: cooldis dev rpc --help", message.into()))
+fn debug_rpc_usage_error(message: impl Into<String>) -> CooldisError {
+    usage_error(format!(
+        "{}\nUsage: cooldis debug rpc --help",
+        message.into()
+    ))
 }
 
 async fn run_rpc(args: Vec<OsString>) -> CooldisResult<()> {
@@ -908,6 +1381,63 @@ async fn run_rpc(args: Vec<OsString>) -> CooldisResult<()> {
     let server = CooldisAppServer::new_local(config).await?;
     eprintln!("cooldis rpc listening on {}", options.listen.display());
     server.serve(options.listen).await
+}
+
+async fn run_console(args: Vec<OsString>) -> CooldisResult<()> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_console_help();
+        return Ok(());
+    }
+    let options = parse_console_args(args)?;
+    if options.help {
+        print_console_help();
+        return Ok(());
+    }
+
+    let listener = TcpListener::bind(options.listen).await.map_err(|err| {
+        usage_error(format!(
+            "failed to bind Cooldis console listener {}: {err}",
+            options.listen
+        ))
+    })?;
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|err| usage_error(format!("failed to inspect Cooldis console listener: {err}")))?;
+    let listen = AppServerListenAddr::WebSocket(bound_addr);
+    let assets = resolve_console_asset_root()?;
+    let session_token = generate_console_session_token();
+    let resolved = resolve_console_app_server_config(&options, listen.clone())?;
+    let project_root = resolved.project_root.clone();
+    let config_path = resolved.config_path.clone();
+    let mut config = resolved.config;
+    let state_home = config.state_home.clone();
+    config.console_assets = Some(ConsoleAssetConfig {
+        root: assets,
+        session_token,
+    });
+    prepare_console_project_storage(&config)?;
+
+    let server = CooldisAppServer::new_local(config).await?;
+    let ui_url = format!("http://{bound_addr}/");
+    let rpc_url = format!("ws://{bound_addr}/rpc");
+    println!("cooldis console UI  {ui_url}");
+    println!("cooldis console RPC {rpc_url}");
+    println!("cooldis console Project {}", project_root.display());
+    if let Some(config_path) = config_path {
+        println!("cooldis console Config {}", config_path.display());
+    } else {
+        println!("cooldis console Config <defaults>");
+    }
+    println!("cooldis console State {}", state_home.display());
+    if options.open {
+        if let Err(err) = open_browser_url(&ui_url) {
+            eprintln!("cooldis console could not open the browser: {err}");
+        }
+    }
+    server.serve_websocket_listener(listener).await
 }
 
 async fn run_daemon(mut args: Vec<OsString>) -> CooldisResult<()> {
@@ -1000,6 +1530,242 @@ fn daemon_app_server_registry_root(path: PathBuf) -> CooldisResult<PathBuf> {
         .join(path))
 }
 
+#[cfg(test)]
+fn console_app_server_config(
+    options: &ConsoleArgs,
+    listen: AppServerListenAddr,
+) -> CooldisResult<CooldisAppServerConfig> {
+    resolve_console_app_server_config(options, listen).map(|resolved| resolved.config)
+}
+
+struct ResolvedConsoleAppServerConfig {
+    config: CooldisAppServerConfig,
+    project_root: PathBuf,
+    config_path: Option<PathBuf>,
+}
+
+struct ConsoleEnvironment {
+    selected_cwd: PathBuf,
+    project_root: PathBuf,
+    project_storage_root: PathBuf,
+    user_home: PathBuf,
+    config_paths: Vec<PathBuf>,
+}
+
+fn resolve_console_app_server_config(
+    options: &ConsoleArgs,
+    listen: AppServerListenAddr,
+) -> CooldisResult<ResolvedConsoleAppServerConfig> {
+    let env = resolve_console_environment(options)?;
+    let loaded = load_cooldis_daemon_config_layers(&env.config_paths, env.project_root.clone())?;
+    let mut config = CooldisAppServerConfig::local(listen.clone(), env.selected_cwd.clone());
+    config.runtime_home = env.project_storage_root.join("runtime");
+    config.state_home = env.project_storage_root.join("state");
+    config.user_state_home = env.user_home.join("state");
+    config.agent_registry_root = env.project_storage_root.join("agents");
+    config.capsule_bindings.registry_root = Some(env.project_storage_root.join("operations"));
+
+    if let Some(runtime_home) = loaded.config.runtime.runtime_home.clone() {
+        config.runtime_home = runtime_home;
+    }
+    if let Some(state_home) = loaded.config.runtime.state_home.clone() {
+        config.state_home = state_home;
+    }
+    if options.cwd_explicit {
+        config.cwd = env.selected_cwd;
+    } else if let Some(cwd) = loaded.config.runtime.cwd.clone() {
+        config.cwd = cwd;
+    }
+    if let Some(operations) = loaded.config.registries.operations.clone() {
+        config.capsule_bindings.registry_root = Some(daemon_app_server_registry_root(operations)?);
+    }
+    if let Some(agents) = loaded.config.registries.agents.clone() {
+        config.agent_registry_root = daemon_app_server_registry_root(agents)?;
+    }
+    config.capsule_bindings.global_operation_names =
+        loaded.config.operations.global_operation_names.clone();
+    config.capsule_bindings.load_all_active_when_unbound =
+        loaded.config.operations.load_all_active_when_unbound;
+    apply_chat_provider_config(
+        &mut config,
+        load_daemon_provider_config(&loaded.config.provider)?,
+    );
+    config.listen = listen;
+
+    Ok(ResolvedConsoleAppServerConfig {
+        config,
+        project_root: env.project_root,
+        config_path: loaded.path,
+    })
+}
+
+fn resolve_console_environment(options: &ConsoleArgs) -> CooldisResult<ConsoleEnvironment> {
+    let selected_cwd = absolute_path(&options.cwd)?;
+    let project = discover_cooldis_project(&selected_cwd)?;
+    let user_home = default_user_cooldis_home()?;
+    let project_storage_root = console_project_storage_root(&project.root, &user_home);
+    let mut config_paths = Vec::new();
+    let user_config = user_home.join("config.toml");
+    if user_config.is_file() {
+        config_paths.push(user_config);
+    }
+    if let Some(project_config) = project.config_path {
+        push_unique_path(&mut config_paths, project_config);
+    }
+    if let Some(config_path) = options.config_path.as_deref() {
+        push_unique_path(&mut config_paths, absolute_path(config_path)?);
+    }
+
+    Ok(ConsoleEnvironment {
+        selected_cwd,
+        project_root: project.root,
+        project_storage_root,
+        user_home,
+        config_paths,
+    })
+}
+
+fn console_project_storage_root(project_root: &Path, user_home: &Path) -> PathBuf {
+    let default_storage_root = project_root.join(".cooldis");
+    if default_storage_root == user_home {
+        return user_home.join("projects/home");
+    }
+    default_storage_root
+}
+
+fn prepare_console_project_storage(config: &CooldisAppServerConfig) -> CooldisResult<()> {
+    let mut roots = vec![
+        config.runtime_home.as_path(),
+        config.state_home.as_path(),
+        config.user_state_home.as_path(),
+        config.agent_registry_root.as_path(),
+    ];
+    if let Some(registry_root) = config.capsule_bindings.registry_root.as_deref() {
+        roots.push(registry_root);
+    }
+    for root in roots {
+        fs::create_dir_all(root).map_err(|err| {
+            io_error(format!(
+                "failed to prepare Cooldis console directory {}: {err}",
+                root.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn default_user_cooldis_home() -> CooldisResult<PathBuf> {
+    if let Some(home) = std::env::var_os("COOLDIS_HOME").map(PathBuf::from) {
+        return Ok(home);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".cooldis"))
+        .ok_or_else(|| usage_error("HOME is not set and COOLDIS_HOME was not provided"))
+}
+
+fn absolute_path(path: &Path) -> CooldisResult<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?
+        .join(path))
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn generate_console_session_token() -> String {
+    format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple())
+}
+
+fn resolve_console_asset_root() -> CooldisResult<PathBuf> {
+    if let Some(path) = std::env::var_os("COOLDIS_CONSOLE_ASSET_DIR").map(PathBuf::from) {
+        return console_asset_root_if_valid(path).ok_or_else(|| {
+            usage_error(
+                "COOLDIS_CONSOLE_ASSET_DIR must point at a built console directory containing index.html",
+            )
+        });
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(exe_asset_candidate(&exe));
+        candidates.push(
+            exe.parent()
+                .unwrap_or(Path::new("."))
+                .join("../share/cooldis/console"),
+        );
+        if let Ok(link) = std::fs::read_link(&exe) {
+            let target = if link.is_absolute() {
+                link
+            } else {
+                exe.parent().unwrap_or(Path::new(".")).join(link)
+            };
+            candidates.push(exe_asset_candidate(&target));
+        }
+    }
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/console/dist"));
+
+    candidates
+        .into_iter()
+        .find_map(console_asset_root_if_valid)
+        .ok_or_else(|| {
+            usage_error(
+                "Cooldis console assets were not found; run `scripts/build-console-assets.sh` or set COOLDIS_CONSOLE_ASSET_DIR",
+            )
+        })
+}
+
+fn exe_asset_candidate(exe: &Path) -> PathBuf {
+    exe.parent()
+        .unwrap_or(Path::new("."))
+        .join("share/cooldis/console")
+}
+
+fn console_asset_root_if_valid(path: PathBuf) -> Option<PathBuf> {
+    path.join("index.html").is_file().then_some(path)
+}
+
+fn open_browser_url(url: &str) -> CooldisResult<()> {
+    browser_open_command(url)?
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| usage_error(format!("failed to open browser: {err}")))
+}
+
+#[cfg(target_os = "macos")]
+fn browser_open_command(url: &str) -> CooldisResult<std::process::Command> {
+    let mut command = std::process::Command::new("open");
+    command.arg(url);
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn browser_open_command(url: &str) -> CooldisResult<std::process::Command> {
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(url);
+    Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+fn browser_open_command(url: &str) -> CooldisResult<std::process::Command> {
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", "start", "", url]);
+    Ok(command)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn browser_open_command(_url: &str) -> CooldisResult<std::process::Command> {
+    Err(usage_error(
+        "automatic browser open is not supported on this platform",
+    ))
+}
+
 async fn start_daemon_io(
     io: &CooldisIoConfig,
     server: &CooldisAppServer,
@@ -1008,11 +1774,18 @@ async fn start_daemon_io(
     let mut tasks = Vec::new();
     let enabled_routes = io.routes.iter().filter(|route| route.enabled);
     for route in enabled_routes {
+        bridge.validate_route_agent_ref(route).await?;
         match route.kind.as_str() {
-            "telegram.bot" => {
+            "clock.tick" => {
                 let ingress = route.ingress.as_ref().unwrap_or(&io.ingress);
                 let sink = route_sink_for_ingress(route, ingress, &bridge, &mut tasks).await?;
-                start_telegram_route(route, sink, &bridge, &mut tasks).await?;
+                start_clock_route(route, sink, server, &mut tasks).await?;
+            }
+            "telegram.bot" => {
+                let ingress = route.ingress.as_ref().unwrap_or(&io.ingress);
+                let egress_state_dsn = ingress.effective_queue_dsn();
+                let sink = route_sink_for_ingress(route, ingress, &bridge, &mut tasks).await?;
+                start_telegram_route(route, sink, &bridge, egress_state_dsn, &mut tasks).await?;
             }
             other => {
                 eprintln!(
@@ -1066,10 +1839,29 @@ async fn route_sink_for_ingress(
     Ok(Arc::new(RouteIngressSink::new(inner, route)))
 }
 
+async fn start_clock_route(
+    route: &CooldisIoRouteConfig,
+    sink: Arc<dyn IngressSink>,
+    server: &CooldisAppServer,
+    tasks: &mut Vec<JoinHandle<()>>,
+) -> CooldisResult<()> {
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .map_err(|err| CooldisError::History(err.to_string()))?;
+    let clock =
+        CooldisDaemonClockRoute::new(route.id.clone(), store, sink, Arc::new(SystemDaemonClock));
+    eprintln!(
+        "cooldis clock route {} polling active mandates every 30s",
+        route.id
+    );
+    tasks.push(tokio::spawn(clock.run()));
+    Ok(())
+}
+
 async fn start_telegram_route(
     route: &CooldisIoRouteConfig,
     sink: Arc<dyn IngressSink>,
     bridge: &CooldisDaemonIoBridge,
+    egress_state_dsn: String,
     tasks: &mut Vec<JoinHandle<()>>,
 ) -> CooldisResult<()> {
     let telegram = route.telegram.as_ref().ok_or_else(|| {
@@ -1078,6 +1870,9 @@ async fn start_telegram_route(
             route.id
         ))
     })?;
+    bridge
+        .register_egress_route_config(TELEGRAM_PROTOCOL, route.id.clone(), route)
+        .await?;
     if let Some(bot_token) = telegram.bot_token_value()? {
         let client = match &telegram.api_base {
             Some(api_base) => TelegramBotClient::new(bot_token).with_api_base(api_base.clone()),
@@ -1091,6 +1886,11 @@ async fn start_telegram_route(
             )
             .await;
     }
+    let projector = bridge
+        .start_egress_projector_sqlite_dsn(TELEGRAM_PROTOCOL, route.id.clone(), egress_state_dsn)
+        .await
+        .map_err(io_error)?;
+    tasks.push(projector);
     let listen = telegram.listen.clone().ok_or_else(|| {
         usage_error(format!(
             "telegram route {} requires telegram.listen",
@@ -1226,6 +2026,7 @@ async fn run_tool(mut args: Vec<OsString>) -> CooldisResult<()> {
             "list" => print_tool_list_help(),
             "publish" => print_tool_publish_help(),
             "run" => print_tool_run_help(),
+            "manual" => print_tool_manual_help(),
             "source" => print_tool_source_help(),
             other => return Err(usage_error(format!("unknown tool subcommand {other:?}"))),
         }
@@ -1236,9 +2037,486 @@ async fn run_tool(mut args: Vec<OsString>) -> CooldisResult<()> {
         "list" => tool_list(args).await,
         "publish" => tool_publish(args).await,
         "run" => tool_run(args).await,
+        "manual" => tool_manual(args).await,
         "source" => tool_source(args).await,
         _ => Err(usage_error(format!(
             "unknown tool subcommand {subcommand:?}"
+        ))),
+    }
+}
+
+async fn coupling_run(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_coupling_run_args(args)?;
+    if options.help {
+        print_coupling_run_help();
+        return Ok(());
+    }
+    if !options.replay {
+        return Err(usage_error("coupling run currently requires --replay"));
+    }
+    let artifact = options
+        .artifact
+        .as_deref()
+        .ok_or_else(|| usage_error("coupling run --replay requires --artifact <path|op://ref>"))?;
+    let mut coupling_set = load_replay_coupling_set(&options)?;
+    if let Some(coupling_id) = &options.coupling_id {
+        coupling_set = select_replay_coupling(&coupling_set, coupling_id)?;
+    }
+    let operation_registry_root =
+        resolve_replay_artifact(artifact, options.registry_root.clone(), &mut coupling_set).await?;
+    let events = load_replay_recorded_events(&options)?;
+    let replayed_event_count = events.len();
+    let receipt = replay_coupling_events(&coupling_set, events, operation_registry_root).await?;
+    let report = CouplingReplayReport::from_receipt(replayed_event_count, &coupling_set, receipt);
+    if options.json {
+        serde_json::to_writer_pretty(std::io::stdout(), &report)
+            .map_err(|err| usage_error(format!("failed to encode coupling replay JSON: {err}")))?;
+        println!();
+    } else {
+        print_coupling_replay_report(&report);
+    }
+    Ok(())
+}
+
+fn load_replay_coupling_set(options: &CouplingRunArgs) -> CooldisResult<BoundCouplingSet> {
+    if let Some(path) = &options.coupling_file {
+        return load_replay_coupling_set_file(path);
+    }
+    if let Some(path) = &options.export_bundle {
+        let value = read_json_file(path)?;
+        if let Some(coupling_set) = coupling_set_from_export_bundle(&value)? {
+            return Ok(coupling_set);
+        }
+    }
+    Err(usage_error(
+        "coupling run --replay requires --coupling-file unless the export bundle contains a bound coupling set",
+    ))
+}
+
+fn load_replay_coupling_set_file(path: &Path) -> CooldisResult<BoundCouplingSet> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| usage_error(format!("failed to read {}: {err}", path.display())))?;
+    if let Ok(set) = serde_json::from_str::<BoundCouplingSet>(&raw) {
+        return Ok(set);
+    }
+    if let Ok(coupling) = serde_json::from_str::<BoundCoupling>(&raw) {
+        return Ok(BoundCouplingSet::new("replay-file", vec![coupling]));
+    }
+    if let Ok(set) = toml::from_str::<BoundCouplingSet>(&raw) {
+        return Ok(set);
+    }
+    if let Ok(coupling) = toml::from_str::<BoundCoupling>(&raw) {
+        return Ok(BoundCouplingSet::new("replay-file", vec![coupling]));
+    }
+    Err(usage_error(format!(
+        "coupling file {} must be a serialized BoundCouplingSet or BoundCoupling",
+        path.display()
+    )))
+}
+
+fn coupling_set_from_export_bundle(value: &Value) -> CooldisResult<Option<BoundCouplingSet>> {
+    for pointer in ["/boundCouplingSet", "/couplingSet"] {
+        if let Some(candidate) = value.pointer(pointer)
+            && !candidate.is_null()
+        {
+            return serde_json::from_value::<BoundCouplingSet>(candidate.clone())
+                .map(Some)
+                .map_err(|err| usage_error(format!("export bundle {pointer} is invalid: {err}")));
+        }
+    }
+    if let Some(raw) = value
+        .pointer("/thread/metadata/cooldis.agent.bound_coupling_set")
+        .and_then(Value::as_str)
+    {
+        return serde_json::from_str::<BoundCouplingSet>(raw)
+            .map(Some)
+            .map_err(|err| {
+                usage_error(format!(
+                    "export bundle bound coupling metadata is invalid: {err}"
+                ))
+            });
+    }
+    Ok(None)
+}
+
+fn select_replay_coupling(
+    coupling_set: &BoundCouplingSet,
+    coupling_id: &str,
+) -> CooldisResult<BoundCouplingSet> {
+    let couplings = coupling_set
+        .couplings
+        .iter()
+        .filter(|coupling| coupling.id == coupling_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if couplings.is_empty() {
+        return Err(usage_error(format!(
+            "bound coupling id {coupling_id:?} was not found in replay coupling set"
+        )));
+    }
+    Ok(BoundCouplingSet::new(
+        coupling_set.snapshot_id.clone(),
+        couplings,
+    ))
+}
+
+async fn resolve_replay_artifact(
+    artifact: &str,
+    registry_root: Option<PathBuf>,
+    coupling_set: &mut BoundCouplingSet,
+) -> CooldisResult<PathBuf> {
+    if artifact.starts_with("op://") {
+        let parsed = parse_pinned_operation_ref(artifact)?;
+        let root = registry_root.unwrap_or_else(default_registry_root);
+        let record = LocalOperationRegistry::new(&root)
+            .load_version_record(&parsed.name, &parsed.artifact_hash)
+            .map_err(|err| {
+                usage_error(format!(
+                    "replay artifact {artifact:?} was not found in operation registry {}: {err}",
+                    root.display()
+                ))
+            })?;
+        apply_replay_operation_record(coupling_set, &record, parsed.operation.as_deref())?;
+        return Ok(root);
+    }
+
+    let artifact_path = PathBuf::from(artifact);
+    let root = registry_root.unwrap_or_else(|| {
+        std::env::temp_dir()
+            .join(format!("cooldis-coupling-replay-{}", Uuid::now_v7()))
+            .join("operations")
+    });
+    let record = LocalOperationRegistry::new(&root)
+        .publish_artifact(PublishOperationRequest {
+            name: "replay-coupling".to_string(),
+            artifact_path: artifact_path.clone(),
+            source: PublishedOperationSource::Wasm {
+                bin_path: artifact_path,
+            },
+            interface: None,
+            capability_grants: BTreeSet::new(),
+            metadata: BTreeMap::from([("coupling.replay.local_artifact".to_string(), json!(true))]),
+        })
+        .await?;
+    apply_replay_operation_record(coupling_set, &record, None)?;
+    Ok(root)
+}
+
+fn apply_replay_operation_record(
+    coupling_set: &mut BoundCouplingSet,
+    record: &PublishedOperationRecord,
+    selected_operation: Option<&str>,
+) -> CooldisResult<()> {
+    for coupling in &mut coupling_set.couplings {
+        let operation_name = select_replay_operation_name(
+            &coupling.id,
+            selected_operation.or(coupling.function.operation_name.as_deref()),
+            &record.manifest,
+        )?;
+        validate_replay_coupling_operation(&coupling.id, &operation_name, &record.manifest)?;
+        coupling.function_ref = format!(
+            "op://{}/{operation_name}@sha256:{}",
+            record.name, record.active_artifact_hash
+        );
+        coupling.function.name = record.name.clone();
+        coupling.function.artifact_hash = record.active_artifact_hash.clone();
+        coupling.function.operation_name = Some(operation_name);
+    }
+    Ok(())
+}
+
+fn select_replay_operation_name(
+    coupling_id: &str,
+    selected_operation: Option<&str>,
+    manifest: &WasmOperationManifest,
+) -> CooldisResult<String> {
+    if let Some(operation_name) = selected_operation {
+        if manifest.operation(operation_name).is_some() {
+            return Ok(operation_name.to_string());
+        }
+        return Err(usage_error(format!(
+            "replay artifact does not expose operation {operation_name:?} for coupling {coupling_id:?}"
+        )));
+    }
+    if manifest.operations.len() == 1 {
+        return Ok(manifest.operations[0].name.clone());
+    }
+    Err(usage_error(format!(
+        "replay artifact for coupling {coupling_id:?} exposes multiple operations; use op://<record>/<operation>@sha256:<hash> or a bound coupling operation_name"
+    )))
+}
+
+fn validate_replay_coupling_operation(
+    coupling_id: &str,
+    operation_name: &str,
+    manifest: &WasmOperationManifest,
+) -> CooldisResult<()> {
+    let operation = manifest.operation(operation_name).ok_or_else(|| {
+        usage_error(format!(
+            "replay artifact does not expose operation {operation_name:?} for coupling {coupling_id:?}"
+        ))
+    })?;
+    if operation.input != WasmOperationValueKind::Json {
+        return Err(usage_error(format!(
+            "coupling {coupling_id:?} operation {operation_name:?} must declare json input for {COUPLING_INVOCATION_ABI}"
+        )));
+    }
+    if operation.output != WasmOperationValueKind::Json {
+        return Err(usage_error(format!(
+            "coupling {coupling_id:?} operation {operation_name:?} must declare json output for {COUPLING_DISCHARGE_ABI}"
+        )));
+    }
+    if !operation.required_capabilities.is_empty() {
+        return Err(usage_error(format!(
+            "coupling {coupling_id:?} operation {operation_name:?} declares effect capabilities; replay couplings must be pure compute"
+        )));
+    }
+    Ok(())
+}
+
+fn load_replay_recorded_events(options: &CouplingRunArgs) -> CooldisResult<Vec<EventRecord>> {
+    match (&options.journal, &options.thread_id, &options.export_bundle) {
+        (Some(_), _, Some(_)) => Err(usage_error(
+            "coupling run --replay accepts either --journal/--thread-id or --export, not both",
+        )),
+        (Some(journal), Some(thread_id), None) => {
+            let store = SqliteSessionStore::open_read_only(journal)
+                .map_err(|err| usage_error(format!("failed to open journal read-only: {err}")))?;
+            let events = store.list_thread_events(*thread_id).map_err(|err| {
+                usage_error(format!(
+                    "failed to read recorded events for thread {thread_id}: {err}"
+                ))
+            })?;
+            if events.is_empty() {
+                return Err(usage_error(format!(
+                    "journal {} has no events for thread {thread_id}",
+                    journal.display()
+                )));
+            }
+            Ok(events)
+        }
+        (Some(_), None, None) => Err(usage_error(
+            "coupling run --replay with --journal requires --thread-id",
+        )),
+        (None, _, Some(export)) => load_replay_events_from_export(export),
+        (None, _, None) => Err(usage_error(
+            "coupling run --replay requires --journal/--thread-id or --export",
+        )),
+    }
+}
+
+fn load_replay_events_from_export(path: &Path) -> CooldisResult<Vec<EventRecord>> {
+    let value = read_json_file(path)?;
+    let streams = value
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(|| usage_error("export bundle missing streams array"))?;
+    let mut events = Vec::new();
+    for stream in streams {
+        let data = stream
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| usage_error("export bundle stream missing data array"))?;
+        for event in data {
+            events.push(event_record_from_export_value(event.clone())?);
+        }
+    }
+    events.sort_by(|left, right| {
+        (
+            left.created_at_ms,
+            left.stream_id.to_string(),
+            left.sequence.get(),
+            left.id.to_string(),
+        )
+            .cmp(&(
+                right.created_at_ms,
+                right.stream_id.to_string(),
+                right.sequence.get(),
+                right.id.to_string(),
+            ))
+    });
+    if events.is_empty() {
+        return Err(usage_error("export bundle contains no replayable events"));
+    }
+    Ok(events)
+}
+
+fn event_record_from_export_value(value: Value) -> CooldisResult<EventRecord> {
+    let envelope = serde_json::from_value::<StreamRecordEnvelopeV1>(value)
+        .map_err(|err| usage_error(format!("export stream record is invalid: {err}")))?;
+    let kind = envelope
+        .kind
+        .parse::<EventKind>()
+        .map_err(|err| usage_error(format!("export stream record kind is invalid: {err}")))?;
+    Ok(EventRecord {
+        id: envelope.event_id,
+        stream_id: envelope.stream_id,
+        sequence: envelope.sequence,
+        coordinates: envelope.coordinates,
+        created_at_ms: envelope.created_at_ms,
+        kind,
+        origin: envelope.origin,
+        provenance: envelope.provenance,
+        payload: envelope.payload,
+    })
+}
+
+async fn replay_coupling_events(
+    coupling_set: &BoundCouplingSet,
+    recorded_events: Vec<EventRecord>,
+    operation_registry_root: PathBuf,
+) -> CooldisResult<CouplingSchedulerCycleReceipt> {
+    let replay_store = CouplingReplayEventStore::default();
+    let executor = crate::kernel::coupling_executor_registry::CouplingExecutorRegistry::new(Some(
+        operation_registry_root,
+    ));
+    let scheduler = CouplingScheduler::new(&replay_store, &executor);
+    let mut aggregate = CouplingSchedulerCycleReceipt {
+        snapshot_id: coupling_set.snapshot_id.clone(),
+        runs: Vec::new(),
+        appended_events: Vec::new(),
+    };
+    for event in recorded_events {
+        let appended = replay_store
+            .append_recorded_event(event)
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        if appended.is_empty() {
+            continue;
+        }
+        let receipt = scheduler.run_batch(coupling_set, appended).await?;
+        aggregate.runs.extend(receipt.runs);
+        aggregate.appended_events.extend(receipt.appended_events);
+    }
+    Ok(aggregate)
+}
+
+fn read_json_file(path: &Path) -> CooldisResult<Value> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| usage_error(format!("failed to read {}: {err}", path.display())))?;
+    serde_json::from_str(&raw)
+        .map_err(|err| usage_error(format!("failed to parse {} as JSON: {err}", path.display())))
+}
+
+fn parse_pinned_operation_ref(reference: &str) -> CooldisResult<ParsedOperationRef> {
+    let body = reference
+        .strip_prefix("op://")
+        .ok_or_else(|| usage_error("operation ref must start with op://"))?;
+    let (name_part, artifact_hash) = body.split_once("@sha256:").ok_or_else(|| {
+        usage_error("operation ref must be pinned as op://<record>/<operation>@sha256:<hash>")
+    })?;
+    if artifact_hash.len() != 64 || !artifact_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(usage_error(
+            "operation ref has an invalid sha256 artifact hash",
+        ));
+    }
+    let segments = name_part.split('/').collect::<Vec<_>>();
+    let (name, operation) = match segments.as_slice() {
+        [name] if !name.is_empty() => ((*name).to_string(), None),
+        [name, operation] if !name.is_empty() && !operation.is_empty() => {
+            ((*name).to_string(), Some((*operation).to_string()))
+        }
+        _ => {
+            return Err(usage_error(
+                "operation ref must match op://<record>@sha256:<hash> or op://<record>/<operation>@sha256:<hash>",
+            ));
+        }
+    };
+    Ok(ParsedOperationRef {
+        name,
+        operation,
+        artifact_hash: artifact_hash.to_string(),
+    })
+}
+
+fn print_coupling_replay_report(report: &CouplingReplayReport) {
+    println!("DRY RUN ONLY: proposed coupling discharges; no stream was appended.");
+    println!("mode {}", report.mode);
+    println!("snapshot {}", report.snapshot_id);
+    println!("replayed_events {}", report.replayed_event_count);
+    println!("runs {}", report.runs.len());
+    for run in &report.runs {
+        if run.blocked {
+            println!(
+                "run {} BLOCKED {} trigger={} sequence={}",
+                run.coupling_id,
+                run.reason.as_deref().unwrap_or("blocked"),
+                run.trigger_event_id,
+                run.trigger_sequence
+            );
+        } else {
+            println!(
+                "run {} {} trigger={} sequence={} proposals={}",
+                run.coupling_id,
+                run.status,
+                run.trigger_event_id,
+                run.trigger_sequence,
+                run.proposal_event_count
+            );
+        }
+    }
+    println!("proposal_events {}", report.proposal_events.len());
+    for event in &report.proposal_events {
+        println!(
+            "proposal stream={} kind={} payload={}",
+            event.stream,
+            event.kind,
+            compact_json(&event.payload)
+        );
+    }
+}
+
+async fn run_skill(mut args: Vec<OsString>) -> CooldisResult<()> {
+    if args.is_empty()
+        || args
+            .first()
+            .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_skill_help();
+        return Ok(());
+    }
+    let subcommand = args.remove(0);
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        match subcommand.to_string_lossy().as_ref() {
+            "publish" => print_skill_publish_help(),
+            other => return Err(usage_error(format!("unknown skill subcommand {other:?}"))),
+        }
+        return Ok(());
+    }
+    match subcommand.to_string_lossy().as_ref() {
+        "publish" => skill_publish(args).await,
+        _ => Err(usage_error(format!(
+            "unknown skill subcommand {subcommand:?}"
+        ))),
+    }
+}
+
+async fn run_blob(mut args: Vec<OsString>) -> CooldisResult<()> {
+    if args.is_empty()
+        || args
+            .first()
+            .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_blob_help();
+        return Ok(());
+    }
+    let subcommand = args.remove(0);
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        match subcommand.to_string_lossy().as_ref() {
+            "publish" => print_blob_publish_help(),
+            other => return Err(usage_error(format!("unknown blob subcommand {other:?}"))),
+        }
+        return Ok(());
+    }
+    match subcommand.to_string_lossy().as_ref() {
+        "publish" => blob_publish(args).await,
+        _ => Err(usage_error(format!(
+            "unknown blob subcommand {subcommand:?}"
         ))),
     }
 }
@@ -1279,72 +2557,24 @@ async fn run_secret(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
-async fn run_provider(mut args: Vec<OsString>) -> CooldisResult<()> {
+async fn run_auth(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
             .first()
             .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        print_provider_help();
+        print_auth_help();
         return Ok(());
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "auth" => run_provider_auth(args).await,
+        "status" => auth_status(args).await,
+        "set" => auth_set(args).await,
+        "delete" => auth_delete(args).await,
         other => Err(usage_error(format!(
-            "unknown provider subcommand {other:?}"
+            "unknown auth subcommand {other:?}; use `cooldis auth --help`"
         ))),
     }
-}
-
-async fn run_provider_auth(mut args: Vec<OsString>) -> CooldisResult<()> {
-    if args.is_empty()
-        || args
-            .first()
-            .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        print_provider_auth_help();
-        return Ok(());
-    }
-    let subcommand = args.remove(0);
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        match subcommand.to_string_lossy().as_ref() {
-            "status" => print_provider_auth_status_help(),
-            "set" => print_provider_auth_set_help(),
-            "delete" => print_provider_auth_delete_help(),
-            other => {
-                return Err(usage_error(format!(
-                    "unknown provider auth subcommand {other:?}"
-                )));
-            }
-        }
-        return Ok(());
-    }
-    match subcommand.to_string_lossy().as_ref() {
-        "status" => provider_auth_status(args).await,
-        "set" => provider_auth_set(args).await,
-        "delete" => provider_auth_delete(args).await,
-        other => Err(usage_error(format!(
-            "unknown provider auth subcommand {other:?}"
-        ))),
-    }
-}
-
-async fn run_thread(args: Vec<OsString>) -> CooldisResult<()> {
-    if args.is_empty()
-        || args
-            .first()
-            .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        print_thread_help();
-        return Ok(());
-    }
-    Err(usage_error(
-        "cooldis thread CLI is not implemented yet; use rpc thread/* methods",
-    ))
 }
 
 async fn tool_build(args: Vec<OsString>) -> CooldisResult<()> {
@@ -1464,6 +2694,58 @@ async fn tool_publish(args: Vec<OsString>) -> CooldisResult<()> {
     Err(usage_error(
         "tool publish requires a package proof gate; author cooldis.tool.toml and publish with `cooldis tool publish --package <cooldis.tool.toml>`",
     ))
+}
+
+async fn skill_publish(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_skill_publish_args(args)?;
+    if options.help {
+        print_skill_publish_help();
+        return Ok(());
+    }
+    let package_dir = options
+        .package_dir
+        .ok_or_else(|| usage_error("skill publish requires <dir>"))?;
+    let registry_root = skill_registry_root(options.registry_root);
+    let registry = LocalSkillRegistry::new(registry_root);
+    let record = registry.publish_directory(PublishSkillPackageRequest {
+        package_dir,
+        name: options.name,
+    })?;
+    println!("published {}", record.name);
+    println!("artifact {}", record.active_artifact_hash);
+    println!("ref {}", record.ref_uri());
+    println!("record {}", registry.record_path(&record.name)?.display());
+    for skill in record.package.skills {
+        println!("skill {}", skill.name);
+    }
+    Ok(())
+}
+
+async fn blob_publish(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_blob_publish_args(args)?;
+    if options.help {
+        print_blob_publish_help();
+        return Ok(());
+    }
+    let file = options
+        .file
+        .ok_or_else(|| usage_error("blob publish requires <file>"))?;
+    let registry_root = options
+        .registry_root
+        .unwrap_or_else(default_blob_registry_root);
+    let registry = LocalBlobRegistry::new(registry_root);
+    let record = registry.publish_file(&file, options.name.as_deref())?;
+    println!("published blob");
+    println!("artifact {}", record.artifact_hash);
+    println!("content_hash {}", record.content_sha256);
+    println!("ref {}", record.ref_uri);
+    println!(
+        "record {}",
+        registry
+            .version_record_path(&record.artifact_hash)?
+            .display()
+    );
+    Ok(())
 }
 
 fn manuals_for_record(
@@ -2287,15 +3569,15 @@ async fn secret_delete(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-async fn provider_auth_status(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_provider_auth_name_args(args, "provider auth status")?;
+async fn auth_status(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_auth_name_args(args, "auth status")?;
     if options.help {
-        print_provider_auth_status_help();
+        print_auth_status_help();
         return Ok(());
     }
     let provider_id = options
         .provider_id
-        .ok_or_else(|| usage_error("provider auth status requires <provider-id>"))?;
+        .ok_or_else(|| usage_error("auth status requires <provider-id>"))?;
     let store = open_provider_store(options.state_home)?;
     let provider = store
         .get_provider(&provider_id)
@@ -2314,23 +3596,23 @@ async fn provider_auth_status(args: Vec<OsString>) -> CooldisResult<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(|err| {
-            CooldisError::RuntimeFactory(format!("failed to encode provider auth status: {err}"))
+            CooldisError::RuntimeFactory(format!("failed to encode auth status: {err}"))
         })?
     );
     Ok(())
 }
 
-async fn provider_auth_set(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_provider_auth_set_args(args)?;
+async fn auth_set(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_auth_set_args(args)?;
     if options.help {
-        print_provider_auth_set_help();
+        print_auth_set_help();
         return Ok(());
     }
     let provider_id = options
         .provider_id
-        .ok_or_else(|| usage_error("provider auth set requires <provider-id>"))?;
+        .ok_or_else(|| usage_error("auth set requires <provider-id>"))?;
     if !options.api_key_stdin {
-        return Err(usage_error("provider auth set requires --api-key-stdin"));
+        return Err(usage_error("auth set requires --api-key-stdin"));
     }
     let mut value = String::new();
     std::io::stdin()
@@ -2338,9 +3620,7 @@ async fn provider_auth_set(args: Vec<OsString>) -> CooldisResult<()> {
         .map_err(io_error)?;
     let value = trim_stdin_secret_value(value);
     if value.is_empty() {
-        return Err(usage_error(
-            "provider auth set requires a non-empty API key",
-        ));
+        return Err(usage_error("auth set requires a non-empty API key"));
     }
     let store = open_provider_store(options.state_home)?;
     if store
@@ -2362,15 +3642,15 @@ async fn provider_auth_set(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
-async fn provider_auth_delete(args: Vec<OsString>) -> CooldisResult<()> {
-    let options = parse_provider_auth_name_args(args, "provider auth delete")?;
+async fn auth_delete(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_auth_name_args(args, "auth delete")?;
     if options.help {
-        print_provider_auth_delete_help();
+        print_auth_delete_help();
         return Ok(());
     }
     let provider_id = options
         .provider_id
-        .ok_or_else(|| usage_error("provider auth delete requires <provider-id>"))?;
+        .ok_or_else(|| usage_error("auth delete requires <provider-id>"))?;
     let store = open_provider_store(options.state_home)?;
     store
         .delete_credential(&provider_id)
@@ -2405,6 +3685,22 @@ struct PublishArgs {
 }
 
 #[derive(Debug)]
+struct SkillPublishArgs {
+    package_dir: Option<PathBuf>,
+    name: Option<String>,
+    registry_root: Option<PathBuf>,
+    help: bool,
+}
+
+#[derive(Debug)]
+struct BlobPublishArgs {
+    file: Option<PathBuf>,
+    name: Option<String>,
+    registry_root: Option<PathBuf>,
+    help: bool,
+}
+
+#[derive(Debug)]
 struct ToolRegistryArgs {
     registry_root: Option<PathBuf>,
     help: bool,
@@ -2426,7 +3722,7 @@ struct RunArgs {
 }
 
 #[derive(Debug)]
-struct ManArgs {
+struct ToolManualArgs {
     tool_name: Option<String>,
     operation: Option<String>,
     registry_root: Option<PathBuf>,
@@ -2500,7 +3796,7 @@ struct SecretListArgs {
 }
 
 #[derive(Debug)]
-struct ProviderAuthSetArgs {
+struct AuthSetArgs {
     provider_id: Option<String>,
     api_key_stdin: bool,
     state_home: Option<PathBuf>,
@@ -2508,7 +3804,7 @@ struct ProviderAuthSetArgs {
 }
 
 #[derive(Debug)]
-struct ProviderAuthNameArgs {
+struct AuthNameArgs {
     provider_id: Option<String>,
     state_home: Option<PathBuf>,
     help: bool,
@@ -2522,6 +3818,14 @@ struct MountArg {
 
 #[derive(Debug)]
 struct AgentInitArgs {
+    name: Option<String>,
+    out_path: Option<PathBuf>,
+    force: bool,
+    help: bool,
+}
+
+#[derive(Debug)]
+struct CouplingInitArgs {
     name: Option<String>,
     out_path: Option<PathBuf>,
     force: bool,
@@ -2549,6 +3853,7 @@ struct AgentManifestArgs {
     manifest_path: Option<PathBuf>,
     registry_root: Option<PathBuf>,
     operations_registry_root: Option<PathBuf>,
+    resolve_ops: bool,
     help: bool,
 }
 
@@ -2574,11 +3879,256 @@ struct AgentRunArgs {
 }
 
 #[derive(Debug)]
+struct CouplingRunArgs {
+    replay: bool,
+    artifact: Option<String>,
+    coupling_file: Option<PathBuf>,
+    coupling_id: Option<String>,
+    journal: Option<PathBuf>,
+    thread_id: Option<ThreadId>,
+    export_bundle: Option<PathBuf>,
+    registry_root: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+#[derive(Debug)]
+struct ParsedOperationRef {
+    name: String,
+    operation: Option<String>,
+    artifact_hash: String,
+}
+
+#[derive(Default)]
+struct CouplingReplayEventStore {
+    streams: std::sync::Mutex<BTreeMap<String, Vec<EventRecord>>>,
+}
+
+impl CouplingReplayEventStore {
+    fn append_recorded_event(&self, event: EventRecord) -> crate::HistoryResult<Vec<EventRecord>> {
+        let mut streams = self.streams.lock().map_err(|err| {
+            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+        })?;
+        let stream = streams.entry(event.stream_id.to_string()).or_default();
+        if stream.iter().any(|existing| existing.id == event.id) {
+            return Ok(Vec::new());
+        }
+        stream.push(event.clone());
+        stream.sort_by(|left, right| {
+            (left.sequence.get(), left.id.to_string())
+                .cmp(&(right.sequence.get(), right.id.to_string()))
+        });
+        Ok(vec![event])
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for CouplingReplayEventStore {
+    async fn append_events(
+        &self,
+        stream_id: &EventStreamId,
+        records: Vec<NewEventRecord>,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        let mut streams = self.streams.lock().map_err(|err| {
+            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+        })?;
+        let stream = streams.entry(stream_id.to_string()).or_default();
+        let mut next_sequence = stream
+            .iter()
+            .map(|event| event.sequence.get())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut appended = Vec::with_capacity(records.len());
+        for record in records {
+            let event =
+                EventRecord::from_new(stream_id.clone(), EventSequence::new(next_sequence), record);
+            next_sequence += 1;
+            stream.push(event.clone());
+            appended.push(event);
+        }
+        Ok(appended)
+    }
+
+    async fn read_events(
+        &self,
+        stream_id: &EventStreamId,
+        from_sequence: Option<EventSequence>,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        let streams = self.streams.lock().map_err(|err| {
+            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+        })?;
+        let events = streams
+            .get(&stream_id.to_string())
+            .cloned()
+            .unwrap_or_default();
+        Ok(match from_sequence {
+            Some(sequence) => events
+                .into_iter()
+                .filter(|event| event.sequence.get() >= sequence.get())
+                .collect(),
+            None => events,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CouplingReplayReport {
+    schema: &'static str,
+    mode: &'static str,
+    dry_run: bool,
+    snapshot_id: String,
+    replayed_event_count: usize,
+    runs: Vec<CouplingReplayRunReport>,
+    proposal_events: Vec<CouplingReplayProposalEvent>,
+}
+
+impl CouplingReplayReport {
+    fn from_receipt(
+        replayed_event_count: usize,
+        coupling_set: &BoundCouplingSet,
+        receipt: CouplingSchedulerCycleReceipt,
+    ) -> Self {
+        let mut proposal_ids = BTreeSet::new();
+        let mut proposal_streams = BTreeMap::new();
+        for run in &receipt.runs {
+            let stream = coupling_set
+                .couplings
+                .iter()
+                .find(|coupling| coupling.id == run.coupling_id)
+                .map(|coupling| coupling.sink.stream.clone())
+                .unwrap_or_else(|| run.trigger_stream_id.clone());
+            for event_id in &run.discharged_event_ids {
+                let id = event_id.to_string();
+                proposal_ids.insert(id.clone());
+                proposal_streams.insert(id, stream.clone());
+            }
+        }
+        let proposal_events = receipt
+            .appended_events
+            .iter()
+            .filter_map(|event| {
+                let id = event.id.to_string();
+                proposal_ids
+                    .contains(&id)
+                    .then(|| CouplingReplayProposalEvent {
+                        stream: proposal_streams
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| event.stream_id.to_string()),
+                        stream_id: event.stream_id.to_string(),
+                        kind: event.kind.to_string(),
+                        payload: event.payload.clone(),
+                        provenance: event.provenance.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        let runs = receipt
+            .runs
+            .into_iter()
+            .map(CouplingReplayRunReport::from_run)
+            .collect();
+        Self {
+            schema: "cooldis.coupling.replay/1",
+            mode: "replay",
+            dry_run: true,
+            snapshot_id: receipt.snapshot_id,
+            replayed_event_count,
+            runs,
+            proposal_events,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CouplingReplayRunReport {
+    coupling_id: String,
+    status: &'static str,
+    scheduler_status: CouplingRunStatus,
+    blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    trigger_event_id: String,
+    trigger_stream_id: String,
+    trigger_sequence: i64,
+    depth: u32,
+    source_event_ids: Vec<String>,
+    proposal_event_count: usize,
+    budget_spent: crate::CouplingBudgetSpent,
+}
+
+impl CouplingReplayRunReport {
+    fn from_run(run: crate::CouplingRunReceipt) -> Self {
+        let blocked = replay_run_is_blocked(&run);
+        Self {
+            coupling_id: run.coupling_id,
+            status: if blocked {
+                "blocked"
+            } else {
+                coupling_run_status_name(run.status)
+            },
+            scheduler_status: run.status,
+            blocked,
+            reason: run.reason,
+            trigger_event_id: run.trigger_event_id.to_string(),
+            trigger_stream_id: run.trigger_stream_id,
+            trigger_sequence: run.trigger_sequence,
+            depth: run.depth,
+            source_event_ids: run
+                .source_event_ids
+                .into_iter()
+                .map(|event_id| event_id.to_string())
+                .collect(),
+            proposal_event_count: run.discharged_event_ids.len(),
+            budget_spent: run.budget_spent,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CouplingReplayProposalEvent {
+    stream: String,
+    stream_id: String,
+    kind: String,
+    payload: Value,
+    provenance: crate::EventProvenance,
+}
+
+fn replay_run_is_blocked(run: &crate::CouplingRunReceipt) -> bool {
+    run.reason.as_deref() == Some("quota_exhausted")
+        || run
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("budget:"))
+}
+
+fn coupling_run_status_name(status: CouplingRunStatus) -> &'static str {
+    match status {
+        CouplingRunStatus::Completed => "completed",
+        CouplingRunStatus::Failed => "failed",
+        CouplingRunStatus::Skipped => "skipped",
+    }
+}
+
+#[derive(Debug)]
 struct RpcArgs {
     listen: AppServerListenAddr,
     runtime_home: Option<PathBuf>,
     state_home: Option<PathBuf>,
     cwd: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct ConsoleArgs {
+    listen: std::net::SocketAddr,
+    cwd: PathBuf,
+    cwd_explicit: bool,
+    config_path: Option<PathBuf>,
+    open: bool,
+    help: bool,
 }
 
 #[derive(Debug)]
@@ -2857,6 +4407,38 @@ fn parse_agent_init_args(args: Vec<OsString>) -> CooldisResult<AgentInitArgs> {
     })
 }
 
+fn parse_coupling_init_args(args: Vec<OsString>) -> CooldisResult<CouplingInitArgs> {
+    let mut name = None;
+    let mut out_path = None;
+    let mut force = false;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--out" => out_path = Some(required_path_value(&mut iter, "--out")?),
+            "--force" => force = true,
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown coupling init argument {other:?}"
+                )));
+            }
+            _ => {
+                if name.is_some() {
+                    return Err(usage_error("coupling init accepts exactly one <name>"));
+                }
+                name = Some(arg.to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(CouplingInitArgs {
+        name,
+        out_path,
+        force,
+        help,
+    })
+}
+
 fn parse_agent_manifest_args(
     args: Vec<OsString>,
     command: &str,
@@ -2864,11 +4446,13 @@ fn parse_agent_manifest_args(
     let mut manifest_path = None;
     let mut registry_root = None;
     let mut operations_registry_root = None;
+    let mut resolve_ops = false;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
+            "--resolve-ops" if command == "agent publish" => resolve_ops = true,
             "--registry-root" => {
                 registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
             }
@@ -2895,6 +4479,7 @@ fn parse_agent_manifest_args(
         manifest_path,
         registry_root,
         operations_registry_root,
+        resolve_ops,
         help,
     })
 }
@@ -2984,6 +4569,68 @@ fn parse_agent_run_args(args: Vec<OsString>) -> CooldisResult<AgentRunArgs> {
         reference,
         input,
         registry_root,
+        help,
+    })
+}
+
+fn parse_coupling_run_args(args: Vec<OsString>) -> CooldisResult<CouplingRunArgs> {
+    let mut replay = false;
+    let mut artifact = None;
+    let mut coupling_file = None;
+    let mut coupling_id = None;
+    let mut journal = None;
+    let mut thread_id = None;
+    let mut export_bundle = None;
+    let mut registry_root = None;
+    let mut json = false;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--replay" => replay = true,
+            "--artifact" => artifact = Some(required_string_value(&mut iter, "--artifact")?),
+            "--coupling-file" => {
+                coupling_file = Some(required_path_value(&mut iter, "--coupling-file")?)
+            }
+            "--coupling-id" => {
+                coupling_id = Some(required_string_value(&mut iter, "--coupling-id")?)
+            }
+            "--journal" | "--db" => journal = Some(required_path_value(&mut iter, "--journal")?),
+            "--thread-id" | "--thread" => {
+                let value = required_string_value(&mut iter, "--thread-id")?;
+                thread_id = Some(
+                    ThreadId::parse_str(&value)
+                        .map_err(|err| usage_error(format!("invalid --thread-id: {err}")))?,
+                );
+            }
+            "--export" => export_bundle = Some(required_path_value(&mut iter, "--export")?),
+            "--registry-root" => {
+                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+            }
+            "--json" => json = true,
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown coupling run argument {other:?}"
+                )));
+            }
+            other => {
+                return Err(usage_error(format!(
+                    "unexpected coupling run positional argument {other:?}; use --artifact"
+                )));
+            }
+        }
+    }
+    Ok(CouplingRunArgs {
+        replay,
+        artifact,
+        coupling_file,
+        coupling_id,
+        journal,
+        thread_id,
+        export_bundle,
+        registry_root,
+        json,
         help,
     })
 }
@@ -3108,6 +4755,74 @@ fn parse_publish_args(args: Vec<OsString>) -> CooldisResult<PublishArgs> {
     })
 }
 
+fn parse_skill_publish_args(args: Vec<OsString>) -> CooldisResult<SkillPublishArgs> {
+    let mut package_dir = None;
+    let mut name = None;
+    let mut registry_root = None;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--registry-root" => {
+                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown skill publish argument {other:?}"
+                )));
+            }
+            _ => {
+                if package_dir.is_some() {
+                    return Err(usage_error("skill publish accepts exactly one <dir>"));
+                }
+                package_dir = Some(PathBuf::from(arg));
+            }
+        }
+    }
+    Ok(SkillPublishArgs {
+        package_dir,
+        name,
+        registry_root,
+        help,
+    })
+}
+
+fn parse_blob_publish_args(args: Vec<OsString>) -> CooldisResult<BlobPublishArgs> {
+    let mut file = None;
+    let mut name = None;
+    let mut registry_root = None;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--registry-root" => {
+                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown blob publish argument {other:?}"
+                )));
+            }
+            _ => {
+                if file.is_some() {
+                    return Err(usage_error("blob publish accepts exactly one <file>"));
+                }
+                file = Some(PathBuf::from(arg));
+            }
+        }
+    }
+    Ok(BlobPublishArgs {
+        file,
+        name,
+        registry_root,
+        help,
+    })
+}
+
 fn parse_tool_registry_args(args: Vec<OsString>, command: &str) -> CooldisResult<ToolRegistryArgs> {
     let mut registry_root = None;
     let mut help = false;
@@ -3204,7 +4919,7 @@ fn parse_run_args(args: Vec<OsString>) -> CooldisResult<RunArgs> {
     })
 }
 
-fn parse_man_args(args: Vec<OsString>) -> CooldisResult<ManArgs> {
+fn parse_tool_manual_args(args: Vec<OsString>) -> CooldisResult<ToolManualArgs> {
     let mut registry_root = None;
     let mut json = false;
     let mut help = false;
@@ -3218,17 +4933,19 @@ fn parse_man_args(args: Vec<OsString>) -> CooldisResult<ManArgs> {
             "--json" => json = true,
             "--help" | "-h" => help = true,
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown man argument {other:?}")));
+                return Err(usage_error(format!(
+                    "unknown tool manual argument {other:?}"
+                )));
             }
             _ => positionals.push(arg.to_string_lossy().to_string()),
         }
     }
     if positionals.len() > 2 {
         return Err(usage_error(
-            "man accepts <published-tool> and optional <operation>",
+            "tool manual accepts <published-tool> and optional <operation>",
         ));
     }
-    Ok(ManArgs {
+    Ok(ToolManualArgs {
         tool_name: positionals.first().cloned(),
         operation: positionals.get(1).cloned(),
         registry_root,
@@ -3500,7 +5217,7 @@ fn parse_secret_list_args(args: Vec<OsString>, command: &str) -> CooldisResult<S
     Ok(SecretListArgs { state_home, help })
 }
 
-fn parse_provider_auth_set_args(args: Vec<OsString>) -> CooldisResult<ProviderAuthSetArgs> {
+fn parse_auth_set_args(args: Vec<OsString>) -> CooldisResult<AuthSetArgs> {
     let mut provider_id = None;
     let mut api_key_stdin = false;
     let mut state_home = None;
@@ -3512,21 +5229,17 @@ fn parse_provider_auth_set_args(args: Vec<OsString>) -> CooldisResult<ProviderAu
             "--api-key-stdin" => api_key_stdin = true,
             "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
-                    "unknown provider auth set argument {other:?}"
-                )));
+                return Err(usage_error(format!("unknown auth set argument {other:?}")));
             }
             _ => {
                 if provider_id.is_some() {
-                    return Err(usage_error(
-                        "provider auth set accepts exactly one <provider-id>",
-                    ));
+                    return Err(usage_error("auth set accepts exactly one <provider-id>"));
                 }
                 provider_id = Some(arg.to_string_lossy().to_string());
             }
         }
     }
-    Ok(ProviderAuthSetArgs {
+    Ok(AuthSetArgs {
         provider_id,
         api_key_stdin,
         state_home,
@@ -3534,10 +5247,7 @@ fn parse_provider_auth_set_args(args: Vec<OsString>) -> CooldisResult<ProviderAu
     })
 }
 
-fn parse_provider_auth_name_args(
-    args: Vec<OsString>,
-    command: &str,
-) -> CooldisResult<ProviderAuthNameArgs> {
+fn parse_auth_name_args(args: Vec<OsString>, command: &str) -> CooldisResult<AuthNameArgs> {
     let mut provider_id = None;
     let mut state_home = None;
     let mut help = false;
@@ -3559,7 +5269,7 @@ fn parse_provider_auth_name_args(
             }
         }
     }
-    Ok(ProviderAuthNameArgs {
+    Ok(AuthNameArgs {
         provider_id,
         state_home,
         help,
@@ -3605,6 +5315,52 @@ fn parse_rpc_args(args: Vec<OsString>) -> CooldisResult<RpcArgs> {
         runtime_home,
         state_home,
         cwd,
+    })
+}
+
+fn parse_console_args(args: Vec<OsString>) -> CooldisResult<ConsoleArgs> {
+    let mut listen = "127.0.0.1:0"
+        .parse::<std::net::SocketAddr>()
+        .expect("default console listen address is valid");
+    let mut cwd = std::env::current_dir()
+        .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?;
+    let mut cwd_explicit = false;
+    let mut config_path = None;
+    let mut open = true;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--no-open" => open = false,
+            "--cwd" => {
+                cwd = PathBuf::from(required_string_value(&mut iter, "--cwd")?);
+                cwd_explicit = true;
+            }
+            "--config" => config_path = Some(required_path_value(&mut iter, "--config")?),
+            "--port" => {
+                let port = required_string_value(&mut iter, "--port")?
+                    .parse::<u16>()
+                    .map_err(|_| usage_error("--port must be an integer from 0 to 65535"))?;
+                listen = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!("unknown console argument {other:?}")));
+            }
+            other => {
+                return Err(usage_error(format!(
+                    "cooldis console does not accept positional argument {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(ConsoleArgs {
+        listen,
+        cwd,
+        cwd_explicit,
+        config_path,
+        open,
+        help,
     })
 }
 
@@ -3861,30 +5617,46 @@ fn default_registry_root() -> PathBuf {
     PathBuf::from(".cooldis").join("operations")
 }
 
-fn default_state_home() -> PathBuf {
+fn default_project_state_home() -> PathBuf {
     PathBuf::from(".cooldis").join("state")
 }
 
-fn metadata_store_path_for_state_home(state_home: Option<PathBuf>) -> PathBuf {
+fn default_user_state_home() -> CooldisResult<PathBuf> {
+    Ok(default_user_cooldis_home()?.join("state"))
+}
+
+fn metadata_store_path_for_state_home(
+    state_home: Option<PathBuf>,
+    default_state_home: PathBuf,
+) -> PathBuf {
     state_home
-        .unwrap_or_else(default_state_home)
+        .unwrap_or(default_state_home)
         .join("metadata.sqlite3")
 }
 
 fn open_secret_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteSecretStore> {
-    SqliteSecretStore::open(metadata_store_path_for_state_home(state_home))
-        .map_err(secret_cli_error)
+    SqliteSecretStore::open(metadata_store_path_for_state_home(
+        state_home,
+        default_user_state_home()?,
+    ))
+    .map_err(secret_cli_error)
 }
 
 fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetadataStore> {
-    let store = SqliteMetadataStore::open(metadata_store_path_for_state_home(state_home))
-        .map_err(provider_cli_error)?;
+    let store = SqliteMetadataStore::open(metadata_store_path_for_state_home(
+        state_home,
+        default_user_state_home()?,
+    ))
+    .map_err(provider_cli_error)?;
     crate::seed_default_llm_providers(&store).map_err(provider_cli_error)?;
     Ok(store)
 }
 
 fn open_mcp_source_registry(state_home: Option<PathBuf>) -> CooldisResult<SqliteMcpSourceRegistry> {
-    SqliteMcpSourceRegistry::open(metadata_store_path_for_state_home(state_home))
+    SqliteMcpSourceRegistry::open(metadata_store_path_for_state_home(
+        state_home,
+        default_project_state_home(),
+    ))
 }
 
 fn secret_cli_error(err: impl std::fmt::Display) -> CooldisError {
@@ -4313,12 +6085,7 @@ fn load_chat_provider_config(args: &ChatArgs) -> CooldisResult<ChatProviderConfi
                 .or_else(|| env_or_file("AWS_BEDROCK_MODEL", &file_env))
                 .or_else(|| env_or_file("ANTHROPIC_DEFAULT_SONNET_MODEL", &file_env))
                 .unwrap_or_else(|| APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string());
-            let stream = config.stream.unwrap_or(false);
-            if stream {
-                return Err(usage_error(
-                    "Anthropic Bedrock InvokeModel streaming is not wired yet; omit --stream or set stream=false",
-                ));
-            }
+            let stream = config.stream.unwrap_or(true);
             Ok(ChatProviderConfig::AnthropicBedrock {
                 region,
                 base_url,
@@ -4666,12 +6433,7 @@ fn load_daemon_provider_config(
                 .or_else(|| env_or_file("AWS_BEDROCK_MODEL", &file_env))
                 .or_else(|| env_or_file("ANTHROPIC_DEFAULT_SONNET_MODEL", &file_env))
                 .unwrap_or_else(|| APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string());
-            let stream = config.stream.unwrap_or(false);
-            if stream {
-                return Err(usage_error(
-                    "Anthropic Bedrock InvokeModel streaming is not wired yet; set provider.stream=false",
-                ));
-            }
+            let stream = config.stream.unwrap_or(true);
             Ok(ChatProviderConfig::AnthropicBedrock {
                 region,
                 base_url,
@@ -4889,6 +6651,7 @@ fn load_chat_config_file(
         max_tokens: file.max_tokens,
         stream: file.stream,
         env_file: file.env_file,
+        // lexicon-allow: capsule - existing app-server operation binding API name
         capsule_bindings: file.capsule_bindings,
     });
     Ok((config, path.parent().map(|base| base.to_path_buf())))
@@ -5001,6 +6764,7 @@ impl PrivateAppServer {
         let root = PathBuf::from("/tmp").join(format!("cdis-chat-{}", Uuid::now_v7().simple()));
         let listen = AppServerListenAddr::Unix(root.join("app-server.sock"));
         let provider = load_chat_provider_config(options)?;
+        // lexicon-allow: capsule - existing app-server operation binding API name
         let capsule_bindings = load_chat_capsule_bindings_config(options)?;
         let mut config = CooldisAppServerConfig::local(listen.clone(), options.cwd.clone());
         config.runtime_home = options
@@ -5011,6 +6775,7 @@ impl PrivateAppServer {
             .state_home
             .clone()
             .unwrap_or_else(|| root.join("state"));
+        // lexicon-allow: capsule - existing app-server operation binding API name
         config.capsule_bindings = capsule_bindings;
         apply_chat_provider_config(&mut config, provider);
 
@@ -5055,19 +6820,6 @@ async fn wait_for_private_socket(path: &Path) -> CooldisResult<()> {
         "timed out waiting for private app-server socket {}",
         path.display()
     )))
-}
-
-async fn bootstrap_chat_client(client: &mut CodexTuiTestClient<UnixStream>) -> CooldisResult<()> {
-    client.account_read().await?;
-    let models = client.model_list().await?;
-    if models
-        .get("data")
-        .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty)
-    {
-        return Err(usage_error("private app-server returned no models"));
-    }
-    Ok(())
 }
 
 async fn manifest_receipt_event_ids(
@@ -5155,97 +6907,6 @@ async fn run_local_app_turn(
     }
 }
 
-async fn run_chat_repl(client: &mut CodexTuiTestClient<UnixStream>) -> CooldisResult<()> {
-    println!("Cooldis chat. Type /quit to exit.");
-    let thread = client.thread_start(json!({})).await?;
-    let stdin = std::io::stdin();
-    let mut stdin = stdin.lock();
-    loop {
-        print!("> ");
-        flush_stdout()?;
-
-        let mut input = String::new();
-        let bytes = stdin
-            .read_line(&mut input)
-            .map_err(|err| usage_error(format!("failed to read stdin: {err}")))?;
-        if bytes == 0 {
-            break;
-        }
-        let input = input.trim_end();
-        match input {
-            "" => continue,
-            "/quit" | "/q" | "exit" => break,
-            "/help" => {
-                println!("Enter a message, or /quit to exit.");
-                continue;
-            }
-            _ => {}
-        }
-
-        let turn = client.turn_start_text(&thread.id, input).await?;
-        print!("assistant> ");
-        flush_stdout()?;
-        stream_turn_to_stdout(client, &thread.id, &turn.id).await?;
-    }
-    Ok(())
-}
-
-async fn stream_turn_to_stdout(
-    client: &mut CodexTuiTestClient<UnixStream>,
-    thread_id: &str,
-    turn_id: &str,
-) -> CooldisResult<()> {
-    let deadline = tokio::time::sleep(Duration::from_secs(120));
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            _ = &mut deadline => {
-                println!();
-                return Err(usage_error(format!("timed out waiting for turn {turn_id}")));
-            }
-            event = client.next_event() => {
-                match event? {
-                    CodexTuiEvent::Notification(notification) => {
-                        if notification.method == "item/agentMessage/delta"
-                            && notification_matches_thread_turn(&notification, thread_id, turn_id)
-                        {
-                            if let Some(delta) = notification
-                                .params
-                                .as_ref()
-                                .and_then(|params| params.get("delta"))
-                                .and_then(Value::as_str)
-                            {
-                                print!("{delta}");
-                                flush_stdout()?;
-                            }
-                        } else if notification.method == "turn/completed"
-                            && notification_turn_id(&notification) == Some(turn_id)
-                        {
-                            println!();
-                            return Ok(());
-                        } else if notification.method == "error" {
-                            println!();
-                            return Err(usage_error(format!(
-                                "app-server error: {}",
-                                notification_error_message(&notification)
-                            )));
-                        }
-                    }
-                    CodexTuiEvent::Error(error) => {
-                        println!();
-                        return Err(usage_error(format!(
-                            "JSON-RPC error {}: {}",
-                            error.error.code,
-                            error.error.message
-                        )));
-                    }
-                    CodexTuiEvent::Request(_) | CodexTuiEvent::Response(_) => {}
-                }
-            }
-        }
-    }
-}
-
 fn notification_matches_thread_turn(
     notification: &JsonRpcNotification,
     thread_id: &str,
@@ -5291,6 +6952,10 @@ fn agent_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
 
 fn agent_operations_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
     registry_root.unwrap_or_else(default_operations_registry_root)
+}
+
+fn skill_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
+    registry_root.unwrap_or_else(|| PathBuf::from(".cooldis/skills"))
 }
 
 fn is_agent_manifest_file_path(path: &Path) -> bool {
@@ -5362,12 +7027,65 @@ fn write_agent_project(name: &str, root: &Path, force: bool) -> CooldisResult<()
     .map_err(io_error)
 }
 
+fn write_coupling_project(name: &str, root: &Path, force: bool) -> CooldisResult<()> {
+    let package_name = crate::validate_record_name(name)?;
+    let operation_name = coupling_operation_name(&package_name)?;
+    let cargo_toml_path = root.join("Cargo.toml");
+    let lib_path = root.join("src/lib.rs");
+    let package_path = root.join("cooldis.tool.toml");
+    let input_schema_path = root.join("schemas/coupling_invocation.input.json");
+    let output_schema_path = root.join("schemas/coupling_discharge.output.json");
+    let fixture_input_path = root.join("fixtures/invocation.json");
+    let fixture_expect_path = root.join("fixtures/expect.discharge.json");
+    let files = [
+        cargo_toml_path.as_path(),
+        lib_path.as_path(),
+        package_path.as_path(),
+        input_schema_path.as_path(),
+        output_schema_path.as_path(),
+        fixture_input_path.as_path(),
+        fixture_expect_path.as_path(),
+    ];
+    if !force {
+        for path in files {
+            if path.exists() {
+                return Err(usage_error(format!(
+                    "coupling scaffold file {} already exists; pass --force to replace it",
+                    path.display()
+                )));
+            }
+        }
+    }
+    fs::create_dir_all(root.join("src")).map_err(io_error)?;
+    fs::create_dir_all(root.join("schemas")).map_err(io_error)?;
+    fs::create_dir_all(root.join("fixtures")).map_err(io_error)?;
+    fs::write(&cargo_toml_path, render_coupling_cargo_toml(&package_name)?).map_err(io_error)?;
+    fs::write(&lib_path, render_coupling_lib_rs(&operation_name)).map_err(io_error)?;
+    fs::write(
+        &package_path,
+        render_coupling_tool_manifest(&package_name, &operation_name),
+    )
+    .map_err(io_error)?;
+    fs::write(&input_schema_path, COUPLING_INVOCATION_SCHEMA).map_err(io_error)?;
+    fs::write(&output_schema_path, COUPLING_DISCHARGE_SCHEMA).map_err(io_error)?;
+    fs::write(
+        &fixture_input_path,
+        render_coupling_fixture_input(&package_name),
+    )
+    .map_err(io_error)?;
+    fs::write(
+        &fixture_expect_path,
+        render_coupling_fixture_expect(&package_name),
+    )
+    .map_err(io_error)
+}
+
 fn render_agent_manifest_template(name: &str) -> CooldisResult<String> {
     crate::validate_record_name(name)?;
     Ok(format!(
         "# Cooldis V1 folder-first agent manifest.\n\
-# Prompt text lives in prompts/system.md. Publish custom operations first,\n\
-# then replace the placeholder op:// ref below before publishing this agent.\n\
+# Prompt text lives in prompts/system.md. Add tools only after publishing\n\
+# operation packages and replacing component refs with real op:// hashes.\n\
 \n\
 [agent]\n\
 name = {name:?}\n\
@@ -5384,12 +7102,7 @@ model_ref = \"model://local_offline/echo\"\n\
 [runtime]\n\
 default_cwd = \".\"\n\
 streaming = false\n\
-\n\
-[[tools]]\n\
-type = \"bash_tool\"\n\
-id = \"example-tool\"\n\
-command = \"example-tool\"\n\
-operation_ref = \"op://example-tool@sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n"
+"
     ))
 }
 
@@ -5475,11 +7188,236 @@ before publishing cooldis.agent.toml.\n"
     ))
 }
 
+fn render_coupling_cargo_toml(name: &str) -> CooldisResult<String> {
+    let crate_name = coupling_crate_name(name)?;
+    let sdk_path = guest_sdk_dependency_path();
+    Ok(format!(
+        "[package]\n\
+name = {}\n\
+version = \"0.1.0\"\n\
+edition = \"2024\"\n\
+publish = false\n\
+\n\
+[workspace]\n\
+\n\
+[lib]\n\
+crate-type = [\"cdylib\"]\n\
+\n\
+[dependencies]\n\
+cooldis-guest-sdk = {{ path = {} }}\n\
+serde = {{ version = \"1\", features = [\"derive\"] }}\n\
+serde_json = \"1\"\n\
+\n\
+[profile.release]\n\
+panic = \"abort\"\n",
+        toml_string(&crate_name),
+        toml_string(&sdk_path.display().to_string()),
+    ))
+}
+
+fn render_coupling_lib_rs(operation_name: &str) -> String {
+    COUPLING_LIB_RS_TEMPLATE.replace("__OPERATION_NAME__", operation_name)
+}
+
+fn render_coupling_tool_manifest(name: &str, operation_name: &str) -> String {
+    format!(
+        "kind = \"cooldis.tool\"\n\
+schema_version = 0\n\
+\n\
+[identity]\n\
+name = {}\n\
+version = \"0.1.0\"\n\
+description = \"Fold coupling invocation events into deterministic derived events.\"\n\
+\n\
+[runtime]\n\
+kind = \"wasm32-unknown-unknown\"\n\
+module_path = \".\"\n\
+state = \"stateless\"\n\
+release = true\n\
+max_input_bytes = 262144\n\
+max_output_bytes = 262144\n\
+\n\
+[[operations]]\n\
+name = {}\n\
+description = \"Emit one placement decision every configured number of selected events.\"\n\
+input_schema = \"schemas/coupling_invocation.input.json\"\n\
+output_schema = \"schemas/coupling_discharge.output.json\"\n\
+required_capabilities = []\n\
+\n\
+[operations.command]\n\
+name = {}\n\
+stdin = \"json\"\n\
+stdout = \"json\"\n\
+\n\
+[operations.mcp]\n\
+tool_name = {}\n\
+\n\
+[[fixtures]]\n\
+name = \"three_events\"\n\
+operation = {}\n\
+input = \"fixtures/invocation.json\"\n\
+expect = \"fixtures/expect.discharge.json\"\n",
+        toml_string(name),
+        toml_string(operation_name),
+        toml_string(&format!("{name} {operation_name}")),
+        toml_string(operation_name),
+        toml_string(operation_name),
+    )
+}
+
+fn render_coupling_fixture_input(name: &str) -> String {
+    format!(
+        "{{\n\
+  \"abi\": \"cooldis.coupling.invocation/0.1\",\n\
+  \"trigger_event\": {{\n\
+    \"id\": \"event-3\",\n\
+    \"stream_id\": \"thread:session\",\n\
+    \"sequence\": 3,\n\
+    \"kind\": \"turn.completed\",\n\
+    \"origin\": \"witnessed\",\n\
+    \"payload\": {{}}\n\
+  }},\n\
+  \"selected_events\": [\n\
+    {{\"id\": \"event-1\", \"stream_id\": \"thread:session\", \"sequence\": 1, \"kind\": \"turn.completed\", \"origin\": \"witnessed\", \"payload\": {{}}}},\n\
+    {{\"id\": \"event-2\", \"stream_id\": \"thread:session\", \"sequence\": 2, \"kind\": \"turn.completed\", \"origin\": \"witnessed\", \"payload\": {{}}}},\n\
+    {{\"id\": \"event-3\", \"stream_id\": \"thread:session\", \"sequence\": 3, \"kind\": \"turn.completed\", \"origin\": \"witnessed\", \"payload\": {{}}}}\n\
+  ],\n\
+  \"config\": {{\n\
+    \"every\": 3,\n\
+    \"sink_stream\": \"derived:counter\",\n\
+    \"sink_kind\": \"placement.decision\"\n\
+  }},\n\
+  \"invocation_meta\": {{\n\
+    \"coupling_id\": {},\n\
+    \"thread_id\": \"session\",\n\
+    \"depth\": 0\n\
+  }}\n\
+}}\n",
+        toml_string(name),
+    )
+}
+
+fn render_coupling_fixture_expect(name: &str) -> String {
+    format!(
+        "{{\n\
+  \"abi\": \"cooldis.coupling.discharge/0.1\",\n\
+  \"events\": [\n\
+    {{\n\
+      \"stream\": \"derived:counter\",\n\
+      \"kind\": \"placement.decision\",\n\
+      \"payload\": {{\n\
+        \"schema\": \"cooldis.scaffold.counter_fold/1\",\n\
+        \"count\": 3,\n\
+        \"trigger_event_id\": \"event-3\",\n\
+        \"coupling_id\": {}\n\
+      }}\n\
+    }}\n\
+  ]\n\
+}}\n",
+        toml_string(name),
+    )
+}
+
+fn coupling_operation_name(name: &str) -> CooldisResult<String> {
+    let mut operation = String::new();
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' => operation.push((byte as char).to_ascii_lowercase()),
+            b'a'..=b'z' | b'0'..=b'9' | b'_' => operation.push(byte as char),
+            b'-' | b'.' => operation.push('_'),
+            _ => {}
+        }
+    }
+    if operation
+        .as_bytes()
+        .first()
+        .is_none_or(|byte| !byte.is_ascii_alphabetic() && *byte != b'_')
+    {
+        operation.insert_str(0, "coupling_");
+    }
+    crate::validate_record_name(&operation)?;
+    Ok(operation)
+}
+
+fn coupling_crate_name(name: &str) -> CooldisResult<String> {
+    let mut suffix = String::new();
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' => suffix.push((byte as char).to_ascii_lowercase()),
+            b'a'..=b'z' | b'0'..=b'9' => suffix.push(byte as char),
+            b'-' | b'_' | b'.' => suffix.push('-'),
+            _ => {}
+        }
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        return Err(usage_error(
+            "coupling name does not produce a Cargo package name",
+        ));
+    }
+    Ok(format!("cooldis-coupling-{suffix}"))
+}
+
+fn guest_sdk_dependency_path() -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../cooldis-guest-sdk");
+    path.canonicalize().unwrap_or(path)
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 fn print_agent_record_json(record: &PublishedAgentRecord) -> CooldisResult<()> {
     let json = serde_json::to_string_pretty(record)
         .map_err(|err| usage_error(format!("failed to encode agent record: {err}")))?;
     println!("{json}");
     Ok(())
+}
+
+fn agent_context_source_lines(manifest: &Value) -> Vec<String> {
+    let resources = manifest
+        .get("resources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|resource| {
+            let name = resource.get("name").and_then(Value::as_str)?;
+            let ref_uri = resource
+                .get("ref")
+                .or_else(|| resource.get("reference"))
+                .and_then(Value::as_str)?;
+            Some((name, ref_uri))
+        })
+        .collect::<BTreeMap<_, _>>();
+    manifest
+        .get("context")
+        .and_then(|context| context.get("sources"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|source| {
+            source.get("assembler").and_then(Value::as_str) == Some("kernel://assembler/static")
+        })
+        .filter_map(|source| {
+            let id = source.get("id").and_then(Value::as_str)?;
+            let input = source.get("input").and_then(Value::as_str)?;
+            let ref_uri = resources.get(input).copied().unwrap_or(input);
+            let content_hash = content_hash_label_from_ref(ref_uri)?;
+            Some(format!(
+                "context_source: {id} -> {ref_uri} ({content_hash})"
+            ))
+        })
+        .collect()
+}
+
+fn content_hash_label_from_ref(ref_uri: &str) -> Option<String> {
+    if let Some(hash) = ref_uri.strip_prefix("resource://artifact/sha256:")
+        && hash.len() == 64
+    {
+        return Some(format!("sha256:{hash}"));
+    }
+    let (_prefix, hash) = ref_uri.rsplit_once("@sha256:")?;
+    (hash.len() == 64).then(|| format!("sha256:{hash}"))
 }
 
 fn flush_stdout() -> CooldisResult<()> {
@@ -5496,63 +7434,213 @@ fn io_error(err: impl std::fmt::Display) -> CooldisError {
     CooldisError::RuntimeFactory(err.to_string())
 }
 
+const COUPLING_LIB_RS_TEMPLATE: &str = r#"use cooldis_guest_sdk::prelude::*;
+use serde_json::json;
+
+#[derive(Deserialize)]
+struct CouplingConfig {
+    #[serde(default = "default_every")]
+    every: u64,
+    #[serde(default = "default_sink_stream")]
+    sink_stream: String,
+    #[serde(default = "default_sink_kind")]
+    sink_kind: String,
+}
+
+#[coupling]
+pub fn __OPERATION_NAME__(ctx: CouplingContext) -> Result<Discharge, GuestError> {
+    let config: CouplingConfig = ctx.config()?;
+    let every = config.every.max(1);
+    let count = ctx.sources().len() as u64;
+    if count == 0 || count % every != 0 {
+        return Ok(Discharge::empty());
+    }
+    Discharge::empty().event(
+        config.sink_stream,
+        config.sink_kind,
+        json!({
+            "schema": "cooldis.scaffold.counter_fold/1",
+            "count": count,
+            "trigger_event_id": ctx.trigger().id.clone(),
+            "coupling_id": ctx.meta().coupling_id.clone(),
+        }),
+    )
+}
+
+fn default_every() -> u64 {
+    3
+}
+
+fn default_sink_stream() -> String {
+    "derived:counter".to_string()
+}
+
+fn default_sink_kind() -> String {
+    "placement.decision".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cooldis_guest_sdk::testkit;
+
+    #[test]
+    fn fixture_runs_natively_without_wasm_host() {
+        let invocation =
+            testkit::invocation_from_fixture_file("fixtures/invocation.json").unwrap();
+        let discharge = testkit::invoke_coupling(__OPERATION_NAME__, invocation).unwrap();
+        assert_eq!(discharge.events.len(), 1);
+        assert_eq!(discharge.events[0].stream, "derived:counter");
+        assert_eq!(discharge.events[0].kind, "placement.decision");
+        assert_eq!(discharge.events[0].payload["count"], 3);
+    }
+}
+"#;
+
+const COUPLING_INVOCATION_SCHEMA: &str = r#"{
+  "type": "object",
+  "required": ["abi", "trigger_event", "invocation_meta"],
+  "properties": {
+    "abi": { "enum": ["cooldis.coupling.invocation/0.1"] },
+    "trigger_event": { "type": "object", "additionalProperties": true },
+    "selected_events": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "config": { "type": "object", "additionalProperties": true },
+    "invocation_meta": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": true
+}
+"#;
+
+const COUPLING_DISCHARGE_SCHEMA: &str = r#"{
+  "type": "object",
+  "required": ["abi", "events"],
+  "properties": {
+    "abi": { "enum": ["cooldis.coupling.discharge/0.1"] },
+    "events": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    }
+  },
+  "additionalProperties": true
+}
+"#;
+
+const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
+    "cooldis console",
+    "cooldis chat [PROMPT]",
+    "cooldis init <name>",
+    "cooldis coupling init <name>",
+    "cooldis agent plan <manifest>",
+    "cooldis agent publish <manifest>",
+    "cooldis blob publish <file>",
+    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> --thread-id <id> --journal <db>",
+    "cooldis tool build --package cooldis.tool.toml",
+    "cooldis tool publish --package cooldis.tool.toml",
+    "cooldis skill publish <dir>",
+    "cooldis auth status <provider-id>",
+    "cooldis secret list",
+];
+
+const ADVANCED_COMMANDS: &[&str] = &[
+    "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]>",
+    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--json]",
+    "cooldis debug rpc call <method> [PARAMS_JSON]",
+    "cooldis daemon run [--config cooldis.toml]",
+];
+
+const CANONICAL_COMMANDS: &[&str] = &[
+    "cooldis",
+    "cooldis commands",
+    "cooldis help [COMMAND...]",
+    "cooldis init <name> [--out <dir|manifest.toml>] [--force]",
+    "cooldis console [--no-open] [--cwd <path>] [--config <cooldis.toml>] [--port <port>]",
+    "cooldis chat [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]",
+    "cooldis auth status <provider-id> [--state-home ~/.cooldis/state]",
+    "cooldis auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]",
+    "cooldis auth delete <provider-id> [--state-home ~/.cooldis/state]",
+    "cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]",
+    "cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]",
+    "cooldis secret list [--state-home ~/.cooldis/state]",
+    "cooldis secret status <name> [--state-home ~/.cooldis/state]",
+    "cooldis secret delete <name> [--state-home ~/.cooldis/state]",
+    "cooldis agent init <name> [--out <dir|manifest.toml>] [--force]",
+    "cooldis coupling init <name> [--out <dir>] [--force]",
+    "cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
+    "cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
+    "cooldis agent list [--registry-root .cooldis/agents]",
+    "cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]",
+    "cooldis agent run <agent-ref> --input <text> [--registry-root .cooldis/agents]",
+    "cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]",
+    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--coupling-id <id>] [--registry-root .cooldis/operations] [--json]",
+    "cooldis tool build --package cooldis.tool.toml",
+    "cooldis tool build --module-path <dir|Cargo.toml> [--name <name>] [--config cooldis.json]",
+    "cooldis tool list [--registry-root .cooldis/operations]",
+    "cooldis tool publish --package cooldis.tool.toml [--registry-root .cooldis/operations]",
+    "cooldis tool run --module-path <dir|Cargo.toml> <operation> --input <text> [--mount /guest=/host]",
+    "cooldis tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]",
+    "cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]",
+    "cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]",
+    "cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]",
+    "cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <secret-name>] [--include-tool <tool>] [--state-home .cooldis/state]",
+    "cooldis tool source discover <name> [--state-home .cooldis/state]",
+    "cooldis tool source list [--json] [--state-home .cooldis/state]",
+    "cooldis tool source show <name> [--json] [--state-home .cooldis/state]",
+    "cooldis tool source remove <name> [--state-home .cooldis/state]",
+    "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]",
+    "cooldis debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]",
+    "cooldis debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]",
+    "cooldis debug rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]",
+    "cooldis daemon run [--config cooldis.toml]",
+    "cooldis daemon config validate [--config cooldis.toml]",
+    "cooldis daemon service print [--target launchd|systemd] --config cooldis.toml [--label com.cooldis.daemon]",
+    "cooldis daemon service install [--target launchd|systemd] --config cooldis.toml [--label com.cooldis.daemon]",
+    "cooldis daemon service uninstall [--target launchd|systemd] [--label com.cooldis.daemon]",
+];
+
 fn print_help() {
+    println!("cooldis\n");
+    println!("Usage:");
+    println!("  cooldis <command> [args]");
+    println!("  cooldis help [COMMAND...]");
+    println!("  cooldis commands");
+    println!();
+    print_command_group("Example usage:", ROOT_EXAMPLE_COMMANDS);
+    println!();
+    print_command_group("Advanced:", ADVANCED_COMMANDS);
+    println!();
+    println!("Further help:");
+    println!("  cooldis commands");
+    println!("  cooldis help <command>");
+    println!("  cooldis <command> --help");
+}
+
+fn print_help_help() {
     println!(
-        "cooldis\n\
+        "cooldis help\n\
 \n\
 Usage:\n\
-  cooldis\n\
-  cooldis init <name> [--out <dir|manifest.toml>]\n\
-  cooldis agent init <name> [--out <dir|manifest.toml>]\n\
-  cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
-  cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
-  cooldis agent list [--registry-root .cooldis/agents]\n\
-  cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]\n\
-  cooldis tool build --module-path <dir|Cargo.toml> [--name <name>]\n\
-  cooldis tool build --module-path <dir|Cargo.toml> [--debug] [--config cooldis.json]\n\
-  cooldis tool list [--registry-root .cooldis/operations]\n\
-  cooldis tool publish --package cooldis.tool.toml [--registry-root .cooldis/operations]\n\
-  cooldis tool run --module-path <dir|Cargo.toml> <operation> --input <text> [--mount /guest=/host]\n\
-  cooldis tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]\n\
-  cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]\n\
-  cooldis man <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
-  cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <name>]\n\
-  cooldis tool source discover <name> [--state-home .cooldis/state]\n\
-  cooldis tool source list [--json] [--state-home .cooldis/state]\n\
-  cooldis tool source show <name> [--json] [--state-home .cooldis/state]\n\
-  cooldis tool source remove <name> [--state-home .cooldis/state]\n\
-  cooldis secret import <name> --from-env <ENV> [--state-home .cooldis/state]\n\
-  cooldis secret set <name> --value-stdin [--state-home .cooldis/state]\n\
-  cooldis secret list [--state-home .cooldis/state]\n\
-  cooldis secret status <name> [--state-home .cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
-  cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]\n\
-  cooldis dev chat [PROMPT] [--cwd <path>]\n\
-  cooldis operator [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]\n\
-  cooldis dev tui [PROMPT] [--cwd <path>]   alias for cooldis operator\n\
-  cooldis daemon config validate [--config cooldis.toml]\n\
-  cooldis daemon service print --target launchd --config cooldis.toml\n\
-  cooldis daemon service install --target launchd --config cooldis.toml\n\
-  cooldis daemon service uninstall --target launchd [--label com.cooldis.daemon]\n\
-  cooldis daemon run [--config cooldis.toml]\n\
+  cooldis help [COMMAND...]\n\
 \n\
-Cooldis is the runtime command console. `cooldis operator` is the default local\n\
-terminal console; remote operation is exposed through `cooldis rpc`.\n"
+Prints root help or the help page for a canonical Cooldis command path.\n"
     );
 }
 
-fn print_man_help() {
-    println!(
-        "cooldis man\n\
-\n\
-Usage:\n\
-  cooldis man <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
-\n\
-Shows the caller-facing contract for a published tool operation. This is the\n\
-manual surface agents should read before invoking a tool; operator details such\n\
-as source paths, transports, and secret refs belong in tool config/show output.\n"
-    );
+fn print_commands_help() {
+    println!("cooldis commands\n");
+    println!("Usage:");
+    println!("  cooldis commands");
+    println!();
+    print_command_group("Commands:", CANONICAL_COMMANDS);
+}
+
+fn print_command_group(title: &str, commands: &[&str]) {
+    println!("{title}");
+    for command in commands {
+        println!("  {command}");
+    }
 }
 
 fn print_agent_help() {
@@ -5569,6 +7657,34 @@ Usage:\n\
 \n\
 Agents are declarative runtime artifacts. `plan` resolves the manifest and\n\
 writes nothing; `publish` reruns the plan and writes an immutable local record.\n"
+    );
+}
+
+fn print_coupling_help() {
+    println!(
+        "cooldis coupling\n\
+\n\
+Usage:\n\
+  cooldis coupling init <name> [--out <dir>] [--force]\n\
+  cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--coupling-id <id>] [--registry-root .cooldis/operations] [--json]\n\
+\n\
+Couplings are event-stream edges. `init` scaffolds a Rust Wasm coupling\n\
+package that uses #[coupling] and validates through `cooldis tool build\n\
+--package`. `run --replay` runs a coupling artifact against a recorded\n\
+thread in dry-run mode and prints proposed discharges without appending to\n\
+the source journal.\n"
+    );
+}
+
+fn print_coupling_init_help() {
+    println!(
+        "cooldis coupling init\n\
+\n\
+Usage:\n\
+  cooldis coupling init <name> [--out <dir>] [--force]\n\
+\n\
+Writes a macro-authored coupling crate with cooldis.tool.toml, schemas,\n\
+fixtures, and one native testkit test.\n"
     );
 }
 
@@ -5593,8 +7709,10 @@ Usage:\n\
   cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
 \n\
 Validates and resolves an agent manifest, previews the publish record, and\n\
-writes nothing. When an operations registry is present, op:// refs are\n\
-verified against it; otherwise they are reported unverified-offline.\n"
+does not write an agent record. Folder-first prompts are lowered through the\n\
+idempotent blob registry so the preview matches publish. When an operations\n\
+registry is present, op:// refs are verified against it; otherwise they are\n\
+reported unverified-offline.\n"
     );
 }
 
@@ -5603,11 +7721,13 @@ fn print_agent_publish_help() {
         "cooldis agent publish\n\
 \n\
 Usage:\n\
-  cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
+  cooldis agent publish <manifest> [--resolve-ops] [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
 \n\
 Reruns the agent plan and writes an immutable published agent record. Every\n\
 op:// tool ref must exist in the operations registry and its row grants must\n\
-cover the selected operation requirements.\n"
+cover the selected operation requirements. --resolve-ops rewrites op://name\n\
+or op://name@latest authoring refs in the manifest file to pinned\n\
+op://name@sha256:<hash> refs before publish verification runs.\n"
     );
 }
 
@@ -5657,6 +7777,7 @@ Usage:\n\
   cooldis tool run --module-path <dir|Cargo.toml> <operation> --input <text> [--mount /guest=/host]\n\
   cooldis tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]\n\
   cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]\n\
+  cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
   cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <secret-name>]\n\
   cooldis tool source discover <name> [--state-home .cooldis/state]\n\
   cooldis tool source list [--json] [--state-home .cooldis/state]\n\
@@ -5666,6 +7787,72 @@ Usage:\n\
 Tools are the public capability surface. A published tool may contain one or\n\
 more ABI operations, and Cooldis can project those operations as model tools,\n\
 virtual-bash commands, HTTP routes, MCP exports, or other runtime surfaces.\n"
+    );
+}
+
+fn print_skill_help() {
+    println!(
+        "cooldis skill\n\
+\n\
+Usage:\n\
+  cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]\n\
+\n\
+Skills are markdown context resources. Publishing turns a directory of\n\
+<name>/SKILL.md files into one content-addressed skill:// package for agent\n\
+manifest resource rows.\n"
+    );
+}
+
+fn print_blob_help() {
+    println!(
+        "cooldis blob\n\
+\n\
+Usage:\n\
+  cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]\n\
+\n\
+Blobs are immutable text or binary artifacts addressable as\n\
+resource://artifact/sha256:<hash>. Agent manifests use blob resources for\n\
+folder-first prompts and other static context inputs.\n"
+    );
+}
+
+fn print_blob_publish_help() {
+    println!(
+        "cooldis blob publish\n\
+\n\
+Usage:\n\
+  cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]\n\
+\n\
+Publishes a file as a content-addressed blob artifact and prints the immutable\n\
+resource://artifact/sha256:<hash> ref for manifest resource rows.\n"
+    );
+}
+
+fn print_coupling_run_help() {
+    println!(
+        "cooldis coupling run\n\
+\n\
+Usage:\n\
+  cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--coupling-id <id>] [--registry-root .cooldis/operations] [--json]\n\
+\n\
+Replays recorded thread events through the bound coupling trigger, selector,\n\
+quota, budget, and Wasm execution path. Output is proposals only; no source\n\
+journal stream is appended. --json emits stable machine-readable replay\n\
+receipts for tests and scripts.\n"
+    );
+}
+
+fn print_skill_publish_help() {
+    println!(
+        "cooldis skill publish\n\
+\n\
+Usage:\n\
+  cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]\n\
+\n\
+Publishes a deterministic skill package from <dir>/<skill>/SKILL.md files.\n\
+Optional frontmatter may declare name, description, and trigger_hint; without\n\
+frontmatter, the skill name is the directory name and the description is the\n\
+first non-heading markdown line.\n"
     );
 }
 
@@ -5797,16 +7984,29 @@ Runs an operation from source, a Wasm artifact, or a published tool record.\n"
     );
 }
 
+fn print_tool_manual_help() {
+    println!(
+        "cooldis tool manual\n\
+\n\
+Usage:\n\
+  cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]\n\
+\n\
+Shows the caller-facing contract for a published tool operation. This is the\n\
+manual surface agents should read before invoking a tool; implementation details such\n\
+as source paths, transports, and secret refs belong in tool source/show output.\n"
+    );
+}
+
 fn print_secret_help() {
     println!(
         "cooldis secret\n\
 \n\
 Usage:\n\
-  cooldis secret import <name> --from-env <ENV> [--state-home .cooldis/state]\n\
-  cooldis secret set <name> --value-stdin [--state-home .cooldis/state]\n\
-  cooldis secret list [--state-home .cooldis/state]\n\
-  cooldis secret status <name> [--state-home .cooldis/state]\n\
-  cooldis secret delete <name> [--state-home .cooldis/state]\n\
+  cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]\n\
+  cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis secret list [--state-home ~/.cooldis/state]\n\
+  cooldis secret status <name> [--state-home ~/.cooldis/state]\n\
+  cooldis secret delete <name> [--state-home ~/.cooldis/state]\n\
 \n\
 Stores local secret refs for host-mediated tool calls. List and status output\n\
 redact values; tool runtimes receive only manifest-declared secret names.\n"
@@ -5818,7 +8018,7 @@ fn print_secret_import_help() {
         "cooldis secret import\n\
 \n\
 Usage:\n\
-  cooldis secret import <name> --from-env <ENV> [--state-home .cooldis/state]\n\
+  cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]\n\
 \n\
 Imports a local environment variable into the Cooldis secret store under a\n\
 stable secret name such as EXAMPLE_API_KEY.\n"
@@ -5830,7 +8030,7 @@ fn print_secret_set_help() {
         "cooldis secret set\n\
 \n\
 Usage:\n\
-  cooldis secret set <name> --value-stdin [--state-home .cooldis/state]\n\
+  cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]\n\
 \n\
 Stores a secret value read from stdin. The stored value is never printed.\n"
     );
@@ -5841,7 +8041,7 @@ fn print_secret_list_help() {
         "cooldis secret list\n\
 \n\
 Usage:\n\
-  cooldis secret list [--state-home .cooldis/state]\n\
+  cooldis secret list [--state-home ~/.cooldis/state]\n\
 \n\
 Lists configured secret refs without printing secret values.\n"
     );
@@ -5852,7 +8052,7 @@ fn print_secret_status_help() {
         "cooldis secret status\n\
 \n\
 Usage:\n\
-  cooldis secret status <name> [--state-home .cooldis/state]\n\
+  cooldis secret status <name> [--state-home ~/.cooldis/state]\n\
 \n\
 Prints redacted metadata for one secret ref.\n"
     );
@@ -5863,67 +8063,54 @@ fn print_secret_delete_help() {
         "cooldis secret delete\n\
 \n\
 Usage:\n\
-  cooldis secret delete <name> [--state-home .cooldis/state]\n\
+  cooldis secret delete <name> [--state-home ~/.cooldis/state]\n\
 \n\
 Deletes a local secret ref.\n"
     );
 }
 
-fn print_provider_help() {
+fn print_auth_help() {
     println!(
-        "cooldis provider\n\
+        "cooldis auth\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
-  cooldis provider auth delete <provider-id> [--state-home .cooldis/state]\n\
+  cooldis auth status <provider-id> [--state-home ~/.cooldis/state]\n\
+  cooldis auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
+  cooldis auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Manages model-provider credentials in the local metadata store. Values are read\n\
 from stdin and never printed.\n"
     );
 }
 
-fn print_provider_auth_help() {
+fn print_auth_status_help() {
     println!(
-        "cooldis provider auth\n\
+        "cooldis auth status\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
-  cooldis provider auth delete <provider-id> [--state-home .cooldis/state]\n\
+  cooldis auth status <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
-Stores redacted model-provider credentials for daemon/app-server provider calls.\n"
+Prints redacted model-provider credential status.\n"
     );
 }
 
-fn print_provider_auth_status_help() {
+fn print_auth_set_help() {
     println!(
-        "cooldis provider auth status\n\
+        "cooldis auth set\n\
 \n\
 Usage:\n\
-  cooldis provider auth status <provider-id> [--state-home .cooldis/state]\n\
-\n\
-Prints redacted provider auth status.\n"
-    );
-}
-
-fn print_provider_auth_set_help() {
-    println!(
-        "cooldis provider auth set\n\
-\n\
-Usage:\n\
-  cooldis provider auth set <provider-id> --api-key-stdin [--state-home .cooldis/state]\n\
+  cooldis auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]\n\
 \n\
 Stores a model-provider API key read from stdin. The stored value is never printed.\n"
     );
 }
 
-fn print_provider_auth_delete_help() {
+fn print_auth_delete_help() {
     println!(
-        "cooldis provider auth delete\n\
+        "cooldis auth delete\n\
 \n\
 Usage:\n\
-  cooldis provider auth delete <provider-id> [--state-home .cooldis/state]\n\
+  cooldis auth delete <provider-id> [--state-home ~/.cooldis/state]\n\
 \n\
 Deletes a stored model-provider credential.\n"
     );
@@ -5941,31 +8128,28 @@ remote operation when Cooldis is running in a sandbox, daemon, or managed host.\
     );
 }
 
-fn print_dev_help() {
+fn print_console_help() {
     println!(
-        "cooldis dev\n\
+        "cooldis console\n\
 \n\
 Usage:\n\
-  cooldis dev chat [PROMPT] [--config <file>] [--cwd <path>]\n\
-  cooldis dev tui [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]\n\
-  cooldis dev rpc (call|turn|tail) ...   debug client for a running daemon (see `cooldis dev rpc --help`)\n\
+  cooldis console [--no-open] [--cwd <path>] [--config <cooldis.toml>] [--port <port>]\n\
 \n\
-Developer surfaces for manually exercising the local provider loop. `dev tui`\n\
-is retained as an alias for the default operator console.\n"
+Starts the bundled local browser console on 127.0.0.1. The command serves the\n\
+console UI and the /rpc WebSocket endpoint from one loopback listener, prints\n\
+the UI and RPC URLs, and opens the browser unless --no-open is set.\n"
     );
 }
 
-fn print_dev_tui_help() {
+fn print_debug_help() {
     println!(
-        "cooldis dev tui\n\
+        "cooldis debug\n\
 \n\
 Usage:\n\
-  cooldis dev tui [PROMPT] [--config <file>] [--cwd <path>] [--attach <unix://path|ws://host:port[/rpc]>]\n\
-  cooldis dev tui [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
+  cooldis debug rpc (call|turn|tail) ...   debug client for a running daemon (see `cooldis debug rpc --help`)\n\
 \n\
-Alias for `cooldis operator`. Starts a private local app-server by default, or\n\
-attaches to an existing app-server with --attach. Enter sends input; modified\n\
-Enter inserts a newline; Esc/Ctrl-C interrupt active turns or exit when idle.\n"
+Maintainer and protocol inspection tools. These commands are not the public\n\
+local console flow; use `cooldis console` or `cooldis chat` for normal operation.\n"
     );
 }
 
@@ -5985,44 +8169,18 @@ user-level launchd/systemd service file without starting it automatically.\n"
     );
 }
 
-fn print_thread_help() {
+fn print_chat_help() {
     println!(
-        "cooldis thread\n\
-\n\
-Thread CLI commands are not part of this V1 surface yet. Use the rpc thread/*\n\
-JSON-RPC methods through Cooldis-owned clients, MCP, or tests.\n"
-    );
-}
-
-fn print_operator_help() {
-    println!(
-        "cooldis operator\n\
+        "cooldis chat\n\
 \n\
 Usage:\n\
-  cooldis operator [PROMPT] [--config <file>] [--cwd <path>]\n\
-  cooldis operator [PROMPT] --attach <unix://path|ws://host:port[/rpc]>\n\
-  cooldis operator [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
+  cooldis chat [PROMPT] [--config <file>] [--cwd <path>]\n\
+  cooldis chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>\n\
+  cooldis chat [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
 \n\
 Starts the bundled local terminal console over the app-server RPC boundary. By\n\
 default it launches a private local app-server; --attach connects to an existing\n\
 endpoint. In the TUI, use /help for session commands.\n"
-    );
-}
-
-fn print_dev_chat_help() {
-    println!(
-        "cooldis dev chat\n\
-\n\
-Usage:\n\
-  cooldis dev chat [PROMPT] [--config <file>] [--cwd <path>]\n\
-  cooldis dev chat [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
-  cooldis dev chat [PROMPT] --provider openai_compatible --api-key-env OPENAI_COMPATIBLE_API_KEY [--model example-chat-model]\n\
-  cooldis dev chat [PROMPT] --provider anthropic --api-key-env ANTHROPIC_API_KEY [--model claude-sonnet-4-5-20250929]\n\
-  cooldis dev chat [PROMPT] --provider anthropic_bedrock --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 --no-stream\n\
-\n\
-Starts a private Cooldis app-server on a temporary Unix socket and connects the\n\
-owned Codex-shaped client to it. With no prompt, opens a small line REPL.\n\
-When no config is given, cooldis reads chat settings from ./cooldis.json if it exists.\n"
     );
 }
 

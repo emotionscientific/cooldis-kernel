@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
+
+pub const COUPLING_INVOCATION_ABI: &str = "cooldis.coupling.invocation/0.1";
+pub const COUPLING_DISCHARGE_ABI: &str = "cooldis.coupling.discharge/0.1";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct WasmOperationManifest {
@@ -201,6 +205,78 @@ pub struct InvocationContext {
     pub attachment_bindings: Vec<AttachmentBinding>,
     #[serde(default)]
     pub audit_metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingInvocation {
+    pub abi: String,
+    pub trigger_event: CouplingInvocationEvent,
+    #[serde(default)]
+    pub selected_events: Vec<CouplingInvocationEvent>,
+    #[serde(default)]
+    pub config: JsonValue,
+    pub invocation_meta: CouplingInvocationMeta,
+}
+
+impl CouplingInvocation {
+    pub fn new(
+        trigger_event: CouplingInvocationEvent,
+        selected_events: Vec<CouplingInvocationEvent>,
+        config: JsonValue,
+        invocation_meta: CouplingInvocationMeta,
+    ) -> Self {
+        Self {
+            abi: COUPLING_INVOCATION_ABI.to_string(),
+            trigger_event,
+            selected_events,
+            config,
+            invocation_meta,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingInvocationEvent {
+    pub id: String,
+    pub stream_id: String,
+    pub sequence: i64,
+    pub kind: String,
+    pub origin: String,
+    #[serde(default)]
+    pub payload: JsonValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CouplingInvocationMeta {
+    pub coupling_id: String,
+    pub thread_id: String,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingDischarge {
+    pub abi: String,
+    #[serde(default)]
+    pub events: Vec<CouplingDischargeEvent>,
+}
+
+impl CouplingDischarge {
+    pub fn new(events: Vec<CouplingDischargeEvent>) -> Self {
+        Self {
+            abi: COUPLING_DISCHARGE_ABI.to_string(),
+            events,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CouplingDischargeEvent {
+    pub stream: String,
+    pub kind: String,
+    #[serde(default)]
+    pub payload: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<JsonValue>,
 }
 
 impl InvocationContext {

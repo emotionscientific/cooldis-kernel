@@ -12,26 +12,26 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn dev_rpc_cli_calls_and_streams_turns_over_websocket() {
-    let root = PathBuf::from("/tmp").join(format!("cdis-dev-rpc-{}", Uuid::now_v7().simple()));
+async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
+    let root = PathBuf::from("/tmp").join(format!("cdis-debug-rpc-{}", Uuid::now_v7().simple()));
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let addr = unused_loopback_addr();
     let url = format!("ws://{addr}/rpc");
-    let server = DevRpcServer::start(&root, &workspace, addr).await;
+    let server = DebugRpcServer::start(&root, &workspace, addr).await;
 
-    let call = run_cooldis(["dev", "rpc", "call", "thread/list", "--url", url.as_str()]).await;
+    let call = run_cooldis(["debug", "rpc", "call", "thread/list", "--url", url.as_str()]).await;
     assert_success(&call);
     let thread_list: Value = serde_json::from_slice(&call.stdout).unwrap();
     assert!(thread_list["data"].as_array().is_some());
 
     let first = run_cooldis([
-        "dev",
+        "debug",
         "rpc",
         "turn",
         "--new",
         "--json",
-        "first dev rpc turn",
+        "first debug rpc turn",
         "--url",
         url.as_str(),
     ])
@@ -54,17 +54,17 @@ async fn dev_rpc_cli_calls_and_streams_turns_over_websocket() {
     let completed_text = completed_turn_text(&jsonl);
     assert_eq!(delta_text, completed_text);
     assert!(
-        completed_text.contains("first dev rpc turn"),
+        completed_text.contains("first debug rpc turn"),
         "completed text did not include prompt: {completed_text:?}"
     );
 
     let resumed = run_cooldis([
-        "dev",
+        "debug",
         "rpc",
         "turn",
         "--thread",
         thread_id.as_str(),
-        "second dev rpc turn",
+        "second debug rpc turn",
         "--url",
         url.as_str(),
     ])
@@ -72,7 +72,7 @@ async fn dev_rpc_cli_calls_and_streams_turns_over_websocket() {
     assert_success(&resumed);
     let resumed_stdout = String::from_utf8(resumed.stdout).unwrap();
     assert!(
-        resumed_stdout.contains("second dev rpc turn"),
+        resumed_stdout.contains("second debug rpc turn"),
         "resumed turn output did not include prompt: {resumed_stdout:?}"
     );
 
@@ -80,11 +80,11 @@ async fn dev_rpc_cli_calls_and_streams_turns_over_websocket() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-struct DevRpcServer {
+struct DebugRpcServer {
     task: JoinHandle<cooldis::CooldisResult<()>>,
 }
 
-impl DevRpcServer {
+impl DebugRpcServer {
     async fn start(root: &Path, workspace: &Path, addr: SocketAddr) -> Self {
         let listen = AppServerListenAddr::WebSocket(addr);
         let mut config = CooldisAppServerConfig::local(listen.clone(), workspace);
@@ -108,7 +108,7 @@ async fn wait_for_websocket(url: &str) {
         match CodexTuiTestClient::connect_websocket(
             url,
             CodexTuiConnectConfig {
-                client_name: "cooldis-dev-rpc-test-wait".to_string(),
+                client_name: "cooldis-debug-rpc-test-wait".to_string(),
                 ..CodexTuiConnectConfig::default()
             },
         )
@@ -125,7 +125,7 @@ async fn wait_for_websocket(url: &str) {
         }
     }
     panic!(
-        "timed out waiting for dev rpc websocket {url}; last error: {}",
+        "timed out waiting for debug rpc websocket {url}; last error: {}",
         last_error.unwrap_or_else(|| "none".to_string())
     );
 }

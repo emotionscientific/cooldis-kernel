@@ -14,6 +14,7 @@ members = [
     "crates/cooldis-vbash",
     "crates/cooldis-wasm",
     "crates/cooldis-guest-sdk",
+    "crates/cooldis-guest-sdk-macros",
     "crates/cooldis-io-core",
     "crates/cooldis-io-pgqrs",
     "crates/cooldis-io-telegram",
