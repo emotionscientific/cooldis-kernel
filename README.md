@@ -103,6 +103,8 @@ stateful product harnesses are future direction. See
 - [ABI](docs/abi.md): operation boundary and host/guest contract.
 - [Wasm operation dev kit](docs/wasm-operation-dev-kit.md): Rust guest
   macros, fixtures, custom coupling authoring, and replay.
+- [OpenAPI adapter](docs/openapi-adapter.md): import a witnessed REST contract
+  into ordinary published operations without SDK generation.
 - [Agent CLI](docs/agent-cli.md): manifest authoring and local agent commands.
 - [Agent manifest ontology](docs/agent-manifest-ontology.md): manifest shape
   and deferred fields.

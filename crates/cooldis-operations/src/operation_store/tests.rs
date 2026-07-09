@@ -107,6 +107,33 @@ fn published_record_round_trips_and_validates_projection() {
 }
 
 #[test]
+fn legacy_wasm_source_deserializes_after_import_source_is_added() {
+    let source: PublishedOperationSource = serde_json::from_value(serde_json::json!({
+        "kind": "wasm",
+        "bin_path": "tool.wasm"
+    }))
+    .unwrap();
+    assert_eq!(
+        source,
+        PublishedOperationSource::Wasm {
+            bin_path: PathBuf::from("tool.wasm")
+        }
+    );
+}
+
+#[test]
+fn imported_record_rejects_invalid_spec_provenance_hash() {
+    let mut record = test_record("catalog", &"a".repeat(64), "search");
+    record.source = PublishedOperationSource::Import {
+        manifest_path: PathBuf::from("catalog.import.toml"),
+        spec_sha256: "not-a-sha256".to_string(),
+    };
+
+    let err = record.validate().unwrap_err().to_string();
+    assert!(err.contains("import spec sha256"), "{err}");
+}
+
+#[test]
 fn record_validation_rejects_stale_projection() {
     let manifest = test_manifest();
     let registered = RegisteredOperation {

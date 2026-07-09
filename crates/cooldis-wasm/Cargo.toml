@@ -8,6 +8,7 @@ publish = false
 bashkit = { version = "0.9.0", features = ["realfs"] }
 cooldis-abi = { path = "../cooldis-abi" }
 cooldis-process = { path = "../cooldis-process" }
+cooldis-runtime-contracts = { path = "../cooldis-runtime-contracts" }
 cooldis-vfs = { path = "../cooldis-vfs" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

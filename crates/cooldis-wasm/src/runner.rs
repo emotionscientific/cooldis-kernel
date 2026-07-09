@@ -5,7 +5,9 @@ use crate::{
 use bashkit::{Error as BashkitError, FileSystem};
 use cooldis_abi::{InvocationContext, WasmOperationManifest};
 use cooldis_process::{CooldisProcessHandle, WasmOperationOutput};
+use cooldis_runtime_contracts::validate_json_value_against_schema;
 use cooldis_vfs::CooldisVfs;
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -1025,6 +1027,36 @@ pub struct WasmHttpError {
     pub message: String,
 }
 
+/// Canonical URL facts shared by import planning and the HTTP host gate.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NormalizedHttpUrl {
+    pub url: String,
+    pub origin: String,
+    pub private_destination: bool,
+    pub has_credentials: bool,
+    pub has_query: bool,
+    pub has_fragment: bool,
+}
+
+/// Parse and canonicalize one HTTP URL using the same rules as host execution.
+#[doc(hidden)]
+pub fn normalize_http_url(value: &str) -> Result<NormalizedHttpUrl, String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "invalid HTTP URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("HTTP URL scheme must be http or https".to_string());
+    }
+    let origin = http_origin(&url).ok_or_else(|| "HTTP URL must include a host".to_string())?;
+    Ok(NormalizedHttpUrl {
+        url: url.to_string(),
+        origin,
+        private_destination: is_private_or_special_url(&url),
+        has_credentials: !url.username().is_empty() || url.password().is_some(),
+        has_query: url.query().is_some(),
+        has_fragment: url.fragment().is_some(),
+    })
+}
+
 impl WasmHttpError {
     fn invalid_argument(message: impl Into<String>) -> Self {
         Self {
@@ -1073,7 +1105,7 @@ pub async fn execute_http_request(
     grants: BTreeSet<String>,
     secrets: BTreeMap<String, String>,
 ) -> Result<WasmHttpExchange, WasmHttpError> {
-    let request: WasmHttpRequest = serde_json::from_slice(&request_bytes)
+    let mut request: WasmHttpRequest = serde_json::from_slice(&request_bytes)
         .map_err(|err| WasmHttpError::invalid_argument(format!("invalid HTTP request: {err}")))?;
     if request.abi != HTTP_ABI {
         return Err(WasmHttpError::invalid_argument(format!(
@@ -1082,20 +1114,19 @@ pub async fn execute_http_request(
         )));
     }
 
+    let body = apply_http_input_mapping(&mut request, body)?;
+    let response_envelope = request.response_envelope;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|_| WasmHttpError::invalid_argument("invalid HTTP method"))?;
-    let url = reqwest::Url::parse(&request.url)
-        .map_err(|_| WasmHttpError::invalid_argument("invalid HTTP url"))?;
-    if url.scheme() != "http" && url.scheme() != "https" {
+    let target = normalize_http_url(&request.url).map_err(WasmHttpError::invalid_argument)?;
+    if target.has_credentials {
         return Err(WasmHttpError::invalid_argument(
-            "HTTP url scheme must be http or https",
+            "HTTP URL must not contain credentials",
         ));
     }
-
-    let origin = http_origin(&url)
-        .ok_or_else(|| WasmHttpError::invalid_argument("HTTP url must include a host"))?;
-    let private_destination = is_private_or_special_url(&url);
-    ensure_http_capability(&grants, &method, &origin, private_destination)?;
+    let url = reqwest::Url::parse(&target.url)
+        .map_err(|_| WasmHttpError::invalid_argument("invalid canonical HTTP URL"))?;
+    ensure_http_capability(&grants, &method, &target.origin, target.private_destination)?;
 
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -1109,17 +1140,15 @@ pub async fn execute_http_request(
         .build()
         .map_err(|err| WasmHttpError::transport(sanitize_http_error(err)))?;
 
-    let mut http = client.request(method.clone(), url).body(body);
+    let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in request.headers {
-        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| WasmHttpError::invalid_argument("invalid HTTP header name"))?;
+        let name = outbound_header_name(&name, "invalid HTTP header name")?;
         let value = reqwest::header::HeaderValue::from_str(&value)
             .map_err(|_| WasmHttpError::invalid_argument("invalid HTTP header value"))?;
-        http = http.header(name, value);
+        headers.insert(name, value);
     }
     for (name, secret_name) in request.secret_headers {
-        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| WasmHttpError::invalid_argument("invalid HTTP secret header name"))?;
+        let name = outbound_header_name(&name, "invalid HTTP secret header name")?;
         let capability = format!("secret:{secret_name}");
         if !grants.contains(&capability) {
             return Err(WasmHttpError::capability_denied(
@@ -1134,11 +1163,34 @@ pub async fn execute_http_request(
         let value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
             WasmHttpError::invalid_argument("secret value is not valid for HTTP header")
         })?;
-        http = http.header(name, value);
+        headers.insert(name, value);
     }
+    for (name, secret_name, prefix) in request.secret_header_prefixes {
+        let name = outbound_header_name(&name, "invalid HTTP prefixed secret header name")?;
+        let capability = format!("secret:{secret_name}");
+        if !grants.contains(&capability) {
+            return Err(WasmHttpError::capability_denied(
+                "missing required secret capability",
+            ));
+        }
+        let Some(value) = secrets.get(&secret_name) else {
+            return Err(WasmHttpError::capability_denied(
+                "required secret is not available",
+            ));
+        };
+        let value =
+            reqwest::header::HeaderValue::from_str(&format!("{prefix}{value}")).map_err(|_| {
+                WasmHttpError::invalid_argument("secret value is not valid for HTTP header")
+            })?;
+        headers.insert(name, value);
+    }
+    let http = client
+        .request(method.clone(), url)
+        .headers(headers)
+        .body(body);
 
     let started_at = Instant::now();
-    let response = http.send().await.map_err(|err| {
+    let mut response = http.send().await.map_err(|err| {
         if err.is_timeout() {
             WasmHttpError::timeout("HTTP request timed out")
         } else {
@@ -1146,7 +1198,7 @@ pub async fn execute_http_request(
         }
     })?;
     let status = response.status().as_u16();
-    let headers = response
+    let headers: Vec<(String, String)> = response
         .headers()
         .iter()
         .map(|(name, value)| {
@@ -1160,18 +1212,46 @@ pub async fn execute_http_request(
         .max_response_bytes
         .unwrap_or(HTTP_DEFAULT_MAX_RESPONSE_BYTES)
         .min(HTTP_DEFAULT_MAX_RESPONSE_BYTES);
-    let mut body = response.bytes().await.map_err(|err| {
+    let mut body = Vec::with_capacity(max_response_bytes.min(64 * 1024));
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await.map_err(|err| {
         if err.is_timeout() {
             WasmHttpError::timeout("HTTP response timed out")
         } else {
             WasmHttpError::transport(sanitize_http_error(err))
         }
-    })?;
-    let truncated = body.len() > max_response_bytes;
-    if truncated {
-        body.truncate(max_response_bytes);
+    })? {
+        let remaining = max_response_bytes.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+        if body.len() == max_response_bytes {
+            if response
+                .chunk()
+                .await
+                .map_err(|err| {
+                    if err.is_timeout() {
+                        WasmHttpError::timeout("HTTP response timed out")
+                    } else {
+                        WasmHttpError::transport(sanitize_http_error(err))
+                    }
+                })?
+                .is_some()
+            {
+                truncated = true;
+            }
+            break;
+        }
     }
 
+    let (body, truncated) = if response_envelope {
+        encode_http_response_envelope(status, &headers, &body, truncated, max_response_bytes)?
+    } else {
+        (body, truncated)
+    };
     Ok(WasmHttpExchange {
         response: WasmHttpResponse {
             abi: HTTP_ABI.to_string(),
@@ -1184,8 +1264,250 @@ pub async fn execute_http_request(
                 .try_into()
                 .unwrap_or(u64::MAX),
         },
-        body: body.to_vec(),
+        body,
     })
+}
+
+#[derive(Deserialize)]
+struct WasmHttpInputMapping {
+    #[serde(default)]
+    input_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    parameters: Vec<WasmHttpParameterMapping>,
+    #[serde(default)]
+    request_body: Option<WasmHttpRequestBodyMapping>,
+}
+
+#[derive(Deserialize)]
+struct WasmHttpParameterMapping {
+    name: String,
+    input_property: String,
+    location: String,
+    required: bool,
+    schema: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct WasmHttpRequestBodyMapping {
+    required: bool,
+    #[serde(default)]
+    input_property: Option<String>,
+    schema: serde_json::Value,
+}
+
+fn apply_http_input_mapping(
+    request: &mut WasmHttpRequest,
+    input_bytes: Vec<u8>,
+) -> Result<Vec<u8>, WasmHttpError> {
+    let Some(mapping) = request.input_mapping.take() else {
+        return Ok(input_bytes);
+    };
+    let mapping: WasmHttpInputMapping = serde_json::from_value(mapping).map_err(|err| {
+        WasmHttpError::invalid_argument(format!("invalid HTTP input mapping: {err}"))
+    })?;
+    let input: serde_json::Value = serde_json::from_slice(&input_bytes)
+        .map_err(|err| WasmHttpError::invalid_argument(format!("invalid JSON input: {err}")))?;
+    if let Some(input_schema) = &mapping.input_schema {
+        validate_json_value_against_schema(input_schema, &input, "HTTP mapped input").map_err(
+            |err| {
+                WasmHttpError::invalid_argument(format!(
+                    "HTTP input violates its pinned schema: {err}"
+                ))
+            },
+        )?;
+    }
+    let object = input.as_object();
+    let mut url = request.url.clone();
+    let mut query = Vec::new();
+    for parameter in mapping.parameters {
+        let value = object.and_then(|object| object.get(&parameter.input_property));
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            if parameter.required {
+                return Err(WasmHttpError::invalid_argument(format!(
+                    "missing required HTTP input property {:?}",
+                    parameter.input_property
+                )));
+            }
+            continue;
+        };
+        validate_json_value_against_schema(
+            &parameter.schema,
+            value,
+            &format!("HTTP input property {:?}", parameter.input_property),
+        )
+        .map_err(|err| {
+            WasmHttpError::invalid_argument(format!(
+                "HTTP input property {:?} violates its pinned schema: {err}",
+                parameter.input_property
+            ))
+        })?;
+        let value = http_parameter_value(value)?;
+        match parameter.location.as_str() {
+            "path" => {
+                let placeholder = format!("{{{}}}", parameter.name);
+                if !url.contains(&placeholder) {
+                    return Err(WasmHttpError::invalid_argument(format!(
+                        "HTTP path placeholder {placeholder:?} was not found"
+                    )));
+                }
+                url = url.replace(&placeholder, &percent_encode_path_segment(&value));
+            }
+            "query" => query.push((parameter.name, value)),
+            "header" => request.headers.push((parameter.name, value)),
+            _ => {
+                return Err(WasmHttpError::invalid_argument(
+                    "unsupported HTTP input parameter location",
+                ));
+            }
+        }
+    }
+    let mut parsed_url = reqwest::Url::parse(&url)
+        .map_err(|_| WasmHttpError::invalid_argument("invalid mapped HTTP url"))?;
+    if !query.is_empty() {
+        let mut pairs = parsed_url.query_pairs_mut();
+        for (name, value) in query {
+            pairs.append_pair(&name, &value);
+        }
+    }
+    request.url = parsed_url.to_string();
+    let Some(request_body) = mapping.request_body else {
+        return Ok(Vec::new());
+    };
+    let body = match request_body.input_property {
+        Some(property) => match object.and_then(|object| object.get(&property)) {
+            Some(body) => body,
+            None if !request_body.required => return Ok(Vec::new()),
+            None => {
+                return Err(WasmHttpError::invalid_argument(format!(
+                    "missing required HTTP request body property {property:?}"
+                )));
+            }
+        },
+        None => &input,
+    };
+    if body.is_null() && request_body.required {
+        return Err(WasmHttpError::invalid_argument(
+            "required HTTP request body must not be null",
+        ));
+    }
+    if body.is_null() {
+        Ok(Vec::new())
+    } else {
+        validate_json_value_against_schema(&request_body.schema, body, "HTTP request body")
+            .map_err(|err| {
+                WasmHttpError::invalid_argument(format!(
+                    "HTTP request body violates its pinned schema: {err}"
+                ))
+            })?;
+        serde_json::to_vec(body).map_err(|err| {
+            WasmHttpError::invalid_argument(format!("failed to encode HTTP request body: {err}"))
+        })
+    }
+}
+
+fn outbound_header_name(
+    name: &str,
+    invalid_message: &'static str,
+) -> Result<reqwest::header::HeaderName, WasmHttpError> {
+    let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| WasmHttpError::invalid_argument(invalid_message))?;
+    if forbidden_outbound_header(&name) {
+        return Err(WasmHttpError::invalid_argument(
+            "forbidden HTTP header controls routing or message framing",
+        ));
+    }
+    Ok(name)
+}
+
+fn forbidden_outbound_header(name: &reqwest::header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "content-length"
+            | "host"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn encode_http_response_envelope(
+    status: u16,
+    headers: &[(String, String)],
+    body: &[u8],
+    truncated: bool,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), WasmHttpError> {
+    let headers = headers
+        .iter()
+        .cloned()
+        .collect::<BTreeMap<String, String>>();
+    let encode = |body: &[u8], truncated| {
+        let body = serde_json::from_slice::<serde_json::Value>(body)
+            .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(body).into()));
+        serde_json::to_vec(&serde_json::json!({
+            "status": status,
+            "headers": headers,
+            "body": body,
+            "truncated": truncated
+        }))
+        .map_err(|err| {
+            WasmHttpError::invalid_argument(format!("failed to encode HTTP response: {err}"))
+        })
+    };
+
+    let encoded = encode(body, truncated)?;
+    if encoded.len() <= max_bytes {
+        return Ok((encoded, truncated));
+    }
+
+    let empty = encode(&[], true)?;
+    if empty.len() > max_bytes {
+        return Err(WasmHttpError::invalid_argument(
+            "HTTP response headers exceed the configured response size limit",
+        ));
+    }
+    let body_budget = max_bytes.saturating_sub(empty.len());
+    let mut prefix_len = (body_budget / 6).min(body.len());
+    loop {
+        let encoded = encode(&body[..prefix_len], true)?;
+        if encoded.len() <= max_bytes {
+            return Ok((encoded, true));
+        }
+        if prefix_len == 0 {
+            return Err(WasmHttpError::invalid_argument(
+                "HTTP response envelope exceeds the configured response size limit",
+            ));
+        }
+        prefix_len /= 2;
+    }
+}
+
+fn http_parameter_value(value: &serde_json::Value) -> Result<String, WasmHttpError> {
+    match value {
+        serde_json::Value::String(value) => Ok(value.clone()),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        _ => Err(WasmHttpError::invalid_argument(
+            "HTTP parameters must be strings, numbers, or booleans",
+        )),
+    }
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 #[doc(hidden)]

@@ -69,7 +69,8 @@ what you approve, and run it under policy.
 
 Cooldis is experimental. The repository is focused on V1 runtime primitives:
 agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
-couplings, offline coupling replay, local runtime execution, provider adapters,
+couplings, witnessed OpenAPI operation imports, offline coupling replay,
+local runtime execution, provider adapters,
 virtual bash, VFS,
 skill-package resources, daemon/RPC
 surfaces, and the proof path for packageable local agents.
@@ -85,4 +86,5 @@ harness product layer are V2 direction.
 - [Permissions And Governance](concepts/permissions-and-governance.md)
 - [Runtime Primitives](developers/runtime-primitives.md)
 - [Protocol Surfaces](developers/protocol-surfaces.md)
+- [OpenAPI Operation Imports](openapi-adapter.md)
 - [Roadmap](roadmap.md)

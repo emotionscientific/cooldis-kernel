@@ -428,6 +428,15 @@ pub struct HttpRequest {
     /// Headers whose values are resolved from host-side secret names.
     pub secret_headers: Vec<(String, String)>,
     #[serde(default)]
+    /// Secret-backed headers with a literal prefix such as `Bearer `.
+    pub secret_header_prefixes: Vec<(String, String, String)>,
+    #[serde(default)]
+    /// Optional normalized input mapping interpreted by the HTTP host import.
+    pub input_mapping: Option<serde_json::Value>,
+    #[serde(default)]
+    /// Return status, headers, body, and truncation as one JSON body source.
+    pub response_envelope: bool,
+    #[serde(default)]
     /// Optional timeout in milliseconds.
     pub timeout_ms: Option<u64>,
     #[serde(default)]
@@ -444,6 +453,9 @@ impl HttpRequest {
             url: url.into(),
             headers: Vec::new(),
             secret_headers: Vec::new(),
+            secret_header_prefixes: Vec::new(),
+            input_mapping: None,
+            response_envelope: false,
             timeout_ms: None,
             max_response_bytes: None,
         }

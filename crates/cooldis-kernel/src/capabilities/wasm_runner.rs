@@ -27,8 +27,9 @@ pub(crate) use crate::{CooldisVfs, InvocationContext};
 pub(crate) use bashkit::FileSystem;
 #[cfg(test)]
 pub(crate) use cooldis_wasm::{
-    FS_MODE_READ, HTTP_ABI, OPERATION_ABI, STATUS_CAPABILITY_DENIED, STATUS_EOF, STATUS_NOT_FOUND,
-    ensure_http_capability, execute_http_request, http_origin,
+    FS_MODE_READ, HTTP_ABI, OPERATION_ABI, STATUS_CAPABILITY_DENIED, STATUS_EOF,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, ensure_http_capability, execute_http_request,
+    http_origin,
 };
 #[cfg(test)]
 pub(crate) use std::collections::{BTreeMap, BTreeSet};

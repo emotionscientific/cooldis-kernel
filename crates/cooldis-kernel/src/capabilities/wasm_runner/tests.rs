@@ -518,6 +518,34 @@ async fn spawn_http_redirect_server(location: &'static str) -> (String, JoinHand
     (base_url, handle)
 }
 
+async fn spawn_http_bytes_server(response_body: Vec<u8>) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if String::from_utf8_lossy(&request).contains("\r\n\r\n") {
+                break;
+            }
+        }
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response_body.len()
+        );
+        socket.write_all(headers.as_bytes()).await.unwrap();
+        socket.write_all(&response_body).await.unwrap();
+    });
+    (base_url, handle)
+}
+
 fn http_request_bytes(
     url: &str,
     max_response_bytes: Option<usize>,
@@ -529,6 +557,9 @@ fn http_request_bytes(
         url: url.to_string(),
         headers: vec![("content-type".to_string(), "application/json".to_string())],
         secret_headers,
+        secret_header_prefixes: Vec::new(),
+        input_mapping: None,
+        response_envelope: false,
         timeout_ms: Some(5000),
         max_response_bytes,
     })
@@ -1125,6 +1156,157 @@ async fn wasm_http_request_truncates_response_to_requested_cap() {
     assert_eq!(exchange.body, b"{\"ab");
     assert!(exchange.response.truncated);
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn wasm_http_response_envelope_stays_valid_and_within_the_requested_cap() {
+    let (base_url, server) = spawn_http_bytes_server(vec![1_u8; 100_000]).await;
+    let url = format!("{base_url}/binary");
+    let origin = http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let grants = BTreeSet::from([format!("net.http.private:POST:{origin}")]);
+    let request = WasmHttpRequest {
+        abi: HTTP_ABI.to_string(),
+        method: "POST".to_string(),
+        url,
+        headers: Vec::new(),
+        secret_headers: Vec::new(),
+        secret_header_prefixes: Vec::new(),
+        input_mapping: None,
+        response_envelope: true,
+        timeout_ms: Some(5000),
+        max_response_bytes: Some(262_144),
+    };
+
+    let exchange = execute_http_request(
+        serde_json::to_vec(&request).unwrap(),
+        Vec::new(),
+        grants,
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&exchange.body).unwrap();
+
+    assert!(exchange.body.len() <= 262_144, "{}", exchange.body.len());
+    assert_eq!(envelope["status"], 200);
+    assert_eq!(envelope["truncated"], true);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn wasm_http_input_mapping_enforces_pinned_parameter_schemas() {
+    let url = "http://127.0.0.1:9/items/{id}";
+    let origin = http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
+    let grants = BTreeSet::from([format!("net.http.private:GET:{origin}")]);
+    let request = WasmHttpRequest {
+        abi: HTTP_ABI.to_string(),
+        method: "GET".to_string(),
+        url: url.to_string(),
+        headers: Vec::new(),
+        secret_headers: Vec::new(),
+        secret_header_prefixes: Vec::new(),
+        input_mapping: Some(serde_json::json!({
+            "parameters": [{
+                "name": "id",
+                "input_property": "id",
+                "location": "path",
+                "required": true,
+                "schema": {"type": "integer"}
+            }]
+        })),
+        response_envelope: true,
+        timeout_ms: Some(5000),
+        max_response_bytes: Some(262_144),
+    };
+
+    let err = execute_http_request(
+        serde_json::to_vec(&request).unwrap(),
+        br#"{"id":"not-an-integer"}"#.to_vec(),
+        grants,
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, STATUS_INVALID_ARGUMENT);
+    assert!(err.message.contains("pinned schema"), "{}", err.message);
+}
+
+#[tokio::test]
+async fn wasm_http_input_mapping_allows_an_omitted_optional_body() {
+    let (base_url, server) = spawn_http_server(200, r#"{"ok":true}"#, Vec::new()).await;
+    let url = format!("{base_url}/optional");
+    let origin = http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let grants = BTreeSet::from([format!("net.http.private:POST:{origin}")]);
+    let request = WasmHttpRequest {
+        abi: HTTP_ABI.to_string(),
+        method: "POST".to_string(),
+        url,
+        headers: Vec::new(),
+        secret_headers: Vec::new(),
+        secret_header_prefixes: Vec::new(),
+        input_mapping: Some(serde_json::json!({
+            "request_body": {
+                "required": false,
+                "input_property": "body",
+                "schema": {"type": "object", "additionalProperties": true}
+            }
+        })),
+        response_envelope: false,
+        timeout_ms: Some(5000),
+        max_response_bytes: Some(262_144),
+    };
+
+    let exchange = execute_http_request(
+        serde_json::to_vec(&request).unwrap(),
+        br#"{}"#.to_vec(),
+        grants,
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exchange.body, br#"{"ok":true}"#);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn wasm_http_rejects_protected_secret_header_injection() {
+    let url = "http://127.0.0.1:9/search";
+    let origin = http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
+    let grants = BTreeSet::from([
+        format!("net.http.private:POST:{origin}"),
+        "secret:HOST_OVERRIDE".to_string(),
+    ]);
+    let request = WasmHttpRequest {
+        abi: HTTP_ABI.to_string(),
+        method: "POST".to_string(),
+        url: url.to_string(),
+        headers: Vec::new(),
+        secret_headers: vec![("Host".to_string(), "HOST_OVERRIDE".to_string())],
+        secret_header_prefixes: Vec::new(),
+        input_mapping: None,
+        response_envelope: false,
+        timeout_ms: Some(5000),
+        max_response_bytes: Some(262_144),
+    };
+
+    let err = execute_http_request(
+        serde_json::to_vec(&request).unwrap(),
+        Vec::new(),
+        grants,
+        BTreeMap::from([("HOST_OVERRIDE".to_string(), "other.example".to_string())]),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, STATUS_INVALID_ARGUMENT);
+    assert!(
+        err.message.contains("forbidden HTTP header"),
+        "{}",
+        err.message
+    );
+    assert!(!err.message.contains("HOST_OVERRIDE"), "{}", err.message);
 }
 
 #[tokio::test]

@@ -1,10 +1,12 @@
 use cooldis::{
-    LocalAgentRegistry, LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry,
-    PublishedAgentRecord, PublishedOperationBuild, PublishedOperationRecord,
-    PublishedOperationSource, RegisteredOperation, WasmOperationDefinition, WasmOperationManifest,
-    WasmOperationValueKind,
+    ImportPackageSource, LocalAgentRegistry, LocalBlobRegistry, LocalOperationRegistry,
+    LocalSkillRegistry, OperationImportPlan, PublishOperationRequest, PublishedAgentRecord,
+    PublishedOperationBuild, PublishedOperationRecord, PublishedOperationSource,
+    RegisteredOperation, WasmOperationDefinition, WasmOperationManifest, WasmOperationValueKind,
+    render_openapi_import_artifact,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
@@ -42,6 +44,211 @@ fn cooldis_cli_tool_help_is_canonical() {
 
     let unknown = run_cooldis_failed(["hello"]);
     assert!(stderr(&unknown).contains("unknown command"));
+}
+
+#[test]
+fn cooldis_cli_import_help_is_canonical() {
+    let help = run_cooldis(["import", "--help"]);
+    assert!(help.contains("cooldis import build"));
+    assert!(help.contains("cooldis import publish"));
+
+    let build = run_cooldis(["import", "build", "--help"]);
+    assert!(build.contains("cooldis import build --package"));
+
+    let publish = run_cooldis(["import", "publish", "--help"]);
+    assert!(publish.contains("cooldis import publish --package"));
+    assert!(publish.contains("--registry-root"));
+
+    let unused_registry = run_cooldis_failed([
+        "import",
+        "build",
+        "--registry-root",
+        "/tmp/unused-import-registry",
+    ]);
+    assert!(
+        stderr(&unused_registry).contains("does not accept --registry-root"),
+        "{}",
+        stderr(&unused_registry)
+    );
+}
+
+#[test]
+fn openapi_import_build_is_deterministic_and_publish_records_provenance() {
+    let root = temp_dir("openapi-import-determinism");
+    let package = write_openapi_import_package(&root, "https://api.example.com", "", "200");
+    let first_source = ImportPackageSource::load(&package).unwrap();
+    let first_plan = OperationImportPlan::from_package(&first_source).unwrap();
+    let first_artifact = render_openapi_import_artifact(&first_plan).unwrap();
+    let second_source = ImportPackageSource::load(&package).unwrap();
+    let second_plan = OperationImportPlan::from_package(&second_source).unwrap();
+    let second_artifact = render_openapi_import_artifact(&second_plan).unwrap();
+    assert_eq!(first_artifact, second_artifact);
+
+    let build = run_cooldis(["import", "build", "--package", package.to_str().unwrap()]);
+    assert!(build.contains("receipt import_build_v0"));
+    assert!(build.contains(&format!("spec_sha256 {}", first_source.spec_sha256)));
+
+    let registry_root = root.join("operations");
+    let publish = run_cooldis([
+        "import",
+        "publish",
+        "--package",
+        package.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    assert!(publish.contains("published catalog"));
+    let record = LocalOperationRegistry::new(&registry_root)
+        .load_record("catalog")
+        .unwrap();
+    assert_eq!(
+        record.active_artifact_hash,
+        format!("{:x}", Sha256::digest(first_artifact))
+    );
+    assert!(matches!(
+        record.source,
+        PublishedOperationSource::Import {
+            spec_sha256,
+            ..
+        } if spec_sha256 == first_source.spec_sha256
+    ));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn openapi_import_publish_gate_rejects_missing_network_and_secret_grants() {
+    let root = temp_dir("openapi-import-grants");
+    let package = write_openapi_import_package(
+        &root,
+        "https://api.example.com",
+        "[auth]\nscheme = \"apiKey\"\nheader = \"x-api-key\"\nsecret = \"SEARCH_API_KEY\"\n",
+        "200",
+    );
+    let source = ImportPackageSource::load(&package).unwrap();
+    let plan = OperationImportPlan::from_package(&source).unwrap();
+    let artifact_path = root.join("catalog.wasm");
+    fs::write(
+        &artifact_path,
+        render_openapi_import_artifact(&plan).unwrap(),
+    )
+    .unwrap();
+    let registry = LocalOperationRegistry::new(root.join("operations"));
+    let request = |capability_grants| PublishOperationRequest {
+        name: "catalog".to_string(),
+        artifact_path: artifact_path.clone(),
+        source: PublishedOperationSource::Import {
+            manifest_path: package.clone(),
+            spec_sha256: source.spec_sha256.clone(),
+        },
+        interface: None,
+        capability_grants,
+        metadata: BTreeMap::new(),
+    };
+
+    let missing_network = registry
+        .publish_artifact(request(BTreeSet::new()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(missing_network.contains("net.http:POST:https://api.example.com"));
+
+    let missing_secret = registry
+        .publish_artifact(request(BTreeSet::from([
+            "net.http:POST:https://api.example.com".to_string(),
+        ])))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(missing_secret.contains("secret:SEARCH_API_KEY"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn openapi_import_publishes_and_runs_through_the_existing_cli_path() {
+    let (base_url, server) = spawn_openapi_import_server(
+        200,
+        r#"{"results":[{"title":"Cooldis runtime"}]}"#,
+        Some("x-api-key: fixture-secret"),
+    );
+    let root = temp_dir("openapi-import-run");
+    let package = write_openapi_import_package(
+        &root,
+        &base_url,
+        "[auth]\nscheme = \"apiKey\"\nheader = \"x-api-key\"\nsecret = \"SEARCH_API_KEY\"\n",
+        "200",
+    );
+    let registry_root = root.join("operations");
+    let state_home = root.join("state");
+
+    run_cooldis([
+        "import",
+        "publish",
+        "--package",
+        package.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    run_cooldis_with_stdin(
+        [
+            "secret",
+            "set",
+            "SEARCH_API_KEY",
+            "--value-stdin",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        "fixture-secret",
+    );
+    let output = run_cooldis([
+        "tool",
+        "run",
+        "catalog",
+        "search",
+        "--input",
+        r#"{"query":"cooldis"}"#,
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--state-home",
+        state_home.to_str().unwrap(),
+    ]);
+
+    assert!(output.contains(r#""status":200"#), "{output}");
+    assert!(output.contains("Cooldis runtime"), "{output}");
+    assert!(output.contains(r#""truncated":false"#), "{output}");
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn openapi_import_returns_http_500_as_operation_output() {
+    let (base_url, server) = spawn_openapi_import_server(500, r#"{"error":"upstream"}"#, None);
+    let root = temp_dir("openapi-import-500");
+    let package = write_openapi_import_package(&root, &base_url, "", "500");
+    let registry_root = root.join("operations");
+
+    run_cooldis([
+        "import",
+        "publish",
+        "--package",
+        package.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let output = run_cooldis([
+        "tool",
+        "run",
+        "catalog",
+        "search",
+        "--input",
+        r#"{"query":"cooldis"}"#,
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+
+    assert!(output.contains(r#""status":500"#), "{output}");
+    assert!(output.contains("upstream"), "{output}");
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1942,6 +2149,111 @@ fn spawn_employee_server() -> (String, thread::JoinHandle<()>) {
         stream.write_all(response.as_bytes()).unwrap();
     });
     (base_url, handle)
+}
+
+fn spawn_openapi_import_server(
+    status: u16,
+    response_body: &'static str,
+    expected_header: Option<&'static str>,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let text = String::from_utf8_lossy(&request);
+            let Some(header_end) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let content_length = text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or_default();
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        assert!(request.contains("POST /search HTTP/1.1"), "{request}");
+        assert!(request.contains(r#"{"query":"cooldis"}"#), "{request}");
+        if let Some(expected_header) = expected_header {
+            assert!(request.contains(expected_header), "{request}");
+        }
+        let reason = if status == 200 {
+            "OK"
+        } else {
+            "Internal Server Error"
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    (base_url, handle)
+}
+
+fn write_openapi_import_package(
+    root: &Path,
+    base_url: &str,
+    auth: &str,
+    response_status: &str,
+) -> PathBuf {
+    fs::create_dir_all(root).unwrap();
+    let spec = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Catalog", "version": "1"},
+        "servers": [{"url": base_url}],
+        "paths": {
+            "/search": {
+                "post": {
+                    "operationId": "search",
+                    "description": "Search the catalog.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["query"],
+                                    "properties": {"query": {"type": "string"}},
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "responses": BTreeMap::from([(
+                        response_status,
+                        serde_json::json!({"description": "response"})
+                    )])
+                }
+            }
+        }
+    });
+    let spec_bytes = serde_json::to_vec_pretty(&spec).unwrap();
+    fs::write(root.join("openapi.json"), &spec_bytes).unwrap();
+    let spec_sha256 = format!("{:x}", Sha256::digest(&spec_bytes));
+    let package = root.join("catalog.import.toml");
+    fs::write(
+        &package,
+        format!(
+            "[import]\nname = \"catalog\"\nversion = \"1.0.0\"\ndescription = \"Catalog API\"\n\n[spec]\npath = \"openapi.json\"\nsha256 = {spec_sha256:?}\n\n{auth}\n[[operations]]\noperation_id = \"search\"\n"
+        ),
+    )
+    .unwrap();
+    package
 }
 
 fn fixture_mount(module_path: &Path) -> String {

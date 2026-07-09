@@ -74,6 +74,7 @@ pub mod live_smoke_support;
 
 pub mod operations {
     pub mod kernel_packages;
+    pub mod openapi_import;
     pub mod operation_builder;
     pub mod operation_registry;
     pub mod operation_store;
@@ -244,7 +245,12 @@ pub use capabilities::wasm_runner::{
     WasmHttpRequest, WasmHttpResponse, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
 };
 pub use cooldis_operations::{
-    LocalBlobRegistry, PublishedBlobRecord, blob_hash_from_ref, blob_ref_uri,
+    IMPORT_BUILD_RECEIPT_KIND, IMPORT_BUILD_RECEIPT_SCHEMA_VERSION, IMPORT_PACKAGE_FILE_NAME,
+    ImportAuthDeclaration, ImportBuildReceipt, ImportOperationBuild, ImportOperationDeclaration,
+    ImportPackageIdentity, ImportPackageManifest, ImportPackageSource, ImportSpecDeclaration,
+    ImportedOperationPlan, LocalBlobRegistry, OpenApiImportError, OperationImportPlan,
+    OperationParameterLocation, OperationParameterPlan, OperationRequestBodyPlan,
+    OperationSecretHeaderPlan, PublishedBlobRecord, blob_hash_from_ref, blob_ref_uri,
 };
 pub use daemon::clock_route::{
     CLOCK_TICK_ROUTE_KIND, CooldisDaemonClockRoute, DaemonClock, SystemDaemonClock,
@@ -392,6 +398,7 @@ pub use operations::kernel_packages::{
     ensure_cooldis_process_published, ensure_cooldis_schedule_published,
     ensure_cooldis_threads_published,
 };
+pub use operations::openapi_import::render_openapi_import_artifact;
 pub use operations::operation_builder::{
     RustWasmBuildOptions, RustWasmBuildOutput, build_rust_wasm_module,
 };

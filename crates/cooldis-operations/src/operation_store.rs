@@ -708,9 +708,20 @@ pub struct PublishInterfaceOperationRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PublishedOperationSource {
-    Rust { module_path: PathBuf, release: bool },
-    Wasm { bin_path: PathBuf },
-    Kernel { package: String },
+    Rust {
+        module_path: PathBuf,
+        release: bool,
+    },
+    Wasm {
+        bin_path: PathBuf,
+    },
+    Import {
+        manifest_path: PathBuf,
+        spec_sha256: String,
+    },
+    Kernel {
+        package: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -750,6 +761,18 @@ impl PublishedOperationRecord {
             )));
         }
         validate_hash(&self.active_artifact_hash)?;
+        if let PublishedOperationSource::Import {
+            manifest_path,
+            spec_sha256,
+        } = &self.source
+        {
+            if manifest_path.as_os_str().is_empty() {
+                return Err(CooldisError::RuntimeFactory(
+                    "operation import manifest path cannot be empty".to_string(),
+                ));
+            }
+            validate_sha256("operation import spec sha256", spec_sha256)?;
+        }
         validate_manifest_shape(&self.manifest)?;
         validate_required_grants(&self.name, &self.manifest, &self.capability_grants)?;
         let registered = RegisteredOperation {
@@ -1013,11 +1036,15 @@ pub fn wasm_sha256(bytes: &[u8]) -> String {
 }
 
 fn validate_hash(hash: &str) -> CooldisResult<()> {
+    validate_sha256("operation artifact hash", hash)
+}
+
+fn validate_sha256(label: &str, hash: &str) -> CooldisResult<()> {
     if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(())
     } else {
         Err(CooldisError::RuntimeFactory(format!(
-            "operation artifact hash {hash:?} is not a sha256 hex digest"
+            "{label} {hash:?} is not a sha256 hex digest"
         )))
     }
 }

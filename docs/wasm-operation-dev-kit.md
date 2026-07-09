@@ -152,6 +152,23 @@ Agent manifest        references published tools with tool:// refs and grants
 Raw `--module-path` and `--bin-path` remain useful for low-level conversion and
 debugging. Package build/publish is the authoring happy path.
 
+## Importing An Existing REST API Instead
+
+When the desired tool is an existing REST API mirror, use a witnessed OpenAPI
+package instead of authoring a Rust guest:
+
+```bash
+cooldis import build --package cooldis.import.toml
+cooldis import publish --package cooldis.import.toml \
+  --registry-root .cooldis/operations
+```
+
+The import package pins a vendored JSON spec by sha256 and selects its operations
+into one ordinary multi-operation Wasm record. The generated artifact calls the
+same `cooldis_0.1.http_request` host import and passes the same publish gate as a
+hand-authored tool. See [OpenAPI To ABI Operation Adapter](openapi-adapter.md)
+for the supported subset, auth mapping, and response contract.
+
 The first checked-in templates are test fixtures rather than a generated
 scaffold:
 

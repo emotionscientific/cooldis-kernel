@@ -28,11 +28,15 @@ pub enum CooldisWasmError {
 
 #[doc(hidden)]
 pub use runner::{
-    FS_MODE_READ, HTTP_ABI, OPERATION_ABI, STATUS_CAPABILITY_DENIED, STATUS_EOF, STATUS_NOT_FOUND,
+    FS_MODE_READ, HTTP_ABI, OPERATION_ABI, STATUS_CAPABILITY_DENIED, STATUS_EOF,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
+};
+#[doc(hidden)]
+pub use runner::{
+    NormalizedHttpUrl, ensure_http_capability, execute_http_request, http_origin,
+    normalize_http_url,
 };
 pub use runner::{WasmModuleRuntime, WasmRuntimeFactory};
-#[doc(hidden)]
-pub use runner::{ensure_http_capability, execute_http_request, http_origin};
 
 #[derive(Clone, Debug)]
 pub enum WasmRuntimeArtifact {
@@ -212,6 +216,12 @@ pub struct WasmHttpRequest {
     pub headers: Vec<(String, String)>,
     #[serde(default)]
     pub secret_headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub secret_header_prefixes: Vec<(String, String, String)>,
+    #[serde(default)]
+    pub input_mapping: Option<serde_json::Value>,
+    #[serde(default)]
+    pub response_envelope: bool,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
