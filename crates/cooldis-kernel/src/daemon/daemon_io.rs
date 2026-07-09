@@ -216,6 +216,20 @@ struct BoundEgressThread {
     coordinates: ThreadCoordinates,
 }
 
+#[derive(Debug)]
+enum ThreadHandleResolutionError {
+    Lookup(CooldisError),
+    LifecycleLoad(CooldisError),
+}
+
+impl ThreadHandleResolutionError {
+    fn into_inner(self) -> CooldisError {
+        match self {
+            Self::Lookup(err) | Self::LifecycleLoad(err) => err,
+        }
+    }
+}
+
 /// Durable route state shared by ingress thread binding and egress projection.
 ///
 /// `cooldis_daemon_egress_threads` keeps its historical name, but its bindings
@@ -460,6 +474,7 @@ pub struct CooldisDaemonIoBridge {
     session_store_path: Option<PathBuf>,
     threads: Arc<Mutex<HashMap<String, ThreadCoordinates>>>,
     thread_scope_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    thread_load_locks: Arc<Mutex<HashMap<ThreadId, Arc<Mutex<()>>>>>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
     egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
     egress_route_configs: Arc<RwLock<HashMap<String, RouteEgressConfig>>>,
@@ -486,6 +501,7 @@ impl CooldisDaemonIoBridge {
             session_store_path: None,
             threads: Arc::new(Mutex::new(HashMap::new())),
             thread_scope_locks: Arc::new(Mutex::new(HashMap::new())),
+            thread_load_locks: Arc::new(Mutex::new(HashMap::new())),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             egress_adapters: Arc::new(RwLock::new(HashMap::new())),
             egress_route_configs: Arc::new(RwLock::new(HashMap::new())),
@@ -583,8 +599,8 @@ impl CooldisDaemonIoBridge {
             .await
             .get(&key)
             .is_some_and(RouteEgressConfig::restores_per_conversation_bindings);
-        let live_bindings = if restores_per_conversation_bindings {
-            self.live_ingress_bindings(&state, &instance_id).await?
+        let bindings = if restores_per_conversation_bindings {
+            self.ingress_bindings(&state, &instance_id)?
         } else {
             Vec::new()
         };
@@ -594,17 +610,18 @@ impl CooldisDaemonIoBridge {
         // and state readers remain blocked until the map seed is visible.
         let mut states = self.egress_states.write().await;
         if restores_per_conversation_bindings {
-            self.threads.lock().await.extend(live_bindings);
+            self.threads.lock().await.extend(bindings);
         }
         states.insert(key, state);
         Ok(())
     }
 
-    /// Loads live ingress bindings for the startup hot-path map seed.
+    /// Loads durable ingress bindings for the startup hot-path map seed.
     ///
     /// Rows are ordered oldest-first by `bound_threads`, so replacing by
-    /// `scope_key` reduces duplicate crash residue to the latest live thread.
-    async fn live_ingress_bindings(
+    /// `scope_key` reduces duplicate crash residue to the latest binding.
+    /// Runtime handles are loaded lazily on first ingress or egress use.
+    fn ingress_bindings(
         &self,
         state: &DaemonEgressState,
         route_id: &str,
@@ -614,15 +631,7 @@ impl CooldisDaemonIoBridge {
             latest_by_scope.insert(binding.scope_key, binding.coordinates);
         }
 
-        let mut live_bindings = Vec::new();
-        for (scope_key, coordinates) in latest_by_scope {
-            match self.supervisor.get_thread_at(&coordinates).await {
-                Ok(_) => live_bindings.push((scope_key, coordinates)),
-                Err(CooldisError::ThreadNotFound(_)) => {}
-                Err(err) => return Err(cooldis_bridge_error(err)),
-            }
-        }
-        Ok(live_bindings)
+        Ok(latest_by_scope.into_iter().collect())
     }
 
     pub async fn start_egress_projector_sqlite_dsn(
@@ -672,12 +681,28 @@ impl CooldisDaemonIoBridge {
         &self,
         binding: &BoundEgressThread,
     ) -> CooldisResult<RuntimeThreadHandle> {
-        match self.supervisor.get_thread_at(&binding.coordinates).await {
+        self.get_or_load_thread_handle(&binding.coordinates)
+            .await
+            .map_err(ThreadHandleResolutionError::into_inner)
+    }
+
+    /// Resolves a resident runtime thread or lazily rehydrates it from its
+    /// durable coordinates and session history after a process restart.
+    /// Concurrent ingress and egress callers serialize the load by thread id
+    /// so only a fully initialized winner can be observed through this bridge.
+    async fn get_or_load_thread_handle(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> Result<RuntimeThreadHandle, ThreadHandleResolutionError> {
+        let load_lock = self.thread_load_lock(coordinates.thread_id).await;
+        let _load_guard = load_lock.lock().await;
+        match self.supervisor.get_thread_at(coordinates).await {
             Ok(handle) => Ok(handle),
             Err(CooldisError::ThreadNotFound(_)) => {
-                self.supervisor
+                match self
+                    .supervisor
                     .load_thread_from_lifecycle(ThreadLifecycleRecord {
-                        coordinates: binding.coordinates.clone(),
+                        coordinates: coordinates.clone(),
                         parent_thread_id: None,
                         topology: ThreadTopology::root(),
                         status: ThreadLifecycleStatus::Idle,
@@ -688,9 +713,30 @@ impl CooldisDaemonIoBridge {
                         metadata: BTreeMap::new(),
                     })
                     .await
+                {
+                    Ok(handle) => Ok(handle),
+                    Err(CooldisError::ThreadAlreadyExists(_)) => {
+                        match self.supervisor.get_thread_at(coordinates).await {
+                            Ok(handle) => Ok(handle),
+                            Err(err @ CooldisError::ThreadNotFound(_)) => {
+                                Err(ThreadHandleResolutionError::LifecycleLoad(err))
+                            }
+                            Err(err) => Err(ThreadHandleResolutionError::Lookup(err)),
+                        }
+                    }
+                    Err(err) => Err(ThreadHandleResolutionError::LifecycleLoad(err)),
+                }
             }
-            Err(err) => Err(err),
+            Err(err) => Err(ThreadHandleResolutionError::Lookup(err)),
         }
+    }
+
+    async fn thread_load_lock(&self, thread_id: ThreadId) -> Arc<Mutex<()>> {
+        let mut locks = self.thread_load_locks.lock().await;
+        locks
+            .entry(thread_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub async fn egress_cursor_for_thread(
@@ -1116,15 +1162,17 @@ impl CooldisDaemonIoBridge {
             threads.get(&scope_key).cloned()
         };
         if let Some(coordinates) = existing_coordinates {
-            match self.supervisor.get_thread_at(&coordinates).await {
+            match self.get_or_load_thread_handle(&coordinates).await {
                 Ok(handle) => return Ok((coordinates, handle)),
-                Err(CooldisError::ThreadNotFound(_)) => {
+                Err(ThreadHandleResolutionError::LifecycleLoad(_)) => {
                     let mut threads = self.threads.lock().await;
                     if threads.get(&scope_key) == Some(&coordinates) {
                         threads.remove(&scope_key);
                     }
                 }
-                Err(err) => return Err(cooldis_bridge_error(err)),
+                Err(ThreadHandleResolutionError::Lookup(err)) => {
+                    return Err(cooldis_bridge_error(err));
+                }
             }
         }
 

@@ -2,9 +2,11 @@ use super::*;
 use crate::{
     APP_SERVER_LOCAL_MODEL,
     APP_SERVER_LOCAL_PROVIDER,
+    AgentRuntimeFactory,
     AppServerListenAddr,
     CanonicalContent,
     CanonicalProviderRuntimeConfig,
+    CanonicalProviderRuntimeFactory,
     CanonicalStopReason,
     CanonicalUsage,
     // lexicon-allow: capsule - existing app-server manifest binding config type
@@ -27,6 +29,9 @@ use crate::{
     PublishedOperationSource,
     StreamCursorV1,
     THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
+    TenantRegistration,
+    TenantRuntimeContext,
+    ThreadContext,
     ThreadSpawnedPayload,
     TimerFiredPayload,
     control_stream_id,
@@ -43,7 +48,8 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
-use tokio::sync::{Barrier, Mutex as TokioMutex, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{Barrier, Mutex as TokioMutex, Notify, mpsc};
 
 #[derive(Clone)]
 struct CaptureSink {
@@ -494,6 +500,190 @@ impl ProviderClient for RecordingRouteProviderClient {
             stop_reason: CanonicalStopReason::EndTurn,
         })
     }
+}
+
+#[derive(Clone, Default)]
+struct RuntimeBuildFailureProbe {
+    reject_once: Arc<StdMutex<Option<ThreadId>>>,
+    failures: Arc<StdMutex<Vec<ThreadId>>>,
+}
+
+impl RuntimeBuildFailureProbe {
+    fn reject_once(&self, thread_id: ThreadId) {
+        *self.reject_once.lock().unwrap() = Some(thread_id);
+    }
+
+    fn failures(&self) -> Vec<ThreadId> {
+        self.failures.lock().unwrap().clone()
+    }
+}
+
+struct SelectiveRuntimeFactory {
+    inner: CanonicalProviderRuntimeFactory,
+    probe: RuntimeBuildFailureProbe,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for SelectiveRuntimeFactory {
+    async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn crate::AgentRuntime>> {
+        let thread_id = context.coordinates.thread_id;
+        let rejected = {
+            let mut reject_once = self.probe.reject_once.lock().unwrap();
+            if *reject_once == Some(thread_id) {
+                reject_once.take();
+                true
+            } else {
+                false
+            }
+        };
+        if rejected {
+            self.probe.failures.lock().unwrap().push(thread_id);
+            return Err(CooldisError::RuntimeFactory(format!(
+                "test rejected lifecycle load for {thread_id}"
+            )));
+        }
+        self.inner.build(context).await
+    }
+}
+
+async fn bridge_with_runtime_build_failure(
+    fixture_root: &Path,
+) -> (CooldisDaemonIoBridge, RuntimeBuildFailureProbe) {
+    let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
+    let user_id = format!("user-{}", uuid::Uuid::now_v7());
+    let runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let client: Arc<dyn ProviderClient> = Arc::new(RecordingRouteProviderClient::default());
+    let probe = RuntimeBuildFailureProbe::default();
+    let runtime_factory = Arc::new(SelectiveRuntimeFactory {
+        inner: CanonicalProviderRuntimeFactory::new(runtime_config, client),
+        probe: probe.clone(),
+    });
+    let supervisor = CooldisSupervisor::new();
+    supervisor
+        .register_tenant(TenantRegistration {
+            context: TenantRuntimeContext::local(
+                tenant_id.clone(),
+                fixture_root.join("runtime"),
+                fixture_root.join("state"),
+            ),
+            runtime_factory,
+        })
+        .await
+        .unwrap();
+    (
+        CooldisDaemonIoBridge::new(
+            supervisor,
+            tenant_id,
+            user_id,
+            APP_SERVER_LOCAL_PROVIDER,
+            APP_SERVER_LOCAL_MODEL,
+            std::env::current_dir().unwrap(),
+        ),
+        probe,
+    )
+}
+
+#[derive(Clone, Default)]
+struct RuntimeBuildGateProbe {
+    blocked_coordinates: Arc<StdMutex<Option<ThreadCoordinates>>>,
+    matching_builds: Arc<AtomicUsize>,
+    build_started: Arc<Notify>,
+    release_first_build: Arc<Notify>,
+}
+
+impl RuntimeBuildGateProbe {
+    fn block_first_build(&self, coordinates: ThreadCoordinates) {
+        *self.blocked_coordinates.lock().unwrap() = Some(coordinates);
+    }
+
+    async fn wait_for_builds(&self, count: usize) {
+        loop {
+            let changed = self.build_started.notified();
+            if self.matching_builds.load(Ordering::SeqCst) >= count {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn release(&self) {
+        self.release_first_build.notify_one();
+    }
+
+    fn matching_builds(&self) -> usize {
+        self.matching_builds.load(Ordering::SeqCst)
+    }
+}
+
+struct GatedRuntimeFactory {
+    inner: CanonicalProviderRuntimeFactory,
+    probe: RuntimeBuildGateProbe,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for GatedRuntimeFactory {
+    async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn crate::AgentRuntime>> {
+        let matches = self
+            .probe
+            .blocked_coordinates
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|coordinates| coordinates == &context.coordinates);
+        if matches {
+            let build_index = self.probe.matching_builds.fetch_add(1, Ordering::SeqCst);
+            self.probe.build_started.notify_one();
+            if build_index == 0 {
+                self.probe.release_first_build.notified().await;
+            }
+        }
+        self.inner.build(context).await
+    }
+}
+
+async fn bridge_with_runtime_build_gate(
+    fixture_root: &Path,
+) -> (CooldisDaemonIoBridge, RuntimeBuildGateProbe) {
+    let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
+    let user_id = format!("user-{}", uuid::Uuid::now_v7());
+    let runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let client: Arc<dyn ProviderClient> = Arc::new(RecordingRouteProviderClient::default());
+    let probe = RuntimeBuildGateProbe::default();
+    let runtime_factory = Arc::new(GatedRuntimeFactory {
+        inner: CanonicalProviderRuntimeFactory::new(runtime_config, client),
+        probe: probe.clone(),
+    });
+    let supervisor = CooldisSupervisor::new();
+    supervisor
+        .register_tenant(TenantRegistration {
+            context: TenantRuntimeContext::local(
+                tenant_id.clone(),
+                fixture_root.join("runtime"),
+                fixture_root.join("state"),
+            ),
+            runtime_factory,
+        })
+        .await
+        .unwrap();
+    (
+        CooldisDaemonIoBridge::new(
+            supervisor,
+            tenant_id,
+            user_id,
+            APP_SERVER_LOCAL_PROVIDER,
+            APP_SERVER_LOCAL_MODEL,
+            std::env::current_dir().unwrap(),
+        ),
+        probe,
+    )
 }
 
 async fn wait_for_provider_requests(client: &RecordingRouteProviderClient, count: usize) {
@@ -2524,7 +2714,7 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
 }
 
 #[tokio::test]
-async fn per_conversation_binding_survives_bridge_restart() {
+async fn per_conversation_binding_survives_true_runtime_restart() {
     let root = test_root("ingress-binding-restart");
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
@@ -2532,12 +2722,33 @@ async fn per_conversation_binding_survives_bridge_restart() {
     let (server, bridge, _rx) = test_bridge_at_root(&root).await;
     register_route_state(&bridge, &route, &db).await;
     let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "before restart").await;
+    let (scope_key, coordinates) = bridge
+        .threads
+        .lock()
+        .await
+        .iter()
+        .find(|(_, coordinates)| coordinates.thread_id.to_string() == thread_id)
+        .map(|(scope_key, coordinates)| (scope_key.clone(), coordinates.clone()))
+        .unwrap();
     assert_eq!(route_bindings(&bridge).await.len(), 1);
     drop(bridge);
+    drop(server);
 
-    let restarted = CooldisDaemonIoBridge::from_app_server(&server);
+    let (_restarted_server, restarted, _rx) = restarted_bridge_at_root(&root).await;
     assert!(restarted.threads.lock().await.is_empty());
+    assert!(matches!(
+        restarted.supervisor.get_thread_at(&coordinates).await,
+        Err(CooldisError::ThreadNotFound(_))
+    ));
     register_route_state(&restarted, &route, &db).await;
+    assert_eq!(
+        restarted.threads.lock().await.get(&scope_key).cloned(),
+        Some(coordinates.clone())
+    );
+    assert!(matches!(
+        restarted.supervisor.get_thread_at(&coordinates).await,
+        Err(CooldisError::ThreadNotFound(_))
+    ));
     let (resumed_thread_id, _) =
         submit_and_wait_for_assistant_event(&restarted, "after restart").await;
 
@@ -2681,43 +2892,62 @@ async fn failed_durable_bind_does_not_publish_thread_in_memory() {
 }
 
 #[tokio::test]
-async fn stale_ingress_binding_is_dropped_during_route_startup() {
-    let root = test_root("ingress-binding-stale");
+async fn lifecycle_load_failure_repairs_and_durably_rebinds_seeded_scope() {
+    let root = test_root("ingress-binding-load-failure");
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
-    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let (bridge, failure_probe) = bridge_with_runtime_build_failure(&root).await;
     let envelope = test_envelope("fresh thread");
     let target = bridge.resolve_target(&envelope).await.unwrap();
-    let stale_coordinates = start_thread_for_target(&bridge, &target).await;
-    bridge
-        .supervisor
-        .shutdown_thread_at(&stale_coordinates)
-        .await
-        .unwrap();
+    let stale_coordinates = ThreadCoordinates {
+        tenant_id: target.address.tenant_id.clone(),
+        user_id: target.address.user_id.clone(),
+        session_id: target.address.session_id.clone(),
+        thread_id: ThreadId::new(),
+    };
+    failure_probe.reject_once(stale_coordinates.thread_id);
     let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
     insert_route_binding(&state, &target.address.scope_key(), &stale_coordinates, 1);
     drop(state);
 
     register_route_state(&bridge, &route, &db).await;
-
-    assert!(
-        !bridge
+    assert_eq!(
+        bridge
             .threads
             .lock()
             .await
-            .contains_key(&target.address.scope_key())
+            .get(&target.address.scope_key())
+            .cloned(),
+        Some(stale_coordinates.clone())
     );
     let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    let fresh_thread_id = receipt.thread_id.as_deref().unwrap();
+
     assert_ne!(
-        receipt.thread_id.as_deref(),
+        Some(fresh_thread_id),
         Some(stale_coordinates.thread_id.to_string().as_str())
+    );
+    assert_eq!(failure_probe.failures(), vec![stale_coordinates.thread_id]);
+    let fresh_coordinates = bridge
+        .threads
+        .lock()
+        .await
+        .get(&target.address.scope_key())
+        .cloned()
+        .unwrap();
+    wait_for_user_text(&bridge, &fresh_coordinates, "fresh thread").await;
+    let bindings = route_bindings(&bridge).await;
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(
+        bindings.last().unwrap().coordinates.thread_id.to_string(),
+        fresh_thread_id
     );
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
-async fn seeded_binding_that_turns_stale_before_ingress_is_replaced() {
-    let root = test_root("ingress-binding-stale-after-seed");
+async fn seeded_binding_unloaded_before_ingress_is_reloaded() {
+    let root = test_root("ingress-binding-unloaded-after-seed");
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
     let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
@@ -2736,11 +2966,122 @@ async fn seeded_binding_that_turns_stale_before_ingress_is_replaced() {
 
     let receipt = bridge.submit_envelope(envelope).await.unwrap();
 
-    assert_ne!(
+    assert_eq!(
         receipt.thread_id.as_deref(),
         Some(stale_coordinates.thread_id.to_string().as_str())
     );
-    assert_eq!(route_bindings(&bridge).await.len(), 2);
+    assert_eq!(route_bindings(&bridge).await.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
+    let root = test_root("ingress-binding-concurrent-load");
+    let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;
+    let envelope = test_envelope("concurrent reload");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let coordinates = ThreadCoordinates {
+        tenant_id: target.address.tenant_id,
+        user_id: target.address.user_id,
+        session_id: target.address.session_id,
+        thread_id: ThreadId::new(),
+    };
+    gate.block_first_build(coordinates.clone());
+
+    let first_bridge = bridge.clone();
+    let first_coordinates = coordinates.clone();
+    let first = tokio::spawn(async move {
+        first_bridge
+            .get_or_load_thread_handle(&first_coordinates)
+            .await
+    });
+    gate.wait_for_builds(1).await;
+
+    let second_bridge = bridge.clone();
+    let second_coordinates = coordinates.clone();
+    let second = tokio::spawn(async move {
+        second_bridge
+            .get_or_load_thread_handle(&second_coordinates)
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), gate.wait_for_builds(2))
+            .await
+            .is_err(),
+        "a concurrent lazy load built a duplicate runtime"
+    );
+
+    gate.release();
+    let first_handle = first.await.unwrap().unwrap();
+    let second_handle = second.await.unwrap().unwrap();
+    assert_eq!(first_handle.context().coordinates, coordinates);
+    assert_eq!(second_handle.context().coordinates, coordinates);
+    assert_eq!(gate.matching_builds(), 1);
+    bridge
+        .supervisor
+        .shutdown_thread_at(&coordinates)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn thread_already_exists_retry_keeps_scope_mismatch_fail_closed() {
+    let root = test_root("ingress-binding-load-scope-mismatch");
+    let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;
+    let envelope = test_envelope("scope mismatch");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let thread_id = ThreadId::new();
+    let requested = ThreadCoordinates {
+        tenant_id: target.address.tenant_id.clone(),
+        user_id: target.address.user_id,
+        session_id: target.address.session_id,
+        thread_id,
+    };
+    let conflicting = ThreadCoordinates {
+        tenant_id: target.address.tenant_id,
+        user_id: "other-user".to_string(),
+        session_id: "other-session".to_string(),
+        thread_id,
+    };
+    gate.block_first_build(requested.clone());
+
+    let loading_bridge = bridge.clone();
+    let loading_coordinates = requested.clone();
+    let loading = tokio::spawn(async move {
+        loading_bridge
+            .get_or_load_thread_handle(&loading_coordinates)
+            .await
+    });
+    gate.wait_for_builds(1).await;
+    bridge
+        .supervisor
+        .load_thread_from_lifecycle(ThreadLifecycleRecord {
+            coordinates: conflicting.clone(),
+            parent_thread_id: None,
+            topology: ThreadTopology::root(),
+            status: ThreadLifecycleStatus::Idle,
+            latest_signal_id: None,
+            latest_checkpoint_id: None,
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+    gate.release();
+
+    assert!(matches!(
+        loading.await.unwrap(),
+        Err(ThreadHandleResolutionError::Lookup(
+            CooldisError::ThreadScopeMismatch { .. }
+        ))
+    ));
+    bridge
+        .supervisor
+        .shutdown_thread_at(&conflicting)
+        .await
+        .unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
