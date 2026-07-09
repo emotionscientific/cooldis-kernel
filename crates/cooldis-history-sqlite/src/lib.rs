@@ -10,7 +10,7 @@ use cooldis_history::{
     storage_error, validate_entry_coordinates, validate_new_event, validate_thread_base_ref,
 };
 use cooldis_runtime_contracts::{ThreadCheckpointId, ThreadCoordinates, ThreadId};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OpenFlags, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,20 @@ impl SqliteSessionStore {
         }
         let connection = rusqlite::Connection::open(path).map_err(storage_error)?;
         Self::from_connection(connection)
+    }
+
+    pub fn open_read_only(path: impl AsRef<Path>) -> HistoryResult<Self> {
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(storage_error)?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(storage_error)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(connection)),
+        })
     }
 
     pub fn in_memory() -> HistoryResult<Self> {
@@ -72,6 +86,28 @@ impl SqliteSessionStore {
             });
         }
         Ok(coordinates)
+    }
+
+    pub fn list_thread_events(&self, thread_id: ThreadId) -> HistoryResult<Vec<EventRecord>> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT event_id, schema, payload_schema, stream_id, sequence, thread_id,
+                        tenant_id, user_id, session_id, created_at_ms, kind, origin,
+                        provenance_json, payload_json
+                 FROM event_records
+                 WHERE thread_id = ?1
+                 ORDER BY rowid",
+            )
+            .map_err(storage_error)?;
+        let mut rows = statement
+            .query(params![thread_id.to_string()])
+            .map_err(storage_error)?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            events.push(sqlite_event_from_row(row)?);
+        }
+        Ok(events)
     }
 }
 

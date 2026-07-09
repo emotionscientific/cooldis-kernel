@@ -3,33 +3,37 @@ use crate::{
     APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
     APP_SERVER_BIFROST_PROVIDER, APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentManifestRefStatus, AppServerListenAddr,
-    AppServerProviderConfig, CapsuleBindingsConfig, CodexTuiConnectConfig, CodexTuiEvent,
-    CodexTuiTestClient, ConsoleAssetConfig, CooldisAppServer, CooldisAppServerConfig,
-    CooldisDaemonClockRoute, CooldisDaemonIoBridge, CooldisDaemonQueueWorker,
-    CooldisDaemonServiceSpec, CooldisDaemonServiceTarget, CooldisError, CooldisIngressConfig,
-    CooldisIoConfig, CooldisIoRouteConfig, CooldisProviderConfig, CooldisResult, CooldisVfs,
-    EventKind, EventStore, EventStreamId, HostFileSystem, HostFileSystemMode, JsonRpcNotification,
-    LlmProviderAuthStore, LlmProviderCatalogStore, LoadedCooldisDaemonConfig, LocalAgentRegistry,
-    LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry, McpRemoteServerConfig,
-    McpRemoteToolProvider, McpRemoteTransport, PublishOperationRequest, PublishSkillPackageRequest,
-    PublishedAgentRecord, PublishedOperationRecord, PublishedOperationSource, RegisteredOperation,
-    RouteIngressSink, RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry,
-    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, SystemDaemonClock,
+    AppServerProviderConfig, BoundCoupling, BoundCouplingSet, CapsuleBindingsConfig,
+    CodexTuiConnectConfig, CodexTuiEvent, CodexTuiTestClient, ConsoleAssetConfig, CooldisAppServer,
+    CooldisAppServerConfig, CooldisDaemonClockRoute, CooldisDaemonIoBridge,
+    CooldisDaemonQueueWorker, CooldisDaemonServiceSpec, CooldisDaemonServiceTarget, CooldisError,
+    CooldisIngressConfig, CooldisIoConfig, CooldisIoRouteConfig, CooldisProviderConfig,
+    CooldisResult, CooldisVfs, CouplingRunStatus, CouplingScheduler, CouplingSchedulerCycleReceipt,
+    EventKind, EventRecord, EventSequence, EventStore, EventStreamId, HostFileSystem,
+    HostFileSystemMode, JsonRpcNotification, LlmProviderAuthStore, LlmProviderCatalogStore,
+    LoadedCooldisDaemonConfig, LocalAgentRegistry, LocalBlobRegistry, LocalOperationRegistry,
+    LocalSkillRegistry, McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport,
+    NewEventRecord, PublishOperationRequest, PublishSkillPackageRequest, PublishedAgentRecord,
+    PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
+    RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore,
+    SqliteSecretStore, SqliteSessionStore, StreamRecordEnvelopeV1, SystemDaemonClock,
     TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore,
     ToolBuildReceipt, ToolFixtureRun, ToolInterfaceContract, ToolManualExitStatus,
-    ToolOperationManual, ToolPackageSource, WasmOperationManifest, WasmRuntimeArtifact,
-    WasmRuntimeConfig, WasmRuntimeFactory, agent::agent_tool_router::AgentKernelToolProvider,
-    build_rust_wasm_module, default_blob_registry_root,
-    default_blob_registry_root_for_agent_registry_root, default_operations_registry_root,
-    discover_cooldis_daemon_config_path, discover_cooldis_project, install_cooldis_daemon_service,
-    load_cooldis_daemon_config, load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
-    required_secret_names, resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
+    ToolOperationManual, ToolPackageSource, WasmOperationManifest, WasmOperationValueKind,
+    WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+    agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
+    default_blob_registry_root, default_blob_registry_root_for_agent_registry_root,
+    default_operations_registry_root, discover_cooldis_daemon_config_path,
+    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
+    load_cooldis_daemon_config_layers, render_cooldis_daemon_service, required_secret_names,
+    resolve_manifest_secret_resolution, uninstall_cooldis_daemon_service,
 };
 use bashkit::InMemoryFs;
+use cooldis_abi::{COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI};
 use cooldis_io_core::{IngressPersistenceMode, IngressSink};
 use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig};
 use cooldis_io_telegram::{TELEGRAM_PROTOCOL, TelegramBotClient, TelegramEgressAdapter};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -115,6 +119,9 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         [command] if command == "coupling" => print_coupling_help(),
         [command, subcommand] if command == "coupling" && subcommand == "init" => {
             print_coupling_init_help()
+        }
+        [command, subcommand] if command == "coupling" && subcommand == "run" => {
+            print_coupling_run_help()
         }
         [command] if command == "blob" => print_blob_help(),
         [command, subcommand] if command == "blob" && subcommand == "publish" => {
@@ -304,6 +311,7 @@ async fn run_coupling(mut args: Vec<OsString>) -> CooldisResult<()> {
     {
         match subcommand.to_string_lossy().as_ref() {
             "init" => print_coupling_init_help(),
+            "run" => print_coupling_run_help(),
             other => {
                 return Err(usage_error(format!(
                     "unknown coupling subcommand {other:?}"
@@ -314,6 +322,7 @@ async fn run_coupling(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
     match subcommand.to_string_lossy().as_ref() {
         "init" => coupling_init(args).await,
+        "run" => coupling_run(args).await,
         _ => Err(usage_error(format!(
             "unknown coupling subcommand {subcommand:?}"
         ))),
@@ -2036,6 +2045,426 @@ async fn run_tool(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
 }
 
+async fn coupling_run(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_coupling_run_args(args)?;
+    if options.help {
+        print_coupling_run_help();
+        return Ok(());
+    }
+    if !options.replay {
+        return Err(usage_error("coupling run currently requires --replay"));
+    }
+    let artifact = options
+        .artifact
+        .as_deref()
+        .ok_or_else(|| usage_error("coupling run --replay requires --artifact <path|op://ref>"))?;
+    let mut coupling_set = load_replay_coupling_set(&options)?;
+    if let Some(coupling_id) = &options.coupling_id {
+        coupling_set = select_replay_coupling(&coupling_set, coupling_id)?;
+    }
+    let operation_registry_root =
+        resolve_replay_artifact(artifact, options.registry_root.clone(), &mut coupling_set).await?;
+    let events = load_replay_recorded_events(&options)?;
+    let replayed_event_count = events.len();
+    let receipt = replay_coupling_events(&coupling_set, events, operation_registry_root).await?;
+    let report = CouplingReplayReport::from_receipt(replayed_event_count, &coupling_set, receipt);
+    if options.json {
+        serde_json::to_writer_pretty(std::io::stdout(), &report)
+            .map_err(|err| usage_error(format!("failed to encode coupling replay JSON: {err}")))?;
+        println!();
+    } else {
+        print_coupling_replay_report(&report);
+    }
+    Ok(())
+}
+
+fn load_replay_coupling_set(options: &CouplingRunArgs) -> CooldisResult<BoundCouplingSet> {
+    if let Some(path) = &options.coupling_file {
+        return load_replay_coupling_set_file(path);
+    }
+    if let Some(path) = &options.export_bundle {
+        let value = read_json_file(path)?;
+        if let Some(coupling_set) = coupling_set_from_export_bundle(&value)? {
+            return Ok(coupling_set);
+        }
+    }
+    Err(usage_error(
+        "coupling run --replay requires --coupling-file unless the export bundle contains a bound coupling set",
+    ))
+}
+
+fn load_replay_coupling_set_file(path: &Path) -> CooldisResult<BoundCouplingSet> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| usage_error(format!("failed to read {}: {err}", path.display())))?;
+    if let Ok(set) = serde_json::from_str::<BoundCouplingSet>(&raw) {
+        return Ok(set);
+    }
+    if let Ok(coupling) = serde_json::from_str::<BoundCoupling>(&raw) {
+        return Ok(BoundCouplingSet::new("replay-file", vec![coupling]));
+    }
+    if let Ok(set) = toml::from_str::<BoundCouplingSet>(&raw) {
+        return Ok(set);
+    }
+    if let Ok(coupling) = toml::from_str::<BoundCoupling>(&raw) {
+        return Ok(BoundCouplingSet::new("replay-file", vec![coupling]));
+    }
+    Err(usage_error(format!(
+        "coupling file {} must be a serialized BoundCouplingSet or BoundCoupling",
+        path.display()
+    )))
+}
+
+fn coupling_set_from_export_bundle(value: &Value) -> CooldisResult<Option<BoundCouplingSet>> {
+    for pointer in ["/boundCouplingSet", "/couplingSet"] {
+        if let Some(candidate) = value.pointer(pointer)
+            && !candidate.is_null()
+        {
+            return serde_json::from_value::<BoundCouplingSet>(candidate.clone())
+                .map(Some)
+                .map_err(|err| usage_error(format!("export bundle {pointer} is invalid: {err}")));
+        }
+    }
+    if let Some(raw) = value
+        .pointer("/thread/metadata/cooldis.agent.bound_coupling_set")
+        .and_then(Value::as_str)
+    {
+        return serde_json::from_str::<BoundCouplingSet>(raw)
+            .map(Some)
+            .map_err(|err| {
+                usage_error(format!(
+                    "export bundle bound coupling metadata is invalid: {err}"
+                ))
+            });
+    }
+    Ok(None)
+}
+
+fn select_replay_coupling(
+    coupling_set: &BoundCouplingSet,
+    coupling_id: &str,
+) -> CooldisResult<BoundCouplingSet> {
+    let couplings = coupling_set
+        .couplings
+        .iter()
+        .filter(|coupling| coupling.id == coupling_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if couplings.is_empty() {
+        return Err(usage_error(format!(
+            "bound coupling id {coupling_id:?} was not found in replay coupling set"
+        )));
+    }
+    Ok(BoundCouplingSet::new(
+        coupling_set.snapshot_id.clone(),
+        couplings,
+    ))
+}
+
+async fn resolve_replay_artifact(
+    artifact: &str,
+    registry_root: Option<PathBuf>,
+    coupling_set: &mut BoundCouplingSet,
+) -> CooldisResult<PathBuf> {
+    if artifact.starts_with("op://") {
+        let parsed = parse_pinned_operation_ref(artifact)?;
+        let root = registry_root.unwrap_or_else(default_registry_root);
+        let record = LocalOperationRegistry::new(&root)
+            .load_version_record(&parsed.name, &parsed.artifact_hash)
+            .map_err(|err| {
+                usage_error(format!(
+                    "replay artifact {artifact:?} was not found in operation registry {}: {err}",
+                    root.display()
+                ))
+            })?;
+        apply_replay_operation_record(coupling_set, &record, parsed.operation.as_deref())?;
+        return Ok(root);
+    }
+
+    let artifact_path = PathBuf::from(artifact);
+    let root = registry_root.unwrap_or_else(|| {
+        std::env::temp_dir()
+            .join(format!("cooldis-coupling-replay-{}", Uuid::now_v7()))
+            .join("operations")
+    });
+    let record = LocalOperationRegistry::new(&root)
+        .publish_artifact(PublishOperationRequest {
+            name: "replay-coupling".to_string(),
+            artifact_path: artifact_path.clone(),
+            source: PublishedOperationSource::Wasm {
+                bin_path: artifact_path,
+            },
+            interface: None,
+            capability_grants: BTreeSet::new(),
+            metadata: BTreeMap::from([("coupling.replay.local_artifact".to_string(), json!(true))]),
+        })
+        .await?;
+    apply_replay_operation_record(coupling_set, &record, None)?;
+    Ok(root)
+}
+
+fn apply_replay_operation_record(
+    coupling_set: &mut BoundCouplingSet,
+    record: &PublishedOperationRecord,
+    selected_operation: Option<&str>,
+) -> CooldisResult<()> {
+    for coupling in &mut coupling_set.couplings {
+        let operation_name = select_replay_operation_name(
+            &coupling.id,
+            selected_operation.or(coupling.function.operation_name.as_deref()),
+            &record.manifest,
+        )?;
+        validate_replay_coupling_operation(&coupling.id, &operation_name, &record.manifest)?;
+        coupling.function_ref = format!(
+            "op://{}/{operation_name}@sha256:{}",
+            record.name, record.active_artifact_hash
+        );
+        coupling.function.name = record.name.clone();
+        coupling.function.artifact_hash = record.active_artifact_hash.clone();
+        coupling.function.operation_name = Some(operation_name);
+    }
+    Ok(())
+}
+
+fn select_replay_operation_name(
+    coupling_id: &str,
+    selected_operation: Option<&str>,
+    manifest: &WasmOperationManifest,
+) -> CooldisResult<String> {
+    if let Some(operation_name) = selected_operation {
+        if manifest.operation(operation_name).is_some() {
+            return Ok(operation_name.to_string());
+        }
+        return Err(usage_error(format!(
+            "replay artifact does not expose operation {operation_name:?} for coupling {coupling_id:?}"
+        )));
+    }
+    if manifest.operations.len() == 1 {
+        return Ok(manifest.operations[0].name.clone());
+    }
+    Err(usage_error(format!(
+        "replay artifact for coupling {coupling_id:?} exposes multiple operations; use op://<record>/<operation>@sha256:<hash> or a bound coupling operation_name"
+    )))
+}
+
+fn validate_replay_coupling_operation(
+    coupling_id: &str,
+    operation_name: &str,
+    manifest: &WasmOperationManifest,
+) -> CooldisResult<()> {
+    let operation = manifest.operation(operation_name).ok_or_else(|| {
+        usage_error(format!(
+            "replay artifact does not expose operation {operation_name:?} for coupling {coupling_id:?}"
+        ))
+    })?;
+    if operation.input != WasmOperationValueKind::Json {
+        return Err(usage_error(format!(
+            "coupling {coupling_id:?} operation {operation_name:?} must declare json input for {COUPLING_INVOCATION_ABI}"
+        )));
+    }
+    if operation.output != WasmOperationValueKind::Json {
+        return Err(usage_error(format!(
+            "coupling {coupling_id:?} operation {operation_name:?} must declare json output for {COUPLING_DISCHARGE_ABI}"
+        )));
+    }
+    if !operation.required_capabilities.is_empty() {
+        return Err(usage_error(format!(
+            "coupling {coupling_id:?} operation {operation_name:?} declares effect capabilities; replay couplings must be pure compute"
+        )));
+    }
+    Ok(())
+}
+
+fn load_replay_recorded_events(options: &CouplingRunArgs) -> CooldisResult<Vec<EventRecord>> {
+    match (&options.journal, &options.thread_id, &options.export_bundle) {
+        (Some(_), _, Some(_)) => Err(usage_error(
+            "coupling run --replay accepts either --journal/--thread-id or --export, not both",
+        )),
+        (Some(journal), Some(thread_id), None) => {
+            let store = SqliteSessionStore::open_read_only(journal)
+                .map_err(|err| usage_error(format!("failed to open journal read-only: {err}")))?;
+            let events = store.list_thread_events(*thread_id).map_err(|err| {
+                usage_error(format!(
+                    "failed to read recorded events for thread {thread_id}: {err}"
+                ))
+            })?;
+            if events.is_empty() {
+                return Err(usage_error(format!(
+                    "journal {} has no events for thread {thread_id}",
+                    journal.display()
+                )));
+            }
+            Ok(events)
+        }
+        (Some(_), None, None) => Err(usage_error(
+            "coupling run --replay with --journal requires --thread-id",
+        )),
+        (None, _, Some(export)) => load_replay_events_from_export(export),
+        (None, _, None) => Err(usage_error(
+            "coupling run --replay requires --journal/--thread-id or --export",
+        )),
+    }
+}
+
+fn load_replay_events_from_export(path: &Path) -> CooldisResult<Vec<EventRecord>> {
+    let value = read_json_file(path)?;
+    let streams = value
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(|| usage_error("export bundle missing streams array"))?;
+    let mut events = Vec::new();
+    for stream in streams {
+        let data = stream
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| usage_error("export bundle stream missing data array"))?;
+        for event in data {
+            events.push(event_record_from_export_value(event.clone())?);
+        }
+    }
+    events.sort_by(|left, right| {
+        (
+            left.created_at_ms,
+            left.stream_id.to_string(),
+            left.sequence.get(),
+            left.id.to_string(),
+        )
+            .cmp(&(
+                right.created_at_ms,
+                right.stream_id.to_string(),
+                right.sequence.get(),
+                right.id.to_string(),
+            ))
+    });
+    if events.is_empty() {
+        return Err(usage_error("export bundle contains no replayable events"));
+    }
+    Ok(events)
+}
+
+fn event_record_from_export_value(value: Value) -> CooldisResult<EventRecord> {
+    let envelope = serde_json::from_value::<StreamRecordEnvelopeV1>(value)
+        .map_err(|err| usage_error(format!("export stream record is invalid: {err}")))?;
+    let kind = envelope
+        .kind
+        .parse::<EventKind>()
+        .map_err(|err| usage_error(format!("export stream record kind is invalid: {err}")))?;
+    Ok(EventRecord {
+        id: envelope.event_id,
+        stream_id: envelope.stream_id,
+        sequence: envelope.sequence,
+        coordinates: envelope.coordinates,
+        created_at_ms: envelope.created_at_ms,
+        kind,
+        origin: envelope.origin,
+        provenance: envelope.provenance,
+        payload: envelope.payload,
+    })
+}
+
+async fn replay_coupling_events(
+    coupling_set: &BoundCouplingSet,
+    recorded_events: Vec<EventRecord>,
+    operation_registry_root: PathBuf,
+) -> CooldisResult<CouplingSchedulerCycleReceipt> {
+    let replay_store = CouplingReplayEventStore::default();
+    let executor = crate::kernel::coupling_executor_registry::CouplingExecutorRegistry::new(Some(
+        operation_registry_root,
+    ));
+    let scheduler = CouplingScheduler::new(&replay_store, &executor);
+    let mut aggregate = CouplingSchedulerCycleReceipt {
+        snapshot_id: coupling_set.snapshot_id.clone(),
+        runs: Vec::new(),
+        appended_events: Vec::new(),
+    };
+    for event in recorded_events {
+        let appended = replay_store
+            .append_recorded_event(event)
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        if appended.is_empty() {
+            continue;
+        }
+        let receipt = scheduler.run_batch(coupling_set, appended).await?;
+        aggregate.runs.extend(receipt.runs);
+        aggregate.appended_events.extend(receipt.appended_events);
+    }
+    Ok(aggregate)
+}
+
+fn read_json_file(path: &Path) -> CooldisResult<Value> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| usage_error(format!("failed to read {}: {err}", path.display())))?;
+    serde_json::from_str(&raw)
+        .map_err(|err| usage_error(format!("failed to parse {} as JSON: {err}", path.display())))
+}
+
+fn parse_pinned_operation_ref(reference: &str) -> CooldisResult<ParsedOperationRef> {
+    let body = reference
+        .strip_prefix("op://")
+        .ok_or_else(|| usage_error("operation ref must start with op://"))?;
+    let (name_part, artifact_hash) = body.split_once("@sha256:").ok_or_else(|| {
+        usage_error("operation ref must be pinned as op://<record>/<operation>@sha256:<hash>")
+    })?;
+    if artifact_hash.len() != 64 || !artifact_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(usage_error(
+            "operation ref has an invalid sha256 artifact hash",
+        ));
+    }
+    let segments = name_part.split('/').collect::<Vec<_>>();
+    let (name, operation) = match segments.as_slice() {
+        [name] if !name.is_empty() => ((*name).to_string(), None),
+        [name, operation] if !name.is_empty() && !operation.is_empty() => {
+            ((*name).to_string(), Some((*operation).to_string()))
+        }
+        _ => {
+            return Err(usage_error(
+                "operation ref must match op://<record>@sha256:<hash> or op://<record>/<operation>@sha256:<hash>",
+            ));
+        }
+    };
+    Ok(ParsedOperationRef {
+        name,
+        operation,
+        artifact_hash: artifact_hash.to_string(),
+    })
+}
+
+fn print_coupling_replay_report(report: &CouplingReplayReport) {
+    println!("DRY RUN ONLY: proposed coupling discharges; no stream was appended.");
+    println!("mode {}", report.mode);
+    println!("snapshot {}", report.snapshot_id);
+    println!("replayed_events {}", report.replayed_event_count);
+    println!("runs {}", report.runs.len());
+    for run in &report.runs {
+        if run.blocked {
+            println!(
+                "run {} BLOCKED {} trigger={} sequence={}",
+                run.coupling_id,
+                run.reason.as_deref().unwrap_or("blocked"),
+                run.trigger_event_id,
+                run.trigger_sequence
+            );
+        } else {
+            println!(
+                "run {} {} trigger={} sequence={} proposals={}",
+                run.coupling_id,
+                run.status,
+                run.trigger_event_id,
+                run.trigger_sequence,
+                run.proposal_event_count
+            );
+        }
+    }
+    println!("proposal_events {}", report.proposal_events.len());
+    for event in &report.proposal_events {
+        println!(
+            "proposal stream={} kind={} payload={}",
+            event.stream,
+            event.kind,
+            compact_json(&event.payload)
+        );
+    }
+}
+
 async fn run_skill(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
         || args
@@ -3450,6 +3879,241 @@ struct AgentRunArgs {
 }
 
 #[derive(Debug)]
+struct CouplingRunArgs {
+    replay: bool,
+    artifact: Option<String>,
+    coupling_file: Option<PathBuf>,
+    coupling_id: Option<String>,
+    journal: Option<PathBuf>,
+    thread_id: Option<ThreadId>,
+    export_bundle: Option<PathBuf>,
+    registry_root: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+#[derive(Debug)]
+struct ParsedOperationRef {
+    name: String,
+    operation: Option<String>,
+    artifact_hash: String,
+}
+
+#[derive(Default)]
+struct CouplingReplayEventStore {
+    streams: std::sync::Mutex<BTreeMap<String, Vec<EventRecord>>>,
+}
+
+impl CouplingReplayEventStore {
+    fn append_recorded_event(&self, event: EventRecord) -> crate::HistoryResult<Vec<EventRecord>> {
+        let mut streams = self.streams.lock().map_err(|err| {
+            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+        })?;
+        let stream = streams.entry(event.stream_id.to_string()).or_default();
+        if stream.iter().any(|existing| existing.id == event.id) {
+            return Ok(Vec::new());
+        }
+        stream.push(event.clone());
+        stream.sort_by(|left, right| {
+            (left.sequence.get(), left.id.to_string())
+                .cmp(&(right.sequence.get(), right.id.to_string()))
+        });
+        Ok(vec![event])
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for CouplingReplayEventStore {
+    async fn append_events(
+        &self,
+        stream_id: &EventStreamId,
+        records: Vec<NewEventRecord>,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        let mut streams = self.streams.lock().map_err(|err| {
+            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+        })?;
+        let stream = streams.entry(stream_id.to_string()).or_default();
+        let mut next_sequence = stream
+            .iter()
+            .map(|event| event.sequence.get())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut appended = Vec::with_capacity(records.len());
+        for record in records {
+            let event =
+                EventRecord::from_new(stream_id.clone(), EventSequence::new(next_sequence), record);
+            next_sequence += 1;
+            stream.push(event.clone());
+            appended.push(event);
+        }
+        Ok(appended)
+    }
+
+    async fn read_events(
+        &self,
+        stream_id: &EventStreamId,
+        from_sequence: Option<EventSequence>,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        let streams = self.streams.lock().map_err(|err| {
+            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+        })?;
+        let events = streams
+            .get(&stream_id.to_string())
+            .cloned()
+            .unwrap_or_default();
+        Ok(match from_sequence {
+            Some(sequence) => events
+                .into_iter()
+                .filter(|event| event.sequence.get() >= sequence.get())
+                .collect(),
+            None => events,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CouplingReplayReport {
+    schema: &'static str,
+    mode: &'static str,
+    dry_run: bool,
+    snapshot_id: String,
+    replayed_event_count: usize,
+    runs: Vec<CouplingReplayRunReport>,
+    proposal_events: Vec<CouplingReplayProposalEvent>,
+}
+
+impl CouplingReplayReport {
+    fn from_receipt(
+        replayed_event_count: usize,
+        coupling_set: &BoundCouplingSet,
+        receipt: CouplingSchedulerCycleReceipt,
+    ) -> Self {
+        let mut proposal_ids = BTreeSet::new();
+        let mut proposal_streams = BTreeMap::new();
+        for run in &receipt.runs {
+            let stream = coupling_set
+                .couplings
+                .iter()
+                .find(|coupling| coupling.id == run.coupling_id)
+                .map(|coupling| coupling.sink.stream.clone())
+                .unwrap_or_else(|| run.trigger_stream_id.clone());
+            for event_id in &run.discharged_event_ids {
+                let id = event_id.to_string();
+                proposal_ids.insert(id.clone());
+                proposal_streams.insert(id, stream.clone());
+            }
+        }
+        let proposal_events = receipt
+            .appended_events
+            .iter()
+            .filter_map(|event| {
+                let id = event.id.to_string();
+                proposal_ids
+                    .contains(&id)
+                    .then(|| CouplingReplayProposalEvent {
+                        stream: proposal_streams
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| event.stream_id.to_string()),
+                        stream_id: event.stream_id.to_string(),
+                        kind: event.kind.to_string(),
+                        payload: event.payload.clone(),
+                        provenance: event.provenance.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        let runs = receipt
+            .runs
+            .into_iter()
+            .map(CouplingReplayRunReport::from_run)
+            .collect();
+        Self {
+            schema: "cooldis.coupling.replay/1",
+            mode: "replay",
+            dry_run: true,
+            snapshot_id: receipt.snapshot_id,
+            replayed_event_count,
+            runs,
+            proposal_events,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CouplingReplayRunReport {
+    coupling_id: String,
+    status: &'static str,
+    scheduler_status: CouplingRunStatus,
+    blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    trigger_event_id: String,
+    trigger_stream_id: String,
+    trigger_sequence: i64,
+    depth: u32,
+    source_event_ids: Vec<String>,
+    proposal_event_count: usize,
+    budget_spent: crate::CouplingBudgetSpent,
+}
+
+impl CouplingReplayRunReport {
+    fn from_run(run: crate::CouplingRunReceipt) -> Self {
+        let blocked = replay_run_is_blocked(&run);
+        Self {
+            coupling_id: run.coupling_id,
+            status: if blocked {
+                "blocked"
+            } else {
+                coupling_run_status_name(run.status)
+            },
+            scheduler_status: run.status,
+            blocked,
+            reason: run.reason,
+            trigger_event_id: run.trigger_event_id.to_string(),
+            trigger_stream_id: run.trigger_stream_id,
+            trigger_sequence: run.trigger_sequence,
+            depth: run.depth,
+            source_event_ids: run
+                .source_event_ids
+                .into_iter()
+                .map(|event_id| event_id.to_string())
+                .collect(),
+            proposal_event_count: run.discharged_event_ids.len(),
+            budget_spent: run.budget_spent,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CouplingReplayProposalEvent {
+    stream: String,
+    stream_id: String,
+    kind: String,
+    payload: Value,
+    provenance: crate::EventProvenance,
+}
+
+fn replay_run_is_blocked(run: &crate::CouplingRunReceipt) -> bool {
+    run.reason.as_deref() == Some("quota_exhausted")
+        || run
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("budget:"))
+}
+
+fn coupling_run_status_name(status: CouplingRunStatus) -> &'static str {
+    match status {
+        CouplingRunStatus::Completed => "completed",
+        CouplingRunStatus::Failed => "failed",
+        CouplingRunStatus::Skipped => "skipped",
+    }
+}
+
+#[derive(Debug)]
 struct RpcArgs {
     listen: AppServerListenAddr,
     runtime_home: Option<PathBuf>,
@@ -3905,6 +4569,68 @@ fn parse_agent_run_args(args: Vec<OsString>) -> CooldisResult<AgentRunArgs> {
         reference,
         input,
         registry_root,
+        help,
+    })
+}
+
+fn parse_coupling_run_args(args: Vec<OsString>) -> CooldisResult<CouplingRunArgs> {
+    let mut replay = false;
+    let mut artifact = None;
+    let mut coupling_file = None;
+    let mut coupling_id = None;
+    let mut journal = None;
+    let mut thread_id = None;
+    let mut export_bundle = None;
+    let mut registry_root = None;
+    let mut json = false;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--replay" => replay = true,
+            "--artifact" => artifact = Some(required_string_value(&mut iter, "--artifact")?),
+            "--coupling-file" => {
+                coupling_file = Some(required_path_value(&mut iter, "--coupling-file")?)
+            }
+            "--coupling-id" => {
+                coupling_id = Some(required_string_value(&mut iter, "--coupling-id")?)
+            }
+            "--journal" | "--db" => journal = Some(required_path_value(&mut iter, "--journal")?),
+            "--thread-id" | "--thread" => {
+                let value = required_string_value(&mut iter, "--thread-id")?;
+                thread_id = Some(
+                    ThreadId::parse_str(&value)
+                        .map_err(|err| usage_error(format!("invalid --thread-id: {err}")))?,
+                );
+            }
+            "--export" => export_bundle = Some(required_path_value(&mut iter, "--export")?),
+            "--registry-root" => {
+                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+            }
+            "--json" => json = true,
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown coupling run argument {other:?}"
+                )));
+            }
+            other => {
+                return Err(usage_error(format!(
+                    "unexpected coupling run positional argument {other:?}; use --artifact"
+                )));
+            }
+        }
+    }
+    Ok(CouplingRunArgs {
+        replay,
+        artifact,
+        coupling_file,
+        coupling_id,
+        journal,
+        thread_id,
+        export_bundle,
+        registry_root,
+        json,
         help,
     })
 }
@@ -6810,6 +7536,7 @@ const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
     "cooldis agent plan <manifest>",
     "cooldis agent publish <manifest>",
     "cooldis blob publish <file>",
+    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> --thread-id <id> --journal <db>",
     "cooldis tool build --package cooldis.tool.toml",
     "cooldis tool publish --package cooldis.tool.toml",
     "cooldis skill publish <dir>",
@@ -6819,6 +7546,7 @@ const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
 
 const ADVANCED_COMMANDS: &[&str] = &[
     "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]>",
+    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--json]",
     "cooldis debug rpc call <method> [PARAMS_JSON]",
     "cooldis daemon run [--config cooldis.toml]",
 ];
@@ -6846,6 +7574,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]",
     "cooldis agent run <agent-ref> --input <text> [--registry-root .cooldis/agents]",
     "cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]",
+    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--coupling-id <id>] [--registry-root .cooldis/operations] [--json]",
     "cooldis tool build --package cooldis.tool.toml",
     "cooldis tool build --module-path <dir|Cargo.toml> [--name <name>] [--config cooldis.json]",
     "cooldis tool list [--registry-root .cooldis/operations]",
@@ -6937,9 +7666,13 @@ fn print_coupling_help() {
 \n\
 Usage:\n\
   cooldis coupling init <name> [--out <dir>] [--force]\n\
+  cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--coupling-id <id>] [--registry-root .cooldis/operations] [--json]\n\
 \n\
-Scaffolds a Rust Wasm coupling package that uses #[coupling], includes a native\n\
-testkit test, and validates through `cooldis tool build --package`.\n"
+Couplings are event-stream edges. `init` scaffolds a Rust Wasm coupling\n\
+package that uses #[coupling] and validates through `cooldis tool build\n\
+--package`. `run --replay` runs a coupling artifact against a recorded\n\
+thread in dry-run mode and prints proposed discharges without appending to\n\
+the source journal.\n"
     );
 }
 
@@ -7092,6 +7825,20 @@ Usage:\n\
 \n\
 Publishes a file as a content-addressed blob artifact and prints the immutable\n\
 resource://artifact/sha256:<hash> ref for manifest resource rows.\n"
+    );
+}
+
+fn print_coupling_run_help() {
+    println!(
+        "cooldis coupling run\n\
+\n\
+Usage:\n\
+  cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--coupling-id <id>] [--registry-root .cooldis/operations] [--json]\n\
+\n\
+Replays recorded thread events through the bound coupling trigger, selector,\n\
+quota, budget, and Wasm execution path. Output is proposals only; no source\n\
+journal stream is appended. --json emits stable machine-readable replay\n\
+receipts for tests and scripts.\n"
     );
 }
 

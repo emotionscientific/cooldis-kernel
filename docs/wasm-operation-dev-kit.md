@@ -292,6 +292,44 @@ The minimal checked-in Rust example is `examples/wasm-counter-coupling`. It
 emits one derived event every `config.every` matching source events without
 hand-writing the raw operation exports.
 
+### Coupling Replay Dev Loop
+
+Use replay while iterating on a custom coupling. It runs the same scheduler
+trigger, selector, quota, budget, and Wasm execution path against recorded
+thread events, but it prints proposals only and does not append to the source
+journal.
+
+```bash
+cargo build --release \
+  --target wasm32-unknown-unknown \
+  --manifest-path examples/wasm-counter-coupling/Cargo.toml
+
+cargo run --locked --bin cooldis -- coupling run --replay \
+  --artifact examples/wasm-counter-coupling/target/wasm32-unknown-unknown/release/cooldis_example_wasm_counter_coupling.wasm \
+  --coupling-file ./counter.bound-coupling.json \
+  --thread-id 018f9fe0-35a7-7a80-8f65-12e7e0b20b52 \
+  --journal .cooldis/state/session_history.sqlite3 \
+  --json
+```
+
+The coupling file is the bound kernel contract (`BoundCoupling` or
+`BoundCouplingSet`) produced by manifest binding. For a published artifact, pass
+the pinned operation ref instead:
+
+```bash
+cargo run --locked --bin cooldis -- coupling run --replay \
+  --artifact op://counter/fold_counter@sha256:<hash> \
+  --registry-root .cooldis/operations \
+  --coupling-file ./counter.bound-coupling.json \
+  --thread-id <thread-id> \
+  --journal .cooldis/state/session_history.sqlite3
+```
+
+Replay output is marked dry-run. JSON output uses `proposalEvents` for proposed
+sink discharges and `runs[].blocked` for quota or budget blocks, so tests can
+assert both emitted events and would-have-been-blocked firings without scraping
+human text.
+
 ## First No-Key Example: `data.csv_profile`
 
 Use a CSV profiler instead of a network search wrapper. It is useful, exact, and
