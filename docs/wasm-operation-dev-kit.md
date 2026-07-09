@@ -189,6 +189,147 @@ same instructions. End-user distribution should come later through the npx
 wrapper, the release binary, or a quick-start/template init helper that installs
 the skill into the user's dev environment.
 
+## Custom Coupling Guests
+
+Custom coupling guests are normal Cooldis Wasm operations with a narrower
+contract:
+
+```text
+input:  cooldis.coupling.invocation/0.1
+output: cooldis.coupling.discharge/0.1
+```
+
+The invocation JSON contains the trigger event, the selected source events,
+manifest config, and invocation metadata (`coupling_id`, `thread_id`, `depth`).
+The discharge JSON contains proposed events only:
+
+```json
+{
+  "abi": "cooldis.coupling.discharge/0.1",
+  "events": [
+    {
+      "stream": "derived:counter",
+      "kind": "placement.decision",
+      "payload": { "count": 3 }
+    }
+  ]
+}
+```
+
+The kernel, not the guest, stamps origin and provenance and rejects undeclared
+sink streams/kinds without partial appends. Coupling guests run as pure compute:
+no HTTP, VFS, secrets, or other effectful imports are available. Put effectful
+work behind tools and let couplings fold event streams into deterministic
+derived events.
+
+The supported Rust authoring surface is the SDK macro contract from ADR 0002:
+write a plain typed function and let the macro own exports, operation dispatch,
+JSON envelope encoding, and ABI status mapping.
+
+```rust
+use cooldis_guest_sdk::prelude::*;
+use serde_json::json;
+
+#[derive(Deserialize)]
+struct CounterConfig {
+    #[serde(default = "default_every")]
+    every: u64,
+}
+
+#[coupling]
+pub fn fold_counter(ctx: CouplingContext) -> Result<Discharge, GuestError> {
+    let config: CounterConfig = ctx.config()?;
+    let count = ctx.sources().len() as u64;
+    if count == 0 || count % config.every.max(1) != 0 {
+        return Ok(Discharge::empty());
+    }
+    Discharge::empty().event(
+        "derived:counter",
+        "placement.decision",
+        json!({
+            "count": count,
+            "trigger_event_id": ctx.trigger().id.clone(),
+        }),
+    )
+}
+
+fn default_every() -> u64 {
+    3
+}
+```
+
+`#[coupling]` wraps `fn(CouplingContext) -> Result<Discharge, GuestError>` and
+exports one JSON operation with the Rust function name. `#[operation]` wraps a
+pure `fn(Input) -> Result<Output, GuestError>`; operations that need host powers
+take `&mut OperationContext` as their first argument. Guest input and output
+types should derive `serde::Deserialize` and `serde::Serialize`.
+
+Native tests should exercise the plain Rust function before building Wasm:
+
+```rust
+#[test]
+fn fixture_runs_natively() {
+    let invocation =
+        cooldis_guest_sdk::testkit::invocation_from_fixture_file("fixtures/invocation.json")?;
+    let discharge = cooldis_guest_sdk::testkit::invoke_coupling(fold_counter, invocation)?;
+    assert_eq!(discharge.events.len(), 1);
+}
+```
+
+`cooldis coupling init <name>` scaffolds the macro-authored crate,
+`cooldis.tool.toml`, schemas, fixture JSON, and one native testkit test. The
+same package then validates through the existing publish oracle:
+
+```bash
+cooldis coupling init counter-coupling
+cd counter-coupling
+cargo test --locked
+cargo build --locked --release --target wasm32-unknown-unknown
+cooldis tool build --package cooldis.tool.toml
+```
+
+The minimal checked-in Rust example is `examples/wasm-counter-coupling`. It
+emits one derived event every `config.every` matching source events without
+hand-writing the raw operation exports.
+
+### Coupling Replay Dev Loop
+
+Use replay while iterating on a custom coupling. It runs the same scheduler
+trigger, selector, quota, budget, and Wasm execution path against recorded
+thread events, but it prints proposals only and does not append to the source
+journal.
+
+```bash
+cargo build --release \
+  --target wasm32-unknown-unknown \
+  --manifest-path examples/wasm-counter-coupling/Cargo.toml
+
+cargo run --locked --bin cooldis -- coupling run --replay \
+  --artifact examples/wasm-counter-coupling/target/wasm32-unknown-unknown/release/cooldis_example_wasm_counter_coupling.wasm \
+  --coupling-file ./counter.bound-coupling.json \
+  --thread-id 018f9fe0-35a7-7a80-8f65-12e7e0b20b52 \
+  --journal .cooldis/state/session_history.sqlite3 \
+  --json
+```
+
+The coupling file is the bound kernel contract (`BoundCoupling` or
+`BoundCouplingSet`) produced by manifest binding. For a published artifact, pass
+the pinned operation ref instead:
+
+```bash
+cargo run --locked --bin cooldis -- coupling run --replay \
+  --artifact op://counter/fold_counter@sha256:<hash> \
+  --registry-root .cooldis/operations \
+  --coupling-file ./counter.bound-coupling.json \
+  --thread-id <thread-id> \
+  --journal .cooldis/state/session_history.sqlite3
+```
+
+Replay output is marked dry-run. JSON output uses `proposalEvents` for proposed
+sink discharges and `runs[].blocked` for quota or budget blocks, so tests can
+assert both emitted events and would-have-been-blocked firings without scraping
+human text.
+
 ## First No-Key Example: `data.csv_profile`
 
 Use a CSV profiler instead of a network search wrapper. It is useful, exact, and
@@ -303,6 +444,16 @@ That later lane needs trusted builder identity, source provenance, compatibility
 checks, scoped promotion policy, rollback semantics, audit receipts, and optional
 human approval before flipping active bindings.
 
+## Encoding Trajectory
+
+The dev kit authors against the SDK contract (typed functions plus
+`cooldis-guest-sdk`), never against the raw JSON-over-linear-memory encoding.
+The WebAssembly component model (WIT) is the planned successor encoding;
+because the SDK macro layer owns the wire format, that migration is a
+recompile for guest authors, not a rewrite. Decision, rationale, and
+migration triggers live in
+[ADR 0002](adr/0002-guest-encoding-v1-component-model-later.md).
+
 ## Non-Goals
 
 - No arbitrary in-process TypeScript extension execution.
@@ -310,3 +461,5 @@ human approval before flipping active bindings.
 - No advisory skill treated as enforcement policy.
 - No remote compiler service in V0.
 - No marketplace trust/signature model in V0.
+- No guest source hand-writing raw ABI exports once the SDK macro layer
+  lands; the SDK contract is the only supported authoring surface.

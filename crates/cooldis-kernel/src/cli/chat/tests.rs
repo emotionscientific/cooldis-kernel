@@ -3,7 +3,7 @@ use serde_json::json;
 use std::path::PathBuf;
 
 #[test]
-fn slash_parser_accepts_operator_session_commands() {
+fn slash_parser_accepts_chat_session_commands() {
     assert_eq!(
         parse_slash_command("/help").unwrap(),
         Some(SlashCommand::Help)
@@ -35,11 +35,11 @@ fn slash_parser_repairs_unknown_or_incomplete_commands() {
 fn attach_parser_accepts_unix_and_ws_endpoints() {
     assert_eq!(
         parse_attach_target("unix:///tmp/cooldis.sock").unwrap(),
-        OperatorAttachTarget::Unix(PathBuf::from("/tmp/cooldis.sock"))
+        ChatAttachTarget::Unix(PathBuf::from("/tmp/cooldis.sock"))
     );
     assert_eq!(
         parse_attach_target("ws://127.0.0.1:49200/rpc").unwrap(),
-        OperatorAttachTarget::WebSocket("ws://127.0.0.1:49200/rpc".to_string())
+        ChatAttachTarget::WebSocket("ws://127.0.0.1:49200/rpc".to_string())
     );
     assert!(parse_attach_target("wss://example.com/rpc").is_err());
 }
@@ -74,13 +74,13 @@ fn state_tracks_turn_lifecycle_rows() {
         state
             .history
             .iter()
-            .any(|line| line.role == OperatorLineRole::Assistant && line.text == "hi")
+            .any(|line| line.role == ChatLineRole::Assistant && line.text == "hi")
     );
     assert!(
         state
             .history
             .iter()
-            .any(|line| line.role == OperatorLineRole::Thinking && line.text == "plan")
+            .any(|line| line.role == ChatLineRole::Thinking && line.text == "plan")
     );
 
     state.finish_turn();
@@ -88,8 +88,8 @@ fn state_tracks_turn_lifecycle_rows() {
     assert_eq!(state.turn_state, "idle");
 }
 
-fn test_state() -> OperatorTuiState {
-    OperatorTuiState::new(
+fn test_state() -> ChatTuiState {
+    ChatTuiState::new(
         CodexTuiThread {
             id: "thread-123456".to_string(),
             raw: json!({
@@ -98,7 +98,7 @@ fn test_state() -> OperatorTuiState {
                 "name": "demo",
             }),
         },
-        OperatorSessionInfo {
+        ChatSessionInfo {
             connection_label: "test".to_string(),
             cwd: "/tmp/work".to_string(),
             model_label: "local/echo".to_string(),

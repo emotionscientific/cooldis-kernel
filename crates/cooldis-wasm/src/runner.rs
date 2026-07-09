@@ -1,6 +1,6 @@
 use crate::{
-    CooldisWasmError, CooldisWasmResult, WasmHttpRequest, WasmHttpResponse, WasmRuntimeArtifact,
-    WasmRuntimeConfig,
+    CooldisWasmError, CooldisWasmResult, WasmHostImportPolicy, WasmHttpRequest, WasmHttpResponse,
+    WasmRuntimeArtifact, WasmRuntimeConfig,
 };
 use bashkit::{Error as BashkitError, FileSystem};
 use cooldis_abi::{InvocationContext, WasmOperationManifest};
@@ -73,23 +73,18 @@ impl WasmRuntimeFactory {
 
     pub async fn validate_operation_artifact(&self) -> CooldisWasmResult<WasmOperationManifest> {
         let module = self.load_module().await?;
-        validate_module_imports(&module)?;
-        let manifest = load_operation_manifest(&self.engine, &module, &self.config)
-            .await?
-            .ok_or_else(|| {
-                CooldisWasmError::RuntimeFactory(format!(
-                    "wasm operation artifact must export {DESCRIBE_EXPORT}; legacy handle_turn modules cannot be published as operations"
-                ))
-            })?;
-        if !module
-            .exports()
-            .any(|export| export.name() == CALL_OPERATION_EXPORT)
-        {
-            return Err(CooldisWasmError::RuntimeFactory(format!(
-                "wasm operation artifact must export {CALL_OPERATION_EXPORT}"
-            )));
-        }
-        Ok(manifest)
+        validate_operation_module(&self.engine, &module, &self.config).await
+    }
+
+    pub async fn build_validated_operation_runtime(&self) -> CooldisWasmResult<WasmModuleRuntime> {
+        let module = self.load_module().await?;
+        let manifest = validate_operation_module(&self.engine, &module, &self.config).await?;
+        Ok(WasmModuleRuntime {
+            config: self.config.clone(),
+            engine: Arc::clone(&self.engine),
+            module,
+            manifest: Some(manifest),
+        })
     }
 
     pub async fn invoke_operation_bytes(
@@ -147,6 +142,30 @@ impl WasmRuntimeFactory {
     }
 }
 
+async fn validate_operation_module(
+    engine: &Engine,
+    module: &Module,
+    config: &WasmRuntimeConfig,
+) -> CooldisWasmResult<WasmOperationManifest> {
+    validate_module_imports(module, config.host_import_policy)?;
+    let manifest = load_operation_manifest(engine, module, config)
+        .await?
+        .ok_or_else(|| {
+            CooldisWasmError::RuntimeFactory(format!(
+                "wasm operation artifact must export {DESCRIBE_EXPORT}; legacy handle_turn modules cannot be published as operations"
+            ))
+        })?;
+    if !module
+        .exports()
+        .any(|export| export.name() == CALL_OPERATION_EXPORT)
+    {
+        return Err(CooldisWasmError::RuntimeFactory(format!(
+            "wasm operation artifact must export {CALL_OPERATION_EXPORT}"
+        )));
+    }
+    Ok(manifest)
+}
+
 fn configure_wasmtime_engine(engine_config: &mut Config) {
     // Wasmtime's default macOS Mach-port trap handler owns a process-global
     // helper thread. Under the parallel lib test harness that thread has
@@ -181,6 +200,27 @@ pub struct WasmModuleRuntime {
 }
 
 impl WasmModuleRuntime {
+    pub async fn invoke_operation_bytes(
+        &self,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+    ) -> CooldisWasmResult<WasmOperationOutput> {
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            CooldisWasmError::RuntimeExecution(format!(
+                "wasm module does not export {DESCRIBE_EXPORT}"
+            ))
+        })?;
+        execute_operation(
+            &self.engine,
+            &self.module,
+            &self.config,
+            manifest,
+            operation_name,
+            input.into(),
+        )
+        .await
+    }
+
     pub async fn execute_turn(&self, input: String) -> CooldisWasmResult<String> {
         if let Some(manifest) = &self.manifest {
             let output = execute_operation(
@@ -409,12 +449,12 @@ fn validate_manifest(manifest: &WasmOperationManifest) -> CooldisWasmResult<()> 
     Ok(())
 }
 
-fn validate_module_imports(module: &Module) -> CooldisWasmResult<()> {
+fn validate_module_imports(module: &Module, policy: WasmHostImportPolicy) -> CooldisWasmResult<()> {
     let mut unsupported = Vec::new();
     for import in module.imports() {
         let module_name = import.module();
         let name = import.name();
-        if allowed_import(module_name, name, import.ty()) {
+        if allowed_import(module_name, name, import.ty(), policy) {
             continue;
         }
         let diagnostic = import_diagnostic(module_name, name);
@@ -430,25 +470,44 @@ fn validate_module_imports(module: &Module) -> CooldisWasmResult<()> {
     }
 }
 
-fn allowed_import(module_name: &str, name: &str, ty: ExternType) -> bool {
+fn allowed_import(
+    module_name: &str,
+    name: &str,
+    ty: ExternType,
+    policy: WasmHostImportPolicy,
+) -> bool {
     let is_function = matches!(ty, ExternType::Func(_));
     is_function
-        && matches!(
-            (module_name, name),
-            ("cooldis", "input_len")
-                | ("cooldis", "input_read")
-                | ("cooldis", "output_write")
-                | ("cooldis", "log")
-                | ("cooldis_0.1", "source_read")
-                | ("cooldis_0.1", "sink_write")
-                | ("cooldis_0.1", "event_emit")
-                | ("cooldis_0.1", "http_request")
-                | ("cooldis_0.1", "check_cancelled")
-                | ("cooldis_0.1", "fs_open")
-                | ("cooldis_0.1", "fs_read")
-                | ("cooldis_0.1", "fs_close")
-                | ("cooldis_0.1", "log")
-        )
+        && match policy {
+            WasmHostImportPolicy::Operation => matches!(
+                (module_name, name),
+                ("cooldis", "input_len")
+                    | ("cooldis", "input_read")
+                    | ("cooldis", "output_write")
+                    | ("cooldis", "log")
+                    | ("cooldis_0.1", "source_read")
+                    | ("cooldis_0.1", "sink_write")
+                    | ("cooldis_0.1", "event_emit")
+                    | ("cooldis_0.1", "http_request")
+                    | ("cooldis_0.1", "check_cancelled")
+                    | ("cooldis_0.1", "fs_open")
+                    | ("cooldis_0.1", "fs_read")
+                    | ("cooldis_0.1", "fs_close")
+                    | ("cooldis_0.1", "log")
+            ),
+            WasmHostImportPolicy::PureCompute => matches!(
+                (module_name, name),
+                ("cooldis", "input_len")
+                    | ("cooldis", "input_read")
+                    | ("cooldis", "output_write")
+                    | ("cooldis", "log")
+                    | ("cooldis_0.1", "source_read")
+                    | ("cooldis_0.1", "sink_write")
+                    | ("cooldis_0.1", "event_emit")
+                    | ("cooldis_0.1", "check_cancelled")
+                    | ("cooldis_0.1", "log")
+            ),
+        }
 }
 
 fn import_diagnostic(module_name: &str, name: &str) -> &'static str {

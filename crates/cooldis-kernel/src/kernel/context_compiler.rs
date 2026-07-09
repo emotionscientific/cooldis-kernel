@@ -1,6 +1,7 @@
 use crate::{
-    CanonicalContent, CanonicalMessage, SessionEntry, SessionEntryId, SessionEntryKind,
-    SystemBlock, ToolDefinition, TurnContextSnapshot, compaction_summary_message,
+    AgentManifestStaticContextSegment, CanonicalContent, CanonicalMessage, SessionEntry,
+    SessionEntryId, SessionEntryKind, SystemBlock, ToolDefinition, TurnContextSnapshot,
+    compaction_summary_message,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -72,6 +73,8 @@ pub struct AgentContextCompilationDiagnostics {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentContextCompileInput {
     pub system: Vec<SystemBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_system_sources: Vec<AgentManifestStaticContextSegment>,
     pub session_entries: Vec<SessionEntry>,
     pub turn_context: TurnContextSnapshot,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -100,18 +103,34 @@ struct TrackedMessage {
     entry_id: Option<SessionEntryId>,
 }
 
+struct CompiledSystemBlocks {
+    blocks: Vec<SystemBlock>,
+    budgeted_text_bytes: usize,
+    truncated_text_bytes: usize,
+}
+
 pub struct AgentContextCompiler;
 
 impl AgentContextCompiler {
     pub fn compile(input: AgentContextCompileInput) -> CompiledAgentContext {
+        let system = compile_system_blocks(
+            input.static_system_sources,
+            input.system,
+            input.policy.max_text_bytes,
+        );
         let mut diagnostics = AgentContextCompilationDiagnostics {
             input_entry_count: input.session_entries.len(),
-            system_block_count: input.system.len(),
+            system_block_count: system.blocks.len(),
             tool_count: input.tools.len(),
             attachment_count: input.attachments.len(),
+            truncated_text_bytes: system.truncated_text_bytes,
             ..AgentContextCompilationDiagnostics::default()
         };
         let mut messages = Vec::new();
+        let mut message_policy = input.policy.clone();
+        if let Some(max_text_bytes) = message_policy.max_text_bytes.as_mut() {
+            *max_text_bytes = max_text_bytes.saturating_sub(system.budgeted_text_bytes);
+        }
 
         for context in render_environment_contexts(&input.turn_context, &input.environment_contexts)
         {
@@ -190,21 +209,100 @@ impl AgentContextCompiler {
             });
         }
 
-        apply_message_budget(&mut messages, &input.policy, &mut diagnostics);
+        apply_message_budget(&mut messages, &message_policy, &mut diagnostics);
         let messages = messages
             .into_iter()
             .map(|tracked| tracked.message)
             .collect::<Vec<_>>();
         diagnostics.output_message_count = messages.len();
-        diagnostics.retained_text_bytes = messages_text_bytes(&messages);
+        diagnostics.retained_text_bytes =
+            messages_text_bytes(&messages).saturating_add(system.budgeted_text_bytes);
 
         CompiledAgentContext {
-            system: input.system,
+            system: system.blocks,
             messages,
             tools: input.tools,
             diagnostics,
         }
     }
+}
+
+fn compile_system_blocks(
+    static_sources: Vec<AgentManifestStaticContextSegment>,
+    mut configured: Vec<SystemBlock>,
+    max_text_bytes: Option<usize>,
+) -> CompiledSystemBlocks {
+    let mut remaining_budget = max_text_bytes;
+    let mut budgeted_text_bytes = 0usize;
+    let mut truncated_text_bytes = 0usize;
+    let mut blocks = Vec::new();
+
+    for source in static_sources {
+        if source.content.trim().is_empty() {
+            continue;
+        }
+        let mut content = source.content;
+        if !source.pinned {
+            let original_len = content.len();
+            if let Some(limit) =
+                static_source_budget_limit(max_text_bytes, source.budget_share, remaining_budget)
+                && original_len > limit
+            {
+                content = prefix_text_bytes(&content, limit).to_string();
+            }
+            if content.trim().is_empty() {
+                truncated_text_bytes = truncated_text_bytes.saturating_add(original_len);
+                continue;
+            }
+            let retained_len = content.len();
+            truncated_text_bytes =
+                truncated_text_bytes.saturating_add(original_len.saturating_sub(retained_len));
+            if let Some(remaining) = remaining_budget.as_mut() {
+                *remaining = remaining.saturating_sub(retained_len);
+            }
+            budgeted_text_bytes = budgeted_text_bytes.saturating_add(retained_len);
+        }
+        if !content.trim().is_empty() {
+            blocks.push(SystemBlock::text(content));
+        }
+    }
+    blocks.append(&mut configured);
+    CompiledSystemBlocks {
+        blocks,
+        budgeted_text_bytes,
+        truncated_text_bytes,
+    }
+}
+
+fn static_source_budget_limit(
+    max_text_bytes: Option<usize>,
+    budget_share: Option<f64>,
+    remaining_budget: Option<usize>,
+) -> Option<usize> {
+    let max_text_bytes = max_text_bytes?;
+    let remaining_budget = remaining_budget.unwrap_or(max_text_bytes);
+    let share_limit = budget_share
+        .map(|share| fractional_budget_limit(max_text_bytes, share))
+        .unwrap_or(remaining_budget);
+    Some(share_limit.min(remaining_budget))
+}
+
+fn fractional_budget_limit(max_text_bytes: usize, share: f64) -> usize {
+    if !share.is_finite() || share <= 0.0 {
+        return 0;
+    }
+    ((max_text_bytes as f64) * share).floor() as usize
+}
+
+fn prefix_text_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 fn render_environment_contexts(

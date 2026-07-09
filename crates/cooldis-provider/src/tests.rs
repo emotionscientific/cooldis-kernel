@@ -1,5 +1,9 @@
 use super::*;
 use cooldis_history::{CacheControl, ThinkingMetadata, ThinkingProvider};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
+use tokio::time::Duration;
 
 fn base_request(api: ProviderApi) -> ProviderRequest {
     let mut request = ProviderRequest::new(api, "provider", "model-test");
@@ -94,7 +98,7 @@ fn provider_capabilities_are_explicit_and_queryable() {
     assert!(bedrock.supports_cache_control);
     assert!(bedrock.supports_reasoning);
     assert!(bedrock.supports_images);
-    assert!(!bedrock.supports_streaming);
+    assert!(bedrock.supports_streaming);
 
     let local = LocalOfflineProviderClient::new("local_offline", "echo")
         .capabilities()
@@ -569,20 +573,208 @@ fn anthropic_bedrock_request_uses_invoke_model_body_shape() {
 }
 
 #[test]
-fn anthropic_bedrock_streaming_fails_closed_until_eventstream_decode_lands() {
+fn anthropic_bedrock_streaming_uses_response_stream_endpoint_and_body_shape() {
     let mut request = base_request(ProviderApi::AnthropicMessages);
     request.messages = vec![CanonicalMessage::user_text("hello")];
 
-    let err = AnthropicBedrockMessagesAdapter
+    let body = AnthropicBedrockMessagesAdapter
         .build_stream_request_body(&request)
-        .unwrap_err();
+        .unwrap();
 
+    assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");
+    assert!(body.get("model").is_none());
+    assert!(body.get("stream").is_none());
+    assert_eq!(
+        AnthropicBedrockMessagesAdapter.stream_endpoint_url(
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/claude/invoke"
+        ),
+        "https://bedrock-runtime.us-east-1.amazonaws.com/model/claude/invoke-with-response-stream"
+    );
+}
+
+const BEDROCK_GOLDEN_MULTI_FRAME_HEX: &str = concat!(
+    "000000c50000004ba5d920da0d3a6d6573736167652d747970650700056576656e740b3a6576656e",
+    "742d747970650700056368756e6b0d3a636f6e74656e742d747970650700106170706c6963617469",
+    "6f6e2f6a736f6e7b226368756e6b223a7b226279746573223a2265794a306558426c496a6f696257",
+    "567a6332466e5a56397a6447467964434973496d316c63334e685a3255694f6e736964584e685a32",
+    "55694f6e73696157357764585266644739725a57357a496a6f7a66583139227d7d4223b8c0000000",
+    "e10000004b9198a91e0d3a6d6573736167652d747970650700056576656e740b3a6576656e742d74",
+    "7970650700056368756e6b0d3a636f6e74656e742d747970650700106170706c69636174696f6e2f",
+    "6a736f6e7b226368756e6b223a7b226279746573223a2265794a306558426c496a6f695932397564",
+    "475675644639696247396a6131396b5a57783059534973496d6c755a475634496a6f774c434a6b5a",
+    "5778305953493665794a306558426c496a6f69644756346446396b5a57783059534973496e526c65",
+    "4851694f694a445430394d496e3139227d7d4536c8a4"
+);
+
+#[test]
+fn aws_eventstream_decoder_accepts_golden_multi_frame_fixture() {
+    let bytes = hex::decode(BEDROCK_GOLDEN_MULTI_FRAME_HEX).unwrap();
+    let frames = decode_aws_eventstream_frames(&bytes).unwrap();
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[0].headers.get(":event-type"),
+        Some(&AwsEventStreamHeaderValue::String("chunk".to_string()))
+    );
+    assert!(decoded_bedrock_chunk_payload(&frames[0].payload).contains("message_start"));
+    assert!(decoded_bedrock_chunk_payload(&frames[1].payload).contains("content_block_delta"));
+}
+
+#[test]
+fn aws_eventstream_decoder_handles_split_read_boundary() {
+    let bytes = hex::decode(BEDROCK_GOLDEN_MULTI_FRAME_HEX).unwrap();
+    let mut decoder = AwsEventStreamDecoder::new();
+
+    assert!(decoder.push(&bytes[..31]).unwrap().is_empty());
+    let frames = decoder.push(&bytes[31..]).unwrap();
+    assert_eq!(frames.len(), 2);
+    assert!(decoder.finish().unwrap().is_empty());
+}
+
+#[test]
+fn aws_eventstream_decoder_rejects_corrupt_crc() {
+    let mut bytes = hex::decode(BEDROCK_GOLDEN_MULTI_FRAME_HEX).unwrap();
+    let last = bytes.last_mut().unwrap();
+    *last ^= 0xff;
+
+    let err = decode_aws_eventstream_frames(&bytes).unwrap_err();
     assert!(matches!(
         err,
-        ProviderError::UnsupportedCapability {
-            capability: "streaming",
-            ..
-        }
+        ProviderError::Decode(message) if message.contains("message CRC mismatch")
+    ));
+}
+
+#[test]
+fn aws_eventstream_decoder_rejects_truncated_prelude() {
+    let mut decoder = AwsEventStreamDecoder::new();
+    assert!(decoder.push(&[0, 0, 0, 16, 0]).unwrap().is_empty());
+
+    let err = decoder.finish().unwrap_err();
+    assert!(matches!(
+        err,
+        ProviderError::Decode(message) if message.contains("truncated AWS eventstream prelude")
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn anthropic_bedrock_http_stream_decodes_events_and_signs_stream_endpoint() {
+    let eventstream_body = bedrock_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
+    let (base_url, request_rx) =
+        serve_fake_http_response(eventstream_body.clone(), Some(eventstream_body.len())).await;
+    let endpoint = ProviderEndpoint::anthropic_bedrock_with_base_url(
+        base_url,
+        "us-east-1",
+        "anthropic.claude-test-v1:0",
+        "AKIA_TEST",
+        "secret",
+        Some("session-token".to_string()),
+    );
+    let client = ProviderHttpClient::with_http(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap(),
+        endpoint,
+        Arc::new(AnthropicBedrockMessagesAdapter),
+    );
+    let mut request = ProviderRequest::new(
+        ProviderApi::AnthropicMessages,
+        "anthropic_bedrock",
+        "anthropic.claude-test-v1:0",
+    );
+    request.max_tokens = 32;
+    request.messages = vec![CanonicalMessage::user_text("hello")];
+
+    let events = client.stream(&request).await.unwrap();
+    let parity_events = AnthropicMessagesAdapter
+        .decode_sse_events(ANTHROPIC_STREAM_SSE)
+        .unwrap();
+    assert_eq!(events, parity_events);
+    assert_eq!(stream_text(&events), "COOL_OK");
+
+    let terminal = AnthropicBedrockMessagesAdapter
+        .decode_response_body(&json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "COOL_OK"}],
+            "usage": {"input_tokens": 3, "output_tokens": 4}
+        }))
+        .unwrap();
+    assert_eq!(stream_usage(&events), terminal.usage);
+    assert_eq!(stream_stop_reason(&events), terminal.stop_reason);
+    assert_eq!(stream_text(&events), test_content_text(&terminal.content));
+
+    let raw_request = request_rx.await.unwrap();
+    assert!(raw_request.starts_with(
+        "POST /model/anthropic.claude-test-v1%3A0/invoke-with-response-stream HTTP/1.1"
+    ));
+    let raw_request_lower = raw_request.to_ascii_lowercase();
+    assert!(raw_request_lower.contains("authorization: aws4-hmac-sha256"));
+    assert!(raw_request_lower.contains(
+        "signedheaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amzn-bedrock-accept"
+    ));
+    assert!(raw_request_lower.contains("x-amz-content-sha256:"));
+    assert!(raw_request_lower.contains("x-amz-security-token: session-token"));
+    assert!(raw_request_lower.contains("x-amzn-bedrock-accept: application/json"));
+}
+
+#[test]
+fn anthropic_bedrock_eventstream_decodes_raw_chunk_payloads() {
+    let body = bedrock_raw_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
+    let events = AnthropicBedrockMessagesAdapter
+        .decode_stream_response(&body)
+        .unwrap();
+    let parity_events = AnthropicMessagesAdapter
+        .decode_sse_events(ANTHROPIC_STREAM_SSE)
+        .unwrap();
+
+    assert_eq!(events, parity_events);
+}
+
+#[test]
+fn anthropic_bedrock_eventstream_decodes_top_level_bytes_payloads() {
+    let body = bedrock_top_level_bytes_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
+    let events = AnthropicBedrockMessagesAdapter
+        .decode_stream_response(&body)
+        .unwrap();
+    let parity_events = AnthropicMessagesAdapter
+        .decode_sse_events(ANTHROPIC_STREAM_SSE)
+        .unwrap();
+
+    assert_eq!(events, parity_events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn anthropic_bedrock_mid_stream_disconnect_returns_terminal_error() {
+    let eventstream_body = bedrock_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
+    let partial = eventstream_body[..25].to_vec();
+    let (base_url, _request_rx) = serve_fake_http_response(partial, None).await;
+    let endpoint = ProviderEndpoint::anthropic_bedrock_with_base_url(
+        base_url,
+        "us-east-1",
+        "anthropic.claude-test-v1:0",
+        "AKIA_TEST",
+        "secret",
+        None,
+    );
+    let client = ProviderHttpClient::with_http(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap(),
+        endpoint,
+        Arc::new(AnthropicBedrockMessagesAdapter),
+    );
+    let mut request = ProviderRequest::new(
+        ProviderApi::AnthropicMessages,
+        "anthropic_bedrock",
+        "anthropic.claude-test-v1:0",
+    );
+    request.messages = vec![CanonicalMessage::user_text("hello")];
+
+    let err = client.stream(&request).await.unwrap_err();
+    assert!(matches!(
+        err,
+        ProviderError::Decode(message) if message.contains("truncated AWS eventstream frame")
     ));
 }
 
@@ -1015,4 +1207,198 @@ fn malformed_tool_arguments_are_rejected_at_wire_edge() {
     assert!(
         matches!(responses, ProviderError::Decode(message) if message.contains("invalid OpenAI Responses function arguments"))
     );
+}
+
+const ANTHROPIC_STREAM_EVENT_JSONS: &[&str] = &[
+    r#"{"type":"message_start","message":{"usage":{"input_tokens":3}}}"#,
+    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"COOL"}}"#,
+    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"_OK"}}"#,
+    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}"#,
+    r#"{"type":"message_stop"}"#,
+];
+
+const ANTHROPIC_STREAM_SSE: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"COOL\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"_OK\"}}\n\n",
+    "event: message_delta\n",
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n",
+    "event: message_stop\n",
+    "data: {\"type\":\"message_stop\"}\n\n",
+);
+
+fn bedrock_eventstream_body(anthropic_events: &[&str]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for event in anthropic_events {
+        let bytes = base64::engine::general_purpose::STANDARD.encode(event.as_bytes());
+        let payload = json!({ "chunk": { "bytes": bytes } }).to_string();
+        body.extend(test_eventstream_frame(payload.as_bytes()));
+    }
+    body
+}
+
+fn bedrock_raw_eventstream_body(anthropic_events: &[&str]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for event in anthropic_events {
+        body.extend(test_eventstream_frame(event.as_bytes()));
+    }
+    body
+}
+
+fn bedrock_top_level_bytes_eventstream_body(anthropic_events: &[&str]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for event in anthropic_events {
+        let bytes = base64::engine::general_purpose::STANDARD.encode(event.as_bytes());
+        let payload = json!({ "bytes": bytes }).to_string();
+        body.extend(test_eventstream_frame(payload.as_bytes()));
+    }
+    body
+}
+
+fn decoded_bedrock_chunk_payload(payload: &[u8]) -> String {
+    let value: Value = serde_json::from_slice(payload).unwrap();
+    let bytes = value
+        .pointer("/chunk/bytes")
+        .and_then(Value::as_str)
+        .unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(bytes)
+        .unwrap();
+    String::from_utf8(decoded).unwrap()
+}
+
+fn test_eventstream_frame(payload: &[u8]) -> Vec<u8> {
+    let headers = [
+        test_eventstream_string_header(":message-type", "event"),
+        test_eventstream_string_header(":event-type", "chunk"),
+        test_eventstream_string_header(":content-type", "application/json"),
+    ]
+    .concat();
+    let total_length = 16 + headers.len() + payload.len();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(total_length as u32).to_be_bytes());
+    frame.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&crc32(&frame).to_be_bytes());
+    frame.extend_from_slice(&headers);
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(&crc32(&frame).to_be_bytes());
+    frame
+}
+
+fn test_eventstream_string_header(name: &str, value: &str) -> Vec<u8> {
+    let mut header = Vec::new();
+    header.push(name.len() as u8);
+    header.extend_from_slice(name.as_bytes());
+    header.push(7);
+    header.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    header.extend_from_slice(value.as_bytes());
+    header
+}
+
+async fn serve_fake_http_response(
+    response_body: Vec<u8>,
+    content_length: Option<usize>,
+) -> (String, oneshot::Receiver<String>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_tx, request_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
+        let mut headers = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/vnd.amazon.eventstream\r\nconnection: close\r\n"
+        );
+        if let Some(content_length) = content_length {
+            headers.push_str(&format!("content-length: {content_length}\r\n"));
+        }
+        headers.push_str("\r\n");
+        socket.write_all(headers.as_bytes()).await.unwrap();
+        for chunk in response_body.chunks(17) {
+            socket.write_all(chunk).await.unwrap();
+        }
+    });
+    (format!("http://{address}"), request_rx)
+}
+
+async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = socket.read(&mut buffer).await.unwrap();
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if let Some(header_end) = find_header_end(&request) {
+            let content_length = http_content_length(&request[..header_end]).unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+    }
+    request
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn http_content_length(headers: &[u8]) -> Option<usize> {
+    let headers = String::from_utf8_lossy(headers);
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
+}
+
+fn stream_text(events: &[ProviderStreamEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderStreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn stream_usage(events: &[ProviderStreamEvent]) -> CanonicalUsage {
+    let mut usage = CanonicalUsage::default();
+    for event in events {
+        if let ProviderStreamEvent::Usage { usage: next } = event {
+            usage.input_tokens += next.input_tokens;
+            usage.output_tokens += next.output_tokens;
+            usage.cache_creation_input_tokens += next.cache_creation_input_tokens;
+            usage.cache_read_input_tokens += next.cache_read_input_tokens;
+        }
+    }
+    usage
+}
+
+fn stream_stop_reason(events: &[ProviderStreamEvent]) -> CanonicalStopReason {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            ProviderStreamEvent::Done { stop_reason } => Some(*stop_reason),
+            _ => None,
+        })
+        .unwrap_or(CanonicalStopReason::EndTurn)
+}
+
+fn test_content_text(content: &[CanonicalContent]) -> String {
+    content
+        .iter()
+        .filter_map(|content| match content {
+            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }

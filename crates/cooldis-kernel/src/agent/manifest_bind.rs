@@ -11,17 +11,27 @@
 
 use crate::agent::manifest::{AgentAliasResolutionReceipt, PublishedAgentRecord};
 use crate::agent::manifest_schema::{
+    AgentManifestBudgetRest, AgentManifestBudgetShare, AgentManifestContextPipeline,
     AgentManifestCoupling, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
     AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestModelProfile,
-    AgentManifestProtocolToolImport, AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey,
-    AgentManifestSchema, AgentManifestTool, AgentManifestToolSurface,
+    AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
+    AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey, AgentManifestSchema,
+    AgentManifestTool, AgentManifestToolSurface, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::agent::tool_universe::{
     PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
 };
+use crate::kernel::coupling_executor_registry::{
+    RegisteredCouplingExecutorKind, registered_coupling_executor_for_id,
+};
 use crate::{
     COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, EventKind, LlmProviderRecord,
-    LocalOperationRegistry, ProviderCapabilityRecord, THREADS_SPAWN_CAPABILITY,
+    LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry, ProviderCapabilityRecord,
+    PublishedOperationSource, SkillPackageRef, THREADS_SPAWN_CAPABILITY,
+};
+use cooldis_abi::{
+    COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, WasmOperationDefinition,
+    WasmOperationValueKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -36,6 +46,11 @@ pub const MANIFEST_COMPILER_DISCHARGED_BY: &str = "projection:manifest-compiler"
 pub const MANIFEST_COMPILER_FUNCTION: &str = "manifest_schema/v1";
 pub const MANIFEST_BINDER_DISCHARGED_BY: &str = "binder:manifest";
 pub const MANIFEST_BINDER_FUNCTION: &str = "bind/v1";
+pub const THREAD_AGENT_SKILL_PACKAGES_METADATA: &str = "cooldis.agent.skill_packages";
+pub const THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA: &str =
+    "cooldis.agent.skill_context_segments";
+pub const THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA: &str =
+    "cooldis.agent.static_context_segments";
 
 /// Caller-supplied runtime overrides at `thread/start`. Every populated
 /// field is checked against the manifest's override allowlist
@@ -149,6 +164,9 @@ pub struct AgentManifestBoundThread {
     pub couplings: Vec<BoundCoupling>,
     pub operation_names: Vec<String>,
     pub operation_bindings: Vec<AgentManifestOperationBinding>,
+    pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
+    pub static_context_segments: Vec<AgentManifestStaticContextSegment>,
+    pub skill_context_segments: Vec<AgentManifestStaticContextSegment>,
     /// Witnessed universe bindings for the thread's protocol tool imports;
     /// the runtime factory mounts these as the search surface (plus direct
     /// rows for pins).
@@ -186,6 +204,8 @@ pub async fn bind_published_agent_record(
     alias: Option<AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
     operation_registry_root: Option<&Path>,
+    blob_registry_root: Option<&Path>,
+    skill_registry_root: Option<&Path>,
     configured_mcp_server_refs: &BTreeSet<String>,
     tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
     model_selection: &AgentManifestModelProfileSelection,
@@ -230,8 +250,10 @@ pub async fn bind_published_agent_record(
         tool_universe_discoverer,
     )
     .await?;
+    let static_context_segments = bind_static_context_sources(&manifest, blob_registry_root)?;
+    let bound_skills = bind_skill_resources(&manifest.resources, skill_registry_root)?;
     let couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
-    enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings)?;
+    enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings, &couplings)?;
     let operation_names = bound_tools
         .operation_bindings
         .iter()
@@ -254,6 +276,8 @@ pub async fn bind_published_agent_record(
         model_id,
         tool_ids: bound_tools.tool_ids,
         operation_bindings: bound_tools.operation_bindings.clone(),
+        skill_packages: bound_skills.package_bindings.clone(),
+        static_context_segments: static_context_segments.clone(),
         tool_universes: bound_tools
             .tool_universes
             .iter()
@@ -272,6 +296,9 @@ pub async fn bind_published_agent_record(
         couplings,
         operation_names,
         operation_bindings: bound_tools.operation_bindings,
+        skill_packages: bound_skills.package_bindings,
+        static_context_segments,
+        skill_context_segments: bound_skills.context_segments,
         tool_universes: bound_tools.tool_universes,
     })
 }
@@ -288,6 +315,108 @@ struct BoundTools {
     granted: Vec<String>,
     operation_bindings: Vec<AgentManifestOperationBinding>,
     tool_universes: Vec<ToolUniverseBinding>,
+}
+
+struct BoundSkills {
+    package_bindings: Vec<AgentManifestSkillPackageBinding>,
+    context_segments: Vec<AgentManifestStaticContextSegment>,
+}
+
+fn bind_static_context_sources(
+    manifest: &AgentManifestSchema,
+    blob_registry_root: Option<&Path>,
+) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    let pipeline = manifest.effective_context_pipeline();
+    let mut segments = Vec::new();
+    for source in &pipeline.sources {
+        if source.assembler != KERNEL_ASSEMBLER_STATIC {
+            continue;
+        }
+        let Some(input) = source
+            .input
+            .as_deref()
+            .filter(|input| !input.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(resource) = static_source_resource(input, &manifest.resources)? else {
+            continue;
+        };
+        if resource.kind != AgentManifestResourceKind::Blob {
+            continue;
+        }
+        let registry_root = blob_registry_root.ok_or_else(|| {
+            CooldisError::RuntimeFactory(format!(
+                "blob resource {:?} ref {:?} requires an app-server blob registry root",
+                resource.name, resource.reference
+            ))
+        })?;
+        let registry = LocalBlobRegistry::new(registry_root);
+        let (record, content) = registry
+            .load_text_ref(&resource.reference)
+            .map_err(|err| missing_blob_resource_error(resource, err))?;
+        segments.push(AgentManifestStaticContextSegment {
+            id: source.id.clone(),
+            assembler: source.assembler.clone(),
+            input: input.to_string(),
+            pinned: source.pinned,
+            budget_share: static_source_budget_share(&pipeline, source.id.as_str()),
+            ref_uri: record.ref_uri,
+            content_sha256: record.content_sha256,
+            content,
+        });
+    }
+    Ok(segments)
+}
+
+fn static_source_resource<'a>(
+    input: &str,
+    resources: &'a [AgentManifestResource],
+) -> CooldisResult<Option<&'a AgentManifestResource>> {
+    if input.starts_with("resource://") || input.starts_with("skill://") {
+        return resources
+            .iter()
+            .find(|resource| resource.reference == input)
+            .map(Some)
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(format!(
+                    "static context source input {input:?} does not match a declared resource ref"
+                ))
+            });
+    }
+    resources
+        .iter()
+        .find(|resource| resource.name == input)
+        .map(Some)
+        .ok_or_else(|| {
+            CooldisError::RuntimeFactory(format!(
+                "static context source input {input:?} does not name a declared resource"
+            ))
+        })
+}
+
+fn missing_blob_resource_error(
+    resource: &AgentManifestResource,
+    err: impl std::fmt::Display,
+) -> CooldisError {
+    CooldisError::RuntimeFactory(format!(
+        "blob resource {:?} ref {:?} was not found in the local blob registry: {err}; run `cooldis blob publish <file>` and use the returned resource://artifact/sha256:<hash> ref",
+        resource.name, resource.reference
+    ))
+}
+
+fn static_source_budget_share(
+    pipeline: &AgentManifestContextPipeline,
+    source_id: &str,
+) -> Option<f64> {
+    pipeline
+        .sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .and_then(|source| match source.budget_share {
+            Some(AgentManifestBudgetShare::Fraction(value)) => Some(value),
+            Some(AgentManifestBudgetShare::Rest(AgentManifestBudgetRest::Rest)) | None => None,
+        })
 }
 
 /// Role inferred from the coupling's resolved sink relation. Manifest
@@ -398,6 +527,81 @@ impl OperationBindingAccumulator {
 
 type OperationBindingMap = BTreeMap<(String, String), OperationBindingAccumulator>;
 
+fn bind_skill_resources(
+    resources: &[AgentManifestResource],
+    skill_registry_root: Option<&Path>,
+) -> CooldisResult<BoundSkills> {
+    let skill_resources = resources
+        .iter()
+        .filter(|resource| resource.kind == AgentManifestResourceKind::Skill)
+        .collect::<Vec<_>>();
+    if skill_resources.is_empty() {
+        return Ok(BoundSkills {
+            package_bindings: Vec::new(),
+            context_segments: Vec::new(),
+        });
+    }
+    let registry_root = skill_registry_root.ok_or_else(|| {
+        CooldisError::RuntimeFactory(
+            "skill resources require an app-server skill registry root".to_string(),
+        )
+    })?;
+    let registry = LocalSkillRegistry::new(registry_root);
+    let mut package_bindings = Vec::new();
+    let mut context_segments = Vec::new();
+    let mut mounted_skill_names = BTreeSet::new();
+    for resource in skill_resources {
+        let parsed = SkillPackageRef::parse(&resource.reference).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "skill resource {:?} ref {:?} is invalid: {err}",
+                resource.name, resource.reference
+            ))
+        })?;
+        let record = registry
+            .load_version_record(&parsed.name, &parsed.artifact_hash)
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "skill resource {:?} ref {:?} was not found in the local skill registry: {err}; publish the skill package or replace the ref with a hash from the registry",
+                    resource.name, resource.reference
+                ))
+            })?;
+        for skill in &record.package.skills {
+            if !mounted_skill_names.insert(skill.name.clone()) {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "skill resource {:?} package {:?} would mount duplicate /skills/{}.md; skill names must be unique across bound packages",
+                    resource.name, record.name, skill.name
+                )));
+            }
+        }
+        let index = record.package.render_index();
+        let index_sha256 = sha256_prefixed(index.as_bytes());
+        let ref_uri = record.ref_uri();
+        context_segments.push(AgentManifestStaticContextSegment {
+            id: format!("skill-index:{}", resource.name),
+            assembler: KERNEL_ASSEMBLER_STATIC.to_string(),
+            input: resource.name.clone(),
+            pinned: true,
+            budget_share: None,
+            ref_uri: ref_uri.clone(),
+            content_sha256: index_sha256.clone(),
+            content: index,
+        });
+        package_bindings.push(AgentManifestSkillPackageBinding {
+            resource_name: resource.name.clone(),
+            package_name: record.name.clone(),
+            ref_uri,
+            artifact_hash: record.active_artifact_hash.clone(),
+            package_digest: format!("sha256:{}", parsed.artifact_hash),
+            skill_count: record.package.skills.len(),
+            index_sha256,
+        });
+    }
+    Ok(BoundSkills {
+        package_bindings,
+        context_segments,
+    })
+}
+
 fn bind_couplings(
     couplings: &[AgentManifestCoupling],
     operation_registry_root: Option<&Path>,
@@ -412,6 +616,20 @@ fn bind_coupling(
     coupling: &AgentManifestCoupling,
     operation_registry_root: Option<&Path>,
 ) -> CooldisResult<BoundCoupling> {
+    let executor_kind = registered_coupling_executor_for_id(&coupling.id).ok_or_else(|| {
+        CooldisError::RuntimeFactory(format!(
+            "no registered executor for coupling id {:?}",
+            coupling.id
+        ))
+    })?;
+    if executor_kind == RegisteredCouplingExecutorKind::Wasm
+        && !coupling.function_ref.starts_with("op://")
+    {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {:?} function_ref {:?} must be an op:// Wasm operation ref",
+            coupling.id, coupling.function_ref
+        )));
+    }
     let registry_root = operation_registry_root.ok_or_else(|| {
         CooldisError::RuntimeFactory(format!(
             "coupling {:?} function_ref {:?} requires an app-server operation registry root",
@@ -449,6 +667,12 @@ fn bind_coupling(
         &coupling.grants,
         registry_root,
     )?;
+    let operation_name = match executor_kind {
+        RegisteredCouplingExecutorKind::Stdlib => verification.operation.clone(),
+        RegisteredCouplingExecutorKind::Wasm => {
+            wasm_coupling_operation_name(&coupling.id, &coupling.function_ref, &verification)?
+        }
+    };
     let config_hash = coupling_config_hash(&coupling.config)?;
     Ok(BoundCoupling {
         id: coupling.id.clone(),
@@ -462,13 +686,76 @@ fn bind_coupling(
         function: BoundCouplingFunction {
             name: verification.name,
             artifact_hash: verification.artifact_hash,
-            operation_name: verification.operation,
+            operation_name,
         },
         grants: verification.grants.into_iter().collect(),
         budget: coupling.budget.clone(),
         config: coupling.config.clone(),
         config_hash,
     })
+}
+
+fn wasm_coupling_operation_name(
+    coupling_id: &str,
+    function_ref: &str,
+    verification: &VerifiedOperationRef,
+) -> CooldisResult<Option<String>> {
+    if !matches!(
+        verification.record.source,
+        PublishedOperationSource::Wasm { .. }
+    ) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} must resolve to a Wasm operation record"
+        )));
+    }
+    let operation = selected_wasm_coupling_operation(coupling_id, function_ref, verification)?;
+    if operation.input != WasmOperationValueKind::Json {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} must declare json input for {COUPLING_INVOCATION_ABI}",
+            operation.name
+        )));
+    }
+    if operation.output != WasmOperationValueKind::Json {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} must declare json output for {COUPLING_DISCHARGE_ABI}",
+            operation.name
+        )));
+    }
+    if !operation.required_capabilities.is_empty() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} declares effect capabilities; couplings are pure compute and must use config, selected events, and stream grants only",
+            operation.name
+        )));
+    }
+    Ok(Some(operation.name.clone()))
+}
+
+fn selected_wasm_coupling_operation<'a>(
+    coupling_id: &str,
+    function_ref: &str,
+    verification: &'a VerifiedOperationRef,
+) -> CooldisResult<&'a WasmOperationDefinition> {
+    if let Some(operation_name) = verification.operation.as_deref() {
+        return verification
+            .record
+            .manifest
+            .operation(operation_name)
+            .ok_or_else(|| {
+                unknown_operation_ref_error(
+                    "coupling",
+                    coupling_id,
+                    function_ref,
+                    &verification.record.name,
+                    &verification.record,
+                )
+            });
+    }
+    if verification.record.manifest.operations.len() == 1 {
+        return Ok(&verification.record.manifest.operations[0]);
+    }
+    Err(CooldisError::RuntimeFactory(format!(
+        "custom coupling {coupling_id:?} function_ref {function_ref:?} must select one operation with op://<record>/<operation>@sha256:<hash>"
+    )))
 }
 
 fn bind_coupling_source_selector(
@@ -516,10 +803,37 @@ fn parse_coupling_event_kind(
 }
 
 pub(crate) fn coupling_config_hash(value: &JsonValue) -> CooldisResult<String> {
+    canonical_json_hash(value)
+}
+
+pub(crate) fn coupling_set_content_hash(coupling_set: &BoundCouplingSet) -> CooldisResult<String> {
+    let mut couplings = coupling_set.couplings.iter().collect::<Vec<_>>();
+    couplings.sort_by(|left, right| left.id.cmp(&right.id));
+    let value = JsonValue::Array(
+        couplings
+            .into_iter()
+            .map(|coupling| {
+                serde_json::json!({
+                    "id": coupling.id,
+                    "function_ref": coupling.function_ref,
+                    "config": coupling.config,
+                })
+            })
+            .collect(),
+    );
+    canonical_json_hash(&value)
+}
+
+pub(crate) fn canonical_json_hash(value: &JsonValue) -> CooldisResult<String> {
     let mut canonical = Vec::new();
     write_canonical_json(value, &mut canonical)?;
     let digest = Sha256::digest(&canonical);
     Ok(format!("sha256:{digest:x}"))
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{digest:x}")
 }
 
 fn write_canonical_json(value: &JsonValue, output: &mut Vec<u8>) -> CooldisResult<()> {
@@ -640,20 +954,29 @@ async fn bind_tools(
 fn enforce_child_agent_policy(
     manifest: &AgentManifestSchema,
     operation_bindings: &[AgentManifestOperationBinding],
+    couplings: &[BoundCoupling],
 ) -> CooldisResult<()> {
     if manifest.policies.allow_child_agents {
         return Ok(());
     }
-    let declares_thread_spawn = operation_bindings.iter().any(|binding| {
+    let tool_declares_thread_spawn = operation_bindings.iter().any(|binding| {
         binding.name == COOLDIS_THREADS_PACKAGE
             && binding
                 .grants
                 .iter()
                 .any(|grant| grant == THREADS_SPAWN_CAPABILITY)
     });
+    let coupling_declares_thread_spawn = couplings.iter().any(|coupling| {
+        coupling.id == crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
+            && coupling
+                .grants
+                .iter()
+                .any(|grant| grant == THREADS_SPAWN_CAPABILITY)
+    });
+    let declares_thread_spawn = tool_declares_thread_spawn || coupling_declares_thread_spawn;
     if declares_thread_spawn {
         return Err(CooldisError::RuntimeFactory(
-            "agent manifest policies.allow_child_agents = false but a cooldis-threads row grants threads.spawn; remove thread_spawn or set allow_child_agents = true".to_string(),
+            "agent manifest policies.allow_child_agents = false but a child-thread operation or supervisor coupling grants threads.spawn; remove thread_spawn/std::supervisor.spawn or set allow_child_agents = true".to_string(),
         ));
     }
     Ok(())
@@ -932,7 +1255,7 @@ fn verify_operation_ref_for_subject(
     let parsed = parse_operation_ref(operation_ref)?;
     let artifact_hash = parsed.artifact_hash.clone().ok_or_else(|| {
         CooldisError::RuntimeFactory(format!(
-            "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} must be content-addressed with @sha256:<hash>"
+            "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} must be content-addressed with @sha256:<hash>; for agent publish, pass --resolve-ops to pin op:// authoring refs from the operations registry"
         ))
     })?;
     let registry = LocalOperationRegistry::new(operation_registry_root);
@@ -1181,6 +1504,12 @@ pub struct AgentManifestBindReceipt {
     /// Exact operation artifacts mounted for this manifest-backed thread.
     #[serde(default)]
     pub operation_bindings: Vec<AgentManifestOperationBinding>,
+    /// Exact skill packages mounted for this manifest-backed thread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
+    /// Exact static context sources mounted as provider system blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_context_segments: Vec<AgentManifestStaticContextSegment>,
     /// Witnessed tool universes mounted on the search surface: server ref,
     /// discovery hash, in-scope contracts, and pinned rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1195,6 +1524,32 @@ pub struct AgentManifestBindReceipt {
     pub effective_runtime: AgentManifestRuntimeDefaults,
     /// Which override keys the caller actually exercised.
     pub overridden_keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestSkillPackageBinding {
+    pub resource_name: String,
+    pub package_name: String,
+    pub ref_uri: String,
+    pub artifact_hash: String,
+    pub package_digest: String,
+    pub skill_count: usize,
+    pub index_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestStaticContextSegment {
+    pub id: String,
+    pub assembler: String,
+    pub input: String,
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_share: Option<f64>,
+    pub ref_uri: String,
+    pub content_sha256: String,
+    pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

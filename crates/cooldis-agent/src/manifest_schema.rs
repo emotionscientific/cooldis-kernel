@@ -60,6 +60,16 @@ impl AgentManifestSchema {
     /// it. Reserved sections are rejected with errors naming the deferral;
     /// unknown keys anywhere fail closed.
     pub fn from_toml_value(value: &toml::Value) -> CooldisResult<Self> {
+        let manifest = Self::from_toml_value_unvalidated(value)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Parse a manifest TOML document into the typed V1 schema before
+    /// cross-field validation. This is only for kernel lowerers that fill in
+    /// source-derived fields before running [`AgentManifestSchema::validate`].
+    #[doc(hidden)]
+    pub fn from_toml_value_unvalidated(value: &toml::Value) -> CooldisResult<Self> {
         let table = value.as_table().ok_or_else(|| {
             CooldisError::RuntimeFactory("agent manifest must be a TOML table".to_string())
         })?;
@@ -118,7 +128,6 @@ impl AgentManifestSchema {
             policies,
             runtime,
         };
-        manifest.validate()?;
         Ok(manifest)
     }
 
@@ -333,10 +342,7 @@ impl AgentManifestSchema {
                     validate_ref_scheme("blob resource ref", &resource.reference, "resource://")?;
                 }
                 AgentManifestResourceKind::Skill => {
-                    return Err(CooldisError::RuntimeFactory(
-                        "resource kind \"skill\" is deferred until skills-as-resource-packages land"
-                            .to_string(),
-                    ));
+                    validate_skill_resource_ref(&resource.reference)?;
                 }
             }
         }
@@ -611,9 +617,8 @@ pub struct AgentManifestResource {
 pub enum AgentManifestResourceKind {
     #[serde(rename = "blob")]
     Blob,
-    /// Accepted by the schema; compile rejects skill refs with an error
-    /// naming the skills-as-resource-packages deferral until skill packages
-    /// exist (audit section 6 is pending).
+    /// Published markdown skill package mounted into context as an index and
+    /// into VFS as read-only bodies.
     #[serde(rename = "skill")]
     Skill,
 }
@@ -708,8 +713,12 @@ pub struct AgentManifestCouplingTrigger {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingQuota {
+    /// Maximum non-skipped coupling runs admitted during one scheduler cycle.
     #[serde(default)]
     pub per_turn: Option<u32>,
+    /// Maximum non-skipped coupling runs admitted over the thread lifetime.
+    /// The kernel derives this count from the thread journal instead of a
+    /// separate persisted quota store.
     #[serde(default)]
     pub per_thread: Option<u32>,
 }
@@ -1007,20 +1016,48 @@ fn validate_ref_scheme(label: &str, value: &str, scheme: &str) -> CooldisResult<
     Ok(())
 }
 
+fn validate_skill_resource_ref(value: &str) -> CooldisResult<()> {
+    let body = value.strip_prefix("skill://").ok_or_else(|| {
+        CooldisError::RuntimeFactory(format!(
+            "skill resource ref {value:?} must start with skill://"
+        ))
+    })?;
+    let (name, hash) = body.split_once("@sha256:").ok_or_else(|| {
+        CooldisError::RuntimeFactory(format!(
+            "skill resource ref {value:?} must be content-addressed as skill://<package>@sha256:<hash>"
+        ))
+    })?;
+    validate_record_name(name)?;
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "skill resource ref {value:?} has an invalid sha256 artifact hash"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_artifact_ref(value: &str) -> CooldisResult<()> {
     if (value.starts_with("op://") && value.len() > "op://".len())
         || (value.starts_with("mcp://") && value.len() > "mcp://".len())
         || (value.starts_with("resource://") && value.len() > "resource://".len())
+        || (value.starts_with("skill://") && value.len() > "skill://".len())
     {
         Ok(())
     } else {
         Err(CooldisError::RuntimeFactory(format!(
-            "agent artifact ref {value:?} must start with op://, mcp://, or resource://"
+            "agent artifact ref {value:?} must start with op://, mcp://, resource://, or skill://"
         )))
     }
 }
 
 fn content_hash_from_ref(reference: &str) -> Option<String> {
+    if let Some(hash) = reference.strip_prefix("resource://artifact/sha256:")
+        && hash.len() == 64
+    {
+        let content_hash = format!("sha256:{hash}");
+        validate_hash_label("content_hash", &content_hash).ok()?;
+        return Some(content_hash);
+    }
     let (_prefix, hash) = reference.rsplit_once("@sha256:")?;
     if hash.len() != 64 {
         return None;

@@ -116,6 +116,15 @@ pub trait KernelOperationDispatcher: Send + Sync + 'static {
         operation_name: &str,
         input: Vec<u8>,
     ) -> CooldisResult<Vec<u8>>;
+
+    async fn invoke_kernel_operation_with_metadata(
+        &self,
+        operation_name: &str,
+        input: Vec<u8>,
+        _metadata: BTreeMap<String, Value>,
+    ) -> CooldisResult<Vec<u8>> {
+        self.invoke_kernel_operation(operation_name, input).await
+    }
 }
 
 #[derive(Default)]
@@ -282,6 +291,22 @@ impl OperationRegistry {
         operation_name: &str,
         input: impl Into<Vec<u8>>,
     ) -> CooldisResult<WasmOperationOutput> {
+        self.invoke_bytes_with_kernel_metadata(
+            registered_name,
+            operation_name,
+            input,
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    pub async fn invoke_bytes_with_kernel_metadata(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+        kernel_metadata: BTreeMap<String, Value>,
+    ) -> CooldisResult<WasmOperationOutput> {
         let entry = self
             .entries
             .read()
@@ -309,7 +334,11 @@ impl OperationRegistry {
                     ))
                 })?;
                 let output = dispatcher
-                    .invoke_kernel_operation(operation_name, input.into())
+                    .invoke_kernel_operation_with_metadata(
+                        operation_name,
+                        input.into(),
+                        kernel_metadata,
+                    )
                     .await?;
                 let operation = entry
                     .record
@@ -336,6 +365,27 @@ impl OperationRegistry {
     ) -> CooldisResult<CooldisProcessHandle> {
         let output = self
             .invoke_bytes(registered_name, operation_name, input)
+            .await?;
+        Ok(CooldisProcessHandle::from_wasm_operation_output(
+            Some(registered_name.to_string()),
+            output,
+        ))
+    }
+
+    pub async fn invoke_process_with_kernel_metadata(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+        kernel_metadata: BTreeMap<String, Value>,
+    ) -> CooldisResult<CooldisProcessHandle> {
+        let output = self
+            .invoke_bytes_with_kernel_metadata(
+                registered_name,
+                operation_name,
+                input,
+                kernel_metadata,
+            )
             .await?;
         Ok(CooldisProcessHandle::from_wasm_operation_output(
             Some(registered_name.to_string()),

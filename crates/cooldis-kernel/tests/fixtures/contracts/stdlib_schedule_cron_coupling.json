@@ -3,17 +3,19 @@
     {
       "kind": "turn.continue.requested",
       "payload": {
-        "next_turn_input": "run scheduled nightly summary",
+        "next_turn_input": "run scheduled nightly summary for 2026-01-01T00:01:00.000Z",
         "reason": "scheduled occurrence accepted",
         "schedule": {
           "mandate_event_id": "018f0000-0000-7000-8000-000000000050",
           "mandate_id": "mandate-nightly-summary",
           "max_occurrences": 2,
-          "occurrence": 1,
-          "schedule_id": "nightly-summary"
+          "occurrence_index": 1,
+          "schedule_id": "nightly-summary",
+          "scheduled_for": "2026-01-01T00:01:00.000Z",
+          "timer_event_id": "018f0000-0000-7000-8000-000000000051"
         },
         "schema": "cooldis.event.turn.continue.requested/1",
-        "snapshot_id": "snapshot-a",
+        "snapshot_id": "schedule.v1",
         "subject": {
           "loop_id": "loop-nightly",
           "parent_turn_id": "turn-nightly-root"
@@ -27,15 +29,17 @@
     {
       "kind": "loop.budget_exhausted",
       "payload": {
-        "mandate_event_id": "018f0000-0000-7000-8000-000000000051",
+        "mandate_event_id": "018f0000-0000-7000-8000-000000000052",
         "mandate_id": "mandate-nightly-summary",
         "max_occurrences": 2,
-        "occurrence": 3,
-        "reason": "schedule budget exhausted after occurrence 3/2",
+        "occurrence": 2,
+        "occurrence_index": 2,
+        "reason": "schedule budget exhausted after occurrence 2/2",
         "schedule_id": "nightly-summary",
         "schema": "cooldis.event.loop.budget_exhausted/1",
         "snapshot_id": "snapshot-a",
-        "template_id": "std::schedule.cron"
+        "template_id": "std::schedule.cron",
+        "timer_event_id": "018f0000-0000-7000-8000-000000000053"
       },
       "stream": "control"
     }

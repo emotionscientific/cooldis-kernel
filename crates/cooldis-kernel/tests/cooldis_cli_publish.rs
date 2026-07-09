@@ -1,7 +1,8 @@
 use cooldis::{
-    LocalAgentRegistry, LocalOperationRegistry, PublishedAgentRecord, PublishedOperationBuild,
-    PublishedOperationRecord, PublishedOperationSource, RegisteredOperation,
-    WasmOperationDefinition, WasmOperationManifest, WasmOperationValueKind,
+    LocalAgentRegistry, LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry,
+    PublishedAgentRecord, PublishedOperationBuild, PublishedOperationRecord,
+    PublishedOperationSource, RegisteredOperation, WasmOperationDefinition, WasmOperationManifest,
+    WasmOperationValueKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,11 +18,12 @@ const TEST_OPERATION_HASH: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[test]
-fn cooldis_cli_tool_help_is_canonical_and_op_is_removed() {
+fn cooldis_cli_tool_help_is_canonical() {
     let help = run_cooldis(["tool", "--help"]);
     assert!(help.contains("cooldis tool"));
     assert!(help.contains("cooldis tool list"));
     assert!(help.contains("cooldis tool publish"));
+    assert!(help.contains("cooldis tool manual"));
 
     let list_help = run_cooldis(["tool", "list", "--help"]);
     assert!(list_help.contains("cooldis tool list"));
@@ -35,52 +37,82 @@ fn cooldis_cli_tool_help_is_canonical_and_op_is_removed() {
     let run_help = run_cooldis(["tool", "run", "--help"]);
     assert!(run_help.contains("cooldis tool run"));
 
-    let old = run_cooldis_failed(["op", "--help"]);
-    assert!(stderr(&old).contains("cooldis op has been removed"));
+    let manual_help = run_cooldis(["tool", "manual", "--help"]);
+    assert!(manual_help.contains("cooldis tool manual <published-name>"));
+
+    let unknown = run_cooldis_failed(["hello"]);
+    assert!(stderr(&unknown).contains("unknown command"));
 }
 
 #[test]
-fn cooldis_cli_uses_console_rpc_and_dev_entrypoints() {
+fn cooldis_cli_uses_clean_public_entrypoints() {
     let root = run_cooldis([]);
     assert!(root.contains("cooldis init"));
     assert!(root.contains("cooldis agent"));
     assert!(root.contains("cooldis tool"));
+    assert!(root.contains("cooldis skill"));
+    assert!(root.contains("cooldis auth"));
     assert!(root.contains("cooldis secret"));
     assert!(root.contains("cooldis rpc"));
-    assert!(root.contains("cooldis dev chat"));
+    assert!(root.contains("cooldis console"));
+    assert!(root.contains("cooldis chat"));
+    assert!(root.contains("cooldis commands"));
+    assert!(root.contains("cooldis help"));
+    assert!(root.contains("cooldis debug rpc"));
+    assert_no_command(&root, &["dev"]);
+    assert_no_command(&root, &["operator"]);
     assert!(!root.contains("cooldis [PROMPT]"));
+
+    let commands = run_cooldis(["commands"]);
+    assert!(commands.contains("cooldis chat [PROMPT]"));
+    assert!(commands.contains("cooldis debug rpc call"));
+    assert!(commands.contains("cooldis tool manual"));
+    assert!(commands.contains("cooldis skill publish"));
+    assert!(commands.contains("cooldis auth set"));
+    assert_no_command(&commands, &["dev"]);
+    assert_no_command(&commands, &["operator"]);
+
+    let chat_help = run_cooldis(["chat", "--help"]);
+    assert!(chat_help.contains("cooldis chat"));
+    assert!(chat_help.contains("bundled local terminal console"));
+
+    let help_chat = run_cooldis(["help", "chat"]);
+    assert!(help_chat.contains("cooldis chat"));
+
+    let help_auth = run_cooldis(["help", "auth"]);
+    assert!(help_auth.contains("cooldis auth"));
+
+    let help_tool_manual = run_cooldis(["help", "tool", "manual"]);
+    assert!(help_tool_manual.contains("cooldis tool manual"));
+
+    let skill_help = run_cooldis(["skill", "--help"]);
+    assert!(skill_help.contains("cooldis skill publish"));
+
+    let skill_publish_help = run_cooldis(["skill", "publish", "--help"]);
+    assert!(skill_publish_help.contains("cooldis skill publish <dir>"));
+    assert!(skill_publish_help.contains("--registry-root"));
+
+    let help_debug_rpc = run_cooldis(["help", "debug", "rpc"]);
+    assert!(help_debug_rpc.contains("cooldis debug rpc"));
 
     let rpc = run_cooldis(["rpc", "--help"]);
     assert!(rpc.contains("cooldis rpc"));
     assert!(rpc.contains("--listen"));
 
-    let dev = run_cooldis(["dev", "--help"]);
-    assert!(dev.contains("cooldis dev chat"));
-    assert!(dev.contains("cooldis dev tui"));
+    let console = run_cooldis(["console", "--help"]);
+    assert!(console.contains("local browser console"));
+    assert!(console.contains("--no-open"));
+    assert!(console.contains("--port"));
 
-    let chat = run_cooldis(["dev", "chat", "--help"]);
-    assert!(chat.contains("cooldis dev chat"));
+    let auth = run_cooldis(["auth", "--help"]);
+    assert!(auth.contains("cooldis auth set"));
+    assert!(auth.contains("cooldis auth status"));
 
-    let operator = run_cooldis(["operator", "--help"]);
-    assert!(operator.contains("bundled local terminal console"));
-
-    let naked_prompt = run_cooldis_failed(["hello"]);
-    assert!(stderr(&naked_prompt).contains("unknown command"));
-
-    let old_chat = run_cooldis_failed(["chat", "--help"]);
-    assert!(stderr(&old_chat).contains("cooldis chat has moved"));
-
-    let old_tui = run_cooldis_failed(["tui", "--help"]);
-    assert!(stderr(&old_tui).contains("cooldis tui has moved"));
-
-    let old_app_server = run_cooldis_failed(["app-server", "--help"]);
-    assert!(stderr(&old_app_server).contains("cooldis app-server has been removed"));
+    let debug_rpc = run_cooldis(["debug", "rpc", "--help"]);
+    assert!(debug_rpc.contains("Protocol-level debug client"));
 
     let old_tool_plan = run_cooldis_failed(["tool", "plan", "--help"]);
     assert!(stderr(&old_tool_plan).contains("unknown tool subcommand"));
-
-    let thread_subcommand = run_cooldis_failed(["thread", "start"]);
-    assert!(stderr(&thread_subcommand).contains("use rpc thread/* methods"));
 }
 
 #[test]
@@ -110,7 +142,7 @@ fn cooldis_cli_init_creates_folder_first_agent_project() {
     let manifest = fs::read_to_string(&manifest_path).unwrap();
     assert!(manifest.contains("name = \"release-verifier\""));
     assert!(manifest.contains("provider_ref = \"provider://local_offline\""));
-    assert!(manifest.contains("operation_ref = \"op://example-tool@sha256:"));
+    assert!(!manifest.contains("0000000000000000000000000000000000000000000000000000000000000000"));
     let prompt = fs::read_to_string(&prompt_path).unwrap();
     assert!(prompt.contains("You are the release-verifier agent."));
     let refs = fs::read_to_string(&refs_path).unwrap();
@@ -132,7 +164,28 @@ fn cooldis_cli_init_creates_folder_first_agent_project() {
         missing_operation_registry_root.to_str().unwrap(),
     ]);
     assert!(plan.contains("agent://release-verifier@0.1.0"));
-    assert!(plan.contains("[unverified-offline]"));
+    assert!(plan.contains("context_source: identity -> resource://artifact/sha256:"));
+    assert!(plan.contains("resources: 1"));
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        missing_operation_registry_root.to_str().unwrap(),
+    ]);
+    assert!(publish.contains("published agent://release-verifier@0.1.0"));
+    assert!(publish.contains("context_source: identity -> resource://artifact/sha256:"));
+    let record = agent_record(&registry_root, "release-verifier");
+    assert_eq!(record.resource_count, 1);
+    assert!(
+        record
+            .resolved_refs
+            .iter()
+            .any(|resolved| resolved.declared.starts_with("resource://artifact/sha256:"))
+    );
 
     let duplicate = run_cooldis_failed([
         "init",
@@ -141,6 +194,198 @@ fn cooldis_cli_init_creates_folder_first_agent_project() {
         project.to_str().unwrap(),
     ]);
     assert!(stderr(&duplicate).contains("already exists"));
+}
+
+#[test]
+fn cooldis_cli_agent_plan_publish_accepts_explicit_folder_first_context() {
+    let workspace = temp_dir("agent-explicit-folder-context");
+    let project = workspace.join("explicit-runner");
+    fs::create_dir_all(project.join("prompts")).unwrap();
+    let prompt_text = "You are the explicit folder-first runner.\n";
+    fs::write(project.join("prompts/system.md"), prompt_text).unwrap();
+    let manifest_path = project.join("cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "explicit-runner"
+version = "0.1.0"
+description = "Uses an explicit folder-first context pipeline."
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[runtime]
+default_cwd = "."
+streaming = false
+
+[context]
+[[context.pipelines]]
+id = "default"
+
+[[context.pipelines.sources]]
+id = "identity"
+assembler = "kernel://assembler/static"
+pinned = true
+
+[[context.pipelines.sources]]
+id = "history"
+assembler = "kernel://assembler/anchored-window"
+select = { stream = "thread", since = "anchor|start" }
+budget_share = 0.75
+"#,
+    )
+    .unwrap();
+    let registry_root = workspace.join("agents");
+    let operation_registry_root = workspace.join("operations");
+
+    let plan = run_cooldis([
+        "agent",
+        "plan",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let plan_context_line = plan
+        .lines()
+        .find(|line| line.starts_with("context_source: identity -> "))
+        .unwrap_or_else(|| panic!("plan output did not include identity context source:\n{plan}"))
+        .to_string();
+    assert!(plan.contains("resources: 1"));
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    assert!(publish.contains("published agent://explicit-runner@0.1.0"));
+    assert!(publish.contains(&plan_context_line));
+
+    let record = agent_record(&registry_root, "explicit-runner");
+    assert_eq!(record.resource_count, 1);
+    let prompt_ref = record.resolved_manifest["resources"][0]["ref"]
+        .as_str()
+        .unwrap();
+    assert!(plan_context_line.contains(prompt_ref));
+    assert_eq!(
+        record.resolved_manifest["context"]["sources"][1]["budget_share"].as_f64(),
+        Some(0.75)
+    );
+    let (_prompt_record, published_prompt) = LocalBlobRegistry::new(workspace.join("blobs"))
+        .load_text_ref(prompt_ref)
+        .unwrap();
+    assert_eq!(published_prompt, prompt_text);
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn cooldis_cli_blob_publish_is_idempotent() {
+    let root = temp_dir("blob-publish-cli");
+    let file = root.join("system.md");
+    fs::write(&file, "Prompt text for the model.\n").unwrap();
+    let registry_root = root.join("blobs");
+
+    let first = run_cooldis([
+        "blob",
+        "publish",
+        file.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--name",
+        "identity",
+    ]);
+    let second = run_cooldis([
+        "blob",
+        "publish",
+        file.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--name",
+        "identity",
+    ]);
+
+    let first_ref = output_line_suffix(&first, "ref ");
+    let second_ref = output_line_suffix(&second, "ref ");
+    assert_eq!(first_ref, second_ref);
+    assert!(first_ref.starts_with("resource://artifact/sha256:"));
+    let artifact = output_line_suffix(&first, "artifact ");
+    assert!(
+        registry_root
+            .join("records/artifact")
+            .join(format!("sha256-{artifact}.json"))
+            .exists()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cooldis_cli_agent_run_uses_registry_relative_blob_root() {
+    let root = temp_dir("agent-run-registry-relative-blob");
+    let project = root.join("proj");
+    let agent_registry_root = root.join("ags");
+    let operation_registry_root = root.join("ops");
+
+    run_cooldis([
+        "agent",
+        "init",
+        "smokey",
+        "--out",
+        project.to_str().unwrap(),
+    ]);
+    let manifest_path = project.join("cooldis.agent.toml");
+    let prompt_text = fs::read_to_string(project.join("prompts/system.md")).unwrap();
+    assert!(prompt_text.contains("You are the smokey agent."));
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        agent_registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    assert!(publish.contains("published agent://smokey@0.1.0"));
+    assert!(publish.contains("context_source: identity -> resource://artifact/sha256:"));
+
+    let record = agent_record(&agent_registry_root, "smokey");
+    let prompt_ref = record
+        .resolved_refs
+        .iter()
+        .find(|resolved| resolved.declared.starts_with("resource://artifact/sha256:"))
+        .expect("folder-first prompt should publish a blob resource")
+        .declared
+        .clone();
+    let (_prompt_record, published_prompt) =
+        LocalBlobRegistry::new(agent_registry_root.join("blobs"))
+            .load_text_ref(&prompt_ref)
+            .unwrap();
+    assert_eq!(published_prompt, prompt_text);
+
+    let run = run_cooldis([
+        "agent",
+        "run",
+        "agent://smokey@latest",
+        "--input",
+        "who are you",
+        "--registry-root",
+        agent_registry_root.to_str().unwrap(),
+    ]);
+    assert!(run.contains("local:who are you"));
+    assert!(run.contains("manifest.compile.completed:"));
+    assert!(run.contains("manifest.bind.completed:"));
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -206,6 +451,78 @@ fn cooldis_cli_secret_import_list_and_status_redact_values() {
 }
 
 #[test]
+fn cooldis_cli_skill_publish_writes_deterministic_package() {
+    let root = temp_dir("skill-publish-cli");
+    let package_dir = root.join("karl-skills");
+    write_skill_fixture(
+        &package_dir,
+        "frontmatter",
+        r#"---
+name: frontmatter-skill
+description: Uses declared metadata.
+trigger_hint: when metadata matters
+---
+# Frontmatter Skill
+
+Body with metadata.
+"#,
+    );
+    write_skill_fixture(
+        &package_dir,
+        "plain",
+        r#"# Plain Skill
+
+First plain description line.
+
+More body.
+"#,
+    );
+    write_skill_fixture(
+        &package_dir,
+        "設計",
+        r#"# 設計
+
+Unicode description line.
+"#,
+    );
+    let registry_root = root.join("skills-registry");
+
+    let first = run_cooldis([
+        "skill",
+        "publish",
+        package_dir.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let second = run_cooldis([
+        "skill",
+        "publish",
+        package_dir.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let first_hash = skill_artifact_hash(&first);
+    let second_hash = skill_artifact_hash(&second);
+
+    assert_eq!(first_hash, second_hash);
+    assert!(first.contains("published karl-skills"));
+    assert!(first.contains("skill frontmatter-skill"));
+    assert!(first.contains("skill plain"));
+    assert!(first.contains("skill 設計"));
+    assert!(first.contains(&format!("ref skill://karl-skills@sha256:{first_hash}")));
+
+    let record = LocalSkillRegistry::new(&registry_root)
+        .load_record("karl-skills")
+        .unwrap();
+    assert_eq!(record.active_artifact_hash, first_hash);
+    assert_eq!(
+        record.package.render_index(),
+        "frontmatter-skill — Uses declared metadata.\nplain — First plain description line.\n設計 — Unicode description line.\n"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn cooldis_cli_tool_run_reports_missing_registered_operation_secret_refs() {
     let registry_root = temp_dir("tool-run-missing-secret-registry");
     let state_home = temp_dir("tool-run-missing-secret-state");
@@ -236,12 +553,11 @@ fn cooldis_cli_tool_run_reports_missing_registered_operation_secret_refs() {
 }
 
 #[test]
-fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
-    let state_home = temp_dir("provider-auth-state");
+fn cooldis_cli_auth_set_status_and_delete_redact_values() {
+    let state_home = temp_dir("auth-state");
 
     let set = run_cooldis_with_stdin(
         [
-            "provider",
             "auth",
             "set",
             "openai_compatible",
@@ -255,7 +571,6 @@ fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
     assert!(!set.contains("fixture-provider-key"));
 
     let status = run_cooldis([
-        "provider",
         "auth",
         "status",
         "openai_compatible",
@@ -268,7 +583,6 @@ fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
     assert!(!status.contains("fixture-provider-key"));
 
     let delete = run_cooldis([
-        "provider",
         "auth",
         "delete",
         "openai_compatible",
@@ -278,7 +592,6 @@ fn cooldis_cli_provider_auth_set_status_and_delete_redact_values() {
     assert!(delete.contains("deleted provider credential openai_compatible"));
 
     let status = run_cooldis([
-        "provider",
         "auth",
         "status",
         "openai_compatible",
@@ -617,28 +930,30 @@ expect = "fixtures/basic.expect.json"
     assert_eq!(manual.summary, "Profile a CSV string.");
     assert!(!manual.generated);
 
-    let man = run_cooldis([
-        "man",
+    let manual_text = run_cooldis([
+        "tool",
+        "manual",
         "data",
         "csv_profile",
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    assert!(man.contains("NAME"));
-    assert!(man.contains("data csv_profile - Profile a CSV string."));
-    assert!(man.contains("USAGE"));
-    assert!(man.contains("cooldis tool run data csv_profile"));
-    assert!(man.contains("EXIT STATUS"));
+    assert!(manual_text.contains("NAME"));
+    assert!(manual_text.contains("data csv_profile - Profile a CSV string."));
+    assert!(manual_text.contains("USAGE"));
+    assert!(manual_text.contains("cooldis tool run data csv_profile"));
+    assert!(manual_text.contains("EXIT STATUS"));
 
-    let man_json = run_cooldis([
-        "man",
+    let manual_json = run_cooldis([
+        "tool",
+        "manual",
         "data",
         "csv_profile",
         "--json",
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    let manuals: Vec<Value> = serde_json::from_str(&man_json).unwrap();
+    let manuals: Vec<Value> = serde_json::from_str(&manual_json).unwrap();
     assert_eq!(manuals[0]["tool_name"], "data");
     assert_eq!(manuals[0]["operation_name"], "csv_profile");
     assert_eq!(manuals[0]["generated"], false);
@@ -1045,6 +1360,185 @@ operation_ref = "op://tailcat@sha256:{TEST_OPERATION_HASH}"
         registry_root.to_str().unwrap(),
     ]);
     assert!(show_by_ref.contains("\"version\": \"0.1.0\""));
+}
+
+#[test]
+fn cooldis_cli_agent_publish_resolve_ops_pins_unpinned_manifest_refs() {
+    let workspace = temp_dir("agent-resolve-ops");
+    let manifest_path = workspace.join("resolve-ops.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+# keep this comment across value rewrites
+[agent]
+name = "resolve-ops"
+version = "0.1.0"
+description = "Pins operation refs during publish."
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "bash_tool"
+id = "tailcat"
+command = "cat"
+operation_ref = "op://tailcat"
+
+[[tools]]
+type = "direct_tool"
+id = "exporter"
+tool_name = "export"
+operation_ref = "op://analytics/export@latest"
+"#,
+    )
+    .unwrap();
+    let registry_root = temp_dir("agent-resolve-ops-registry");
+    let operation_registry_root = temp_dir("agent-resolve-ops-operation-registry");
+    seed_operation_record(
+        &operation_registry_root,
+        "tailcat",
+        TEST_OPERATION_HASH,
+        &[("cat", &[])],
+    );
+    seed_operation_record(
+        &operation_registry_root,
+        "analytics",
+        &"f".repeat(64),
+        &[("export", &[])],
+    );
+
+    let publish = run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--resolve-ops",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let tailcat_ref = format!("op://tailcat@sha256:{TEST_OPERATION_HASH}");
+    let analytics_ref = format!("op://analytics/export@sha256:{}", "f".repeat(64));
+    assert!(publish.contains(&format!(
+        "resolved operation_ref: op://tailcat -> {tailcat_ref}"
+    )));
+    assert!(publish.contains(&format!(
+        "resolved operation_ref: op://analytics/export@latest -> {analytics_ref}"
+    )));
+    assert!(publish.contains("published agent://resolve-ops@0.1.0"));
+
+    let rewritten = fs::read_to_string(&manifest_path).unwrap();
+    assert!(rewritten.contains("# keep this comment across value rewrites"));
+    assert!(rewritten.contains(&format!("operation_ref = \"{tailcat_ref}\"")));
+    assert!(rewritten.contains(&format!("operation_ref = \"{analytics_ref}\"")));
+    assert!(!rewritten.contains("operation_ref = \"op://tailcat\""));
+    assert!(!rewritten.contains("operation_ref = \"op://analytics/export@latest\""));
+
+    let record = agent_record(&registry_root, "resolve-ops");
+    assert_eq!(record.tool_refs[0].reference, tailcat_ref);
+    assert_eq!(record.tool_refs[1].reference, analytics_ref);
+}
+
+#[test]
+fn cooldis_cli_agent_publish_unpinned_ops_without_resolve_hint_fails() {
+    let workspace = temp_dir("agent-unpinned-op-hint");
+    let manifest_path = workspace.join("unresolved.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "unresolved"
+version = "0.1.0"
+description = "Fails without resolve-ops."
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "bash_tool"
+id = "tailcat"
+command = "cat"
+operation_ref = "op://tailcat"
+"#,
+    )
+    .unwrap();
+    let registry_root = temp_dir("agent-unpinned-op-hint-registry");
+    let operation_registry_root = temp_dir("agent-unpinned-op-hint-operation-registry");
+    seed_operation_record(
+        &operation_registry_root,
+        "tailcat",
+        TEST_OPERATION_HASH,
+        &[("cat", &[])],
+    );
+
+    let publish = run_cooldis_failed([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let err = stderr(&publish);
+    assert!(err.contains("unresolved artifact ref"));
+    assert!(err.contains("--resolve-ops"));
+}
+
+#[test]
+fn cooldis_cli_agent_publish_resolve_ops_unknown_name_writes_nothing() {
+    let workspace = temp_dir("agent-resolve-ops-unknown");
+    let manifest_path = workspace.join("unknown.cooldis.agent.toml");
+    let source = r#"
+[agent]
+name = "unknown"
+version = "0.1.0"
+description = "Does not rewrite when resolution is ambiguous."
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "bash_tool"
+id = "missing"
+command = "cat"
+operation_ref = "op://missing"
+"#;
+    fs::write(&manifest_path, source).unwrap();
+    let registry_root = temp_dir("agent-resolve-ops-unknown-registry");
+    let operation_registry_root = temp_dir("agent-resolve-ops-unknown-operation-registry");
+    seed_operation_record(
+        &operation_registry_root,
+        "tailcat",
+        TEST_OPERATION_HASH,
+        &[("cat", &[])],
+    );
+
+    let publish = run_cooldis_failed([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--resolve-ops",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let err = stderr(&publish);
+    assert!(err.contains("was not found in the local operation registry"));
+    assert_eq!(fs::read_to_string(&manifest_path).unwrap(), source);
+    assert!(
+        LocalAgentRegistry::new(&registry_root)
+            .list_records()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1457,6 +1951,24 @@ fn fixture_mount(module_path: &Path) -> String {
     )
 }
 
+fn write_skill_fixture(package_dir: &Path, name: &str, body: &str) {
+    let dir = package_dir.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
+fn skill_artifact_hash(output: &str) -> String {
+    output_line_suffix(output, "artifact ")
+}
+
+fn output_line_suffix(output: &str, prefix: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("output did not contain line prefix {prefix:?}:\n{output}"))
+        .to_string()
+}
+
 fn registry_record(root: &Path, name: &str) -> PublishedOperationRecord {
     LocalOperationRegistry::new(root).load_record(name).unwrap()
 }
@@ -1532,6 +2044,16 @@ fn seed_operation_record(
 
 fn agent_record(root: &Path, name: &str) -> PublishedAgentRecord {
     LocalAgentRegistry::new(root).load_record(name).unwrap()
+}
+
+fn assert_no_command(output: &str, path: &[&str]) {
+    let needle = format!("cooldis {}", path.join(" "));
+    assert!(
+        !output
+            .lines()
+            .any(|line| line.trim_start().starts_with(&needle)),
+        "unexpected legacy command in output: {needle}\n{output}"
+    );
 }
 
 fn run_cooldis<const N: usize>(args: [&str; N]) -> String {

@@ -63,7 +63,8 @@ where
 
         let mut runs = Vec::new();
         let mut appended_events = Vec::new();
-        let mut run_counts = HashMap::<String, u32>::new();
+        let mut per_turn_run_counts = HashMap::<String, u32>::new();
+        let mut per_thread_run_counts = HashMap::<ThreadCouplingRunKey, u32>::new();
         let mut remaining_discharge_budget = self.config.max_discharge_events_per_cycle;
         while let Some(queued) = queue.pop_front() {
             if queued.activation.depth > self.config.max_depth {
@@ -91,7 +92,23 @@ where
                 runs.push(run);
                 continue;
             }
-            if quota_exhausted(&queued.coupling, &run_counts) {
+            let per_turn_count = per_turn_run_counts
+                .get(&queued.coupling.id)
+                .copied()
+                .unwrap_or_default();
+            let thread_count = if queued.coupling.trigger_quota.per_thread.is_some() {
+                Some(
+                    self.thread_run_count(&queued, &mut per_thread_run_counts)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let per_thread_count = thread_count
+                .as_ref()
+                .map(|(_, count)| *count)
+                .unwrap_or_default();
+            if quota_exhausted(&queued.coupling, per_turn_count, per_thread_count) {
                 let (run, receipt) = self
                     .append_run_receipt(
                         &queued,
@@ -116,7 +133,12 @@ where
                 runs.push(run);
                 continue;
             }
-            *run_counts.entry(queued.coupling.id.clone()).or_default() += 1;
+            *per_turn_run_counts
+                .entry(queued.coupling.id.clone())
+                .or_default() += 1;
+            if let Some((key, _)) = thread_count {
+                *per_thread_run_counts.entry(key).or_default() += 1;
+            }
 
             let (source_cut, source_events) = match self
                 .resolve_source_cut(&queued.coupling, &queued.trigger_event)
@@ -388,6 +410,32 @@ where
         ))
     }
 
+    async fn thread_run_count(
+        &self,
+        queued: &QueuedActivation,
+        per_thread_run_counts: &mut HashMap<ThreadCouplingRunKey, u32>,
+    ) -> CooldisResult<(ThreadCouplingRunKey, u32)> {
+        let key = ThreadCouplingRunKey::new(
+            &queued.trigger_event.coordinates,
+            queued.coupling.id.clone(),
+        );
+        if !per_thread_run_counts.contains_key(&key) {
+            let stream_id = stream_id_for(&queued.trigger_event.coordinates, "control");
+            let events = self
+                .store
+                .read_events(&stream_id, None)
+                .await
+                .map_err(|err| CooldisError::History(err.to_string()))?;
+            let count = events
+                .iter()
+                .filter(|event| counted_thread_quota_run(event, &queued.coupling.id))
+                .count() as u32;
+            per_thread_run_counts.insert(key.clone(), count);
+        }
+        let count = per_thread_run_counts.get(&key).copied().unwrap_or_default();
+        Ok((key, count))
+    }
+
     async fn append_sink_events(
         &self,
         queued: &QueuedActivation,
@@ -621,6 +669,24 @@ enum RootDepth {
     },
 }
 
+/// Derived thread-lifetime quota key. The counter is rebuilt from coupling run
+/// receipts in this thread's control stream and then incremented in-memory for
+/// the current scheduler cycle; the journal remains the source of truth.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ThreadCouplingRunKey {
+    control_stream_id: String,
+    coupling_id: String,
+}
+
+impl ThreadCouplingRunKey {
+    fn new(coordinates: &ThreadCoordinates, coupling_id: String) -> Self {
+        Self {
+            control_stream_id: stream_id_for(coordinates, "control").to_string(),
+            coupling_id,
+        }
+    }
+}
+
 fn root_depth_from_event(event: &EventRecord) -> (EventRecordId, u32) {
     match event.origin {
         EventOrigin::Witnessed => (event.id, 0),
@@ -644,15 +710,31 @@ fn coupling_matches_event(coupling: &BoundCoupling, event: &EventRecord) -> bool
             .all(|(key, expected)| event.payload.get(key) == Some(expected))
 }
 
-fn quota_exhausted(coupling: &BoundCoupling, run_counts: &HashMap<String, u32>) -> bool {
-    let count = run_counts.get(&coupling.id).copied().unwrap_or_default();
-    [
-        coupling.trigger_quota.per_turn,
-        coupling.trigger_quota.per_thread,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|limit| count >= limit)
+/// `per_turn` is the scheduler-cycle count for this coupling id; `per_thread`
+/// is the lifetime count reconstructed from this thread's run receipts plus
+/// the non-skipped runs already admitted in the current cycle.
+fn quota_exhausted(coupling: &BoundCoupling, per_turn_count: u32, per_thread_count: u32) -> bool {
+    coupling
+        .trigger_quota
+        .per_turn
+        .is_some_and(|limit| per_turn_count >= limit)
+        || coupling
+            .trigger_quota
+            .per_thread
+            .is_some_and(|limit| per_thread_count >= limit)
+}
+
+fn counted_thread_quota_run(event: &EventRecord, coupling_id: &str) -> bool {
+    if !matches!(
+        event.kind,
+        EventKind::CouplingRunCompleted | EventKind::CouplingRunFailed
+    ) {
+        return false;
+    }
+    if event.payload.get("coupling_id").and_then(JsonValue::as_str) != Some(coupling_id) {
+        return false;
+    }
+    event.payload.get("status").and_then(JsonValue::as_str) != Some("skipped")
 }
 
 fn validate_discharges(
@@ -664,13 +746,13 @@ fn validate_discharges(
         && discharges.len() > limit as usize
     {
         return Err(format!(
-            "coupling {:?} exceeded max_discharge_events budget",
+            "budget: coupling {:?} exceeded max_discharge_events budget",
             coupling.id
         ));
     }
     if discharges.len() > remaining_discharge_budget as usize {
         return Err(format!(
-            "coupling {:?} exceeded scheduler discharge budget",
+            "budget: coupling {:?} exceeded scheduler discharge budget",
             coupling.id
         ));
     }
@@ -684,13 +766,13 @@ fn validate_discharges(
     for discharge in discharges {
         if discharge.stream != coupling.sink.stream {
             return Err(format!(
-                "coupling {:?} cannot discharge to sink stream {:?}; bound sink is {:?}",
+                "sink-violation: coupling {:?} cannot discharge to sink stream {:?}; bound sink is {:?}",
                 coupling.id, discharge.stream, coupling.sink.stream
             ));
         }
         if !coupling.sink.kinds.contains(&discharge.kind) {
             return Err(format!(
-                "coupling {:?} cannot discharge sink kind {:?}",
+                "sink-violation: coupling {:?} cannot discharge sink kind {:?}",
                 coupling.id, discharge.kind
             ));
         }
@@ -749,7 +831,7 @@ mod tests {
     use super::*;
     use crate::{
         BoundCoupling, BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSet,
-        BoundCouplingSink, CouplingRole, EventKind, EventStore, EventStreamId,
+        BoundCouplingSink, CouplingRole, EventKind, EventProvenance, EventStore, EventStreamId,
         InMemorySessionStore, NewEventRecord, ThreadCoordinates,
     };
     use async_trait::async_trait;
@@ -891,6 +973,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loop_discharged_session_entry_depth_uses_triggering_event_id() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let thread_stream = EventStreamId::for_thread(&coordinates);
+        let submitted = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::TurnSubmitted,
+            json!({
+                "schema": EventKind::TurnSubmitted.payload_schema_id(),
+                "turn_id": "t1",
+            }),
+        );
+        let submitted_id = submitted.id;
+        let session_entry = NewEventRecord::discharged(
+            coordinates.clone(),
+            EventKind::SessionEntryAppended,
+            json!({
+                "entry_id": "entry-1",
+                "parent_entry_id": null,
+                "entry_kind": "message",
+            }),
+            EventProvenance {
+                source_streams: vec![thread_stream.clone()],
+                source_event_ids: vec![submitted_id],
+                discharged_by: Some("propagator:agent-loop".to_string()),
+                function: Some("session_entry_append/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        );
+        let appended = store
+            .append_events(&thread_stream, vec![submitted, session_entry])
+            .await
+            .unwrap();
+        let executor = RecordingExecutor::default();
+        let scheduler = CouplingScheduler::new(&store, &executor);
+
+        scheduler
+            .run_batch(
+                &BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![test_coupling(
+                        "mirror_session",
+                        EventKind::SessionEntryAppended,
+                        "control",
+                    )],
+                ),
+                vec![appended[1].clone()],
+            )
+            .await
+            .unwrap();
+
+        let calls = executor.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].activation.trigger_event_id, appended[1].id);
+        assert_eq!(calls[0].activation.root_event_id, submitted_id);
+        assert_ne!(calls[0].activation.root_event_id, appended[1].id);
+        assert_eq!(calls[0].activation.depth, 1);
+    }
+
+    #[tokio::test]
     async fn invalid_sink_discharge_records_failure_without_partial_events() {
         let coordinates = ThreadCoordinates::new("tenant", "user", "session");
         let store = InMemorySessionStore::default();
@@ -1021,6 +1163,118 @@ mod tests {
 
         assert!(receipt.runs.is_empty());
         assert!(executor.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn per_thread_quota_counts_runs_across_scheduler_cycles() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let executor = RecordingExecutor::default();
+        let mut coupling = test_coupling("gate", EventKind::TurnCompleted, "control");
+        coupling.trigger_quota.per_thread = Some(2);
+        let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+
+        let first = append_turn_completed(&store, &coordinates, "t1").await;
+        let first_receipt = CouplingScheduler::new(&store, &executor)
+            .run_batch(&coupling_set, first)
+            .await
+            .unwrap();
+        assert_eq!(first_receipt.runs[0].status, CouplingRunStatus::Completed);
+
+        let second = append_turn_completed(&store, &coordinates, "t2").await;
+        let second_receipt = CouplingScheduler::new(&store, &executor)
+            .run_batch(&coupling_set, second)
+            .await
+            .unwrap();
+        assert_eq!(second_receipt.runs[0].status, CouplingRunStatus::Completed);
+
+        let third = append_turn_completed(&store, &coordinates, "t3").await;
+        let third_receipt = CouplingScheduler::new(&store, &executor)
+            .run_batch(&coupling_set, third)
+            .await
+            .unwrap();
+
+        assert_eq!(third_receipt.runs[0].status, CouplingRunStatus::Skipped);
+        assert_eq!(
+            third_receipt.runs[0].reason.as_deref(),
+            Some("quota_exhausted")
+        );
+        assert_eq!(executor.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn per_turn_quota_still_resets_between_scheduler_cycles() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let executor = RecordingExecutor::default();
+        let mut coupling = test_coupling("gate", EventKind::TurnCompleted, "control");
+        coupling.trigger_quota.per_turn = Some(1);
+        let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+
+        let first_batch = store
+            .append_events(
+                &EventStreamId::for_thread(&coordinates),
+                vec![
+                    NewEventRecord::witnessed(
+                        coordinates.clone(),
+                        EventKind::TurnCompleted,
+                        json!({"turn_id": "t1"}),
+                    ),
+                    NewEventRecord::witnessed(
+                        coordinates.clone(),
+                        EventKind::TurnCompleted,
+                        json!({"turn_id": "t2"}),
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+        let scheduler = CouplingScheduler::new(&store, &executor);
+
+        let first_receipt = scheduler
+            .run_batch(&coupling_set, first_batch)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first_receipt
+                .runs
+                .iter()
+                .map(|run| run.status)
+                .collect::<Vec<_>>(),
+            vec![CouplingRunStatus::Completed, CouplingRunStatus::Skipped]
+        );
+        assert_eq!(
+            first_receipt.runs[1].reason.as_deref(),
+            Some("quota_exhausted")
+        );
+
+        let second_batch = append_turn_completed(&store, &coordinates, "t3").await;
+        let second_receipt = scheduler
+            .run_batch(&coupling_set, second_batch)
+            .await
+            .unwrap();
+
+        assert_eq!(second_receipt.runs[0].status, CouplingRunStatus::Completed);
+        assert_eq!(executor.calls.lock().unwrap().len(), 2);
+    }
+
+    async fn append_turn_completed(
+        store: &InMemorySessionStore,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+    ) -> Vec<EventRecord> {
+        store
+            .append_events(
+                &EventStreamId::for_thread(coordinates),
+                vec![NewEventRecord::witnessed(
+                    coordinates.clone(),
+                    EventKind::TurnCompleted,
+                    json!({"turn_id": turn_id}),
+                )],
+            )
+            .await
+            .unwrap()
     }
 
     fn test_coupling(id: &str, trigger_kind: EventKind, sink_stream: &str) -> BoundCoupling {

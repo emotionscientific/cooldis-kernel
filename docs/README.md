@@ -11,6 +11,7 @@ provider adapters, and release gates.
   reading path.
 - [Getting Started](getting-started.md): install, run, and inspect the local
   runtime.
+- [Cooldis CLI](cli.md): canonical command surface and help model.
 - [Repository Map](repository-map.md): where code, tests, docs, scripts, and
   runtime contracts live.
 - [Kernel Invariants](kernel-invariants.md): public vocabulary for the runtime
@@ -26,11 +27,12 @@ provider adapters, and release gates.
 ## Runtime Surfaces
 
 - [ABI: Cooldis Operation Boundary](abi.md)
+- [Cooldis CLI](cli.md)
 - [Command Contracts](command-contracts.md)
 - [Cooldis Daemon](daemon.md)
 - [Cooldis IO](io.md)
-- [Operator Console](operator.md)
-- [RPC Control Plane And Dev Chat](app-server.md)
+- [Chat Console](chat.md)
+- [RPC Control Plane](app-server.md)
 - [Cooldis MCP Server](mcp-server.md)
 - [Provider Adapter Surface](provider-adapters.md)
 - [Metadata And Provider Auth Storage](provider-storage.md)

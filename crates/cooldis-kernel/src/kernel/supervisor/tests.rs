@@ -4,10 +4,10 @@ use crate::{
     ThreadStatus,
 };
 use async_trait::async_trait;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 struct EchoRuntimeFactory;
 
@@ -603,9 +603,5 @@ fn text_messages(context: &crate::SessionContext) -> Vec<String> {
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7()))
 }

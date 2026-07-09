@@ -27,6 +27,7 @@ allowed to exercise.
 
 - Build an agent locally from a manifest.
 - Attach tools, resources, secrets, and runtime grants.
+- Publish static prompt and context files as immutable blob resources.
 - Run the agent through a governed runtime instead of a one-off app server.
 - Inspect events, tool calls, receipts, and artifacts.
 - Resume work from durable records.
@@ -40,7 +41,7 @@ agent declaration
 + capability bindings
 + resources
 + context pipeline
-+ hooks and grants
++ couplings and grants
 + placement requirements
 -> governed agent runtime
 ```
@@ -67,9 +68,11 @@ what you approve, and run it under policy.
 ## Current Status
 
 Cooldis is experimental. The repository is focused on V1 runtime primitives:
-agent manifests, operation publishing, ABI contracts, local runtime execution,
-provider adapters, virtual bash, VFS, daemon/RPC surfaces, and the proof path for
-packageable local agents.
+agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
+couplings, offline coupling replay, local runtime execution, provider adapters,
+virtual bash, VFS,
+skill-package resources, daemon/RPC
+surfaces, and the proof path for packageable local agents.
 
 The managed cloud, public package registry, private marketplace, and stateful
 harness product layer are V2 direction.

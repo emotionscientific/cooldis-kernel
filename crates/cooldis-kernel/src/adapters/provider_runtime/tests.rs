@@ -3,15 +3,16 @@ use crate::EventKind;
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindReceipt,
     AgentManifestCouplingBinding, AgentManifestCouplingBudget, AgentManifestRuntimeDefaults,
-    AgentToolRouter, CanonicalStopReason, CanonicalUsage, CouplingRole, EventProvenance,
-    EventStore, EventStreamId, HookEventName, HookHandler, HookHandlerOutput, HookHandlerSpec,
-    HookRequest, HookRunStatus, InMemorySessionStore, KernelOperationRegistration, NewEventRecord,
+    AgentToolRouter, CanonicalStopReason, CanonicalUsage, CommandHookHandler, CouplingRole,
+    EventProvenance, EventStore, EventStreamId, HookEventName, HookHandler, HookHandlerOutput,
+    HookHandlerSpec, HookRequest, HookRunStatus, InMemorySessionStore, KernelOperationRegistration,
+    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, NewEventRecord,
     ObservationStore, OperationRegistration, OperationRegistry, OperationToolAlias,
     ProviderCapabilityRecord, ProviderContextPolicy, RuntimeEvent, RuntimeHost, SessionEntry,
-    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadTopology,
-    ToolCallDecisionOutcomePayload, ToolCallDecisionPayload, ToolCallSubject,
-    ToolCallSuspendedPayload, TurnContextSnapshot, WasmRuntimeArtifact,
-    cooldis_threads_kernel_package,
+    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadJoinedPayload,
+    ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology, ToolCallDecisionOutcomePayload,
+    ToolCallDecisionPayload, ToolCallSubject, ToolCallSuspendedPayload, TurnContextSnapshot,
+    WasmRuntimeArtifact, cooldis_threads_kernel_package,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -65,6 +66,56 @@ struct TurnContextRecordingKernelToolProvider {
     snapshots: Mutex<Vec<Option<TurnContextSnapshot>>>,
 }
 
+struct WitnessCheckingEchoProvider {
+    store: Arc<InMemorySessionStore>,
+    expected_command_sha256: String,
+    seen_arguments: Mutex<Vec<Value>>,
+}
+
+struct StaticThreadSpawnAgentResolver;
+
+const CHILD_AGENT_REF: &str = "agent://worker@latest";
+const CHILD_MANIFEST_HASH: &str = "sha256:child-manifest";
+
+#[async_trait]
+impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
+    async fn resolve_agent_ref(
+        &self,
+        _caller: &ThreadContext,
+        agent_ref: &str,
+    ) -> CooldisResult<KernelThreadSpawnAgentBinding> {
+        assert_eq!(agent_ref, CHILD_AGENT_REF);
+        Ok(KernelThreadSpawnAgentBinding {
+            metadata: BTreeMap::from([(
+                "cooldis.agent.manifest_hash".to_string(),
+                CHILD_MANIFEST_HASH.to_string(),
+            )]),
+            compile_receipt: serde_json::json!({
+                "ref_uri": CHILD_AGENT_REF,
+                "manifest_hash": CHILD_MANIFEST_HASH,
+                "source_hash": "sha256:child-source"
+            }),
+            bind_receipt: serde_json::to_value(AgentManifestBindReceipt {
+                ref_uri: CHILD_AGENT_REF.to_string(),
+                manifest_hash: CHILD_MANIFEST_HASH.to_string(),
+                model_profile_id: "default".to_string(),
+                provider_id: "test".to_string(),
+                model_id: "model".to_string(),
+                tool_ids: Vec::new(),
+                operation_bindings: Vec::new(),
+                tool_universes: Vec::new(),
+                couplings: Vec::new(),
+                skill_packages: Vec::new(),
+                static_context_segments: Vec::new(),
+                granted: vec!["threads.read".to_string()],
+                effective_runtime: AgentManifestRuntimeDefaults::default(),
+                overridden_keys: Vec::new(),
+            })
+            .unwrap(),
+        })
+    }
+}
+
 struct StaticHookHandler {
     spec: HookHandlerSpec,
     output: HookHandlerOutput,
@@ -106,6 +157,12 @@ impl TurnContextRecordingKernelToolProvider {
     }
 }
 
+impl WitnessCheckingEchoProvider {
+    fn seen_arguments(&self) -> Vec<Value> {
+        self.seen_arguments.lock().unwrap().clone()
+    }
+}
+
 #[async_trait]
 impl HookHandler for StaticHookHandler {
     fn spec(&self) -> HookHandlerSpec {
@@ -115,6 +172,85 @@ impl HookHandler for StaticHookHandler {
     async fn run(&self, request: HookRequest) -> CooldisResult<HookHandlerOutput> {
         self.requests.lock().unwrap().push(request);
         Ok(self.output.clone())
+    }
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for WitnessCheckingEchoProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            "echo_search",
+            "Echo input after checking hook witnesses.",
+            serde_json::json!({"type":"object"}),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        let coordinates = call
+            .turn_context
+            .as_ref()
+            .expect("tool call should carry turn context")
+            .coordinates
+            .clone();
+        let witnesses = self
+            .store
+            .list_observations(&coordinates, Some("host.hook.mutation_witnessed"))
+            .await
+            .unwrap();
+        assert_eq!(
+            witnesses.len(),
+            1,
+            "pre-tool mutation witness must be appended before the tool runs"
+        );
+        let payload = &witnesses[0].payload;
+        assert_eq!(payload["hook_event_name"].as_str(), Some("pre_tool_use"));
+        assert_eq!(
+            payload["command_sha256"].as_str(),
+            Some(self.expected_command_sha256.as_str())
+        );
+        assert_eq!(
+            payload["mutated_fields"],
+            serde_json::json!(["updated_input"])
+        );
+        assert_eq!(
+            payload["tool_input"]["before_sha256"].as_str(),
+            Some(
+                sha256_hex(
+                    &serde_json::to_vec(
+                        &serde_json::json!({"input":"original","secret":"before-secret"})
+                    )
+                    .unwrap()
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            payload["tool_input"]["after_sha256"].as_str(),
+            Some(
+                sha256_hex(
+                    &serde_json::to_vec(
+                        &serde_json::json!({"input":"rewritten","secret":"after-secret"})
+                    )
+                    .unwrap()
+                )
+                .as_str()
+            )
+        );
+        assert_payload_omits_values(
+            payload,
+            &["original", "rewritten", "before-secret", "after-secret"],
+        );
+
+        self.seen_arguments.lock().unwrap().push(call.arguments);
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            "tool original before-secret-output",
+            false,
+        )))
     }
 }
 
@@ -328,6 +464,7 @@ impl AgentRuntime for ChildEchoRuntime {
         cancellation: CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
+        let thread_context = context.clone();
         let coordinates = context.coordinates.clone();
         emit_runtime_event(
             &events,
@@ -348,13 +485,41 @@ impl AgentRuntime for ChildEchoRuntime {
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { input, .. }) => {
+                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
                             let _ = services.append_user_turn_input(&coordinates, &input).await;
                             let _ = events.send(ThreadEvent::Output {
                                 thread_id,
                                 text: format!("child:{}", input.text_projection()),
                             });
+                            if let Ok(completed) = services
+                                .append_thread_event(
+                                    &coordinates,
+                                    NewEventRecord::discharged(
+                                        coordinates.clone(),
+                                        EventKind::TurnCompleted,
+                                        serde_json::json!({
+                                            "turn_id": turn_id,
+                                        }),
+                                        EventProvenance {
+                                            source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                                            discharged_by: Some("runtime:child-echo".to_string()),
+                                            function: Some("turn_complete/v1".to_string()),
+                                            ..EventProvenance::default()
+                                        },
+                                    ),
+                                )
+                                .await
+                            {
+                                let _ = services
+                                    .append_thread_joined_event_if_spawned(
+                                        &thread_context,
+                                        ThreadTerminalState::Completed,
+                                        None,
+                                        Some(completed.id),
+                                    )
+                                    .await;
+                            }
                             let _ = status.send(ThreadStatus::Idle);
                         }
                         Some(ThreadCommand::Cancel { reason }) => {
@@ -1660,6 +1825,23 @@ async fn runtime_persists_tool_request_and_completion_facts() {
         )
         .await
         .unwrap();
+    let submitted = records
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::TurnSubmitted
+                && event.origin == crate::EventOrigin::Witnessed
+                && event.payload["turn_id"].as_str() == Some("turn-1")
+        })
+        .expect("turn submission should be durable");
+    let assistant_session_entry = records
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.origin == crate::EventOrigin::Discharged
+                && event.provenance.source_event_ids == vec![submitted.id]
+        })
+        .expect("assistant session entry should cite the submitted turn");
+    assert_ne!(assistant_session_entry.id, submitted.id);
     let request = records
         .iter()
         .find(|event| event.kind == EventKind::ToolCallRequested)
@@ -1679,6 +1861,11 @@ async fn runtime_persists_tool_request_and_completion_facts() {
         !request.provenance.source_event_ids.is_empty(),
         "tool requests should point back to the assistant session entry"
     );
+    assert!(records.iter().any(|event| {
+        event.kind == EventKind::SessionEntryAppended
+            && event.origin == crate::EventOrigin::Discharged
+            && event.provenance.source_event_ids == vec![request.id]
+    }));
     let completed = records
         .iter()
         .find(|event| event.kind == EventKind::ToolCallCompleted)
@@ -1686,11 +1873,6 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     assert_eq!(completed.origin, crate::EventOrigin::Witnessed);
     assert_eq!(completed.payload["tool_name"].as_str(), Some("echo_search"));
     assert_eq!(completed.payload["success"].as_bool(), Some(true));
-    assert!(records.iter().any(|event| {
-        event.kind == EventKind::TurnSubmitted
-            && event.origin == crate::EventOrigin::Witnessed
-            && event.payload["turn_id"].as_str() == Some("turn-1")
-    }));
     assert!(records.iter().any(|event| {
         event.kind == EventKind::TurnCompleted
             && event.origin == crate::EventOrigin::Discharged
@@ -2261,6 +2443,115 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
 }
 
 #[tokio::test]
+async fn mutating_tool_hooks_append_secret_free_witnesses_before_effects() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let pre_command = r#"cat >/dev/null; printf '%s' '{"updated_input":{"input":"rewritten","secret":"after-secret"}}'"#;
+    let post_command = r#"cat >/dev/null; printf '%s' '{"replacement_output":"hook replacement after-secret-output"}'"#;
+    let expected_pre_command_sha256 = sha256_hex(pre_command.as_bytes());
+    let expected_post_command_sha256 = sha256_hex(post_command.as_bytes());
+    let echo_provider = Arc::new(WitnessCheckingEchoProvider {
+        store: store.clone(),
+        expected_command_sha256: expected_pre_command_sha256.clone(),
+        seen_arguments: Mutex::new(Vec::new()),
+    });
+    let kernel_provider: Arc<dyn AgentKernelToolProvider> = echo_provider.clone();
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(kernel_provider),
+    );
+    let hook_pipeline = Arc::new(
+        HookPipeline::new()
+            .with_command_handler(
+                CommandHookHandler::new("pre-echo", HookEventName::PreToolUse, pre_command)
+                    .with_matcher("echo_search"),
+            )
+            .with_command_handler(
+                CommandHookHandler::new("post-echo", HookEventName::PostToolUse, post_command)
+                    .with_matcher("echo_search"),
+            ),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named(
+            "echo_search",
+            serde_json::json!({"input":"original","secret":"before-secret"}),
+        ),
+        response_text("final reply"),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let mut config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config.max_tokens = 128;
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(config, provider_client)
+                .with_tool_router(router)
+                .with_hook_pipeline(hook_pipeline),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "use echo")
+        .await
+        .unwrap();
+    assert_output(&mut events, "final reply").await;
+
+    assert_eq!(
+        echo_provider.seen_arguments(),
+        vec![serde_json::json!({"input":"rewritten","secret":"after-secret"})]
+    );
+    let witnesses = store
+        .list_observations(
+            &thread.context().coordinates,
+            Some("host.hook.mutation_witnessed"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(witnesses.len(), 2);
+    let post_payload = witnesses
+        .iter()
+        .map(|record| &record.payload)
+        .find(|payload| payload["hook_event_name"] == "post_tool_use")
+        .expect("post-tool replacement should be witnessed");
+    assert_eq!(
+        post_payload["command_sha256"].as_str(),
+        Some(expected_post_command_sha256.as_str())
+    );
+    assert_eq!(
+        post_payload["mutated_fields"],
+        serde_json::json!(["replacement_output"])
+    );
+    assert_eq!(
+        post_payload["tool_output"]["before_sha256"].as_str(),
+        Some(sha256_hex("tool original before-secret-output".as_bytes()).as_str())
+    );
+    assert_eq!(
+        post_payload["tool_output"]["after_sha256"].as_str(),
+        Some(sha256_hex("hook replacement after-secret-output".as_bytes()).as_str())
+    );
+    for witness in &witnesses {
+        assert_payload_omits_values(
+            &witness.payload,
+            &[
+                "original",
+                "rewritten",
+                "before-secret",
+                "after-secret",
+                "tool original before-secret-output",
+                "hook replacement after-secret-output",
+            ],
+        );
+    }
+}
+
+#[tokio::test]
 async fn pre_tool_hook_can_block_tool_execution() {
     let registry = echo_registry("echo").await;
     let block_hook = Arc::new(StaticHookHandler::new(
@@ -2354,6 +2645,181 @@ async fn pre_tool_hook_can_block_tool_execution() {
 }
 
 #[tokio::test]
+async fn block_stop_and_observe_only_hook_witnessing() {
+    let block_store = Arc::new(InMemorySessionStore::new());
+    let block_command = r#"cat >/dev/null; printf '%s' '{"should_block":true,"block_reason":"blocked by hook secret","additional_context":"block context secret"}'"#;
+    let block_hook_pipeline = Arc::new(
+        HookPipeline::new().with_command_handler(
+            CommandHookHandler::new("block-echo", HookEventName::PreToolUse, block_command)
+                .with_matcher("echo_search"),
+        ),
+    );
+    let block_client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named("echo_search", serde_json::json!({"input": "original"})),
+        response_text("final reply"),
+    ]));
+    let block_provider_client: Arc<dyn ProviderClient> = block_client.clone();
+    let mut block_config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    block_config.max_tokens = 128;
+    let block_host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(block_config, block_provider_client)
+                .with_operation_registry(echo_registry("echo").await)
+                .with_hook_pipeline(block_hook_pipeline),
+        ),
+        block_store.clone(),
+    );
+    let block_thread = block_host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "session_block"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut block_events = block_thread.subscribe_events();
+
+    block_host
+        .submit(
+            block_thread.context().coordinates.thread_id,
+            "turn-1",
+            "use echo",
+        )
+        .await
+        .unwrap();
+    assert_output(&mut block_events, "final reply").await;
+    let block_witnesses = block_store
+        .list_observations(
+            &block_thread.context().coordinates,
+            Some("host.hook.mutation_witnessed"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(block_witnesses.len(), 1);
+    let block_payload = &block_witnesses[0].payload;
+    assert_eq!(
+        block_payload["command_sha256"].as_str(),
+        Some(sha256_hex(block_command.as_bytes()).as_str())
+    );
+    assert_mutated_fields(block_payload, &["additional_contexts", "should_block"]);
+    assert_payload_omits_values(
+        block_payload,
+        &["blocked by hook secret", "block context secret"],
+    );
+
+    let stop_store = Arc::new(InMemorySessionStore::new());
+    let stop_command =
+        r#"cat >/dev/null; printf '%s' '{"should_stop":true,"stop_reason":"stop secret"}'"#;
+    let stop_hook_pipeline = Arc::new(HookPipeline::new().with_command_handler(
+        CommandHookHandler::new("stop-turn", HookEventName::UserPromptSubmit, stop_command),
+    ));
+    let stop_client = Arc::new(RecordingClient::with_responses(vec![]));
+    let stop_provider_client: Arc<dyn ProviderClient> = stop_client.clone();
+    let stop_host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                stop_provider_client,
+            )
+            .with_hook_pipeline(stop_hook_pipeline),
+        ),
+        stop_store.clone(),
+    );
+    let stop_thread = stop_host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "session_stop"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut stop_events = stop_thread.subscribe_events();
+
+    stop_host
+        .submit(
+            stop_thread.context().coordinates.thread_id,
+            "turn-1",
+            "stop before provider",
+        )
+        .await
+        .unwrap();
+    assert_stopped(&mut stop_events).await;
+    assert!(stop_client.requests().is_empty());
+    let stop_witnesses = stop_store
+        .list_observations(
+            &stop_thread.context().coordinates,
+            Some("host.hook.mutation_witnessed"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stop_witnesses.len(), 1);
+    let stop_payload = &stop_witnesses[0].payload;
+    assert_eq!(
+        stop_payload["hook_event_name"].as_str(),
+        Some("user_prompt_submit")
+    );
+    assert_eq!(
+        stop_payload["command_sha256"].as_str(),
+        Some(sha256_hex(stop_command.as_bytes()).as_str())
+    );
+    assert_mutated_fields(stop_payload, &["should_stop"]);
+    assert_payload_omits_values(stop_payload, &["stop secret"]);
+
+    let observe_store = Arc::new(InMemorySessionStore::new());
+    let observe_hook_pipeline = Arc::new(
+        HookPipeline::new().with_command_handler(
+            CommandHookHandler::new("observe-echo", HookEventName::PreToolUse, "cat >/dev/null")
+                .with_matcher("echo_search"),
+        ),
+    );
+    let observe_client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named("echo_search", serde_json::json!({"input": "observed"})),
+        response_text("final reply"),
+    ]));
+    let observe_provider_client: Arc<dyn ProviderClient> = observe_client.clone();
+    let mut observe_config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    observe_config.max_tokens = 128;
+    let observe_host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(observe_config, observe_provider_client)
+                .with_operation_registry(echo_registry("echo").await)
+                .with_hook_pipeline(observe_hook_pipeline),
+        ),
+        observe_store.clone(),
+    );
+    let observe_thread = observe_host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "session_observe"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut observe_events = observe_thread.subscribe_events();
+
+    observe_host
+        .submit(
+            observe_thread.context().coordinates.thread_id,
+            "turn-1",
+            "use echo",
+        )
+        .await
+        .unwrap();
+    assert_output(&mut observe_events, "final reply").await;
+    let observe_witnesses = observe_store
+        .list_observations(
+            &observe_thread.context().coordinates,
+            Some("host.hook.mutation_witnessed"),
+        )
+        .await
+        .unwrap();
+    assert!(observe_witnesses.is_empty());
+}
+
+#[tokio::test]
 async fn runtime_passes_turn_context_to_tool_router() {
     let kernel_provider = Arc::new(TurnContextRecordingKernelToolProvider::new());
     let tool_provider: Arc<dyn AgentKernelToolProvider> = kernel_provider.clone();
@@ -2436,6 +2902,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
             serde_json::json!({
                 "task_name": "worker",
                 "message": "echo child-through-tool",
+                "agent_ref": CHILD_AGENT_REF,
             }),
         ),
         response_text("spawned child"),
@@ -2445,10 +2912,12 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
         CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let root_factory = CanonicalProviderRuntimeFactory::new(config, provider_client)
-        .with_tool_router(Arc::new(kernel_thread_router().await));
+        .with_tool_router(Arc::new(kernel_thread_router().await))
+        .with_thread_spawn_agent_resolver(Arc::new(StaticThreadSpawnAgentResolver));
     let host = RuntimeHost::new(Arc::new(RootProviderChildEchoFactory {
         root: Arc::new(root_factory),
     }));
+    let store = host.runtime_store();
     let thread = host
         .start_thread(
             ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
@@ -2496,6 +2965,43 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     assert_eq!(
         text_messages(&child_session.messages),
         vec!["echo child-through-tool"]
+    );
+    let spawned = wait_for_control_event(
+        store.as_ref(),
+        &thread.context().coordinates,
+        EventKind::ThreadSpawned,
+    )
+    .await;
+    let spawned_payload: ThreadSpawnedPayload =
+        serde_json::from_value(spawned.payload.clone()).unwrap();
+    assert_eq!(
+        spawned_payload.parent_thread_id,
+        thread.context().coordinates.thread_id
+    );
+    assert_eq!(
+        spawned_payload.child_thread_id,
+        children[0].context().coordinates.thread_id
+    );
+    assert_eq!(spawned_payload.child_manifest_hash, CHILD_MANIFEST_HASH);
+    assert_eq!(spawned_payload.granted, vec!["threads.read".to_string()]);
+    assert!(spawned_payload.inputs_hash.starts_with("sha256:"));
+
+    let joined = wait_for_control_event(
+        store.as_ref(),
+        &thread.context().coordinates,
+        EventKind::ThreadJoined,
+    )
+    .await;
+    let joined_payload: ThreadJoinedPayload =
+        serde_json::from_value(joined.payload.clone()).unwrap();
+    assert_eq!(
+        joined_payload.child_thread_id,
+        spawned_payload.child_thread_id
+    );
+    assert_eq!(joined_payload.spawned_event_id, spawned.id);
+    assert_eq!(
+        joined_payload.terminal_state,
+        ThreadTerminalState::Completed
     );
 
     let parent_session = thread.session_context().await.unwrap();
@@ -2546,6 +3052,8 @@ async fn append_tool_controller_bind_receipt(
         model_id: "model".to_string(),
         tool_ids: Vec::new(),
         operation_bindings: Vec::new(),
+        skill_packages: Vec::new(),
+        static_context_segments: Vec::new(),
         tool_universes: Vec::new(),
         couplings: vec![AgentManifestCouplingBinding {
             id: "tool_gate".to_string(),
@@ -2637,6 +3145,7 @@ async fn append_witnessed_tool_decision(
                     },
                     snapshot_id: snapshot_id.to_string(),
                     outcome,
+                    admissible: None,
                 })
                 .unwrap(),
             )],
@@ -2671,6 +3180,26 @@ async fn wait_for_thread_event(
         assert!(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for thread event kind {kind}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_control_event<S: EventStore + ?Sized>(
+    store: &S,
+    coordinates: &ThreadCoordinates,
+    kind: EventKind,
+) -> crate::EventRecord {
+    let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let records = store.read_events(&stream_id, None).await.unwrap();
+        if let Some(record) = records.into_iter().find(|event| event.kind == kind) {
+            return record;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for control event kind {kind}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -3314,6 +3843,20 @@ async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: 
     }
 }
 
+async fn assert_stopped(events: &mut broadcast::Receiver<ThreadEvent>) {
+    loop {
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event timed out")
+            .expect("event channel closed");
+        match event {
+            ThreadEvent::Stopped { .. } => return,
+            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            _ => {}
+        }
+    }
+}
+
 async fn assert_output_with_runtime_events(
     events: &mut broadcast::Receiver<ThreadEvent>,
     expected: &str,
@@ -3356,6 +3899,26 @@ async fn assert_completed_terminal(events: &mut broadcast::Receiver<ThreadEvent>
             ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
+    }
+}
+
+fn assert_mutated_fields(payload: &Value, expected: &[&str]) {
+    let fields = payload["mutated_fields"]
+        .as_array()
+        .expect("mutated_fields should be an array")
+        .iter()
+        .map(|field| field.as_str().expect("mutated field should be a string"))
+        .collect::<Vec<_>>();
+    assert_eq!(fields, expected);
+}
+
+fn assert_payload_omits_values(payload: &Value, forbidden_values: &[&str]) {
+    let encoded = serde_json::to_string(payload).unwrap();
+    for forbidden in forbidden_values {
+        assert!(
+            !encoded.contains(forbidden),
+            "witness payload leaked forbidden value {forbidden:?}: {encoded}"
+        );
     }
 }
 

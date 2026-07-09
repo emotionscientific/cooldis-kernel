@@ -98,6 +98,81 @@ fn cooldis_threads_package_declares_five_kernel_operations() {
 }
 
 #[test]
+fn cooldis_schedule_package_declares_three_kernel_operations() {
+    let package = cooldis_schedule_kernel_package();
+    let operations = package
+        .manifest
+        .operations
+        .iter()
+        .map(|operation| operation.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        operations,
+        vec![
+            MANDATE_START_OPERATION,
+            MANDATE_REVOKE_OPERATION,
+            MANDATE_LIST_OPERATION,
+        ]
+    );
+    assert_eq!(package.interface.runtime.kind, KERNEL_RUNTIME_KIND);
+    assert_eq!(
+        package.capability_grants,
+        BTreeSet::from([
+            SCHEDULE_MANAGE_CAPABILITY.to_string(),
+            SCHEDULE_READ_CAPABILITY.to_string(),
+        ])
+    );
+    assert_eq!(package.interface.identity.name, COOLDIS_SCHEDULE_PACKAGE);
+    assert_eq!(package.interface.identity.owner.as_deref(), Some("cooldis"));
+    assert_eq!(package.interface.identity.version.as_deref(), Some("1.0.0"));
+    assert_eq!(package.interface.operations.len(), operations.len());
+
+    for manifest_operation in &package.manifest.operations {
+        let interface = package
+            .interface
+            .operations
+            .iter()
+            .find(|operation| operation.name == manifest_operation.name)
+            .unwrap_or_else(|| panic!("missing interface operation {}", manifest_operation.name));
+        assert_eq!(
+            interface.required_capabilities,
+            manifest_operation
+                .required_capabilities
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(manifest_operation.input, WasmOperationValueKind::Json);
+        assert_eq!(manifest_operation.output, WasmOperationValueKind::Json);
+        assert_eq!(manifest_operation.mode, WasmOperationMode::Sync);
+        assert_eq!(manifest_operation.events, WasmOperationEventKind::None);
+        validate_json_schema_subset(
+            &interface.input_schema,
+            &format!("{}.{}.input", COOLDIS_SCHEDULE_PACKAGE, interface.name),
+        )
+        .unwrap();
+        validate_json_schema_subset(
+            &interface.output_schema,
+            &format!("{}.{}.output", COOLDIS_SCHEDULE_PACKAGE, interface.name),
+        )
+        .unwrap();
+        assert_eq!(
+            interface.command.as_ref().unwrap().stdin.as_deref(),
+            Some("json")
+        );
+        assert_eq!(
+            interface.command.as_ref().unwrap().stdout.as_deref(),
+            Some("json")
+        );
+        assert_eq!(
+            interface.manual.as_ref().unwrap().tool_name,
+            COOLDIS_SCHEDULE_PACKAGE
+        );
+    }
+}
+
+#[test]
 fn cooldis_process_package_declares_four_kernel_operations() {
     let package = cooldis_process_kernel_package();
     let operations = package
@@ -423,6 +498,48 @@ fn cooldis_threads_publish_is_idempotent_by_contract_hash() {
         second.source,
         PublishedOperationSource::Kernel {
             package: COOLDIS_THREADS_PACKAGE.to_string()
+        }
+    );
+    assert_eq!(
+        second
+            .metadata
+            .get(OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(Value::as_str),
+        Some(KERNEL_RUNTIME_KIND)
+    );
+    assert_eq!(
+        second
+            .interface
+            .as_ref()
+            .expect("published interface")
+            .runtime
+            .kind,
+        KERNEL_RUNTIME_KIND
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cooldis_schedule_publish_is_idempotent_by_contract_hash() {
+    let root = std::env::temp_dir().join(format!(
+        "cooldis-kernel-schedule-package-{}",
+        Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let first = ensure_cooldis_schedule_published(Some(&root))
+        .unwrap()
+        .unwrap();
+    let second = ensure_cooldis_schedule_published(Some(&root))
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first.active_artifact_hash, second.active_artifact_hash);
+    assert_eq!(second.name, COOLDIS_SCHEDULE_PACKAGE);
+    assert_eq!(
+        second.source,
+        PublishedOperationSource::Kernel {
+            package: COOLDIS_SCHEDULE_PACKAGE.to_string()
         }
     );
     assert_eq!(

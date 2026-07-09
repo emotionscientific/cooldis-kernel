@@ -474,7 +474,15 @@ fn render_researcher_template(
     let rendered = template
         .replace("{HTTP_FETCH_SHA256}", &standard_ops.http_fetch)
         .replace("{FILE_READ_SHA256}", &standard_ops.file_read)
-        .replace("{JSON_QUERY_SHA256}", &standard_ops.json_query);
+        .replace("{JSON_QUERY_SHA256}", &standard_ops.json_query)
+        .replace(
+            "provider_ref = \"provider://local\"",
+            "provider_ref = \"provider://openai_compatible\"",
+        )
+        .replace(
+            "model_ref = \"model://local/default\"",
+            &format!("model_ref = \"model://openai_compatible/{OPENAI_COMPATIBLE_DEFAULT_MODEL}\""),
+        );
     if let Some(unresolved) = [
         "{HTTP_FETCH_SHA256}",
         "{FILE_READ_SHA256}",
