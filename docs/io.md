@@ -134,6 +134,11 @@ SQLite/Postgres queue growing forever during development, but any in-flight
 message can be lost if the daemon exits between protocol receipt and runtime
 submission.
 
+For routes using `threading = "per_conversation"`, the conversation-to-thread
+binding is durable. Route startup restores live bindings before accepting
+ingress, so a conversation resumes the same thread after a daemon restart;
+bindings to threads no longer known by the supervisor are ignored.
+
 Runtime hotswap should start as config-level hotswap:
 
 ```toml

@@ -1797,6 +1797,9 @@ async fn start_daemon_io(
             "telegram.bot" => {
                 let ingress = route.ingress.as_ref().unwrap_or(&io.ingress);
                 let egress_state_dsn = ingress.effective_queue_dsn();
+                bridge
+                    .register_egress_route_config(TELEGRAM_PROTOCOL, route.id.clone(), route)
+                    .await?;
                 let sink = route_sink_for_ingress(route, ingress, &bridge, &mut tasks).await?;
                 start_telegram_route(route, sink, &bridge, egress_state_dsn, &mut tasks).await?;
             }
@@ -1883,9 +1886,6 @@ async fn start_telegram_route(
             route.id
         ))
     })?;
-    bridge
-        .register_egress_route_config(TELEGRAM_PROTOCOL, route.id.clone(), route)
-        .await?;
     if let Some(bot_token) = telegram.bot_token_value()? {
         let client = match &telegram.api_base {
             Some(api_base) => TelegramBotClient::new(bot_token).with_api_base(api_base.clone()),

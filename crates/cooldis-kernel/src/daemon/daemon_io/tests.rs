@@ -40,10 +40,10 @@ use cooldis_io_core::{
 };
 use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig, sqlite_dsn};
 use serde_json::json;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
-use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::sync::{Barrier, Mutex as TokioMutex, mpsc};
 
 #[derive(Clone)]
 struct CaptureSink {
@@ -726,14 +726,73 @@ async fn register_route_state(
     route: &CooldisIoRouteConfig,
     db: &Path,
 ) {
+    let source = test_envelope("").source;
     bridge
-        .register_egress_route_config("telegram.bot", "main", route)
+        .register_egress_route_config(&source.protocol, &source.instance_id, route)
         .await
         .unwrap();
     bridge
-        .register_egress_state_sqlite_dsn("telegram.bot", "main", sqlite_dsn(db))
+        .register_egress_state_sqlite_dsn(&source.protocol, &source.instance_id, sqlite_dsn(db))
         .await
         .unwrap();
+}
+
+async fn route_bindings(bridge: &CooldisDaemonIoBridge) -> Vec<BoundEgressThread> {
+    let route_scope = test_envelope("").source.stable_scope();
+    let state = bridge
+        .egress_states
+        .read()
+        .await
+        .get(&route_scope)
+        .cloned()
+        .expect("route state should be registered");
+    state.bound_threads("main").unwrap()
+}
+
+fn insert_route_binding(
+    state: &DaemonEgressState,
+    scope_key: &str,
+    coordinates: &ThreadCoordinates,
+    updated_at_ms: i64,
+) {
+    let connection = state.lock_connection().unwrap();
+    connection
+        .execute(
+            "INSERT INTO cooldis_daemon_egress_threads (
+                route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "main",
+                test_envelope("").source.stable_scope(),
+                scope_key,
+                coordinates.tenant_id,
+                coordinates.user_id,
+                coordinates.session_id,
+                coordinates.thread_id.to_string(),
+                updated_at_ms,
+            ],
+        )
+        .unwrap();
+}
+
+async fn start_thread_for_target(
+    bridge: &CooldisDaemonIoBridge,
+    target: &ResolvedIoTarget,
+) -> ThreadCoordinates {
+    bridge
+        .supervisor
+        .start_thread(ThreadStartRequest {
+            tenant_id: target.address.tenant_id.clone(),
+            user_id: target.address.user_id.clone(),
+            session_id: target.address.session_id.clone(),
+            topology: ThreadTopology::root(),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .unwrap()
+        .context()
+        .coordinates
+        .clone()
 }
 
 async fn submit_and_wait_for_assistant_event(
@@ -2462,6 +2521,253 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
         Some("capture")
     );
     assert!(egress_cursor(&restarted, &thread_id).await.is_some());
+}
+
+#[tokio::test]
+async fn per_conversation_binding_survives_bridge_restart() {
+    let root = test_root("ingress-binding-restart");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "before restart").await;
+    assert_eq!(route_bindings(&bridge).await.len(), 1);
+    drop(bridge);
+
+    let restarted = CooldisDaemonIoBridge::from_app_server(&server);
+    assert!(restarted.threads.lock().await.is_empty());
+    register_route_state(&restarted, &route, &db).await;
+    let (resumed_thread_id, _) =
+        submit_and_wait_for_assistant_event(&restarted, "after restart").await;
+
+    assert_eq!(resumed_thread_id, thread_id);
+    assert_eq!(route_bindings(&restarted).await.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn new_thread_is_durably_bound_before_first_turn_submission() {
+    let root = test_root("ingress-binding-order");
+    let db = root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &db).await;
+    let envelope = test_envelope("not submitted");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+
+    let (coordinates, _) = bridge.ensure_thread(&target, &envelope).await.unwrap();
+
+    let bindings = route_bindings(&bridge).await;
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].scope_key, target.address.scope_key());
+    assert_eq!(bindings[0].coordinates, coordinates);
+    let thread_events = thread_events_for(server.session_store_path(), &coordinates).await;
+    assert!(
+        thread_events
+            .iter()
+            .all(|event| event.kind != EventKind::TurnSubmitted)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn configured_route_rejects_ingress_until_durable_state_is_seeded() {
+    let root = test_root("ingress-binding-startup-race");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let source = test_envelope("").source;
+    bridge
+        .register_egress_route_config(&source.protocol, &source.instance_id, &route)
+        .await
+        .unwrap();
+    let envelope = test_envelope("during startup");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let existing = start_thread_for_target(&bridge, &target).await;
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    insert_route_binding(&state, &target.address.scope_key(), &existing, 1);
+    drop(state);
+
+    let err = bridge.submit_envelope(envelope.clone()).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        IoError::Bridge(message) if message.contains("durable route state")
+    ));
+    assert!(bridge.threads.lock().await.is_empty());
+
+    bridge
+        .register_egress_state_sqlite_dsn(&source.protocol, &source.instance_id, sqlite_dsn(&db))
+        .await
+        .unwrap();
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    assert_eq!(
+        receipt.thread_id.as_deref(),
+        Some(existing.thread_id.to_string().as_str())
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn concurrent_ingress_thread_creation_has_one_durable_winner() {
+    const CONCURRENCY: usize = 16;
+
+    let root = test_root("ingress-binding-concurrent");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let envelope = test_envelope("concurrent");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let barrier = Arc::new(Barrier::new(CONCURRENCY));
+    let mut tasks = Vec::new();
+    for _ in 0..CONCURRENCY {
+        let bridge = bridge.clone();
+        let barrier = barrier.clone();
+        let envelope = envelope.clone();
+        let target = target.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            bridge.ensure_thread(&target, &envelope).await.unwrap().0
+        }));
+    }
+
+    let mut thread_ids = HashSet::new();
+    for task in tasks {
+        thread_ids.insert(task.await.unwrap().thread_id);
+    }
+
+    assert_eq!(thread_ids.len(), 1);
+    assert_eq!(route_bindings(&bridge).await.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn failed_durable_bind_does_not_publish_thread_in_memory() {
+    let root = test_root("ingress-binding-write-failure");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let envelope = test_envelope("write fails");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let state = bridge
+        .egress_states
+        .read()
+        .await
+        .get(&envelope.source.stable_scope())
+        .cloned()
+        .unwrap();
+    state
+        .lock_connection()
+        .unwrap()
+        .execute("DROP TABLE cooldis_daemon_egress_threads", [])
+        .unwrap();
+
+    bridge
+        .ensure_thread(&target, &envelope)
+        .await
+        .err()
+        .expect("durable binding write should fail");
+
+    assert!(
+        !bridge
+            .threads
+            .lock()
+            .await
+            .contains_key(&target.address.scope_key())
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn stale_ingress_binding_is_dropped_during_route_startup() {
+    let root = test_root("ingress-binding-stale");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = test_envelope("fresh thread");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let stale_coordinates = start_thread_for_target(&bridge, &target).await;
+    bridge
+        .supervisor
+        .shutdown_thread_at(&stale_coordinates)
+        .await
+        .unwrap();
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    insert_route_binding(&state, &target.address.scope_key(), &stale_coordinates, 1);
+    drop(state);
+
+    register_route_state(&bridge, &route, &db).await;
+
+    assert!(
+        !bridge
+            .threads
+            .lock()
+            .await
+            .contains_key(&target.address.scope_key())
+    );
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    assert_ne!(
+        receipt.thread_id.as_deref(),
+        Some(stale_coordinates.thread_id.to_string().as_str())
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn seeded_binding_that_turns_stale_before_ingress_is_replaced() {
+    let root = test_root("ingress-binding-stale-after-seed");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = test_envelope("fresh thread");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let stale_coordinates = start_thread_for_target(&bridge, &target).await;
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    insert_route_binding(&state, &target.address.scope_key(), &stale_coordinates, 1);
+    drop(state);
+    register_route_state(&bridge, &route, &db).await;
+    bridge
+        .supervisor
+        .shutdown_thread_at(&stale_coordinates)
+        .await
+        .unwrap();
+
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+
+    assert_ne!(
+        receipt.thread_id.as_deref(),
+        Some(stale_coordinates.thread_id.to_string().as_str())
+    );
+    assert_eq!(route_bindings(&bridge).await.len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn duplicate_ingress_bindings_seed_the_latest_thread() {
+    let root = test_root("ingress-binding-duplicate");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = test_envelope("latest thread");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let older = start_thread_for_target(&bridge, &target).await;
+    let latest = start_thread_for_target(&bridge, &target).await;
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    insert_route_binding(&state, &target.address.scope_key(), &older, 1);
+    insert_route_binding(&state, &target.address.scope_key(), &latest, 2);
+    drop(state);
+
+    register_route_state(&bridge, &route, &db).await;
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+
+    assert_eq!(
+        receipt.thread_id.as_deref(),
+        Some(latest.thread_id.to_string().as_str())
+    );
+    assert_eq!(route_bindings(&bridge).await.len(), 2);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

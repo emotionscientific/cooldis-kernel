@@ -55,6 +55,7 @@ struct RouteEgressConfig {
     projection_rules: Vec<CompiledEgressProjectionRule>,
     typing_simulation: Option<CooldisTypingSimulationConfig>,
     retry: CooldisEgressRetryConfig,
+    threading: Option<String>,
 }
 
 impl RouteEgressConfig {
@@ -69,7 +70,12 @@ impl RouteEgressConfig {
             projection_rules,
             typing_simulation: route.typing_simulation.clone(),
             retry: route.egress_retry,
+            threading: route.threading.clone(),
         })
+    }
+
+    fn restores_per_conversation_bindings(&self) -> bool {
+        self.threading.as_deref().unwrap_or("per_conversation") == "per_conversation"
     }
 
     fn project(&self, envelope: EgressEnvelope) -> Vec<EgressEnvelope> {
@@ -210,6 +216,10 @@ struct BoundEgressThread {
     coordinates: ThreadCoordinates,
 }
 
+/// Durable route state shared by ingress thread binding and egress projection.
+///
+/// `cooldis_daemon_egress_threads` keeps its historical name, but its bindings
+/// serve both directions and are recovered by ingress during route startup.
 #[derive(Clone)]
 struct DaemonEgressState {
     connection: Arc<StdMutex<rusqlite::Connection>>,
@@ -449,6 +459,7 @@ pub struct CooldisDaemonIoBridge {
     cwd: PathBuf,
     session_store_path: Option<PathBuf>,
     threads: Arc<Mutex<HashMap<String, ThreadCoordinates>>>,
+    thread_scope_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
     egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
     egress_route_configs: Arc<RwLock<HashMap<String, RouteEgressConfig>>>,
@@ -474,6 +485,7 @@ impl CooldisDaemonIoBridge {
             cwd: cwd.into(),
             session_store_path: None,
             threads: Arc::new(Mutex::new(HashMap::new())),
+            thread_scope_locks: Arc::new(Mutex::new(HashMap::new())),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             egress_adapters: Arc::new(RwLock::new(HashMap::new())),
             egress_route_configs: Arc::new(RwLock::new(HashMap::new())),
@@ -563,12 +575,54 @@ impl CooldisDaemonIoBridge {
     ) -> IoResult<()> {
         let protocol = protocol.into();
         let instance_id = instance_id.into();
+        let key = source_scope(&protocol, &instance_id);
         let state = Arc::new(DaemonEgressState::connect(dsn)?);
-        self.egress_states
-            .write()
+        let restores_per_conversation_bindings = self
+            .egress_route_configs
+            .read()
             .await
-            .insert(source_scope(&protocol, &instance_id), state);
+            .get(&key)
+            .is_some_and(RouteEgressConfig::restores_per_conversation_bindings);
+        let live_bindings = if restores_per_conversation_bindings {
+            self.live_ingress_bindings(&state, &instance_id).await?
+        } else {
+            Vec::new()
+        };
+
+        // Publish the recovered map and its backing state together. A configured
+        // per-conversation route cannot create a thread until the state appears,
+        // and state readers remain blocked until the map seed is visible.
+        let mut states = self.egress_states.write().await;
+        if restores_per_conversation_bindings {
+            self.threads.lock().await.extend(live_bindings);
+        }
+        states.insert(key, state);
         Ok(())
+    }
+
+    /// Loads live ingress bindings for the startup hot-path map seed.
+    ///
+    /// Rows are ordered oldest-first by `bound_threads`, so replacing by
+    /// `scope_key` reduces duplicate crash residue to the latest live thread.
+    async fn live_ingress_bindings(
+        &self,
+        state: &DaemonEgressState,
+        route_id: &str,
+    ) -> IoResult<Vec<(String, ThreadCoordinates)>> {
+        let mut latest_by_scope = HashMap::new();
+        for binding in state.bound_threads(route_id)? {
+            latest_by_scope.insert(binding.scope_key, binding.coordinates);
+        }
+
+        let mut live_bindings = Vec::new();
+        for (scope_key, coordinates) in latest_by_scope {
+            match self.supervisor.get_thread_at(&coordinates).await {
+                Ok(_) => live_bindings.push((scope_key, coordinates)),
+                Err(CooldisError::ThreadNotFound(_)) => {}
+                Err(err) => return Err(cooldis_bridge_error(err)),
+            }
+        }
+        Ok(live_bindings)
     }
 
     pub async fn start_egress_projector_sqlite_dsn(
@@ -701,7 +755,7 @@ impl CooldisDaemonIoBridge {
         coalesced: bool,
     ) -> IoResult<KernelIoReceipt> {
         let mut target = self.resolve_target(&envelope).await?;
-        let (coordinates, _) = self.ensure_thread(&target).await?;
+        let (coordinates, _) = self.ensure_thread(&target, &envelope).await?;
         target.address.thread_id = Some(coordinates.thread_id.to_string());
         let state = self.ingress_state(&target).await;
         let policy_hash = self
@@ -1033,6 +1087,7 @@ impl CooldisDaemonIoBridge {
     async fn ensure_thread(
         &self,
         target: &ResolvedIoTarget,
+        envelope: &IngressEnvelope,
     ) -> IoResult<(ThreadCoordinates, RuntimeThreadHandle)> {
         if let Some(thread_id) = &target.address.thread_id {
             let thread_id = ThreadId::parse_str(thread_id)
@@ -1052,13 +1107,25 @@ impl CooldisDaemonIoBridge {
         }
 
         let scope_key = target.address.scope_key();
-        if let Some(coordinates) = self.threads.lock().await.get(&scope_key).cloned() {
-            let handle = self
-                .supervisor
-                .get_thread_at(&coordinates)
-                .await
-                .map_err(cooldis_bridge_error)?;
-            return Ok((coordinates, handle));
+        let durable_binding = self.durable_ingress_binding(envelope).await?;
+        let scope_lock = self.thread_scope_lock(&scope_key).await;
+        let _scope_guard = scope_lock.lock().await;
+
+        let existing_coordinates = {
+            let threads = self.threads.lock().await;
+            threads.get(&scope_key).cloned()
+        };
+        if let Some(coordinates) = existing_coordinates {
+            match self.supervisor.get_thread_at(&coordinates).await {
+                Ok(handle) => return Ok((coordinates, handle)),
+                Err(CooldisError::ThreadNotFound(_)) => {
+                    let mut threads = self.threads.lock().await;
+                    if threads.get(&scope_key) == Some(&coordinates) {
+                        threads.remove(&scope_key);
+                    }
+                }
+                Err(err) => return Err(cooldis_bridge_error(err)),
+            }
         }
 
         let topology = target
@@ -1098,11 +1165,61 @@ impl CooldisDaemonIoBridge {
             return Err(cooldis_bridge_error(err));
         }
         let coordinates = handle.context().coordinates.clone();
+        if let Some((route_id, source_scope, state)) = durable_binding
+            && let Err(err) = state.bind_thread(
+                &route_id,
+                &source_scope,
+                &target.address.scope_key(),
+                &coordinates,
+            )
+        {
+            let _ = self.supervisor.shutdown_thread_at(&coordinates).await;
+            return Err(err);
+        }
         self.threads
             .lock()
             .await
             .insert(scope_key, coordinates.clone());
         Ok((coordinates, handle))
+    }
+
+    async fn thread_scope_lock(&self, scope_key: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.thread_scope_locks.lock().await;
+        locks
+            .entry(scope_key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn durable_ingress_binding(
+        &self,
+        envelope: &IngressEnvelope,
+    ) -> IoResult<Option<(String, String, Arc<DaemonEgressState>)>> {
+        let threading = envelope
+            .metadata
+            .get("cooldis_route_threading")
+            .map(String::as_str)
+            .unwrap_or("per_conversation");
+        if threading != "per_conversation" {
+            return Ok(None);
+        }
+
+        let route_id = route_id_for_ingress(envelope);
+        let source_scope = source_scope(&envelope.source.protocol, &route_id);
+        let route_requires_state = self
+            .egress_route_configs
+            .read()
+            .await
+            .get(&source_scope)
+            .is_some_and(RouteEgressConfig::restores_per_conversation_bindings);
+        let state = self.egress_states.read().await.get(&source_scope).cloned();
+        match state {
+            Some(state) => Ok(Some((route_id, source_scope, state))),
+            None if route_requires_state => Err(IoError::Bridge(format!(
+                "durable route state for {source_scope:?} is not ready"
+            ))),
+            None => Ok(None),
+        }
     }
 
     async fn route_agent_binding(
@@ -1159,7 +1276,7 @@ impl CooldisDaemonIoBridge {
         child_key: &str,
         input: &IoTurnInput,
     ) -> IoResult<KernelIoReceipt> {
-        let (parent_coordinates, parent_handle) = self.ensure_thread(target).await?;
+        let (parent_coordinates, parent_handle) = self.ensure_thread(target, envelope).await?;
         let checkpoint = self
             .supervisor
             .create_checkpoint_at(
@@ -1185,12 +1302,22 @@ impl CooldisDaemonIoBridge {
         )
         .await?;
 
+        let scope_key = target.address.scope_key();
+        let scope_lock = self.thread_scope_lock(&scope_key).await;
+        let scope_guard = scope_lock.lock().await;
+        if let Err(err) = self
+            .bind_egress_thread(envelope, target, &child_coordinates)
+            .await
+        {
+            drop(scope_guard);
+            let _ = self.supervisor.shutdown_thread_at(&child_coordinates).await;
+            return Err(err);
+        }
         self.threads
             .lock()
             .await
-            .insert(target.address.scope_key(), child_coordinates.clone());
-        self.bind_egress_thread(envelope, target, &child_coordinates)
-            .await?;
+            .insert(scope_key, child_coordinates.clone());
+        drop(scope_guard);
         self.append_ingress_received_event(&child_handle, envelope, target, child_key)
             .await?;
         self.active_turns
@@ -1794,7 +1921,7 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
     ) -> IoResult<KernelIoReceipt> {
         match decision {
             AdmissionDecision::Queue { turn_id, input } => {
-                let (coordinates, handle) = self.ensure_thread(target).await?;
+                let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 self.bind_egress_thread(envelope, target, &coordinates)
                     .await?;
                 self.append_ingress_received_event(&handle, envelope, target, turn_id)
@@ -1818,7 +1945,7 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                 Ok(receipt)
             }
             AdmissionDecision::Steer { turn_id, input, .. } => {
-                let (coordinates, handle) = self.ensure_thread(target).await?;
+                let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 self.bind_egress_thread(envelope, target, &coordinates)
                     .await?;
                 self.append_ingress_received_event(&handle, envelope, target, turn_id)
@@ -1846,7 +1973,7 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
                 replacement_turn_id,
                 replacement,
             } => {
-                let (coordinates, handle) = self.ensure_thread(target).await?;
+                let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 self.supervisor
                     .cancel_at(&coordinates, reason.clone())
                     .await
