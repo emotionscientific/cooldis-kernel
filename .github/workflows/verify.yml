@@ -21,3 +21,16 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Verify remote sentinel
         run: scripts/check-remote-ci.sh
+
+  tests:
+    name: Workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Verify workspace
+        run: scripts/verify.sh

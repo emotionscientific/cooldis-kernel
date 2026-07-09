@@ -92,6 +92,17 @@ cargo run --bin cooldis-wasm-smoke
 
 Run app-server and MCP smokes when touching their projections.
 
+## Continuous Integration
+
+Pull requests and pushes to `main` run `scripts/verify.sh`. The default CI lane
+checks formatting, runs the locked workspace test suite for all targets, and
+runs the live, virtual-bash, and Wasm smoke binaries. When no Codex binary is
+available, the script supplies its local stub for the live smoke.
+
+Two provider-backed lanes remain opt-in and are disabled in regular CI. Set
+`COOLDIS_VERIFY_LIVE_PLUGIN=1` to run the live plugin smoke, or set
+`COOLDIS_VERIFY_LIVE_S3=1` to run the ignored real-S3 object-store test.
+
 ## Terminology Lint
 
 `crates/cooldis-kernel/tests/lexicon_lint.rs` keeps selected public kernel
