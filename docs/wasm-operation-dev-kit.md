@@ -222,10 +222,75 @@ no HTTP, VFS, secrets, or other effectful imports are available. Put effectful
 work behind tools and let couplings fold event streams into deterministic
 derived events.
 
-The minimal Rust example is `examples/wasm-counter-coupling`. It uses
-`cooldis-guest-sdk::read_coupling_invocation` and
-`write_coupling_discharge` to emit one derived event every `config.every`
-matching source events.
+The supported Rust authoring surface is the SDK macro contract from ADR 0002:
+write a plain typed function and let the macro own exports, operation dispatch,
+JSON envelope encoding, and ABI status mapping.
+
+```rust
+use cooldis_guest_sdk::prelude::*;
+use serde_json::json;
+
+#[derive(Deserialize)]
+struct CounterConfig {
+    #[serde(default = "default_every")]
+    every: u64,
+}
+
+#[coupling]
+pub fn fold_counter(ctx: CouplingContext) -> Result<Discharge, GuestError> {
+    let config: CounterConfig = ctx.config()?;
+    let count = ctx.sources().len() as u64;
+    if count == 0 || count % config.every.max(1) != 0 {
+        return Ok(Discharge::empty());
+    }
+    Discharge::empty().event(
+        "derived:counter",
+        "placement.decision",
+        json!({
+            "count": count,
+            "trigger_event_id": ctx.trigger().id.clone(),
+        }),
+    )
+}
+
+fn default_every() -> u64 {
+    3
+}
+```
+
+`#[coupling]` wraps `fn(CouplingContext) -> Result<Discharge, GuestError>` and
+exports one JSON operation with the Rust function name. `#[operation]` wraps a
+pure `fn(Input) -> Result<Output, GuestError>`; operations that need host powers
+take `&mut OperationContext` as their first argument. Guest input and output
+types should derive `serde::Deserialize` and `serde::Serialize`.
+
+Native tests should exercise the plain Rust function before building Wasm:
+
+```rust
+#[test]
+fn fixture_runs_natively() {
+    let invocation =
+        cooldis_guest_sdk::testkit::invocation_from_fixture_file("fixtures/invocation.json")?;
+    let discharge = cooldis_guest_sdk::testkit::invoke_coupling(fold_counter, invocation)?;
+    assert_eq!(discharge.events.len(), 1);
+}
+```
+
+`cooldis coupling init <name>` scaffolds the macro-authored crate,
+`cooldis.tool.toml`, schemas, fixture JSON, and one native testkit test. The
+same package then validates through the existing publish oracle:
+
+```bash
+cooldis coupling init counter-coupling
+cd counter-coupling
+cargo test --locked
+cargo build --locked --release --target wasm32-unknown-unknown
+cooldis tool build --package cooldis.tool.toml
+```
+
+The minimal checked-in Rust example is `examples/wasm-counter-coupling`. It
+emits one derived event every `config.every` matching source events without
+hand-writing the raw operation exports.
 
 ## First No-Key Example: `data.csv_profile`
 

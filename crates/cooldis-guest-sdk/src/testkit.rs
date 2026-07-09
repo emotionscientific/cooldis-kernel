@@ -8,6 +8,7 @@
 
 use crate::contract::{CouplingContext, Discharge, GuestError};
 use crate::{COUPLING_INVOCATION_ABI, CouplingDischarge, CouplingInvocation};
+use std::path::Path;
 
 /// Invoke a `#[coupling]` function natively.
 pub fn invoke_coupling<F>(
@@ -43,6 +44,17 @@ pub fn invocation_from_fixture_json(json: &str) -> Result<CouplingInvocation, Gu
         )));
     }
     Ok(invocation)
+}
+
+/// Load and parse a `cooldis.coupling.invocation/0.1` fixture from disk.
+pub fn invocation_from_fixture_file(
+    path: impl AsRef<Path>,
+) -> Result<CouplingInvocation, GuestError> {
+    let path = path.as_ref();
+    let json = std::fs::read_to_string(path).map_err(|err| {
+        GuestError::BadInput(format!("fixture invocation {}: {err}", path.display()))
+    })?;
+    invocation_from_fixture_json(&json)
 }
 
 #[cfg(test)]

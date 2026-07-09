@@ -1,88 +1,44 @@
-use cooldis_guest_sdk::{
-    COUPLING_INVOCATION_ABI, CouplingDischarge, CouplingDischargeEvent, OperationDefinition,
-    OperationEventKind, OperationManifest, OperationMode, OperationValueKind,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_OK, Sink, Source, StatusCode,
-    read_coupling_invocation, write_coupling_discharge, write_sink,
-};
+use cooldis_guest_sdk::prelude::*;
 use serde_json::json;
 
-const FOLD_COUNTER_ID: u32 = 1;
-
-#[unsafe(no_mangle)]
-pub extern "C" fn __cooldis_describe_module__(sink: u32) -> i32 {
-    let manifest = OperationManifest::new(vec![OperationDefinition {
-        id: FOLD_COUNTER_ID,
-        name: "fold_counter".to_string(),
-        input: OperationValueKind::Json,
-        output: OperationValueKind::Json,
-        events: OperationEventKind::None,
-        mode: OperationMode::Sync,
-        required_capabilities: Vec::new(),
-    }]);
-    let bytes = match manifest.to_json_vec() {
-        Ok(bytes) => bytes,
-        Err(_) => return STATUS_INVALID_ARGUMENT,
-    };
-    status(write_sink(Sink(sink), &bytes).map(|_| ()))
+#[derive(Deserialize)]
+struct CounterConfig {
+    #[serde(default = "default_every")]
+    every: u64,
+    #[serde(default = "default_sink_stream")]
+    sink_stream: String,
+    #[serde(default = "default_sink_kind")]
+    sink_kind: String,
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn __cooldis_call_operation__(
-    operation: u32,
-    _invocation: u32,
-    source: u32,
-    output: u32,
-    _events: u32,
-) -> i32 {
-    match operation {
-        FOLD_COUNTER_ID => status(fold_counter(Source(source), Sink(output))),
-        _ => STATUS_NOT_FOUND,
+#[coupling]
+pub fn fold_counter(ctx: CouplingContext) -> Result<Discharge, GuestError> {
+    let config: CounterConfig = ctx.config()?;
+    let every = config.every.max(1);
+    let count = ctx.sources().len() as u64;
+    if count == 0 || count % every != 0 {
+        return Ok(Discharge::empty());
     }
+    Discharge::empty().event(
+        config.sink_stream,
+        config.sink_kind,
+        json!({
+            "schema": "cooldis.example.counter_fold/1",
+            "count": count,
+            "trigger_event_id": ctx.trigger().id.clone(),
+            "coupling_id": ctx.meta().coupling_id.clone(),
+        }),
+    )
 }
 
-fn fold_counter(source: Source, output: Sink) -> Result<(), StatusCode> {
-    let invocation = read_coupling_invocation(source)?;
-    if invocation.abi != COUPLING_INVOCATION_ABI {
-        return Err(StatusCode::InvalidArgument);
-    }
-    let every = invocation
-        .config
-        .get("every")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(3)
-        .max(1);
-    let sink_stream = invocation
-        .config
-        .get("sink_stream")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("derived:counter");
-    let sink_kind = invocation
-        .config
-        .get("sink_kind")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("placement.decision");
-    let count = invocation.selected_events.len() as u64;
-    let events = if count > 0 && count % every == 0 {
-        vec![CouplingDischargeEvent {
-            stream: sink_stream.to_string(),
-            kind: sink_kind.to_string(),
-            payload: json!({
-                "schema": "cooldis.example.counter_fold/1",
-                "count": count,
-                "trigger_event_id": invocation.trigger_event.id,
-                "coupling_id": invocation.invocation_meta.coupling_id,
-            }),
-            provenance: None,
-        }]
-    } else {
-        Vec::new()
-    };
-    write_coupling_discharge(output, &CouplingDischarge::new(events)).map(|_| ())
+fn default_every() -> u64 {
+    3
 }
 
-fn status(result: Result<(), StatusCode>) -> i32 {
-    match result {
-        Ok(()) => STATUS_OK,
-        Err(err) => err.as_raw(),
-    }
+fn default_sink_stream() -> String {
+    "derived:counter".to_string()
+}
+
+fn default_sink_kind() -> String {
+    "placement.decision".to_string()
 }

@@ -32,6 +32,7 @@ inputs, durable effects, or output semantics.
 | --- | --- | --- | --- | --- |
 | `cooldis` | [README](../README.md), [Cooldis Docs](README.md) | `cooldis --help` | partial | Generate a model-facing `man cooldis` page from the command contract. |
 | `cooldis init`, `cooldis agent init` | [Cooldis Agent CLI](agent-cli.md) | `cooldis init --help`, `cooldis agent init --help` | partial | Folder-first project graph implemented; add generated synopsis/options/output/exit-status manual. |
+| `cooldis coupling init` | [Rust Wasm Operation Dev Kit](wasm-operation-dev-kit.md), [ABI](abi.md) | `cooldis coupling init --help` | partial | Scaffolds a macro-authored Wasm coupling package with native testkit and fixture proof; generated command manual remains follow-up work. |
 | `cooldis agent plan` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent plan --help` | partial | Document JSON/text output shape and validation exit statuses. |
 | `cooldis agent publish` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent publish --help` | partial | Document registry writes, idempotency, and failure statuses in man form. |
 | `cooldis agent list` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent list --help` | partial | Document listing output and registry-root behavior in man form. |
@@ -62,7 +63,7 @@ inputs, durable effects, or output semantics.
 | Surface | Canonical contract doc | Help/man projection | Status | Gap |
 | --- | --- | --- | --- | --- |
 | ABI operation contract | [ABI](abi.md) | n/a | covered | Keep projection law linked from every command-contract doc. |
-| ABI coupling contract | [ABI](abi.md), [Agent Manifest Ontology](agent-manifest-ontology.md), [Rust Wasm Operation Dev Kit](wasm-operation-dev-kit.md) | n/a | covered | Custom Wasm couplings use versioned invocation/discharge JSON and pure-compute host imports; generated authoring/manual pages remain follow-up work. |
+| ABI coupling contract | [ABI](abi.md), [Agent Manifest Ontology](agent-manifest-ontology.md), [Rust Wasm Operation Dev Kit](wasm-operation-dev-kit.md) | `cooldis coupling init` scaffold | covered | Custom Wasm couplings use versioned invocation/discharge JSON, pure-compute host imports, and SDK macro-authored exports; generated authoring/manual pages remain follow-up work. |
 | Command contracts | [Command Contracts](command-contracts.md) | `cooldis tool manual`; issue [#104](https://github.com/emotionscientific/cooldis/issues/104) | partial | Tool-package operation manuals, generated fallback manuals, and JSON projection are implemented; generated first-party CLI command man pages remain. |
 | Virtual-bash commands | [Command Contracts](command-contracts.md), [ABI](abi.md) | `man <command>` inside agent turns | partial | Live operation shell commands expose a thread-visible command contract with `cooldis run` origin, IO, capability, and exit-status fields; richer package-authored docs still need to flow into the runtime registry. |
 | MCP compatibility ingress | [Cooldis MCP Server](mcp-server.md), [Command Contracts](command-contracts.md) | MCP tool descriptions | partial | Imported tools should compile into reviewed command contracts where useful. |

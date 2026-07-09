@@ -69,6 +69,7 @@ pub struct CouplingContext {
 }
 
 impl CouplingContext {
+    /// Build a context from the raw invocation envelope.
     pub fn from_invocation(invocation: CouplingInvocation) -> Self {
         Self { invocation }
     }
@@ -90,6 +91,7 @@ impl CouplingContext {
             .map_err(|err| GuestError::BadInput(format!("coupling config: {err}")))
     }
 
+    /// Metadata about the coupling invocation.
     pub fn meta(&self) -> &CouplingInvocationMeta {
         &self.invocation.invocation_meta
     }
@@ -154,6 +156,7 @@ impl Discharge {
         self.events.is_empty()
     }
 
+    /// Convert this builder into the wire discharge envelope.
     pub fn into_coupling_discharge(self) -> CouplingDischarge {
         CouplingDischarge::new(self.events)
     }
@@ -172,6 +175,7 @@ pub struct OperationContext {
 }
 
 impl OperationContext {
+    /// Build an operation context from host invocation and event handles.
     pub fn new(invocation: Invocation, events: EventSink) -> Self {
         Self { invocation, events }
     }

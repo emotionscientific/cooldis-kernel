@@ -23,6 +23,7 @@ Bare `cooldis` prints the same concise help as `cooldis --help`. Use
 cooldis console
 cooldis chat
 cooldis init <name>
+cooldis coupling init <name>
 cooldis agent init|plan|publish|list|show|run
 cooldis blob publish
 cooldis tool build|list|publish|run|source|manual
@@ -37,6 +38,10 @@ default.
 `cooldis chat` starts the bundled terminal console. By default it launches a
 private local app-server; with `--attach` it connects to an existing
 `unix://...` or `ws://.../rpc` endpoint.
+
+`cooldis coupling init <name>` scaffolds a Rust Wasm coupling package using the
+SDK `#[coupling]` macro, fixture JSON, schemas, and a native testkit test. The
+generated package is validated with `cooldis tool build --package`.
 
 `cooldis auth` stores local model-provider credentials in the user metadata
 store. `cooldis secret` stores named runtime secrets used by tools and adapters.

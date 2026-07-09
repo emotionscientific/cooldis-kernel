@@ -161,7 +161,52 @@ async fn example_counter_coupling_builds_and_emits_discharge() {
         build.artifact_path,
     )))
     .unwrap();
-    let invocation = json!({
+    let invocation = counter_invocation();
+
+    let output = factory
+        .invoke_operation_bytes("fold_counter", serde_json::to_vec(&invocation).unwrap())
+        .await
+        .unwrap();
+    let discharge: Value = serde_json::from_slice(&output.output).unwrap();
+
+    assert_eq!(discharge["abi"], "cooldis.coupling.discharge/0.1");
+    assert_eq!(discharge["events"][0]["stream"], "derived:counter");
+    assert_eq!(discharge["events"][0]["kind"], "placement.decision");
+    assert_eq!(discharge["events"][0]["payload"]["count"], 3);
+}
+
+#[tokio::test]
+async fn macro_counter_coupling_matches_handrolled_envelope_bytes() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let macro_module = repo.join("../../examples/wasm-counter-coupling");
+    let handrolled_module = repo.join("tests/fixtures/wasm-counter-coupling-handrolled");
+    let macro_build = build_rust_wasm_module(RustWasmBuildOptions::new(&macro_module)).unwrap();
+    let handrolled_build =
+        build_rust_wasm_module(RustWasmBuildOptions::new(&handrolled_module)).unwrap();
+    let input = serde_json::to_vec(&counter_invocation()).unwrap();
+    let macro_factory = WasmRuntimeFactory::new(WasmRuntimeConfig::new(WasmRuntimeArtifact::path(
+        macro_build.artifact_path,
+    )))
+    .unwrap();
+    let handrolled_factory = WasmRuntimeFactory::new(WasmRuntimeConfig::new(
+        WasmRuntimeArtifact::path(handrolled_build.artifact_path),
+    ))
+    .unwrap();
+
+    let macro_output = macro_factory
+        .invoke_operation_bytes("fold_counter", input.clone())
+        .await
+        .unwrap();
+    let handrolled_output = handrolled_factory
+        .invoke_operation_bytes("fold_counter", input)
+        .await
+        .unwrap();
+
+    assert_eq!(macro_output.output, handrolled_output.output);
+}
+
+fn counter_invocation() -> Value {
+    json!({
         "abi": "cooldis.coupling.invocation/0.1",
         "trigger_event": {
             "id": "event-3",
@@ -186,18 +231,7 @@ async fn example_counter_coupling_builds_and_emits_discharge() {
             "thread_id": "session",
             "depth": 0
         }
-    });
-
-    let output = factory
-        .invoke_operation_bytes("fold_counter", serde_json::to_vec(&invocation).unwrap())
-        .await
-        .unwrap();
-    let discharge: Value = serde_json::from_slice(&output.output).unwrap();
-
-    assert_eq!(discharge["abi"], "cooldis.coupling.discharge/0.1");
-    assert_eq!(discharge["events"][0]["stream"], "derived:counter");
-    assert_eq!(discharge["events"][0]["kind"], "placement.decision");
-    assert_eq!(discharge["events"][0]["payload"]["count"], 3);
+    })
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {

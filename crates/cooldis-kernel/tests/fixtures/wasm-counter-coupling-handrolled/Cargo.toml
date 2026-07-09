@@ -1,5 +1,5 @@
 [package]
-name = "cooldis-example-wasm-counter-coupling"
+name = "cooldis-wasm-counter-coupling-handrolled"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -10,8 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-cooldis-guest-sdk = { path = "../../crates/cooldis-guest-sdk" }
-serde = { version = "1", features = ["derive"] }
+cooldis-guest-sdk = { path = "../../../../cooldis-guest-sdk" }
 serde_json = "1"
 
 [profile.release]

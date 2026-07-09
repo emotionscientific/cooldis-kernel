@@ -75,6 +75,7 @@ pub async fn run() -> CooldisResult<()> {
         "init" => agent_init(args).await,
         "agent" => run_agent(args).await,
         "blob" => run_blob(args).await,
+        "coupling" => run_coupling(args).await,
         "tool" => run_tool(args).await,
         "skill" => run_skill(args).await,
         "secret" => run_secret(args).await,
@@ -111,6 +112,10 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         [command] if command == "chat" => print_chat_help(),
         [command] if command == "init" => print_agent_init_help(),
         [command] if command == "agent" => print_agent_help(),
+        [command] if command == "coupling" => print_coupling_help(),
+        [command, subcommand] if command == "coupling" && subcommand == "init" => {
+            print_coupling_init_help()
+        }
         [command] if command == "blob" => print_blob_help(),
         [command, subcommand] if command == "blob" && subcommand == "publish" => {
             print_blob_publish_help()
@@ -281,6 +286,53 @@ async fn run_agent(mut args: Vec<OsString>) -> CooldisResult<()> {
         "run" => agent_run(args).await,
         other => Err(usage_error(format!("unknown agent subcommand {other:?}"))),
     }
+}
+
+async fn run_coupling(mut args: Vec<OsString>) -> CooldisResult<()> {
+    if args.is_empty()
+        || args
+            .first()
+            .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_coupling_help();
+        return Ok(());
+    }
+    let subcommand = args.remove(0);
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        match subcommand.to_string_lossy().as_ref() {
+            "init" => print_coupling_init_help(),
+            other => {
+                return Err(usage_error(format!(
+                    "unknown coupling subcommand {other:?}"
+                )));
+            }
+        }
+        return Ok(());
+    }
+    match subcommand.to_string_lossy().as_ref() {
+        "init" => coupling_init(args).await,
+        _ => Err(usage_error(format!(
+            "unknown coupling subcommand {subcommand:?}"
+        ))),
+    }
+}
+
+async fn coupling_init(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_coupling_init_args(args)?;
+    if options.help {
+        print_coupling_init_help();
+        return Ok(());
+    }
+    let name = options
+        .name
+        .ok_or_else(|| usage_error("coupling init requires <name>"))?;
+    let root = options.out_path.unwrap_or_else(|| PathBuf::from(&name));
+    write_coupling_project(&name, &root, options.force)?;
+    println!("{}", root.display());
+    Ok(())
 }
 
 async fn agent_init(args: Vec<OsString>) -> CooldisResult<()> {
@@ -3344,6 +3396,14 @@ struct AgentInitArgs {
 }
 
 #[derive(Debug)]
+struct CouplingInitArgs {
+    name: Option<String>,
+    out_path: Option<PathBuf>,
+    force: bool,
+    help: bool,
+}
+
+#[derive(Debug)]
 enum AgentInitTarget {
     SingleFile(PathBuf),
     ProjectDirectory(PathBuf),
@@ -3676,6 +3736,38 @@ fn parse_agent_init_args(args: Vec<OsString>) -> CooldisResult<AgentInitArgs> {
         }
     }
     Ok(AgentInitArgs {
+        name,
+        out_path,
+        force,
+        help,
+    })
+}
+
+fn parse_coupling_init_args(args: Vec<OsString>) -> CooldisResult<CouplingInitArgs> {
+    let mut name = None;
+    let mut out_path = None;
+    let mut force = false;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--out" => out_path = Some(required_path_value(&mut iter, "--out")?),
+            "--force" => force = true,
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown coupling init argument {other:?}"
+                )));
+            }
+            _ => {
+                if name.is_some() {
+                    return Err(usage_error("coupling init accepts exactly one <name>"));
+                }
+                name = Some(arg.to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(CouplingInitArgs {
         name,
         out_path,
         force,
@@ -6209,6 +6301,59 @@ fn write_agent_project(name: &str, root: &Path, force: bool) -> CooldisResult<()
     .map_err(io_error)
 }
 
+fn write_coupling_project(name: &str, root: &Path, force: bool) -> CooldisResult<()> {
+    let package_name = crate::validate_record_name(name)?;
+    let operation_name = coupling_operation_name(&package_name)?;
+    let cargo_toml_path = root.join("Cargo.toml");
+    let lib_path = root.join("src/lib.rs");
+    let package_path = root.join("cooldis.tool.toml");
+    let input_schema_path = root.join("schemas/coupling_invocation.input.json");
+    let output_schema_path = root.join("schemas/coupling_discharge.output.json");
+    let fixture_input_path = root.join("fixtures/invocation.json");
+    let fixture_expect_path = root.join("fixtures/expect.discharge.json");
+    let files = [
+        cargo_toml_path.as_path(),
+        lib_path.as_path(),
+        package_path.as_path(),
+        input_schema_path.as_path(),
+        output_schema_path.as_path(),
+        fixture_input_path.as_path(),
+        fixture_expect_path.as_path(),
+    ];
+    if !force {
+        for path in files {
+            if path.exists() {
+                return Err(usage_error(format!(
+                    "coupling scaffold file {} already exists; pass --force to replace it",
+                    path.display()
+                )));
+            }
+        }
+    }
+    fs::create_dir_all(root.join("src")).map_err(io_error)?;
+    fs::create_dir_all(root.join("schemas")).map_err(io_error)?;
+    fs::create_dir_all(root.join("fixtures")).map_err(io_error)?;
+    fs::write(&cargo_toml_path, render_coupling_cargo_toml(&package_name)?).map_err(io_error)?;
+    fs::write(&lib_path, render_coupling_lib_rs(&operation_name)).map_err(io_error)?;
+    fs::write(
+        &package_path,
+        render_coupling_tool_manifest(&package_name, &operation_name),
+    )
+    .map_err(io_error)?;
+    fs::write(&input_schema_path, COUPLING_INVOCATION_SCHEMA).map_err(io_error)?;
+    fs::write(&output_schema_path, COUPLING_DISCHARGE_SCHEMA).map_err(io_error)?;
+    fs::write(
+        &fixture_input_path,
+        render_coupling_fixture_input(&package_name),
+    )
+    .map_err(io_error)?;
+    fs::write(
+        &fixture_expect_path,
+        render_coupling_fixture_expect(&package_name),
+    )
+    .map_err(io_error)
+}
+
 fn render_agent_manifest_template(name: &str) -> CooldisResult<String> {
     crate::validate_record_name(name)?;
     Ok(format!(
@@ -6317,6 +6462,185 @@ before publishing cooldis.agent.toml.\n"
     ))
 }
 
+fn render_coupling_cargo_toml(name: &str) -> CooldisResult<String> {
+    let crate_name = coupling_crate_name(name)?;
+    let sdk_path = guest_sdk_dependency_path();
+    Ok(format!(
+        "[package]\n\
+name = {}\n\
+version = \"0.1.0\"\n\
+edition = \"2024\"\n\
+publish = false\n\
+\n\
+[workspace]\n\
+\n\
+[lib]\n\
+crate-type = [\"cdylib\"]\n\
+\n\
+[dependencies]\n\
+cooldis-guest-sdk = {{ path = {} }}\n\
+serde = {{ version = \"1\", features = [\"derive\"] }}\n\
+serde_json = \"1\"\n\
+\n\
+[profile.release]\n\
+panic = \"abort\"\n",
+        toml_string(&crate_name),
+        toml_string(&sdk_path.display().to_string()),
+    ))
+}
+
+fn render_coupling_lib_rs(operation_name: &str) -> String {
+    COUPLING_LIB_RS_TEMPLATE.replace("__OPERATION_NAME__", operation_name)
+}
+
+fn render_coupling_tool_manifest(name: &str, operation_name: &str) -> String {
+    format!(
+        "kind = \"cooldis.tool\"\n\
+schema_version = 0\n\
+\n\
+[identity]\n\
+name = {}\n\
+version = \"0.1.0\"\n\
+description = \"Fold coupling invocation events into deterministic derived events.\"\n\
+\n\
+[runtime]\n\
+kind = \"wasm32-unknown-unknown\"\n\
+module_path = \".\"\n\
+state = \"stateless\"\n\
+release = true\n\
+max_input_bytes = 262144\n\
+max_output_bytes = 262144\n\
+\n\
+[[operations]]\n\
+name = {}\n\
+description = \"Emit one placement decision every configured number of selected events.\"\n\
+input_schema = \"schemas/coupling_invocation.input.json\"\n\
+output_schema = \"schemas/coupling_discharge.output.json\"\n\
+required_capabilities = []\n\
+\n\
+[operations.command]\n\
+name = {}\n\
+stdin = \"json\"\n\
+stdout = \"json\"\n\
+\n\
+[operations.mcp]\n\
+tool_name = {}\n\
+\n\
+[[fixtures]]\n\
+name = \"three_events\"\n\
+operation = {}\n\
+input = \"fixtures/invocation.json\"\n\
+expect = \"fixtures/expect.discharge.json\"\n",
+        toml_string(name),
+        toml_string(operation_name),
+        toml_string(&format!("{name} {operation_name}")),
+        toml_string(operation_name),
+        toml_string(operation_name),
+    )
+}
+
+fn render_coupling_fixture_input(name: &str) -> String {
+    format!(
+        "{{\n\
+  \"abi\": \"cooldis.coupling.invocation/0.1\",\n\
+  \"trigger_event\": {{\n\
+    \"id\": \"event-3\",\n\
+    \"stream_id\": \"thread:session\",\n\
+    \"sequence\": 3,\n\
+    \"kind\": \"turn.completed\",\n\
+    \"origin\": \"witnessed\",\n\
+    \"payload\": {{}}\n\
+  }},\n\
+  \"selected_events\": [\n\
+    {{\"id\": \"event-1\", \"stream_id\": \"thread:session\", \"sequence\": 1, \"kind\": \"turn.completed\", \"origin\": \"witnessed\", \"payload\": {{}}}},\n\
+    {{\"id\": \"event-2\", \"stream_id\": \"thread:session\", \"sequence\": 2, \"kind\": \"turn.completed\", \"origin\": \"witnessed\", \"payload\": {{}}}},\n\
+    {{\"id\": \"event-3\", \"stream_id\": \"thread:session\", \"sequence\": 3, \"kind\": \"turn.completed\", \"origin\": \"witnessed\", \"payload\": {{}}}}\n\
+  ],\n\
+  \"config\": {{\n\
+    \"every\": 3,\n\
+    \"sink_stream\": \"derived:counter\",\n\
+    \"sink_kind\": \"placement.decision\"\n\
+  }},\n\
+  \"invocation_meta\": {{\n\
+    \"coupling_id\": {},\n\
+    \"thread_id\": \"session\",\n\
+    \"depth\": 0\n\
+  }}\n\
+}}\n",
+        toml_string(name),
+    )
+}
+
+fn render_coupling_fixture_expect(name: &str) -> String {
+    format!(
+        "{{\n\
+  \"abi\": \"cooldis.coupling.discharge/0.1\",\n\
+  \"events\": [\n\
+    {{\n\
+      \"stream\": \"derived:counter\",\n\
+      \"kind\": \"placement.decision\",\n\
+      \"payload\": {{\n\
+        \"schema\": \"cooldis.scaffold.counter_fold/1\",\n\
+        \"count\": 3,\n\
+        \"trigger_event_id\": \"event-3\",\n\
+        \"coupling_id\": {}\n\
+      }}\n\
+    }}\n\
+  ]\n\
+}}\n",
+        toml_string(name),
+    )
+}
+
+fn coupling_operation_name(name: &str) -> CooldisResult<String> {
+    let mut operation = String::new();
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' => operation.push((byte as char).to_ascii_lowercase()),
+            b'a'..=b'z' | b'0'..=b'9' | b'_' => operation.push(byte as char),
+            b'-' | b'.' => operation.push('_'),
+            _ => {}
+        }
+    }
+    if operation
+        .as_bytes()
+        .first()
+        .is_none_or(|byte| !byte.is_ascii_alphabetic() && *byte != b'_')
+    {
+        operation.insert_str(0, "coupling_");
+    }
+    crate::validate_record_name(&operation)?;
+    Ok(operation)
+}
+
+fn coupling_crate_name(name: &str) -> CooldisResult<String> {
+    let mut suffix = String::new();
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' => suffix.push((byte as char).to_ascii_lowercase()),
+            b'a'..=b'z' | b'0'..=b'9' => suffix.push(byte as char),
+            b'-' | b'_' | b'.' => suffix.push('-'),
+            _ => {}
+        }
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        return Err(usage_error(
+            "coupling name does not produce a Cargo package name",
+        ));
+    }
+    Ok(format!("cooldis-coupling-{suffix}"))
+}
+
+fn guest_sdk_dependency_path() -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../cooldis-guest-sdk");
+    path.canonicalize().unwrap_or(path)
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 fn print_agent_record_json(record: &PublishedAgentRecord) -> CooldisResult<()> {
     let json = serde_json::to_string_pretty(record)
         .map_err(|err| usage_error(format!("failed to encode agent record: {err}")))?;
@@ -6384,10 +6708,105 @@ fn io_error(err: impl std::fmt::Display) -> CooldisError {
     CooldisError::RuntimeFactory(err.to_string())
 }
 
+const COUPLING_LIB_RS_TEMPLATE: &str = r#"use cooldis_guest_sdk::prelude::*;
+use serde_json::json;
+
+#[derive(Deserialize)]
+struct CouplingConfig {
+    #[serde(default = "default_every")]
+    every: u64,
+    #[serde(default = "default_sink_stream")]
+    sink_stream: String,
+    #[serde(default = "default_sink_kind")]
+    sink_kind: String,
+}
+
+#[coupling]
+pub fn __OPERATION_NAME__(ctx: CouplingContext) -> Result<Discharge, GuestError> {
+    let config: CouplingConfig = ctx.config()?;
+    let every = config.every.max(1);
+    let count = ctx.sources().len() as u64;
+    if count == 0 || count % every != 0 {
+        return Ok(Discharge::empty());
+    }
+    Discharge::empty().event(
+        config.sink_stream,
+        config.sink_kind,
+        json!({
+            "schema": "cooldis.scaffold.counter_fold/1",
+            "count": count,
+            "trigger_event_id": ctx.trigger().id.clone(),
+            "coupling_id": ctx.meta().coupling_id.clone(),
+        }),
+    )
+}
+
+fn default_every() -> u64 {
+    3
+}
+
+fn default_sink_stream() -> String {
+    "derived:counter".to_string()
+}
+
+fn default_sink_kind() -> String {
+    "placement.decision".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cooldis_guest_sdk::testkit;
+
+    #[test]
+    fn fixture_runs_natively_without_wasm_host() {
+        let invocation =
+            testkit::invocation_from_fixture_file("fixtures/invocation.json").unwrap();
+        let discharge = testkit::invoke_coupling(__OPERATION_NAME__, invocation).unwrap();
+        assert_eq!(discharge.events.len(), 1);
+        assert_eq!(discharge.events[0].stream, "derived:counter");
+        assert_eq!(discharge.events[0].kind, "placement.decision");
+        assert_eq!(discharge.events[0].payload["count"], 3);
+    }
+}
+"#;
+
+const COUPLING_INVOCATION_SCHEMA: &str = r#"{
+  "type": "object",
+  "required": ["abi", "trigger_event", "invocation_meta"],
+  "properties": {
+    "abi": { "enum": ["cooldis.coupling.invocation/0.1"] },
+    "trigger_event": { "type": "object", "additionalProperties": true },
+    "selected_events": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "config": { "type": "object", "additionalProperties": true },
+    "invocation_meta": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": true
+}
+"#;
+
+const COUPLING_DISCHARGE_SCHEMA: &str = r#"{
+  "type": "object",
+  "required": ["abi", "events"],
+  "properties": {
+    "abi": { "enum": ["cooldis.coupling.discharge/0.1"] },
+    "events": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    }
+  },
+  "additionalProperties": true
+}
+"#;
+
 const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
     "cooldis console",
     "cooldis chat [PROMPT]",
     "cooldis init <name>",
+    "cooldis coupling init <name>",
     "cooldis agent plan <manifest>",
     "cooldis agent publish <manifest>",
     "cooldis blob publish <file>",
@@ -6420,6 +6839,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis secret status <name> [--state-home ~/.cooldis/state]",
     "cooldis secret delete <name> [--state-home ~/.cooldis/state]",
     "cooldis agent init <name> [--out <dir|manifest.toml>] [--force]",
+    "cooldis coupling init <name> [--out <dir>] [--force]",
     "cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
     "cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
     "cooldis agent list [--registry-root .cooldis/agents]",
@@ -6508,6 +6928,30 @@ Usage:\n\
 \n\
 Agents are declarative runtime artifacts. `plan` resolves the manifest and\n\
 writes nothing; `publish` reruns the plan and writes an immutable local record.\n"
+    );
+}
+
+fn print_coupling_help() {
+    println!(
+        "cooldis coupling\n\
+\n\
+Usage:\n\
+  cooldis coupling init <name> [--out <dir>] [--force]\n\
+\n\
+Scaffolds a Rust Wasm coupling package that uses #[coupling], includes a native\n\
+testkit test, and validates through `cooldis tool build --package`.\n"
+    );
+}
+
+fn print_coupling_init_help() {
+    println!(
+        "cooldis coupling init\n\
+\n\
+Usage:\n\
+  cooldis coupling init <name> [--out <dir>] [--force]\n\
+\n\
+Writes a macro-authored coupling crate with cooldis.tool.toml, schemas,\n\
+fixtures, and one native testkit test.\n"
     );
 }
 

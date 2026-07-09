@@ -68,8 +68,8 @@ what you approve, and run it under policy.
 ## Current Status
 
 Cooldis is experimental. The repository is focused on V1 runtime primitives:
-agent manifests, operation publishing, ABI contracts, custom Wasm couplings,
-local runtime execution, provider adapters, virtual bash, VFS,
+agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
+couplings, local runtime execution, provider adapters, virtual bash, VFS,
 skill-package resources, daemon/RPC
 surfaces, and the proof path for packageable local agents.
 

@@ -81,7 +81,7 @@ The V1 work is focused on runtime primitives:
 - blob resource publication and folder-first prompt lowering;
 - skill-package publication, manifest binding, static indexes, and read-only
   VFS bodies;
-- custom Wasm coupling execution for declared event folds;
+- custom Wasm coupling execution and macro scaffolding for declared event folds;
 - local runtime execution through provider, virtual bash, and Wasm paths;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
 - release packaging for `cooldis`, `cooldis-acp-agent`, and
@@ -101,7 +101,7 @@ stateful product harnesses are future direction. See
   surfaces and boundaries.
 - [ABI](docs/abi.md): operation boundary and host/guest contract.
 - [Wasm operation dev kit](docs/wasm-operation-dev-kit.md): Rust guest
-  helpers, fixtures, and custom coupling authoring.
+  macros, fixtures, and custom coupling authoring.
 - [Agent CLI](docs/agent-cli.md): manifest authoring and local agent commands.
 - [Agent manifest ontology](docs/agent-manifest-ontology.md): manifest shape
   and deferred fields.
