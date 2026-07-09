@@ -22,6 +22,8 @@ checks:
 - focused MCP server tests;
 - manifest-backed `thread/start` end-to-end smoke;
 - release binary package build and archive smoke;
+- packaged-binary canonical CLI help smoke for `console`, `chat`, `auth`,
+  `tool manual`, `rpc`, and `debug rpc`;
 - packaged-binary secret import, set, list, status, delete redaction smoke;
 - deterministic AX blind-test prompt bundle;
 - packaged-binary folder-first init, operation publish, and agent publish
@@ -66,6 +68,17 @@ scripts/check-release-tag.sh v$(cargo metadata --format-version 1 --no-deps \
 
 GitHub Actions runs the tag check before publishing artifacts.
 
+For normal maintainer release iteration, use the async helper after local
+changes are committed:
+
+```sh
+scripts/release-async.sh v0.1.0-rc.N
+```
+
+The helper performs a local host-target package smoke, pushes the tag, prints
+the Release workflow URL, and exits. Pass `--full-gate` to run this full V1 gate
+before the tag push.
+
 ## Binary Artifacts
 
 Release packaging is target-aware:
@@ -73,6 +86,9 @@ Release packaging is target-aware:
 ```sh
 scripts/package-release-binary.sh --target x86_64-unknown-linux-gnu
 ```
+
+Each archive includes the public binaries and the bundled browser console under
+`share/cooldis/console`; the installed user-facing command is `cooldis console`.
 
 See [Release Process](../RELEASE.md) for the supported target matrix and publish
 flow.
@@ -82,3 +98,4 @@ flow.
 A V1 candidate is releasable only when the deterministic default gate passes,
 the tag matches the crate version, and every included public surface has either
 canonical docs or an explicit gap in [Public API Coverage](public-api-coverage.md).
+The public command surface starts at [Cooldis CLI](cli.md).

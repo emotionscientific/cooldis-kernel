@@ -34,7 +34,7 @@ Current built-in families:
 | `openai_responses` | OpenAI Responses | yes | yes | yes | no | yes | no | text, image input, LLM tool |
 | `openai_chat_completions` | OpenAI Chat Completions | yes | yes | yes | no | no | no | text, LLM tool |
 | `anthropic_messages` | Anthropic Messages | yes | yes | yes | yes | yes | no | text, image input, LLM tool |
-| `anthropic_bedrock_messages` | Anthropic Messages on Bedrock InvokeModel | yes | no | yes | yes | yes | no | text, image input, LLM tool |
+| `anthropic_bedrock_messages` | Anthropic Messages on Bedrock InvokeModel/InvokeModelWithResponseStream | yes | yes | yes | yes | yes | no | text, image input, LLM tool |
 | local/offline | `ProviderApi::Other(...)` | no | no | no | no | no | no | text |
 
 Adapters or clients that need gateway-specific behavior should override the
@@ -71,6 +71,12 @@ blocks, canonical session entries, compaction summaries, hook-added context,
 turn/environment context, attachments, and tool definitions. It returns the
 compiled model-visible context plus diagnostics for dropped entries, retained
 text bytes, and truncated text bytes.
+
+Hooks are host-scope debug tooling. They are not declared through agent
+manifests; manifest `[hooks]` remains reserved, and replayable control should be
+modeled as witnessed couplings. While host hooks still exist, mutating hook
+outcomes are recorded as secret-free mutation witness observations before the
+runtime applies them.
 
 Provider-specific context policy still runs after that kernel compilation in
 `CanonicalProviderRuntimeFactory` when the client exposes capabilities.
@@ -162,11 +168,11 @@ a gateway compatibility path. OpenAI Compatible/OpenAI-compatible MODEL smokes r
 separate Chat Completions-compatible lane and do not count as OpenAI Responses
 or Anthropic Messages protocol evidence.
 
-`cooldis dev chat` can route its private Codex-shaped app-server through any
+`cooldis chat` can route its private Codex-shaped app-server through any
 wire-compatible provider endpoint. These paths use the same provider adapter
 boundary: gateways remain wire-compatible endpoints, and Cooldis still stores
 canonical provider-neutral history rather than provider-native JSON. See
-[Cooldis RPC Control Plane And Dev Chat](app-server.md) for the local config shape and
+[Cooldis RPC Control Plane](app-server.md) for the local config shape and
 command-line flags.
 
 `LocalOfflineProviderClient` is the deterministic local provider shape for tests

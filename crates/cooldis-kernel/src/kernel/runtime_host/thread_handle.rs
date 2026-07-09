@@ -5,13 +5,14 @@ use super::{
     ThreadCommand, ThreadEvent,
 };
 use crate::agent::manifest_bind::{
-    MANIFEST_BINDER_DISCHARGED_BY, MANIFEST_BINDER_FUNCTION, MANIFEST_COMPILER_DISCHARGED_BY,
-    MANIFEST_COMPILER_FUNCTION,
+    BoundCouplingSet, MANIFEST_BINDER_DISCHARGED_BY, MANIFEST_BINDER_FUNCTION,
+    MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION, coupling_set_content_hash,
 };
 use crate::kernel::history::{
-    EventKind, EventProvenance, EventRecord, EventStreamId, NewEventRecord, SessionContext,
-    SessionEntry, SessionEntryKind,
+    EventKind, EventProvenance, EventRecord, EventSequence, EventStreamId, NewEventRecord,
+    PolicyBoundPayload, PolicyKind, SessionContext, SessionEntry, SessionEntryKind, StreamCursorV1,
 };
+use crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA;
 use cooldis_runtime_contracts::{
     ThreadCheckpointId, ThreadContext, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadSignal,
     ThreadSignalKind, ThreadStatus,
@@ -19,6 +20,7 @@ use cooldis_runtime_contracts::{
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 impl RuntimeThreadHandle {
     pub fn context(&self) -> &ThreadContext {
@@ -85,7 +87,7 @@ impl RuntimeThreadHandle {
             },
         );
         let bind_event = NewEventRecord::discharged(
-            coordinates,
+            coordinates.clone(),
             EventKind::ManifestBindCompleted,
             bind_payload,
             EventProvenance {
@@ -96,14 +98,57 @@ impl RuntimeThreadHandle {
                 ..EventProvenance::default()
             },
         );
+        let mut records = vec![compile_event, bind_event];
+        if let Some(raw_coupling_set) = self
+            .thread
+            .context
+            .metadata
+            .get(THREAD_BOUND_COUPLING_SET_METADATA)
+        {
+            let coupling_set =
+                serde_json::from_str::<BoundCouplingSet>(raw_coupling_set).map_err(|err| {
+                    CooldisError::RuntimeFactory(format!(
+                        "thread bound coupling set is invalid: {err}"
+                    ))
+                })?;
+            let content_hash = coupling_set_content_hash(&coupling_set)?;
+            let payload = PolicyBoundPayload {
+                policy_kind: PolicyKind::CouplingSet,
+                policy_id: format!("coupling_set:{}", coupling_set.snapshot_id),
+                content_hash: content_hash.clone(),
+                valid_from_note: "valid until next policy.bound of same policy_id".to_string(),
+            };
+            let mut value = serde_json::to_value(payload).map_err(|err| {
+                CooldisError::History(format!("policy.bound payload codec failed: {err}"))
+            })?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "schema".to_string(),
+                    serde_json::json!(EventKind::PolicyBound.payload_schema_id()),
+                );
+            }
+            records.push(NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::PolicyBound,
+                value,
+                EventProvenance {
+                    source_streams: vec![stream_id.clone()],
+                    source_event_ids: vec![records[1].id],
+                    discharged_by: Some(MANIFEST_BINDER_DISCHARGED_BY.to_string()),
+                    function: Some(MANIFEST_BINDER_FUNCTION.to_string()),
+                    config_hash: Some(content_hash),
+                    ..EventProvenance::default()
+                },
+            ));
+        }
         let events = self
             .thread
             .services
             .runtime_store()
-            .append_events(&stream_id, vec![compile_event, bind_event])
+            .append_events(&stream_id, records)
             .await
             .map_err(|err| CooldisError::History(err.to_string()))?;
-        if events.len() != 2 {
+        if events.len() < 2 {
             return Err(CooldisError::History(format!(
                 "manifest receipt append returned {} record(s)",
                 events.len()
@@ -146,6 +191,68 @@ impl RuntimeThreadHandle {
             .map_err(|err| CooldisError::History(err.to_string()))
     }
 
+    pub async fn append_control_event(&self, record: NewEventRecord) -> CooldisResult<EventRecord> {
+        self.thread
+            .services
+            .append_control_event(&self.thread.context.coordinates, record)
+            .await
+    }
+
+    pub async fn read_control_events(&self) -> CooldisResult<Vec<EventRecord>> {
+        let stream_id = EventStreamId::new(format!(
+            "control:{}",
+            self.thread.context.coordinates.thread_id
+        ));
+        self.thread
+            .services
+            .runtime_store()
+            .read_events(&stream_id, None)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))
+    }
+
+    pub async fn read_thread_events(
+        &self,
+        from_sequence: Option<EventSequence>,
+    ) -> CooldisResult<Vec<EventRecord>> {
+        let stream_id = EventStreamId::for_thread(&self.thread.context.coordinates);
+        self.thread
+            .services
+            .runtime_store()
+            .read_events(&stream_id, from_sequence)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))
+    }
+
+    pub async fn read_thread_events_after_cursor(
+        &self,
+        cursor: &StreamCursorV1,
+    ) -> CooldisResult<Vec<EventRecord>> {
+        let stream_id = EventStreamId::for_thread(&self.thread.context.coordinates);
+        self.thread
+            .services
+            .runtime_store()
+            .read_events_after_cursor(&stream_id, cursor)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))
+    }
+
+    pub async fn append_thread_event_record(
+        &self,
+        record: NewEventRecord,
+    ) -> CooldisResult<EventRecord> {
+        let stream_id = EventStreamId::for_thread(&self.thread.context.coordinates);
+        self.thread
+            .services
+            .runtime_store()
+            .append_events(&stream_id, vec![record])
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CooldisError::History("event append returned no record".to_string()))
+    }
+
     pub async fn append_runtime_session_entry(
         &self,
         kind: impl Into<String>,
@@ -172,6 +279,15 @@ impl RuntimeThreadHandle {
             .await
             .map_err(|_| CooldisError::ThreadClosed(thread_id))?;
         Ok(())
+    }
+
+    pub async fn reserve_command(&self) -> CooldisResult<mpsc::Permit<'_, ThreadCommand>> {
+        let thread_id = self.thread.context.coordinates.thread_id;
+        self.thread
+            .command_tx
+            .reserve()
+            .await
+            .map_err(|_| CooldisError::ThreadClosed(thread_id))
     }
 
     pub async fn record_signal(&self, signal: ThreadSignal) {

@@ -33,7 +33,7 @@ fn workspace_layout_contract_matches_current_repository_shape() {
         );
     }
 
-    for removed_root in ["src", "tests", "apps", "packages", "services"] {
+    for removed_root in ["src", "tests", "packages", "services"] {
         assert!(
             !root.join(removed_root).exists(),
             "{removed_root}/ should not reappear at the workspace root"
@@ -53,6 +53,8 @@ fn workspace_layout_contract_matches_current_repository_shape() {
         "crates/cooldis-kernel/tests/runtime_loop_scenarios.rs",
         "crates/cooldis-kernel/tests/smokes/cooldis-live-smoke.rs",
         "crates/cooldis-kernel/tests/support_bins/cooldis-mcp-echo-server.rs",
+        "apps/console/package.json",
+        "apps/console/src/App.svelte",
         "docs/README.md",
         "docs/index.md",
         "docs/getting-started.md",
@@ -228,20 +230,21 @@ fn public_api_coverage_tracks_docs_and_man_page_gaps() {
         "cooldis agent list",
         "cooldis agent show",
         "cooldis agent run",
+        "cooldis blob publish",
         "cooldis tool build",
         "cooldis tool list",
         "cooldis tool publish",
         "cooldis tool run",
+        "cooldis tool manual",
+        "cooldis auth",
         "cooldis rpc",
-        "cooldis dev chat",
-        "cooldis dev tui",
+        "cooldis chat",
+        "cooldis debug rpc",
         "cooldis daemon run",
         "cooldis daemon config validate",
         "cooldis daemon service print",
         "cooldis daemon service install",
         "cooldis daemon service uninstall",
-        "cooldis thread",
-        "cooldis operator",
     ] {
         assert!(
             coverage.contains(surface),

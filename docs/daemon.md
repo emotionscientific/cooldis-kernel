@@ -2,7 +2,7 @@
 
 `cooldis daemon` is the foreground shape for the future `cooldisd` service. It
 does not install launchd or systemd units implicitly; service files are printed
-or installed only through explicit operator commands.
+or installed only through explicit user commands.
 
 The daemon config format is TOML:
 
@@ -44,7 +44,7 @@ visibility_timeout_secs = 30
 sqlite_path = ".cooldis/queue/ingress.sqlite"
 
 [[daemon.io.routes]]
-id = "operator-tui"
+id = "chat-tui"
 kind = "websocket.tui"
 enabled = true
 policy = "steer_when_active"
@@ -56,12 +56,63 @@ kind = "telegram.bot"
 enabled = true
 policy = "queue_per_conversation"
 threading = "per_conversation"
+agent_ref = "agent://karl-dev@latest"
+egress_retry = { max_attempts = 5, base_backoff_ms = 500 }
+
+[daemon.io.routes.content_policies]
+"telegram.message_reaction" = "observe_only"
 
 [daemon.io.routes.telegram]
 listen = "127.0.0.1:9000"
 path = "/telegram"
 secret_token_env = "TELEGRAM_WEBHOOK_SECRET"
 bot_token_env = "TELEGRAM_BOT_TOKEN"
+
+[[daemon.io.routes]]
+id = "clock-main"
+kind = "clock.tick"
+enabled = true
+```
+
+Common route keys:
+
+| Key | Meaning |
+| --- | --- |
+| `id` | Stable route id used in IO receipts and egress state. |
+| `kind` | Route adapter kind such as `telegram.bot` or `clock.tick`. |
+| `enabled` | Starts the route when true; disabled routes are parsed but not started. |
+| `policy` | Admission policy such as `queue_per_conversation`, `interrupt_on_new_dm`, or `fork_on_new_dm`. |
+| `content_policies` | Optional map from adapter-stamped event content kind to a policy override. Values use the same vocabulary as `policy`. |
+| `threading` | Scope selector such as `per_conversation`, `per_actor`, or `route_single_thread`. |
+| `agent_ref` | Optional published manifest ref, for example `agent://karl-dev@latest`. The daemon requires an `agent://` ref and fails startup if the ref does not resolve in the effective `daemon.registries.agents` root. Publish missing refs with `cooldis agent publish`. |
+| `egress_retry` | Per-route delivery retry limits for projected assistant output. |
+
+`content_policies` applies only to envelopes whose content is
+`Event { kind, .. }`; plain text, commands, and metadata use the route's
+`policy`. A `coalesce_bursts` override requires the route to define
+`coalesce_bursts`, just like the route-level policy. For Telegram routes, map
+`"telegram.message_reaction" = "observe_only"` to witness those webhook updates
+without starting turns, or map that content kind to another route policy when
+the route should wake the agent.
+
+Telegram only delivers `message_reaction` updates when the webhook is
+registered with that update kind:
+
+```sh
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://alice.example.com/telegram",
+    "secret_token": "'"$TELEGRAM_WEBHOOK_SECRET"'",
+    "allowed_updates": [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+      "callback_query",
+      "message_reaction"
+    ]
+  }'
 ```
 
 Operation-backed agent manifests, including examples such as
@@ -105,15 +156,15 @@ stream = true
 max_tokens = 4096
 ```
 
-For AWS Bedrock Anthropic through `InvokeModel`, use AWS credentials from the
-environment and keep streaming disabled:
+For AWS Bedrock Anthropic through `InvokeModel` and
+`InvokeModelWithResponseStream`, use AWS credentials from the environment:
 
 ```toml
 [daemon.provider]
 provider = "anthropic_bedrock"
 region = "us-east-1"
 model = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-stream = false
+stream = true
 max_tokens = 4096
 ```
 
@@ -143,21 +194,36 @@ does not load, enable, start, or stop the service automatically.
 `daemon run` starts the Cooldis app-server with the configured
 provider and starts enabled IO routes. Telegram routes bind the configured HTTP
 webhook listener, normalize updates through `cooldis-io-telegram`, submit them
-to either the durable pgqrs/SQLite queue or the direct runtime bridge, and can
-deliver visible assistant messages through Telegram `sendMessage` when a bot
-token is configured.
+to either the durable pgqrs/SQLite queue or the direct runtime bridge, and
+start a per-route egress projector. The projector reads bound thread streams
+from a persisted cursor, delivers visible assistant messages through Telegram
+`sendMessage` when a bot token is configured, records delivered/failed receipts
+in the journal, and stores exhausted envelopes in
+`cooldis_daemon_egress_dead_letters` in the route's queue SQLite database.
+`egress_retry.max_attempts` and `egress_retry.base_backoff_ms` configure the
+bounded exponential retry loop; the defaults are `5` and `500`.
+
+Clock routes are daemon-owned ingress adapters. Configure one
+`kind = "clock.tick"` route per daemon; schedules are not route config and live
+in `mandate.started` control-stream events. The route scans control streams for
+active mandates, computes deterministic due occurrences, enqueues due ticks
+through the same durable ingress queue as Telegram, and the queue worker admits
+them as witnessed `timer.fired` events on the subject thread's control stream.
+In this daemon slice the clock route observes mandate changes by rescanning
+control streams on a 30-second poll instead of subscribing to append
+notifications.
 
 ## Lifecycle Boundary For Local V1 Use
 
 The app-server runs in three shapes. They share one implementation; they
 differ in who owns the process, the socket, and the state directories.
 
-1. **Ephemeral, per-command** — `cooldis dev chat` / `cooldis dev tui` spawn
-   a private in-process app-server on a throwaway Unix socket under `/tmp`
+1. **Ephemeral, per-command** — `cooldis chat` starts a private in-process
+   app-server on a throwaway Unix socket under `/tmp`
    and tear it down on exit. Nothing outside the command should attach to
    it; its socket path is not stable.
 2. **Standalone control plane** — `cooldis rpc --listen ...` runs the
-   app-server in the foreground on an operator-chosen Unix socket or
+   app-server in the foreground on a user-chosen Unix socket or
    loopback WebSocket address, with no IO routes. This is the shape a local
    client (the workbench, a script, the smoke bins) attaches to during
    development. The process owns the socket for its lifetime; stopping it
@@ -171,7 +237,7 @@ The boundary rules for V1:
 
 - **One writer per state home.** Exactly one app-server process may own a
   given runtime/state home at a time. Running two shapes against the same
-  state directories is unsupported; the ephemeral dev shapes avoid this by
+  state directories is unsupported; the ephemeral chat shape avoids this by
   using isolated temp state.
 - **State outlives the process; subscriptions do not.** Threads, turns, and
   events persist in the state home (published agent records live in the
@@ -181,7 +247,7 @@ The boundary rules for V1:
   client must re-list state and re-subscribe; there is no notification
   replay.
 - **Lifecycle ownership is explicit.** Most local clients attach to a socket
-  that an operator (or the OS service manager) already started. Connection
+  that a user (or the OS service manager) already started. Connection
   refused means "start the daemon", and those clients should say so rather
   than spawning processes themselves. A desktop client may offer an explicit
   user-level managed profile that starts `cooldis daemon run`/`cooldis rpc`
@@ -207,6 +273,7 @@ Verification coverage for the daemon lane includes:
 ```sh
 cargo test --test daemon_smoke
 cargo test daemon_io::tests::queue_worker_processes_envelope_after_queue_and_bridge_restart
+cargo test -p cooldis clock_route
 ```
 
 The first smoke starts the real `cooldis daemon run` binary on a configured

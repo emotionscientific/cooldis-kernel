@@ -116,7 +116,21 @@ impl CooldisAppServer {
                     .supervisor
                     .shutdown_thread_at(&handle.context().coordinates)
                     .await;
-                return Err(err);
+                eprintln!(
+                    "cooldis app-server skipped unavailable thread {}: agent_ref={}, stored_hash={}, error={err}",
+                    record.coordinates.thread_id,
+                    record
+                        .metadata
+                        .get(THREAD_AGENT_REF_METADATA)
+                        .map(String::as_str)
+                        .unwrap_or("<none>"),
+                    record
+                        .metadata
+                        .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+                        .map(String::as_str)
+                        .unwrap_or("<none>")
+                );
+                continue;
             }
             let thread_state = self
                 .thread_state_from_lifecycle(&record, handle.status())
@@ -225,6 +239,8 @@ impl CooldisAppServer {
             alias,
             &provider_surface,
             self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.blob_registry_root.as_path()),
+            Some(self.inner.skill_registry_root.as_path()),
             &mcp_server_refs,
             Some(&tool_universe_discoverer),
             &model_selection,
@@ -232,6 +248,69 @@ impl CooldisAppServer {
         )
         .await?;
         record_bound_agent_receipts(handle, &bound).await.map(Some)
+    }
+
+    pub(crate) fn agent_registry_root(&self) -> &Path {
+        &self.inner.agent_registry_root
+    }
+
+    pub(crate) async fn validate_daemon_route_agent_ref(
+        &self,
+        agent_ref: &str,
+    ) -> CooldisResult<()> {
+        if !agent_ref.starts_with("agent://") {
+            return Err(CooldisError::RuntimeFactory(
+                "daemon route agent_ref must be an agent:// ref".to_string(),
+            ));
+        }
+        AgentRecordRef::parse(agent_ref)?;
+        self.bind_daemon_route_agent(agent_ref).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn bind_daemon_route_agent(
+        &self,
+        agent_ref: &str,
+    ) -> CooldisResult<KernelThreadSpawnAgentBinding> {
+        let bound = self
+            .bind_app_server_agent_ref(
+                agent_ref,
+                &AgentManifestModelProfileSelection::default(),
+                &AgentManifestBindOverrides::default(),
+            )
+            .await?;
+        kernel_thread_spawn_agent_binding(
+            &bound,
+            &self.inner.cwd,
+            self.inner.capsule_bindings.registry_root.as_deref(),
+            None,
+        )
+    }
+
+    pub(super) async fn bind_app_server_agent_ref(
+        &self,
+        agent_ref: &str,
+        model_selection: &AgentManifestModelProfileSelection,
+        overrides: &AgentManifestBindOverrides,
+    ) -> CooldisResult<AgentManifestBoundThread> {
+        let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
+        let provider_surface = self.agent_manifest_provider_surface()?;
+        let mcp_server_refs = self.configured_mcp_server_refs()?;
+        let tool_universe_discoverer = self.tool_universe_discoverer()?;
+        bind_published_agent_record(
+            &record,
+            alias,
+            &provider_surface,
+            self.inner.capsule_bindings.registry_root.as_deref(),
+            Some(self.inner.blob_registry_root.as_path()),
+            Some(self.inner.skill_registry_root.as_path()),
+            &mcp_server_refs,
+            Some(&tool_universe_discoverer),
+            model_selection,
+            overrides,
+        )
+        .await
     }
 
     pub(super) async fn thread_state_from_lifecycle(
@@ -925,7 +1004,15 @@ pub(super) fn resolve_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
 }
 
 pub(super) fn normalize_registry_roots(config: &mut CooldisAppServerConfig) {
+    let blob_registry_root_was_default =
+        config.blob_registry_root == Path::new(DEFAULT_BLOB_REGISTRY_ROOT);
     config.agent_registry_root = resolve_path_against_cwd(&config.cwd, &config.agent_registry_root);
+    config.blob_registry_root = if blob_registry_root_was_default {
+        default_blob_registry_root_for_agent_registry_root(&config.agent_registry_root)
+    } else {
+        resolve_path_against_cwd(&config.cwd, &config.blob_registry_root)
+    };
+    config.skill_registry_root = resolve_path_against_cwd(&config.cwd, &config.skill_registry_root);
     if let Some(registry_root) = &config.capsule_bindings.registry_root {
         config.capsule_bindings.registry_root =
             Some(resolve_path_against_cwd(&config.cwd, registry_root));
@@ -988,6 +1075,7 @@ pub(super) fn append_bound_agent_metadata(
     metadata: &mut BTreeMap<String, String>,
     bound: &AgentManifestBoundThread,
     overrides: Option<&AgentManifestBindOverrides>,
+    operation_registry_root: Option<&Path>,
 ) -> Result<(), JsonRpcErrorError> {
     metadata.insert(
         THREAD_AGENT_REF_METADATA.to_string(),
@@ -1046,6 +1134,39 @@ pub(super) fn append_bound_agent_metadata(
             encoded,
         );
     }
+    if !bound.skill_packages.is_empty() {
+        let encoded = serde_json::to_string(&bound.skill_packages).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest skill package bindings: {err}"),
+            )
+        })?;
+        metadata.insert(THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(), encoded);
+    }
+    if !bound.skill_context_segments.is_empty() {
+        let encoded = serde_json::to_string(&bound.skill_context_segments).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest skill context segments: {err}"),
+            )
+        })?;
+        metadata.insert(
+            THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA.to_string(),
+            encoded,
+        );
+    }
+    if !bound.static_context_segments.is_empty() {
+        let encoded = serde_json::to_string(&bound.static_context_segments).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest static context segments: {err}"),
+            )
+        })?;
+        metadata.insert(
+            crate::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA.to_string(),
+            encoded,
+        );
+    }
     if !bound.tool_universes.is_empty() {
         let encoded = serde_json::to_string(&bound.tool_universes).map_err(|err| {
             jsonrpc_error(
@@ -1063,6 +1184,12 @@ pub(super) fn append_bound_agent_metadata(
             )
         })?;
         metadata.insert(THREAD_BOUND_COUPLING_SET_METADATA.to_string(), encoded);
+        if let Some(root) = operation_registry_root {
+            metadata.insert(
+                THREAD_OPERATION_REGISTRY_ROOT_METADATA.to_string(),
+                root.display().to_string(),
+            );
+        }
     }
     if let Some(overrides) = overrides {
         let encoded = serde_json::to_string(overrides).map_err(|err| {
@@ -1152,6 +1279,32 @@ pub(super) async fn record_bound_agent_receipts(
         .record_tool_universe_discovery_receipts(discovery_payloads)
         .await?;
     Ok(manifest_events)
+}
+
+fn kernel_thread_spawn_agent_binding(
+    bound: &AgentManifestBoundThread,
+    cwd_root: &Path,
+    operation_registry_root: Option<&Path>,
+    overrides: Option<&AgentManifestBindOverrides>,
+) -> CooldisResult<KernelThreadSpawnAgentBinding> {
+    let cwd = resolve_cwd(
+        cwd_root,
+        Some(bound.bind_receipt.effective_runtime.default_cwd.as_str()),
+    );
+    let mut metadata = app_server_thread_metadata(&cwd, &bound.bind_receipt.provider_id, false);
+    append_bound_agent_metadata(&mut metadata, bound, overrides, operation_registry_root)
+        .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
+    let compile_receipt = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to encode manifest compile receipt: {err}"))
+    })?;
+    let bind_receipt = serde_json::to_value(&bound.bind_receipt).map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
+    })?;
+    Ok(KernelThreadSpawnAgentBinding {
+        metadata,
+        compile_receipt,
+        bind_receipt,
+    })
 }
 
 pub(super) fn app_server_thread_metadata(
@@ -1255,14 +1408,32 @@ pub(super) fn thread_manifest_tool_universes(
     Ok(bindings)
 }
 
+pub(super) fn thread_manifest_skill_packages(
+    context: &ThreadContext,
+) -> CooldisResult<Vec<AgentManifestSkillPackageBinding>> {
+    let Some(raw) = context.metadata.get(THREAD_AGENT_SKILL_PACKAGES_METADATA) else {
+        return Ok(Vec::new());
+    };
+    let bindings =
+        serde_json::from_str::<Vec<AgentManifestSkillPackageBinding>>(raw).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "thread manifest skill package bindings are invalid: {err}"
+            ))
+        })?;
+    Ok(bindings)
+}
+
 pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) config: CanonicalProviderRuntimeConfig,
     pub(super) client: Arc<dyn ProviderClient>,
     pub(super) capsule_bindings: CapsuleBindingsConfig,
     pub(super) secret_resolver: Option<Arc<dyn SecretResolver>>,
     pub(super) metadata_store_path: Option<PathBuf>,
+    pub(super) secret_store_path: Option<PathBuf>,
     pub(super) session_store_path: Option<PathBuf>,
     pub(super) agent_registry_root: Option<PathBuf>,
+    pub(super) blob_registry_root: Option<PathBuf>,
+    pub(super) skill_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
 }
 
@@ -1287,6 +1458,7 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
             factory = factory.with_thread_spawn_agent_resolver(Arc::new(resolver));
         }
         let mut tool_router = None;
+        let skill_files = self.skill_mount_files_for_thread(context).await?;
         if let Some(catalog) = self.operation_catalog_for_thread(context).await? {
             let ThreadOperationCatalog {
                 registry,
@@ -1299,12 +1471,18 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
                     .with_tool_aliases(tool_aliases)
                     .with_capability_grants(capability_grants.clone()),
             );
-            factory = factory.with_bash_tool(
+            factory = factory.with_bash_tool(bash_config_with_skill_files(
                 VirtualBashRuntimeConfig::default()
                     .with_operation_registry(registry)
                     .with_workspace_vfs(workspace_vfs)
                     .with_capability_grants(capability_grants),
-            );
+                &skill_files,
+            ));
+        } else if !skill_files.is_empty() {
+            factory = factory.with_bash_tool(bash_config_with_skill_files(
+                VirtualBashRuntimeConfig::default(),
+                &skill_files,
+            ));
         }
         if let Some(tool_universe_surface) = self.tool_universe_search_surface(context).await? {
             let router = tool_router
@@ -1324,7 +1502,10 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
 struct AppServerThreadSpawnAgentResolver {
     agent_registry_root: PathBuf,
     operation_registry_root: Option<PathBuf>,
+    blob_registry_root: Option<PathBuf>,
+    skill_registry_root: Option<PathBuf>,
     metadata_store_path: Option<PathBuf>,
+    secret_store_path: Option<PathBuf>,
     cwd: PathBuf,
     provider_surface: AgentManifestProviderSurface,
 }
@@ -1345,6 +1526,8 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             alias,
             &self.provider_surface,
             self.operation_registry_root.as_deref(),
+            self.blob_registry_root.as_deref(),
+            self.skill_registry_root.as_deref(),
             &mcp_server_refs,
             tool_universe_discoverer
                 .as_ref()
@@ -1353,26 +1536,12 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             &AgentManifestBindOverrides::default(),
         )
         .await?;
-        let cwd = resolve_cwd(
+        kernel_thread_spawn_agent_binding(
+            &bound,
             &self.cwd,
-            Some(bound.bind_receipt.effective_runtime.default_cwd.as_str()),
-        );
-        let mut metadata = app_server_thread_metadata(&cwd, &bound.bind_receipt.provider_id, false);
-        append_bound_agent_metadata(&mut metadata, &bound, None)
-            .map_err(|err| CooldisError::RuntimeFactory(err.message))?;
-        let compile_receipt = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
-            CooldisError::RuntimeFactory(format!(
-                "failed to encode manifest compile receipt: {err}"
-            ))
-        })?;
-        let bind_receipt = serde_json::to_value(&bound.bind_receipt).map_err(|err| {
-            CooldisError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
-        })?;
-        Ok(KernelThreadSpawnAgentBinding {
-            metadata,
-            compile_receipt,
-            bind_receipt,
-        })
+            self.operation_registry_root.as_deref(),
+            None,
+        )
     }
 }
 
@@ -1397,8 +1566,12 @@ impl AppServerThreadSpawnAgentResolver {
         };
         let registry = SqliteMcpSourceRegistry::open(metadata_store_path)
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
+        let secret_store_path = self
+            .secret_store_path
+            .as_ref()
+            .unwrap_or(metadata_store_path);
         let secret_store =
-            SqliteSecretStore::open(metadata_store_path).map_err(secret_store_error)?;
+            SqliteSecretStore::open(secret_store_path).map_err(secret_store_error)?;
         Ok(Some(McpToolUniverseDiscoverer::new(
             registry,
             Some(Arc::new(secret_store)),
@@ -1412,11 +1585,64 @@ impl CapsuleBindingRuntimeFactory {
         let cwd = self.cwd.clone()?;
         Some(AppServerThreadSpawnAgentResolver {
             agent_registry_root,
+            // lexicon-allow: capsule - existing app-server config field
             operation_registry_root: self.capsule_bindings.registry_root.clone(),
+            blob_registry_root: self.blob_registry_root.clone(),
+            skill_registry_root: self.skill_registry_root.clone(),
             metadata_store_path: self.metadata_store_path.clone(),
+            secret_store_path: self.secret_store_path.clone(),
             cwd,
             provider_surface: provider_surface_for_runtime_config(&self.config),
         })
+    }
+
+    async fn skill_mount_files_for_thread(
+        &self,
+        context: &ThreadContext,
+    ) -> CooldisResult<Vec<VirtualFile>> {
+        let bindings = thread_manifest_skill_packages(context)?;
+        if bindings.is_empty() {
+            return Ok(Vec::new());
+        }
+        let registry_root = self.skill_registry_root.as_ref().ok_or_else(|| {
+            CooldisError::RuntimeFactory(
+                "skill package bindings require an app-server skill registry root".to_string(),
+            )
+        })?;
+        let registry = LocalSkillRegistry::new(registry_root);
+        let mut files = Vec::new();
+        let mut names = BTreeSet::new();
+        for binding in bindings {
+            let record = registry
+                .load_version_record(&binding.package_name, &binding.artifact_hash)
+                .map_err(|err| {
+                    CooldisError::RuntimeFactory(format!(
+                        "manifest skill package binding {:?}@sha256:{} was not found: {err}",
+                        binding.package_name, binding.artifact_hash
+                    ))
+                })?;
+            if record.ref_uri() != binding.ref_uri {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "manifest skill package binding {:?} ref drift: receipt {}, registry {}",
+                    binding.resource_name,
+                    binding.ref_uri,
+                    record.ref_uri()
+                )));
+            }
+            for skill in record.package.skills {
+                if !names.insert(skill.name.clone()) {
+                    return Err(CooldisError::RuntimeFactory(format!(
+                        "manifest skill packages contain duplicate /skills/{}.md",
+                        skill.name
+                    )));
+                }
+                files.push(VirtualFile::new(
+                    PathBuf::from(format!("{}.md", skill.name)),
+                    skill.body.into_bytes(),
+                ));
+            }
+        }
+        Ok(files)
     }
 
     async fn operation_catalog_for_thread(
@@ -1427,6 +1653,7 @@ impl CapsuleBindingRuntimeFactory {
         if manifest_operation_bindings.is_empty() {
             return Ok(None);
         }
+        // lexicon-allow: capsule - existing app-server config field
         let Some(registry_root) = &self.capsule_bindings.registry_root else {
             // lexicon-allow: capsule - existing app-server config error text
             return Err(CooldisError::RuntimeFactory(
@@ -1528,6 +1755,16 @@ impl CapsuleBindingRuntimeFactory {
             discoverer,
         )))
     }
+}
+
+fn bash_config_with_skill_files(
+    mut config: VirtualBashRuntimeConfig,
+    skill_files: &[VirtualFile],
+) -> VirtualBashRuntimeConfig {
+    for file in skill_files {
+        config = config.with_readonly_skill_file(file.path.clone(), file.content.clone());
+    }
+    config
 }
 
 fn provider_surface_for_runtime_config(

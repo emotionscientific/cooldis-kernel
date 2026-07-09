@@ -278,8 +278,20 @@ fn reserved_and_deferred_resource_kinds_are_named() {
     assert!(err.to_string().contains("dataset"));
     assert!(err.to_string().contains("deferred"));
 
+    let skill_ref = "skill://karl-skills@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let manifest = parse(
+        &valid_manifest()
+            .replace("kind = \"blob\"", "kind = \"skill\"")
+            .replace(
+                "resource://system-prompt@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                skill_ref,
+            ),
+    )
+    .unwrap();
+    assert_eq!(manifest.resources[0].reference, skill_ref);
+
     let err = parse(&valid_manifest().replace("kind = \"blob\"", "kind = \"skill\"")).unwrap_err();
-    assert!(err.to_string().contains("skills-as-resource-packages"));
+    assert!(err.to_string().contains("skill://"));
 }
 
 #[test]

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${COOLDIS_RELEASE_OUT_DIR:-$ROOT/dist}"
-REPO="${GITHUB_REPOSITORY:-emotionscientific/cooldis}"
+REPO="${GITHUB_REPOSITORY:-emotionscientific/cooldis-kernel}"
 TAG="${GITHUB_REF_NAME:-}"
 CHANNEL="${COOLDIS_RELEASE_CHANNEL:-stable}"
 BASE_URL=""
@@ -73,6 +73,11 @@ if [[ -z "$TAG" ]]; then
   TAG="v$VERSION"
 fi
 
+RELEASE_VERSION="$VERSION"
+if [[ "$TAG" == v* ]]; then
+  RELEASE_VERSION="${TAG#v}"
+fi
+
 if [[ -z "$BASE_URL" ]]; then
   BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 fi
@@ -94,7 +99,7 @@ fi
   printf '{\n'
   printf '  "schema": 1,\n'
   printf '  "name": "cooldis",\n'
-  printf '  "version": "%s",\n' "$(json_escape "$VERSION")"
+  printf '  "version": "%s",\n' "$(json_escape "$RELEASE_VERSION")"
   printf '  "channel": "%s",\n' "$(json_escape "$CHANNEL")"
   printf '  "repository": "%s",\n' "$(json_escape "$REPO")"
   printf '  "tag": "%s",\n' "$(json_escape "$TAG")"
@@ -109,10 +114,10 @@ fi
       echo "missing checksum for $archive" >&2
       exit 1
     fi
-    target="${name#cooldis-$VERSION-}"
+    target="${name#cooldis-$RELEASE_VERSION-}"
     target="${target%.tar.gz}"
     if [[ "$target" == "$name" || -z "$target" ]]; then
-      echo "archive name does not match cooldis-$VERSION-<target>.tar.gz: $name" >&2
+      echo "archive name does not match cooldis-$RELEASE_VERSION-<target>.tar.gz: $name" >&2
       exit 1
     fi
     sha256="$(sha256_from_file "$checksum")"

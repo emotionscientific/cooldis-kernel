@@ -52,8 +52,14 @@ for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
   fi
 done
 
+if [[ ! -f "$INSTALL_ROOT/current/share/cooldis/console/index.html" || ! -d "$INSTALL_ROOT/current/share/cooldis/console/assets" ]]; then
+  echo "expected installed console assets under $INSTALL_ROOT/current/share/cooldis/console" >&2
+  exit 1
+fi
+
 run cooldis --version
 run cooldis --help
+run cooldis console --help
 run cooldis-acp-agent --version
 run cooldis-mcp-server --help
 

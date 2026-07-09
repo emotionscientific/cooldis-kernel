@@ -24,9 +24,9 @@ Each public surface needs:
 2. a help or man-page projection;
 3. a coverage entry that names current gaps.
 
-The internal coverage ledger is `docs/public-api-coverage.md`. This public docs
-site will graduate stable entries from that ledger into user-facing reference
-pages.
+The canonical CLI reference is [Cooldis CLI](../cli.md). The internal coverage
+ledger is `docs/public-api-coverage.md`. This public docs site will graduate
+stable entries from that ledger into user-facing reference pages.
 
 For the currently supported communication surfaces, see
 [Protocol Surfaces](protocol-surfaces.md).

@@ -235,9 +235,13 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
                 "std::schedule.cron",
                 CouplingTemplateMaturity::ReferenceOnly,
                 CouplingRole::Controller,
-                &[EventKind::MandateStarted],
+                &[EventKind::TimerFired],
                 "control",
-                &[EventKind::MandateStarted, EventKind::MandateRevoked],
+                &[
+                    EventKind::MandateStarted,
+                    EventKind::MandateRevoked,
+                    EventKind::TimerFired,
+                ],
                 "control",
                 &[
                     EventKind::TurnContinueRequested,
@@ -245,7 +249,7 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
                 ],
                 false,
                 false,
-                "Turn a standing mandate into bounded future turn requests.",
+                "Turn witnessed timer firings for a standing mandate into bounded future turn requests.",
             ),
             template(
                 "std::supervisor.spawn",
@@ -255,7 +259,11 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
                 "thread",
                 &[EventKind::TurnSubmitted, EventKind::ToolCallRequested],
                 "control",
-                &[EventKind::TurnWaiting, EventKind::CouplingRunCompleted],
+                &[
+                    EventKind::ThreadSpawnRequested,
+                    EventKind::TurnWaiting,
+                    EventKind::CouplingRunCompleted,
+                ],
                 false,
                 false,
                 "Spawn supervised child work through the thread/turn kernel package.",
@@ -377,6 +385,7 @@ fn coupling_template_runtime_executable(id: &str) -> bool {
             | "std::permission.tool_gate"
             | "std::prompt.dynamic_instructions"
             | "std::schedule.cron"
+            | "std::supervisor.spawn"
             | "std::supervisor.child_completion"
             | "std::retry.with_budget"
             | "std::failure.deadletter"
@@ -420,6 +429,7 @@ mod tests {
                 "std::prompt.steer",
                 "std::prompt.dynamic_instructions",
                 "std::schedule.cron",
+                "std::supervisor.spawn",
                 "std::supervisor.child_completion",
                 "std::retry.with_budget",
                 "std::failure.deadletter"

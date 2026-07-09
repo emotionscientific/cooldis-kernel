@@ -55,8 +55,8 @@ In another terminal, call the daemon:
 
 ```sh
 URL="ws://127.0.0.1:49200/rpc"
-cooldis dev rpc call thread/list --url "$URL"
-cooldis dev rpc turn --new --url "$URL" "hello from rpc"
+cooldis debug rpc call thread/list --url "$URL"
+cooldis debug rpc turn --new --url "$URL" "hello from rpc"
 ```
 
 Expected dry response text starts with `local:`.
@@ -93,7 +93,7 @@ cooldis daemon run --config cooldis.toml
 Then submit a real model-backed turn:
 
 ```sh
-cooldis dev rpc turn --new \
+cooldis debug rpc turn --new \
   --url ws://127.0.0.1:49200/rpc \
   "Reply with exactly: COOLDIS_RPC_LIVE_OK"
 ```
@@ -104,8 +104,8 @@ cooldis dev rpc turn --new \
 RPC. It can create sessions, submit prompts, stream updates, cancel active
 prompts, close sessions, and expose session-local config options.
 
-ACP does not own provider auth, operation registry mutation, sandbox policy, or
-Cooldis permission policy.
+ACP does not own provider credentials, operation registry mutation, sandbox
+policy, or Cooldis permission policy.
 
 ### Dry Path
 

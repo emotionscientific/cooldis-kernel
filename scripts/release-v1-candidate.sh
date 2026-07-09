@@ -229,7 +229,11 @@ fi
 RELEASE_BIN="$TARGET_DIR/release/cooldis"
 run "$RELEASE_BIN"
 run "$RELEASE_BIN" --help
+run "$RELEASE_BIN" commands
+run "$RELEASE_BIN" help chat
 run "$RELEASE_BIN" init --help
+run "$RELEASE_BIN" console --help
+run "$RELEASE_BIN" chat --help
 run "$RELEASE_BIN" agent --help
 run "$RELEASE_BIN" agent init --help
 run "$RELEASE_BIN" agent plan --help
@@ -241,6 +245,8 @@ run "$RELEASE_BIN" tool --help
 run "$RELEASE_BIN" tool build --help
 run "$RELEASE_BIN" tool publish --help
 run "$RELEASE_BIN" tool run --help
+run "$RELEASE_BIN" tool manual --help
+run "$RELEASE_BIN" auth --help
 run "$RELEASE_BIN" secret --help
 run "$RELEASE_BIN" secret import --help
 run "$RELEASE_BIN" secret set --help
@@ -248,15 +254,8 @@ run "$RELEASE_BIN" secret list --help
 run "$RELEASE_BIN" secret status --help
 run "$RELEASE_BIN" secret delete --help
 run "$RELEASE_BIN" rpc --help
-run "$RELEASE_BIN" dev --help
-run "$RELEASE_BIN" dev chat --help
-run "$RELEASE_BIN" dev tui --help
-run "$RELEASE_BIN" operator --help
-run "$RELEASE_BIN" thread --help
-run_fails "$RELEASE_BIN" op --help
-run_fails "$RELEASE_BIN" app-server --help
-run_fails "$RELEASE_BIN" chat --help
-run_fails "$RELEASE_BIN" tui --help
+run "$RELEASE_BIN" debug --help
+run "$RELEASE_BIN" debug rpc --help
 run_fails "$RELEASE_BIN" hello
 
 AGENT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cooldis-agent-release.XXXXXX")"

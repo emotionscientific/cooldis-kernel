@@ -146,6 +146,7 @@ pub(super) async fn append_continuation_accepted_event(
             snapshot_id: snapshot_id.to_string(),
             mandate_id: mandate_id.to_string(),
             next_turn_id: next_turn_id.to_string(),
+            admissible: None,
         })
         .map_err(|err| CooldisError::History(err.to_string()))?,
         consumed_request_id,
@@ -170,6 +171,7 @@ pub(super) async fn append_continuation_rejected_event(
             subject: subject.clone(),
             snapshot_id: snapshot_id.to_string(),
             reason: reason.to_string(),
+            admissible: None,
         })
         .map_err(|err| CooldisError::History(err.to_string()))?,
         consumed_request_id,

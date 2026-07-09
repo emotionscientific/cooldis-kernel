@@ -1,0 +1,30 @@
+{
+  "name": "cooldis-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "clean": "rm -rf dist .vite",
+    "clean:deps": "rm -rf dist .vite node_modules"
+  },
+  "dependencies": {
+    "bits-ui": "^2.18.1",
+    "dompurify": "^3.4.9",
+    "lucide-svelte": "^0.468.0",
+    "marked": "^18.0.5",
+    "paneforge": "^1.0.2",
+    "shiki": "^4.2.0",
+    "svelte": "^5.38.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@types/bun": "^1.3.14",
+    "svelte-check": "^4.1.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}

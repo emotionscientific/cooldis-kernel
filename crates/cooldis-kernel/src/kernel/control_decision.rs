@@ -26,6 +26,8 @@ pub struct ToolCallDecisionPayload {
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
     pub outcome: ToolCallDecisionOutcomePayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admissible: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,7 +74,26 @@ pub struct ApprovalResolvedPayload {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MandateSubject {
-    pub loop_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MandateSchedulePayload {
+    Cron { expr: String, tz: String },
+    Interval { every_ms: u64 },
+    At { when: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MandateCatchUpPolicy {
+    CoalesceMissed,
+    #[default]
+    SkipMissed,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,12 +107,22 @@ pub struct MandateStartedPayload {
     pub max_continuations: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<MandateSchedulePayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_occurrences: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up: Option<MandateCatchUpPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_template: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MandateRevokedPayload {
     pub subject: MandateSubject,
     pub mandate_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate_event_id: Option<String>,
     pub snapshot_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -116,6 +147,8 @@ pub struct TurnContinuationAcceptedPayload {
     pub snapshot_id: String,
     pub mandate_id: String,
     pub next_turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admissible: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,6 +156,8 @@ pub struct TurnContinuationRejectedPayload {
     pub subject: TurnContinuationSubject,
     pub snapshot_id: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admissible: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -674,15 +709,18 @@ fn latest_matching_mandate(
                 )));
             }
         };
-        if payload.subject.loop_id != request.subject.loop_id
+        if payload.subject.loop_id.as_deref() != Some(request.subject.loop_id.as_str())
             || payload.snapshot_id != request.snapshot_id
         {
             continue;
         }
+        let request_thread_id = request.coordinates.thread_id.to_string();
         if payload
+            .subject
             .thread_id
             .as_deref()
-            .map(|thread_id| thread_id == request.coordinates.thread_id.to_string())
+            .or(payload.thread_id.as_deref())
+            .map(|thread_id| thread_id == request_thread_id)
             .unwrap_or(true)
         {
             matching.push((event.sequence.get(), payload));
@@ -711,7 +749,7 @@ fn mandate_rejection_reason(
                 )));
             }
         };
-        if payload.subject.loop_id == request.subject.loop_id
+        if payload.subject.loop_id.as_deref() == Some(request.subject.loop_id.as_str())
             && payload.snapshot_id == request.snapshot_id
             && payload.mandate_id == mandate.mandate_id
         {
@@ -724,7 +762,6 @@ fn mandate_rejection_reason(
     }
     Ok(None)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,6 +773,59 @@ mod tests {
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
 
+    #[test]
+    fn decision_payload_admissible_is_additive_optional() {
+        let tool_without: ToolCallDecisionPayload = serde_json::from_value(json!({
+            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+            "snapshot_id": "snapshot-a",
+            "outcome": {"decision": "allow"}
+        }))
+        .unwrap();
+        assert_eq!(tool_without.admissible, None);
+        assert!(serde_json::to_value(&tool_without).unwrap()["admissible"].is_null());
+
+        let tool_with: ToolCallDecisionPayload = serde_json::from_value(json!({
+            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+            "snapshot_id": "snapshot-a",
+            "outcome": {"decision": "deny", "reason": "blocked"},
+            "admissible": ["allow", "rewrite", "deny"]
+        }))
+        .unwrap();
+        assert_eq!(
+            tool_with.admissible,
+            Some(vec![
+                "allow".to_string(),
+                "rewrite".to_string(),
+                "deny".to_string()
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(&tool_with).unwrap()["admissible"],
+            json!(["allow", "rewrite", "deny"])
+        );
+
+        let accepted: TurnContinuationAcceptedPayload = serde_json::from_value(json!({
+            "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
+            "snapshot_id": "snapshot-a",
+            "mandate_id": "mandate-1",
+            "next_turn_id": "turn-2",
+            "admissible": ["accepted", "rejected"]
+        }))
+        .unwrap();
+        assert_eq!(
+            accepted.admissible,
+            Some(vec!["accepted".to_string(), "rejected".to_string()])
+        );
+
+        let rejected: TurnContinuationRejectedPayload = serde_json::from_value(json!({
+            "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
+            "snapshot_id": "snapshot-a",
+            "reason": "budget exhausted"
+        }))
+        .unwrap();
+        assert_eq!(rejected.admissible, None);
+    }
+
     #[tokio::test]
     async fn tool_decision_accepts_fresh_allow_fact() {
         let fixture = ToolDecisionFixture::new().await;
@@ -744,6 +834,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
 
@@ -764,6 +855,7 @@ mod tests {
                 outcome: ToolCallDecisionOutcomePayload::Rewrite {
                     arguments: json!({"cmd": "ls"}),
                 },
+                admissible: None,
             })
             .await;
 
@@ -790,6 +882,7 @@ mod tests {
                 outcome: ToolCallDecisionOutcomePayload::Deny {
                     reason: "dangerous command".to_string(),
                 },
+                admissible: None,
             })
             .await;
 
@@ -840,6 +933,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: "old-snapshot".to_string(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
 
@@ -879,6 +973,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
         fixture
@@ -888,6 +983,7 @@ mod tests {
                 outcome: ToolCallDecisionOutcomePayload::Deny {
                     reason: "blocked".to_string(),
                 },
+                admissible: None,
             })
             .await;
 
@@ -956,13 +1052,18 @@ mod tests {
         fixture
             .append_mandate_started(MandateStartedPayload {
                 subject: MandateSubject {
-                    loop_id: "loop-1".to_string(),
+                    thread_id: None,
+                    loop_id: Some("loop-1".to_string()),
                 },
                 mandate_id: "mandate-1".to_string(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 thread_id: Some(fixture.coordinates.thread_id.to_string()),
                 max_continuations: Some(2),
                 expires_at_ms: Some(10_000),
+                schedule: None,
+                max_occurrences: None,
+                catch_up: None,
+                input_template: None,
             })
             .await;
 
@@ -987,21 +1088,28 @@ mod tests {
         fixture
             .append_mandate_started(MandateStartedPayload {
                 subject: MandateSubject {
-                    loop_id: "loop-1".to_string(),
+                    thread_id: None,
+                    loop_id: Some("loop-1".to_string()),
                 },
                 mandate_id: "mandate-1".to_string(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 thread_id: None,
                 max_continuations: None,
                 expires_at_ms: None,
+                schedule: None,
+                max_occurrences: None,
+                catch_up: None,
+                input_template: None,
             })
             .await;
         fixture
             .append_mandate_revoked(MandateRevokedPayload {
                 subject: MandateSubject {
-                    loop_id: "loop-1".to_string(),
+                    thread_id: None,
+                    loop_id: Some("loop-1".to_string()),
                 },
                 mandate_id: "mandate-1".to_string(),
+                mandate_event_id: None,
                 snapshot_id: fixture.snapshot_id.clone(),
                 reason: Some("operator stopped loop".to_string()),
             })
@@ -1097,6 +1205,7 @@ mod tests {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 outcome: ToolCallDecisionOutcomePayload::Allow,
+                admissible: None,
             })
             .await;
 
@@ -1246,6 +1355,8 @@ mod tests {
                 model_id: "model".to_string(),
                 tool_ids: Vec::new(),
                 operation_bindings: Vec::new(),
+                skill_packages: Vec::new(),
+                static_context_segments: Vec::new(),
                 tool_universes: Vec::new(),
                 couplings,
                 granted: Vec::new(),

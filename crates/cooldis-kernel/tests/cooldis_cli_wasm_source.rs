@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Command;
+use uuid::Uuid;
 
 #[test]
 fn cooldis_cli_builds_rust_source_and_runs_cat_tail() {
@@ -37,8 +38,44 @@ fn cooldis_cli_builds_rust_source_and_runs_cat_tail() {
     assert_eq!(tail, "four\nfive\n");
 }
 
+#[test]
+fn cooldis_coupling_init_scaffold_tests_builds_and_validates_package() {
+    let temp = std::env::temp_dir().join(format!("cooldis-coupling-init-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&temp).unwrap();
+    let scaffold = temp.join("counter-coupling");
+
+    run_cooldis([
+        "coupling",
+        "init",
+        "counter-coupling",
+        "--out",
+        scaffold.to_str().unwrap(),
+    ]);
+    run_command(&scaffold, "cargo", &["test"]);
+    run_command(
+        &scaffold,
+        "cargo",
+        &[
+            "build",
+            "--locked",
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+        ],
+    );
+    run_cooldis_in(
+        &scaffold,
+        ["tool", "build", "--package", "cooldis.tool.toml"],
+    );
+}
+
 fn run_cooldis<const N: usize>(args: [&str; N]) -> String {
+    run_cooldis_in(&PathBuf::from("."), args)
+}
+
+fn run_cooldis_in<const N: usize>(current_dir: &PathBuf, args: [&str; N]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cooldis"))
+        .current_dir(current_dir)
         .args(args)
         .output()
         .expect("failed to run cooldis cli");
@@ -49,4 +86,19 @@ fn run_cooldis<const N: usize>(args: [&str; N]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("cooldis output should be utf8")
+}
+
+fn run_command(current_dir: &PathBuf, program: &str, args: &[&str]) -> String {
+    let output = Command::new(program)
+        .current_dir(current_dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {program}: {err}"));
+    assert!(
+        output.status.success(),
+        "{program} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("command output should be utf8")
 }

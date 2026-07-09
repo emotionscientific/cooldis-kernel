@@ -148,6 +148,21 @@ runtime:
   ) -> status
 ```
 
+Custom coupling capsules reuse the Wasm operation call path with versioned JSON
+payloads instead of a new entrypoint:
+
+```text
+input:  cooldis.coupling.invocation/0.1
+output: cooldis.coupling.discharge/0.1
+```
+
+The invocation carries the trigger event, selected source event cut, manifest
+config, and invocation metadata. The discharge contains proposed events only.
+The kernel stamps discharged origin and provenance after validating the declared
+sink stream and kind, so guest-supplied provenance is ignored. Coupling capsules
+run under the pure-compute host import policy: no HTTP, VFS, secrets, or other
+effectful imports are available through this surface.
+
 The manifest should grow from value kinds toward typed schemas:
 
 ```json
@@ -465,3 +480,15 @@ the first network/tool interface.
 Process, VFS, and claim semantics remain separate design work. The public V1
 contract keeps the network/tool ABI first and treats POSIX-shaped execution as a
 later compatibility layer.
+
+## Encoding Trajectory
+
+The V1 guest encoding is core Wasm with JSON over linear memory. The
+WebAssembly component model (WIT) is the named successor, and the migration is
+planned, not pending discovery: the SDK macro layer is the compatibility
+boundary, the wire encoding is a private detail of the macro expansion, and
+the component migration swaps the expansion and the host executor without
+touching guest source, manifests, or recorded operation contracts.
+
+See [ADR 0002](adr/0002-guest-encoding-v1-component-model-later.md) for the
+decision, the reasons components are not V1, and the migration triggers.

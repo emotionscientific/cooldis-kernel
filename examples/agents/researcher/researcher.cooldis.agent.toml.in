@@ -19,7 +19,7 @@ schema_version = 1
 
 [[model_profiles]]
 id = "default"
-provider_ref = "provider://local/default"
+provider_ref = "provider://local"
 model_ref = "model://local/default"
 
 [model_profiles.params]

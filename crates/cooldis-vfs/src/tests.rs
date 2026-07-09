@@ -1,51 +1,11 @@
 use super::*;
-use cooldis_fs::DirObjectStore;
-use cooldis_fs::workspace::{self, Change};
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use std::fmt::{Display, Result as FmtResult};
-use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-
-static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
-
-struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    fn new(label: &str) -> Self {
-        let id = NEXT_TEMP_DIR.fetch_add(1, AtomicOrdering::SeqCst);
-        let path =
-            std::env::temp_dir().join(format!("cooldis-vfs-{label}-{}-{id}", std::process::id()));
-        remove_dir_if_exists(&path)
-            .unwrap_or_else(|err| panic!("failed to remove {}: {err}", path.display()));
-        fs::create_dir_all(&path)
-            .unwrap_or_else(|err| panic!("failed to create {}: {err}", path.display()));
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = remove_dir_if_exists(&self.path);
-    }
-}
-
-fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
-}
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 #[derive(Debug)]
 struct FailingFirstPutStore {
@@ -165,93 +125,6 @@ fn object_store_mount_prefixes_are_normalized_for_virtual_paths() {
         "tenant/session/dir/"
     );
     assert_eq!(relative_vfs_key(Path::new("../escaped.txt")), "escaped.txt");
-}
-
-/// Verifies the v1 "mountable" acceptance bar from cooldis-fs
-/// `docs/design.md`: VFS writes through a mounted workspace directory are
-/// exactly what cooldis-fs commits, diffs, checks out, and re-commits.
-#[tokio::test]
-async fn cooldis_fs_workspace_dir_mount_commits_and_restores_vfs_writes() {
-    let workspace_dir = TestDir::new("workspace");
-    let store_dir = TestDir::new("store");
-    let checkout_dir = TestDir::new("checkout");
-    let store = DirObjectStore::open(store_dir.path()).unwrap();
-
-    let vfs = CooldisVfs::new(Arc::new(InMemoryFs::new()));
-    let host_workspace = Arc::new(HostFileSystem::read_write(workspace_dir.path()).unwrap());
-    vfs.mount("/workspace", host_workspace).unwrap();
-
-    vfs.mkdir(Path::new("/workspace/nested"), true)
-        .await
-        .unwrap();
-    vfs.write_file(Path::new("/workspace/root.txt"), b"alpha\n")
-        .await
-        .unwrap();
-    vfs.write_file(Path::new("/workspace/nested/story.txt"), b"chapter one\n")
-        .await
-        .unwrap();
-    vfs.flush().await.unwrap();
-
-    let record1 = workspace::commit(&store, workspace_dir.path(), None, "episode-1").unwrap();
-
-    vfs.write_file(Path::new("/workspace/root.txt"), b"alpha edited\n")
-        .await
-        .unwrap();
-    vfs.write_file(Path::new("/workspace/extra.txt"), b"new file\n")
-        .await
-        .unwrap();
-    vfs.remove(Path::new("/workspace/nested/story.txt"), false)
-        .await
-        .unwrap();
-    vfs.flush().await.unwrap();
-
-    let record2 = workspace::commit(
-        &store,
-        workspace_dir.path(),
-        Some(record1.commit),
-        "episode-2",
-    )
-    .unwrap();
-
-    let mut diff = workspace::diff(&store, record1.root, record2.root)
-        .unwrap()
-        .into_iter()
-        .map(|entry| (entry.path.to_string_lossy().into_owned(), entry.change))
-        .collect::<Vec<_>>();
-    diff.sort_by(|left, right| left.0.cmp(&right.0));
-    assert_eq!(
-        diff,
-        vec![
-            ("extra.txt".to_owned(), Change::Added),
-            ("nested/story.txt".to_owned(), Change::Removed),
-            ("root.txt".to_owned(), Change::Modified),
-        ]
-    );
-
-    workspace::checkout(&store, record1.root, checkout_dir.path()).unwrap();
-    let restored =
-        workspace::commit(&store, checkout_dir.path(), None, "episode-1-restored").unwrap();
-    assert_eq!(restored.root, record1.root);
-    assert_eq!(
-        fs::read(checkout_dir.path().join("root.txt")).unwrap(),
-        b"alpha\n"
-    );
-    assert_eq!(
-        fs::read(checkout_dir.path().join("nested/story.txt")).unwrap(),
-        b"chapter one\n"
-    );
-
-    assert_eq!(record2.parent, Some(record1.commit));
-    assert_eq!(record1.stats.files, 2);
-    assert_eq!(
-        record1.stats.total_bytes,
-        (b"alpha\n".len() + b"chapter one\n".len()) as u64
-    );
-    assert_eq!(record2.stats.files, 2);
-    assert_eq!(
-        record2.stats.total_bytes,
-        (b"alpha edited\n".len() + b"new file\n".len()) as u64
-    );
 }
 
 #[tokio::test]

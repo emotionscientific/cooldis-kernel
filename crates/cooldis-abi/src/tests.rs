@@ -1,5 +1,6 @@
 use super::*;
 use crate::{WasmOperationMode, WasmOperationValueKind};
+use serde_json::json;
 
 fn operation(
     name: &str,
@@ -248,4 +249,43 @@ fn scratch_claim_uses_host_allocated_path() {
             path: Some("/workspace/scratch.txt".to_string()),
         },
     )));
+}
+
+#[test]
+fn coupling_invocation_and_discharge_use_versioned_abi_tags() {
+    let invocation = CouplingInvocation::new(
+        CouplingInvocationEvent {
+            id: "event-1".to_string(),
+            stream_id: "thread:abc".to_string(),
+            sequence: 7,
+            kind: "turn.completed".to_string(),
+            origin: "witnessed".to_string(),
+            payload: json!({"turn_id": "t1"}),
+        },
+        Vec::new(),
+        json!({"every": 3}),
+        CouplingInvocationMeta {
+            coupling_id: "org.example.counter".to_string(),
+            thread_id: "abc".to_string(),
+            depth: 0,
+        },
+    );
+
+    let value = serde_json::to_value(&invocation).unwrap();
+    assert_eq!(value["abi"], COUPLING_INVOCATION_ABI);
+    assert_eq!(
+        value["invocation_meta"]["coupling_id"],
+        "org.example.counter"
+    );
+
+    let discharge = CouplingDischarge::new(vec![CouplingDischargeEvent {
+        stream: "derived:counter".to_string(),
+        kind: "placement.decision".to_string(),
+        payload: json!({"count": 3}),
+        provenance: Some(json!({"ignored": true})),
+    }]);
+
+    let value = serde_json::to_value(&discharge).unwrap();
+    assert_eq!(value["abi"], COUPLING_DISCHARGE_ABI);
+    assert_eq!(value["events"][0]["kind"], "placement.decision");
 }

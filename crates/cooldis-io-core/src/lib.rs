@@ -19,6 +19,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -573,12 +574,34 @@ impl IoTarget {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EgressKind {
-    AssistantDelta { text: String },
-    AssistantMessage { text: String },
-    Status { text: String },
-    ToolStarted { name: String },
-    ToolCompleted { name: String, success: bool },
-    Error { message: String },
+    AssistantDelta {
+        text: String,
+    },
+    AssistantMessage {
+        text: String,
+    },
+    Status {
+        text: String,
+    },
+    ToolStarted {
+        name: String,
+    },
+    ToolCompleted {
+        name: String,
+        success: bool,
+    },
+    Error {
+        message: String,
+    },
+    PlatformAction {
+        action: String,
+        #[serde(default)]
+        payload: JsonValue,
+    },
+    Silence {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 impl EgressKind {
@@ -588,7 +611,10 @@ impl EgressKind {
             | Self::AssistantMessage { text }
             | Self::Status { text } => Some(text.as_str()),
             Self::Error { message } => Some(message.as_str()),
-            Self::ToolStarted { .. } | Self::ToolCompleted { .. } => None,
+            Self::ToolStarted { .. }
+            | Self::ToolCompleted { .. }
+            | Self::PlatformAction { .. }
+            | Self::Silence { .. } => None,
         }
     }
 }
@@ -795,6 +821,8 @@ pub trait IngressQueueStore: IngressSink {
 
     async fn complete_ingress(&self, message_id: &str) -> IoResult<()>;
 
+    async fn hold_ingress_until(&self, message_id: &str, visible_at_ms: u64) -> IoResult<()>;
+
     async fn retry_ingress(&self, message_id: &str, reason: &str) -> IoResult<()>;
 }
 
@@ -993,6 +1021,33 @@ mod tests {
             "telegram:chat:123"
         );
         assert_eq!(egress.kind.visible_text(), Some("hello back"));
+    }
+
+    #[test]
+    fn egress_kind_round_trips_platform_action_and_silence() {
+        let action = EgressKind::PlatformAction {
+            action: "reaction".to_string(),
+            payload: serde_json::json!({
+                "message_id": 555,
+                "emoji": "👍",
+            }),
+        };
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(value["type"], "platform_action");
+        assert_eq!(value["action"], "reaction");
+        assert_eq!(value["payload"]["emoji"], "👍");
+
+        let roundtrip: EgressKind = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip, action);
+        assert_eq!(roundtrip.visible_text(), None);
+
+        let silence = EgressKind::Silence {
+            reason: Some("agent_declined".to_string()),
+        };
+        let value = serde_json::to_value(&silence).unwrap();
+        assert_eq!(value["type"], "silence");
+        assert_eq!(value["reason"], "agent_declined");
+        assert_eq!(silence.visible_text(), None);
     }
 
     #[test]

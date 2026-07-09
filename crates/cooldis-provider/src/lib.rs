@@ -1,6 +1,7 @@
 pub mod provider_transform;
 
 use async_trait::async_trait;
+use base64::Engine;
 use cooldis_history::{
     CacheControl, CanonicalContent, CanonicalMessage, CanonicalStopReason, CanonicalUsage,
     ProviderApi, ThinkingMetadata, ThinkingProvider,
@@ -10,7 +11,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use thiserror::Error;
 
 /// Providers that accept Zhipu-style chat-completions `thinking` parameters.
@@ -649,12 +650,24 @@ pub trait ProviderWireAdapter: Send + Sync {
         body["stream"] = json!(true);
         Ok(body)
     }
+    fn stream_endpoint_url(&self, endpoint_url: &str) -> String {
+        endpoint_url.to_string()
+    }
+    fn stream_request_headers(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("accept", "text/event-stream")]
+    }
     fn decode_response_body(&self, body: &Value) -> ProviderResult<ProviderResponse>;
     fn decode_stream_events(&self, _sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>> {
         Err(ProviderError::Decode(format!(
             "adapter {:?} does not support streaming decode",
             self.api()
         )))
+    }
+    fn decode_stream_response(&self, body: &[u8]) -> ProviderResult<Vec<ProviderStreamEvent>> {
+        let sse = std::str::from_utf8(body).map_err(|err| {
+            ProviderError::Decode(format!("stream response was not UTF-8: {err}"))
+        })?;
+        self.decode_stream_events(sse)
     }
 }
 
@@ -865,7 +878,9 @@ fn provider_json_body(body: &Value) -> ProviderResult<Vec<u8>> {
 fn apply_endpoint_auth(
     mut builder: reqwest::RequestBuilder,
     endpoint: &ProviderEndpoint,
+    request_url: &str,
     body: &[u8],
+    extra_signed_headers: &[(String, String)],
 ) -> ProviderResult<reqwest::RequestBuilder> {
     builder = match &endpoint.auth {
         ProviderAuth::Bearer { token } => builder.bearer_auth(token),
@@ -879,7 +894,7 @@ fn apply_endpoint_auth(
         } => {
             for (name, value) in aws_sigv4_headers(AwsSigV4Request {
                 method: "POST",
-                url: &endpoint.url,
+                url: request_url,
                 body,
                 access_key_id,
                 secret_access_key,
@@ -887,6 +902,7 @@ fn apply_endpoint_auth(
                 region,
                 service,
                 content_type: "application/json",
+                extra_headers: extra_signed_headers,
                 now: chrono::Utc::now(),
             })? {
                 builder = builder.header(name, value);
@@ -911,6 +927,7 @@ struct AwsSigV4Request<'a> {
     region: &'a str,
     service: &'a str,
     content_type: &'a str,
+    extra_headers: &'a [(String, String)],
     now: chrono::DateTime<chrono::Utc>,
 }
 
@@ -933,6 +950,9 @@ fn aws_sigv4_headers(request: AwsSigV4Request<'_>) -> ProviderResult<Vec<(String
             "x-amz-security-token".to_string(),
             session_token.to_string(),
         ));
+    }
+    for (name, value) in request.extra_headers {
+        canonical_header_values.push((name.to_ascii_lowercase(), value.to_string()));
     }
     canonical_header_values.sort_by(|left, right| left.0.cmp(&right.0));
     let canonical_headers = canonical_header_values
@@ -1091,7 +1111,7 @@ impl ProviderClient for ProviderHttpClient {
             .post(&self.endpoint.url)
             .header("content-type", "application/json")
             .body(body.clone());
-        builder = apply_endpoint_auth(builder, &self.endpoint, &body)?;
+        builder = apply_endpoint_auth(builder, &self.endpoint, &self.endpoint.url, &body, &[])?;
 
         let response = builder
             .send()
@@ -1122,27 +1142,60 @@ impl ProviderClient for ProviderHttpClient {
             .validate_request(request, ProviderRequestMode::Stream)?;
         let body = self.adapter.build_stream_request_body(request)?;
         let body = provider_json_body(&body)?;
+        let stream_url = self.adapter.stream_endpoint_url(&self.endpoint.url);
         let mut builder = self
             .http
-            .post(&self.endpoint.url)
-            .header("accept", "text/event-stream")
+            .post(&stream_url)
             .header("content-type", "application/json")
             .body(body.clone());
-        builder = apply_endpoint_auth(builder, &self.endpoint, &body)?;
+        let stream_headers = self.adapter.stream_request_headers();
+        let extra_signed_headers = stream_headers
+            .iter()
+            .filter(|(name, _)| name.to_ascii_lowercase().starts_with("x-amz"))
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect::<Vec<_>>();
+        for (name, value) in stream_headers {
+            builder = builder.header(name, value);
+        }
+        builder = apply_endpoint_auth(
+            builder,
+            &self.endpoint,
+            &stream_url,
+            &body,
+            &extra_signed_headers,
+        )?;
 
         let response = builder
             .send()
             .await
             .map_err(|err| ProviderError::Http(err.to_string()))?;
         let status = response.status();
-        let text = response
-            .text()
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let content_length = response.content_length();
+        let bytes = response
+            .bytes()
             .await
             .map_err(|err| ProviderError::Http(err.to_string()))?;
         if !status.is_success() {
-            return Err(ProviderError::HttpStatus { status, body: text });
+            return Err(ProviderError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            });
         }
-        self.adapter.decode_stream_events(&text)
+        if bytes.is_empty() {
+            return Err(ProviderError::Decode(format!(
+                "provider stream response body was empty; content_type={}; content_length={}",
+                content_type.unwrap_or_else(|| "unknown".to_string()),
+                content_length
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
+        self.adapter.decode_stream_response(&bytes)
     }
 }
 
@@ -1493,7 +1546,6 @@ impl ProviderWireAdapter for AnthropicBedrockMessagesAdapter {
     fn capabilities(&self) -> ProviderCapabilityRecord {
         let mut capabilities = ProviderCapabilityRecord::for_api(ProviderApi::AnthropicMessages);
         capabilities.provider_family = "anthropic_bedrock_messages".to_string();
-        capabilities.supports_streaming = false;
         capabilities
     }
 
@@ -1511,12 +1563,38 @@ impl ProviderWireAdapter for AnthropicBedrockMessagesAdapter {
         ))
     }
 
+    fn build_stream_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value> {
+        self.capabilities()
+            .validate_request(request, ProviderRequestMode::Stream)?;
+        ensure_api(
+            "anthropic_bedrock_messages",
+            &request.api,
+            ProviderApi::AnthropicMessages,
+        )?;
+        Ok(build_anthropic_messages_body(
+            request,
+            AnthropicRequestFlavor::Bedrock,
+        ))
+    }
+
+    fn stream_endpoint_url(&self, endpoint_url: &str) -> String {
+        bedrock_response_stream_endpoint_url(endpoint_url)
+    }
+
+    fn stream_request_headers(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("x-amzn-bedrock-accept", "application/json")]
+    }
+
     fn decode_response_body(&self, body: &Value) -> ProviderResult<ProviderResponse> {
         AnthropicMessagesAdapter.decode_response_body(body)
     }
 
     fn decode_stream_events(&self, sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>> {
         self.decode_sse_events(sse)
+    }
+
+    fn decode_stream_response(&self, body: &[u8]) -> ProviderResult<Vec<ProviderStreamEvent>> {
+        decode_bedrock_anthropic_eventstream(body)
     }
 }
 
@@ -2554,6 +2632,336 @@ fn decode_anthropic_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>> {
     }
 
     Ok(out)
+}
+
+fn bedrock_response_stream_endpoint_url(endpoint_url: &str) -> String {
+    endpoint_url
+        .strip_suffix("/invoke")
+        .map(|prefix| format!("{prefix}/invoke-with-response-stream"))
+        .unwrap_or_else(|| endpoint_url.to_string())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AwsEventStreamFrame {
+    headers: BTreeMap<String, AwsEventStreamHeaderValue>,
+    payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AwsEventStreamHeaderValue {
+    Bool(bool),
+    Byte(i8),
+    Short(i16),
+    Integer(i32),
+    Long(i64),
+    Bytes(Vec<u8>),
+    String(String),
+    Timestamp(i64),
+    Uuid([u8; 16]),
+}
+
+impl AwsEventStreamHeaderValue {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct AwsEventStreamDecoder {
+    buffer: Vec<u8>,
+}
+
+impl AwsEventStreamDecoder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> ProviderResult<Vec<AwsEventStreamFrame>> {
+        self.buffer.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+
+        loop {
+            if self.buffer.len() < 12 {
+                break;
+            }
+
+            let total_length = read_be_u32(&self.buffer[0..4])? as usize;
+            let headers_length = read_be_u32(&self.buffer[4..8])? as usize;
+            if total_length < 16 {
+                return Err(ProviderError::Decode(format!(
+                    "AWS eventstream frame total length {total_length} is smaller than the 16-byte frame overhead"
+                )));
+            }
+            if headers_length > total_length.saturating_sub(16) {
+                return Err(ProviderError::Decode(format!(
+                    "AWS eventstream headers length {headers_length} exceeds frame payload budget"
+                )));
+            }
+
+            let expected_prelude_crc = read_be_u32(&self.buffer[8..12])?;
+            let actual_prelude_crc = crc32(&self.buffer[0..8]);
+            if expected_prelude_crc != actual_prelude_crc {
+                return Err(ProviderError::Decode(format!(
+                    "AWS eventstream prelude CRC mismatch: expected {expected_prelude_crc:#010x}, got {actual_prelude_crc:#010x}"
+                )));
+            }
+
+            if self.buffer.len() < total_length {
+                break;
+            }
+
+            let expected_message_crc = read_be_u32(&self.buffer[total_length - 4..total_length])?;
+            let actual_message_crc = crc32(&self.buffer[0..total_length - 4]);
+            if expected_message_crc != actual_message_crc {
+                return Err(ProviderError::Decode(format!(
+                    "AWS eventstream message CRC mismatch: expected {expected_message_crc:#010x}, got {actual_message_crc:#010x}"
+                )));
+            }
+
+            let headers_start = 12;
+            let headers_end = headers_start + headers_length;
+            let payload_end = total_length - 4;
+            let headers = decode_aws_eventstream_headers(&self.buffer[headers_start..headers_end])?;
+            let payload = self.buffer[headers_end..payload_end].to_vec();
+            frames.push(AwsEventStreamFrame { headers, payload });
+            self.buffer.drain(..total_length);
+        }
+
+        Ok(frames)
+    }
+
+    fn finish(mut self) -> ProviderResult<Vec<AwsEventStreamFrame>> {
+        let frames = self.push(&[])?;
+        if self.buffer.is_empty() {
+            return Ok(frames);
+        }
+        if self.buffer.len() < 12 {
+            return Err(ProviderError::Decode(format!(
+                "truncated AWS eventstream prelude: got {} bytes, need 12",
+                self.buffer.len()
+            )));
+        }
+        let total_length = read_be_u32(&self.buffer[0..4])? as usize;
+        Err(ProviderError::Decode(format!(
+            "truncated AWS eventstream frame: got {} bytes, need {total_length}",
+            self.buffer.len()
+        )))
+    }
+}
+
+fn decode_aws_eventstream_frames(body: &[u8]) -> ProviderResult<Vec<AwsEventStreamFrame>> {
+    let mut decoder = AwsEventStreamDecoder::new();
+    let mut frames = decoder.push(body)?;
+    frames.extend(decoder.finish()?);
+    Ok(frames)
+}
+
+fn decode_aws_eventstream_headers(
+    mut bytes: &[u8],
+) -> ProviderResult<BTreeMap<String, AwsEventStreamHeaderValue>> {
+    let mut headers = BTreeMap::new();
+    while !bytes.is_empty() {
+        let name_length = take_u8(&mut bytes)? as usize;
+        if name_length == 0 {
+            return Err(ProviderError::Decode(
+                "AWS eventstream header name was empty".to_string(),
+            ));
+        }
+        let name = take_bytes(&mut bytes, name_length)?;
+        let name = std::str::from_utf8(name)
+            .map_err(|err| {
+                ProviderError::Decode(format!("AWS eventstream header name was not UTF-8: {err}"))
+            })?
+            .to_string();
+        let value_type = take_u8(&mut bytes)?;
+        let value = match value_type {
+            0 => AwsEventStreamHeaderValue::Bool(true),
+            1 => AwsEventStreamHeaderValue::Bool(false),
+            2 => AwsEventStreamHeaderValue::Byte(take_u8(&mut bytes)? as i8),
+            3 => AwsEventStreamHeaderValue::Short(i16::from_be_bytes(take_array(&mut bytes)?)),
+            4 => AwsEventStreamHeaderValue::Integer(i32::from_be_bytes(take_array(&mut bytes)?)),
+            5 => AwsEventStreamHeaderValue::Long(i64::from_be_bytes(take_array(&mut bytes)?)),
+            6 => {
+                let length = u16::from_be_bytes(take_array(&mut bytes)?) as usize;
+                AwsEventStreamHeaderValue::Bytes(take_bytes(&mut bytes, length)?.to_vec())
+            }
+            7 => {
+                let length = u16::from_be_bytes(take_array(&mut bytes)?) as usize;
+                let value = take_bytes(&mut bytes, length)?;
+                let value = std::str::from_utf8(value)
+                    .map_err(|err| {
+                        ProviderError::Decode(format!(
+                            "AWS eventstream string header {name:?} was not UTF-8: {err}"
+                        ))
+                    })?
+                    .to_string();
+                AwsEventStreamHeaderValue::String(value)
+            }
+            8 => AwsEventStreamHeaderValue::Timestamp(i64::from_be_bytes(take_array(&mut bytes)?)),
+            9 => AwsEventStreamHeaderValue::Uuid(take_array(&mut bytes)?),
+            other => {
+                return Err(ProviderError::Decode(format!(
+                    "unknown AWS eventstream header value type {other}"
+                )));
+            }
+        };
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+fn decode_bedrock_anthropic_eventstream(body: &[u8]) -> ProviderResult<Vec<ProviderStreamEvent>> {
+    let frames = decode_aws_eventstream_frames(body)?;
+    let mut events = Vec::new();
+    let mut anthropic_sse = String::new();
+    for frame in frames {
+        let event_type = frame
+            .headers
+            .get(":event-type")
+            .and_then(AwsEventStreamHeaderValue::as_str);
+        let payload: Value = serde_json::from_slice(&frame.payload).map_err(|err| {
+            ProviderError::Decode(format!("invalid Bedrock eventstream payload JSON: {err}"))
+        })?;
+        if let Some(bytes) = payload
+            .pointer("/chunk/bytes")
+            .or_else(|| payload.get("bytes"))
+            .and_then(Value::as_str)
+        {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(bytes)
+                .map_err(|err| {
+                    ProviderError::Decode(format!(
+                        "invalid Bedrock chunk.bytes base64 payload: {err}"
+                    ))
+                })?;
+            append_anthropic_sse_event(&mut anthropic_sse, &decoded)?;
+            continue;
+        }
+        if event_type == Some("chunk") {
+            append_anthropic_sse_event(&mut anthropic_sse, &frame.payload)?;
+            continue;
+        }
+        if let Some(message) = bedrock_stream_error_message(&payload) {
+            flush_anthropic_sse(&mut anthropic_sse, &mut events)?;
+            events.push(ProviderStreamEvent::Error { message });
+        } else if let Some(event_type) = event_type {
+            flush_anthropic_sse(&mut anthropic_sse, &mut events)?;
+            events.push(ProviderStreamEvent::Error {
+                message: format!(
+                    "{event_type}: {}",
+                    payload
+                        .get("message")
+                        .or_else(|| payload.get("Message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Bedrock response stream failed")
+                ),
+            });
+        }
+    }
+    flush_anthropic_sse(&mut anthropic_sse, &mut events)?;
+    Ok(events)
+}
+
+fn append_anthropic_sse_event(sse: &mut String, event_json: &[u8]) -> ProviderResult<()> {
+    let event_text = std::str::from_utf8(event_json).map_err(|err| {
+        ProviderError::Decode(format!(
+            "Bedrock Anthropic chunk payload was not UTF-8: {err}"
+        ))
+    })?;
+    let event: Value = serde_json::from_str(event_text).map_err(|err| {
+        ProviderError::Decode(format!("invalid Bedrock Anthropic chunk JSON: {err}"))
+    })?;
+    let kind = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message");
+    sse.push_str("event: ");
+    sse.push_str(kind);
+    sse.push('\n');
+    sse.push_str("data: ");
+    sse.push_str(event_text);
+    sse.push_str("\n\n");
+    Ok(())
+}
+
+fn flush_anthropic_sse(
+    sse: &mut String,
+    events: &mut Vec<ProviderStreamEvent>,
+) -> ProviderResult<()> {
+    if sse.is_empty() {
+        return Ok(());
+    }
+    events.extend(decode_anthropic_sse(sse)?);
+    sse.clear();
+    Ok(())
+}
+
+fn bedrock_stream_error_message(payload: &Value) -> Option<String> {
+    for key in [
+        "modelStreamErrorException",
+        "modelTimeoutException",
+        "internalServerException",
+        "serviceUnavailableException",
+        "throttlingException",
+        "validationException",
+        "modelErrorException",
+        "modelNotReadyException",
+        "serviceQuotaExceededException",
+    ] {
+        if let Some(error) = payload.get(key) {
+            let message = error
+                .get("message")
+                .or_else(|| error.get("originalMessage"))
+                .and_then(Value::as_str)
+                .unwrap_or("Bedrock response stream failed");
+            return Some(format!("{key}: {message}"));
+        }
+    }
+    None
+}
+
+fn read_be_u32(bytes: &[u8]) -> ProviderResult<u32> {
+    Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
+        ProviderError::Decode("internal AWS eventstream u32 slice length mismatch".to_string())
+    })?))
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
+fn take_u8<'a>(bytes: &mut &'a [u8]) -> ProviderResult<u8> {
+    let Some((first, rest)) = bytes.split_first() else {
+        return Err(ProviderError::Decode(
+            "truncated AWS eventstream header".to_string(),
+        ));
+    };
+    *bytes = rest;
+    Ok(*first)
+}
+
+fn take_bytes<'a>(bytes: &mut &'a [u8], length: usize) -> ProviderResult<&'a [u8]> {
+    if bytes.len() < length {
+        return Err(ProviderError::Decode(format!(
+            "truncated AWS eventstream header value: got {} bytes, need {length}",
+            bytes.len()
+        )));
+    }
+    let (head, rest) = bytes.split_at(length);
+    *bytes = rest;
+    Ok(head)
+}
+
+fn take_array<const N: usize>(bytes: &mut &[u8]) -> ProviderResult<[u8; N]> {
+    let value = take_bytes(bytes, N)?;
+    value.try_into().map_err(|_| {
+        ProviderError::Decode("internal AWS eventstream array length mismatch".to_string())
+    })
 }
 
 fn image_data_url(content: &CanonicalContent) -> Option<String> {

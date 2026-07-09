@@ -797,6 +797,64 @@ async fn sqlite_event_load_fails_closed_on_payload_schema_drift() {
 }
 
 #[tokio::test]
+async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() {
+    let path = temp_db_path("cooldis-history-egress-requested-replay-invalid");
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    {
+        let store = SqliteSessionStore::open(&path).unwrap();
+        store
+            .append_events(
+                &stream_id,
+                vec![NewEventRecord::discharged(
+                    coordinates,
+                    EventKind::IoEgressRequested,
+                    serde_json::json!({
+                        "schema": EventKind::IoEgressRequested.payload_schema_id(),
+                        "egress_kind": {
+                            "type": "platform_action",
+                            "action": "reaction",
+                            "payload": {
+                                "message_id": "message-1",
+                                "emoji": "👍"
+                            }
+                        },
+                        "requested_by_tool_call_id": "call_1"
+                    }),
+                    EventProvenance {
+                        source_streams: vec![stream_id.clone()],
+                        discharged_by: Some("rpc:append_events".to_string()),
+                        function: Some("io_egress_requested/v1".to_string()),
+                        ..EventProvenance::default()
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE event_records SET payload_json = ?1",
+                params![
+                    serde_json::json!({
+                        "schema": EventKind::IoEgressRequested.payload_schema_id(),
+                        "requested_by_tool_call_id": "call_1"
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+    }
+
+    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let err = reopened.read_events(&stream_id, None).await.unwrap_err();
+    assert!(matches!(err, HistoryError::Codec(message) if message.contains("egress_kind")));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
     let path = temp_db_path("cooldis-history-legacy-events");
     let coordinates = coords("tenant_a", "user_1", "session_1");
@@ -904,19 +962,21 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
     assert_eq!(
         events[1].provenance,
         EventProvenance {
-            source_streams: vec![stream_id.clone()],
-            discharged_by: Some("propagator:agent-loop".to_string()),
+            discharged_by: Some("migration:origin-backfill@v1".to_string()),
             ..EventProvenance::default()
         }
     );
+    assert_ne!(
+        events[1].provenance.discharged_by.as_deref(),
+        Some("propagator:agent-loop")
+    );
+    assert!(events[1].provenance.source_event_ids.is_empty());
     assert_eq!(events[2].kind, EventKind::ContextCompileCompleted);
     assert_eq!(events[2].origin, EventOrigin::Discharged);
     assert_eq!(
         events[2].provenance,
         EventProvenance {
-            source_streams: vec![stream_id.clone()],
-            discharged_by: Some("projection:context-compiler".to_string()),
-            function: Some("naive_assembly/v1".to_string()),
+            discharged_by: Some("migration:origin-backfill@v1".to_string()),
             ..EventProvenance::default()
         }
     );

@@ -23,7 +23,7 @@ Cooldis permissioning centers on:
 - resource bindings;
 - placement policy;
 - operation ABI contracts;
-- approval hooks;
+- approval gates;
 - event streams;
 - receipts for durable effects;
 - revoke, rollback, and quarantine paths.

@@ -1,3 +1,4 @@
+use crate::kernel::admission::AdmissionGateContext;
 use crate::{
     AgentRuntimeFactory, CooldisError, CooldisResult, RuntimeExecutionPolicy, RuntimeHost,
     RuntimeHostSnapshot, RuntimeStore, RuntimeThreadHandle, SqliteSessionStore, ThreadBaseRef,
@@ -442,6 +443,22 @@ impl CooldisSupervisor {
             .await?
             .host
             .submit_turn_with_mode(coordinates.thread_id, turn_id, input, mode)
+            .await
+    }
+
+    pub(crate) async fn submit_turn_to_with_admission(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: impl Into<String>,
+        input: TurnInput,
+        mode: TurnSubmissionMode,
+        admission: Option<AdmissionGateContext>,
+    ) -> CooldisResult<()> {
+        self.get_thread_at(coordinates).await?;
+        self.tenant(&coordinates.tenant_id)
+            .await?
+            .host
+            .submit_turn_with_admission(coordinates.thread_id, turn_id, input, mode, admission)
             .await
     }
 
