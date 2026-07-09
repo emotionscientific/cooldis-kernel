@@ -26,7 +26,7 @@
       "supports_atomic_batch_append": true,
       "supports_broadcast": false,
       "supports_cold_archive": false,
-      "supports_expected_tail": false,
+      "supports_expected_tail": true,
       "supports_fencing_tokens": false,
       "supports_live_follow": false,
       "supports_query_projection": true,

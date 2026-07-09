@@ -25,6 +25,84 @@ fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
         .collect()
 }
 
+async fn assert_fenced_append_conformance(store: &dyn EventStore) -> EventStreamId {
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let record = |entry_id: &str| {
+        NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::SessionEntryAppended,
+            serde_json::json!({"entry_id": entry_id}),
+        )
+    };
+
+    let initial = store
+        .append_events_fenced(
+            &stream_id,
+            EventSequence::new(1),
+            vec![record("entry-1"), record("entry-2")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        initial
+            .iter()
+            .map(|event| event.sequence.get())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    store
+        .append_events(&stream_id, vec![record("competing-entry")])
+        .await
+        .unwrap();
+    let before_conflict =
+        serde_json::to_vec(&store.read_events(&stream_id, None).await.unwrap()).unwrap();
+
+    let err = store
+        .append_events_fenced(
+            &stream_id,
+            EventSequence::new(3),
+            vec![record("losing-entry-1"), record("losing-entry-2")],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        HistoryError::AppendFenceConflict {
+            stream_id: conflict_stream,
+            expected_next_sequence: 3,
+            actual_next_sequence: 4,
+        } if conflict_stream == stream_id
+    ));
+
+    let after_conflict =
+        serde_json::to_vec(&store.read_events(&stream_id, None).await.unwrap()).unwrap();
+    assert_eq!(after_conflict, before_conflict);
+    stream_id
+}
+
+#[tokio::test]
+async fn in_memory_store_honors_fenced_append_conformance() {
+    assert_fenced_append_conformance(&InMemorySessionStore::new()).await;
+}
+
+#[tokio::test]
+async fn sqlite_store_honors_fenced_append_conformance() {
+    let path = temp_db_path("cooldis-history-fenced-append");
+    let store = SqliteSessionStore::open(&path).unwrap();
+
+    let stream_id = assert_fenced_append_conformance(&store).await;
+
+    drop(store);
+    let reopened = SqliteSessionStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.read_events(&stream_id, None).await.unwrap().len(),
+        3
+    );
+    let _ = std::fs::remove_file(path);
+}
+
 #[tokio::test]
 async fn sqlite_store_persists_canonical_history_across_reopen() {
     let path = temp_db_path("cooldis-history-persist");

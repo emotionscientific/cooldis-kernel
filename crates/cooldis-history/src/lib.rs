@@ -879,7 +879,7 @@ impl StreamBackendCapabilitiesV1 {
             supports_atomic_batch_append: true,
             supports_verified_cursor_replay: true,
             supports_query_projection: true,
-            supports_expected_tail: false,
+            supports_expected_tail: true,
             supports_fencing_tokens: false,
             supports_live_follow: false,
             supports_broadcast: false,
@@ -2838,28 +2838,30 @@ impl EventStore for InMemorySessionStore {
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
         let mut inner = self.inner.write().await;
-        let current_len = inner
+        append_in_memory_events(&mut inner, stream_id, records)
+    }
+
+    async fn append_events_fenced(
+        &self,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        let mut inner = self.inner.write().await;
+        let actual_next_sequence = inner
             .events
             .get(stream_id)
             .map(|events| events.len() as i64)
-            .unwrap_or_default();
-        let mut appended = Vec::with_capacity(records.len());
-        for (index, record) in records.into_iter().enumerate() {
-            validate_new_event(&record)?;
-            let event = EventRecord::from_new(
-                stream_id.clone(),
-                EventSequence::new(current_len + index as i64 + 1),
-                record,
-            );
-            event.validate_stream_record_v1()?;
-            appended.push(event);
+            .unwrap_or_default()
+            + 1;
+        if actual_next_sequence != expected_next_sequence.get() {
+            return Err(HistoryError::AppendFenceConflict {
+                stream_id: stream_id.clone(),
+                expected_next_sequence: expected_next_sequence.get(),
+                actual_next_sequence,
+            });
         }
-        inner
-            .events
-            .entry(stream_id.clone())
-            .or_default()
-            .extend(appended.clone());
-        Ok(appended)
+        append_in_memory_events(&mut inner, stream_id, records)
     }
 
     async fn read_events(
@@ -2882,6 +2884,35 @@ impl EventStore for InMemorySessionStore {
             .collect();
         Ok(events)
     }
+}
+
+fn append_in_memory_events(
+    inner: &mut InMemorySessionStoreInner,
+    stream_id: &EventStreamId,
+    records: Vec<NewEventRecord>,
+) -> HistoryResult<Vec<EventRecord>> {
+    let current_len = inner
+        .events
+        .get(stream_id)
+        .map(|events| events.len() as i64)
+        .unwrap_or_default();
+    let mut appended = Vec::with_capacity(records.len());
+    for (index, record) in records.into_iter().enumerate() {
+        validate_new_event(&record)?;
+        let event = EventRecord::from_new(
+            stream_id.clone(),
+            EventSequence::new(current_len + index as i64 + 1),
+            record,
+        );
+        event.validate_stream_record_v1()?;
+        appended.push(event);
+    }
+    inner
+        .events
+        .entry(stream_id.clone())
+        .or_default()
+        .extend(appended.clone());
+    Ok(appended)
 }
 
 #[async_trait]
