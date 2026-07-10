@@ -8,7 +8,7 @@ use super::threads::{
 use super::*;
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventKind, EventOrigin, KERNEL_RUNTIME_KIND,
     LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
     MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
     PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
@@ -7398,6 +7398,89 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
+    let app = test_app().await;
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn_id = "turn-ingress-applied".to_string();
+    let handle = app.handle_for_thread(&thread_id).await.unwrap();
+    {
+        let mut state = app.inner.state.write().await;
+        let thread = state.threads.get_mut(&thread_id).unwrap();
+        thread.active_turn_id = Some(turn_id.clone());
+        thread.turns.insert(
+            turn_id.clone(),
+            AppServerTurnState::new(
+                turn_id.clone(),
+                vec![json!({ "type": "text", "text": "ingress", "text_elements": [] })],
+            ),
+        );
+    }
+    handle
+        .append_thread_event_record(crate::NewEventRecord::discharged(
+            handle.context().coordinates.clone(),
+            EventKind::TurnSubmitted,
+            json!({
+                "schema": EventKind::TurnSubmitted.payload_schema_id(),
+                "turn_id": turn_id,
+            }),
+            crate::EventProvenance {
+                source_event_ids: vec![crate::EventRecordId::new()],
+                discharged_by: Some("projector:io-ingress-apply".to_string()),
+                function: Some("ingress_turn_submit/v1".to_string()),
+                ..crate::EventProvenance::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        resynchronize_thread_after_lag(&app, &handle, &thread_id, 1, Some(&turn_id)).await,
+        "missing entry_id should degrade the lag resync instead of failing it",
+    );
+
+    let resynced = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let message = outbound_rx
+                .recv()
+                .await
+                .expect("notification stream closed");
+            let JsonRpcMessage::Notification(notification) = message else {
+                continue;
+            };
+            match notification.method.as_str() {
+                "thread/resynced" => break notification.params.expect("resync params"),
+                "thread/resync/failed" => panic!("degraded lag resync unexpectedly failed"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("degraded lag resync did not complete");
+
+    let resynced_turn = resynced["thread"]["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["id"].as_str() == Some(turn_id.as_str()))
+        .expect("resync snapshot should retain the active turn");
+    assert!(
+        resynced_turn["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"].as_str() != Some("agentMessage")),
+        "degraded resync must not synthesize a mid-turn projection",
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

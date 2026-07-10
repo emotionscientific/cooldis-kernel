@@ -813,17 +813,7 @@ impl CooldisDaemonIoBridge {
 
     async fn queued_message_was_applied(&self, message: &LeasedIngressEnvelope) -> IoResult<bool> {
         let ingress_message_ids = [message.envelope.id.clone()];
-        let Some(marker) = self.applied_ingress_marker(&ingress_message_ids)? else {
-            return Ok(false);
-        };
-        self.record_ingress_dedupe_hits(
-            &marker.coordinates,
-            std::slice::from_ref(&message.envelope),
-            &ingress_message_ids,
-            &marker.turn_id,
-        )
-        .await?;
-        Ok(true)
+        Ok(self.applied_ingress_marker(&ingress_message_ids)?.is_some())
     }
 
     pub async fn submit_coalesced_envelopes(
@@ -880,13 +870,6 @@ impl CooldisDaemonIoBridge {
         let mut target = self.resolve_target(&envelope).await?;
         if let Some(marker) = self.applied_ingress_marker(ingress_message_ids)? {
             target.address.thread_id = Some(marker.coordinates.thread_id.to_string());
-            self.record_ingress_dedupe_hits(
-                &marker.coordinates,
-                source_envelopes,
-                ingress_message_ids,
-                &marker.turn_id,
-            )
-            .await?;
             return Ok(deduplicated_ingress_receipt(
                 &envelope,
                 target,
@@ -899,13 +882,6 @@ impl CooldisDaemonIoBridge {
             .ingress_state(&target, &handle, ingress_message_ids)
             .await?;
         if let Some(applied_turn_id) = applied_turn_id {
-            self.record_ingress_dedupe_hits(
-                &coordinates,
-                source_envelopes,
-                ingress_message_ids,
-                &applied_turn_id,
-            )
-            .await?;
             return Ok(deduplicated_ingress_receipt(
                 &envelope,
                 target,
@@ -928,27 +904,26 @@ impl CooldisDaemonIoBridge {
             ingress_event_ids.push(ingress_event.id);
         }
         let decision = self.decide(&envelope, &target, &state).await?;
+        let ingress_source_stream = control_stream_id(&coordinates);
         self.record_admission_decided(
             &coordinates,
             &envelope,
             &decision,
             &policy_hash,
-            ingress_event_ids,
+            ingress_event_ids.clone(),
             coalesced,
         )
         .await?;
-        let (receipt, raced_applied_turn_id) = self
-            .apply_with_ingress_markers(&envelope, &target, &decision, ingress_message_ids)
-            .await?;
-        if let Some(applied_turn_id) = raced_applied_turn_id {
-            self.record_ingress_dedupe_hits(
-                &coordinates,
-                source_envelopes,
+        let (receipt, _) = self
+            .apply_with_ingress_markers(
+                &envelope,
+                &target,
+                &decision,
                 ingress_message_ids,
-                &applied_turn_id,
+                Some(&ingress_source_stream),
+                &ingress_event_ids,
             )
             .await?;
-        }
         Ok(receipt)
     }
 
@@ -1096,7 +1071,7 @@ impl CooldisDaemonIoBridge {
         let rows = statement
             .query_map(
                 [
-                    EventKind::IoIngressReceived.as_str(),
+                    EventKind::TurnSubmitted.as_str(),
                     self.tenant_id.as_str(),
                     self.user_id.as_str(),
                 ],
@@ -1217,38 +1192,6 @@ impl CooldisDaemonIoBridge {
             },
             applied_turn_id,
         ))
-    }
-
-    async fn record_ingress_dedupe_hits(
-        &self,
-        coordinates: &ThreadCoordinates,
-        source_envelopes: &[IngressEnvelope],
-        ingress_message_ids: &[String],
-        applied_turn_id: &str,
-    ) -> IoResult<()> {
-        let store_path = self.session_store_path.as_ref().ok_or_else(|| {
-            IoError::Bridge(
-                "durable ingress dedupe diagnostics require a daemon session store".to_string(),
-            )
-        })?;
-        let store = SqliteSessionStore::open(store_path).map_err(cooldis_history_error)?;
-        let records = source_envelopes
-            .iter()
-            .zip(ingress_message_ids)
-            .map(|(envelope, message_id)| {
-                ingress_received_control_record(
-                    coordinates,
-                    envelope,
-                    Some(message_id),
-                    Some(applied_turn_id),
-                )
-            })
-            .collect::<IoResult<Vec<_>>>()?;
-        store
-            .append_events(&control_stream_id(coordinates), records)
-            .await
-            .map_err(cooldis_history_error)?;
-        Ok(())
     }
 
     async fn decide(
@@ -1615,6 +1558,8 @@ impl CooldisDaemonIoBridge {
         child_key: &str,
         input: &IoTurnInput,
         ingress_message_ids: &[String],
+        ingress_source_stream: Option<&EventStreamId>,
+        source_ingress_event_ids: &[EventRecordId],
     ) -> IoResult<(KernelIoReceipt, Option<String>)> {
         let (parent_coordinates, parent_handle) = self.ensure_thread(target, envelope).await?;
         let checkpoint = self
@@ -1659,12 +1604,14 @@ impl CooldisDaemonIoBridge {
             .insert(scope_key, child_coordinates.clone());
         drop(scope_guard);
         let marker = self
-            .append_ingress_received_event(
+            .append_ingress_turn_submitted_event(
                 &child_handle,
                 envelope,
                 target,
                 child_key,
                 ingress_message_ids,
+                ingress_source_stream,
+                source_ingress_event_ids,
             )
             .await?;
         if let IngressMarkerAppend::AlreadyApplied {
@@ -1791,13 +1738,15 @@ impl CooldisDaemonIoBridge {
         Ok(())
     }
 
-    async fn append_ingress_received_event(
+    async fn append_ingress_turn_submitted_event(
         &self,
         handle: &RuntimeThreadHandle,
         envelope: &IngressEnvelope,
         _target: &ResolvedIoTarget,
         turn_id: &str,
         ingress_message_ids: &[String],
+        ingress_source_stream: Option<&EventStreamId>,
+        source_ingress_event_ids: &[EventRecordId],
     ) -> IoResult<IngressMarkerAppend> {
         let route_id = route_id_for_ingress(envelope);
         let mut payload = serde_json::to_value(IoIngressReceivedPayload {
@@ -1815,6 +1764,10 @@ impl CooldisDaemonIoBridge {
         let object = payload.as_object_mut().ok_or_else(|| {
             IoError::Bridge("ingress receipt payload did not encode as object".to_string())
         })?;
+        object.insert(
+            "schema".to_string(),
+            json!(EventKind::TurnSubmitted.payload_schema_id()),
+        );
         object.insert(
             "turn_id".to_string(),
             JsonValue::String(turn_id.to_string()),
@@ -1845,12 +1798,31 @@ impl CooldisDaemonIoBridge {
                 })?,
             );
         }
+        if !source_ingress_event_ids.is_empty() && ingress_source_stream.is_none() {
+            return Err(IoError::Bridge(
+                "derived ingress turn submission requires its control source stream".to_string(),
+            ));
+        }
 
         let record = || {
-            NewEventRecord::witnessed(
+            if source_ingress_event_ids.is_empty() {
+                return NewEventRecord::witnessed(
+                    handle.context().coordinates.clone(),
+                    EventKind::TurnSubmitted,
+                    payload.clone(),
+                );
+            }
+            NewEventRecord::discharged(
                 handle.context().coordinates.clone(),
-                EventKind::IoIngressReceived,
+                EventKind::TurnSubmitted,
                 payload.clone(),
+                EventProvenance {
+                    source_streams: ingress_source_stream.cloned().into_iter().collect(),
+                    source_event_ids: source_ingress_event_ids.to_vec(),
+                    discharged_by: Some("projector:io-ingress-apply".to_string()),
+                    function: Some("ingress_turn_submit/v1".to_string()),
+                    ..EventProvenance::default()
+                },
             )
         };
         if ingress_message_ids.is_empty() {
@@ -2347,6 +2319,8 @@ impl CooldisDaemonIoBridge {
         target: &ResolvedIoTarget,
         decision: &AdmissionDecision,
         ingress_message_ids: &[String],
+        ingress_source_stream: Option<&EventStreamId>,
+        source_ingress_event_ids: &[EventRecordId],
     ) -> IoResult<(KernelIoReceipt, Option<String>)> {
         match decision {
             AdmissionDecision::Queue { turn_id, input } => {
@@ -2367,12 +2341,14 @@ impl CooldisDaemonIoBridge {
                 if let IngressMarkerAppend::AlreadyApplied {
                     turn_id: applied_turn_id,
                 } = self
-                    .append_ingress_received_event(
+                    .append_ingress_turn_submitted_event(
                         &handle,
                         envelope,
                         target,
                         turn_id,
                         ingress_message_ids,
+                        ingress_source_stream,
+                        source_ingress_event_ids,
                     )
                     .await?
                 {
@@ -2405,12 +2381,14 @@ impl CooldisDaemonIoBridge {
                 if let IngressMarkerAppend::AlreadyApplied {
                     turn_id: applied_turn_id,
                 } = self
-                    .append_ingress_received_event(
+                    .append_ingress_turn_submitted_event(
                         &handle,
                         envelope,
                         target,
                         turn_id,
                         ingress_message_ids,
+                        ingress_source_stream,
+                        source_ingress_event_ids,
                     )
                     .await?
                 {
@@ -2454,12 +2432,14 @@ impl CooldisDaemonIoBridge {
                     if let IngressMarkerAppend::AlreadyApplied {
                         turn_id: applied_turn_id,
                     } = self
-                        .append_ingress_received_event(
+                        .append_ingress_turn_submitted_event(
                             &handle,
                             envelope,
                             target,
                             turn_id,
                             ingress_message_ids,
+                            ingress_source_stream,
+                            source_ingress_event_ids,
                         )
                         .await?
                     {
@@ -2492,8 +2472,16 @@ impl CooldisDaemonIoBridge {
                 Err(IoError::PolicyRejected(reason.clone()))
             }
             AdmissionDecision::Fork { child_key, input } => {
-                self.apply_fork_admission(envelope, target, child_key, input, ingress_message_ids)
-                    .await
+                self.apply_fork_admission(
+                    envelope,
+                    target,
+                    child_key,
+                    input,
+                    ingress_message_ids,
+                    ingress_source_stream,
+                    source_ingress_event_ids,
+                )
+                .await
             }
         }
     }
@@ -2508,7 +2496,7 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
         decision: &AdmissionDecision,
     ) -> IoResult<KernelIoReceipt> {
         let (receipt, _) = self
-            .apply_with_ingress_markers(envelope, target, decision, &[])
+            .apply_with_ingress_markers(envelope, target, decision, &[], None, &[])
             .await?;
         Ok(receipt)
     }
@@ -3400,7 +3388,7 @@ fn receipt_dedupe_cursors(events: &[EventRecord]) -> HashMap<String, ReceiptDedu
 }
 
 fn ingress_context_from_event(event: &EventRecord) -> Option<IngressReceiptContext> {
-    if event.kind != EventKind::IoIngressReceived {
+    if event.kind != EventKind::TurnSubmitted {
         return None;
     }
     let target = serde_json::from_value(event.payload.get("target")?.clone()).ok()?;
@@ -3441,7 +3429,7 @@ fn applied_ingress_lookup(
     let requested = ingress_message_ids.iter().collect::<HashSet<_>>();
     let mut applied = HashMap::<String, String>::new();
     for event in events {
-        if event.kind != EventKind::IoIngressReceived {
+        if event.kind != EventKind::TurnSubmitted {
             continue;
         }
         let Some(turn_id) = event.payload.get("turn_id").and_then(Value::as_str) else {
