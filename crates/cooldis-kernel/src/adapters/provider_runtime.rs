@@ -566,6 +566,7 @@ impl CanonicalProviderRuntime {
     async fn run_turn(
         &self,
         turn_context: &TurnContext,
+        turn_anchor_timestamp_ms: i64,
         services: &RuntimeServices,
         events: &broadcast::Sender<ThreadEvent>,
         steering_contexts: Vec<String>,
@@ -592,6 +593,7 @@ impl CanonicalProviderRuntime {
             system: self.config.system.clone(),
             static_system_sources: static_context_segments.clone(),
             session_entries: session_entries.clone(),
+            turn_anchor_timestamp_ms,
             turn_context: turn_context.snapshot(),
             hook_contexts: steering_contexts,
             environment_contexts,
@@ -757,7 +759,7 @@ async fn run_idle_provider_command(
                 );
                 return true;
             }
-            let turn_source_event_id = match services
+            let (turn_source_event_id, turn_anchor_timestamp_ms) = match services
                 .append_user_turn_input(coordinates, &input)
                 .await
             {
@@ -777,7 +779,7 @@ async fn run_idle_provider_command(
                             }
                         };
                     let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
-                    submitted.id
+                    (submitted.id, submitted.created_at_ms)
                 }
                 Err(err) => {
                     let _ = status.send(ThreadStatus::Failed);
@@ -794,6 +796,7 @@ async fn run_idle_provider_command(
                 turn_id,
                 input,
                 turn_source_event_id,
+                turn_anchor_timestamp_ms,
                 coordinates,
                 services,
                 thread_id,
@@ -853,13 +856,17 @@ async fn run_idle_provider_command(
             )
             .await
             {
-                Ok(ToolResumeOutcome::Resumed { source_event_id }) => {
+                Ok(ToolResumeOutcome::Resumed {
+                    source_event_id,
+                    turn_anchor_timestamp_ms,
+                }) => {
                     run_provider_turn(
                         runtime,
                         thread_context,
                         turn_id,
                         TurnInput::text(""),
                         source_event_id,
+                        turn_anchor_timestamp_ms,
                         coordinates,
                         services,
                         thread_id,
@@ -944,10 +951,18 @@ async fn run_auto_compaction_if_needed(
         .chain(memory_contexts)
         .chain(instruction_contexts)
         .collect::<Vec<_>>();
+    let turn_anchor_timestamp_ms = if context.entries.is_empty() && environment_contexts.is_empty()
+    {
+        // This preflight emits no timestamped messages, so no persisted anchor is consumed.
+        0
+    } else {
+        persisted_thread_anchor_timestamp_ms(services, coordinates).await?
+    };
     let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
         system: runtime.config.system.clone(),
         static_system_sources: static_context_segments,
         session_entries: context.entries,
+        turn_anchor_timestamp_ms,
         turn_context: runtime
             .turn_context(
                 thread_context,
@@ -976,6 +991,26 @@ async fn run_auto_compaction_if_needed(
         events,
     )
     .await
+}
+
+async fn persisted_thread_anchor_timestamp_ms(
+    services: &RuntimeServices,
+    coordinates: &crate::ThreadCoordinates,
+) -> CooldisResult<i64> {
+    services
+        .runtime_store()
+        .read_events(&EventStreamId::for_thread(coordinates), None)
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?
+        .into_iter()
+        .min_by_key(|event| event.sequence.get())
+        .map(|event| event.created_at_ms)
+        .ok_or_else(|| {
+            CooldisError::History(format!(
+                "thread {} has no persisted context timestamp anchor",
+                coordinates.thread_id
+            ))
+        })
 }
 
 async fn run_compaction(
@@ -1493,6 +1528,7 @@ async fn run_provider_turn(
     turn_id: String,
     turn_input: TurnInput,
     turn_source_event_id: EventRecordId,
+    turn_anchor_timestamp_ms: i64,
     coordinates: &crate::ThreadCoordinates,
     services: &RuntimeServices,
     thread_id: crate::ThreadId,
@@ -1574,7 +1610,13 @@ async fn run_provider_turn(
         let mut continue_after_tools = false;
         let mut suspended_after_tools = false;
         let mut last_assistant_text = None;
-        let turn = runtime.run_turn(&turn_context, services, events, steering_contexts.clone());
+        let turn = runtime.run_turn(
+            &turn_context,
+            turn_anchor_timestamp_ms,
+            services,
+            events,
+            steering_contexts.clone(),
+        );
         tokio::pin!(turn);
 
         let result = loop {
@@ -1919,7 +1961,10 @@ enum ToolAppendOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolResumeOutcome {
-    Resumed { source_event_id: EventRecordId },
+    Resumed {
+        source_event_id: EventRecordId,
+        turn_anchor_timestamp_ms: i64,
+    },
     StillWaiting,
     AlreadyCompleted,
 }
@@ -2100,6 +2145,15 @@ async fn resume_pending_tool_call(
             "missing tool.call.requested for pending call {turn_id}/{call_id}"
         )));
     };
+    let turn_anchor_timestamp_ms =
+        existing_turn_submitted_event(services, &thread_context.coordinates, turn_id)
+            .await?
+            .map(|event| event.created_at_ms)
+            .ok_or_else(|| {
+                CooldisError::History(format!(
+                    "turn {turn_id} has no persisted context timestamp anchor"
+                ))
+            })?;
     let decision = decide_tool_call(
         services.runtime_store().as_ref(),
         ToolDecisionRequest {
@@ -2146,6 +2200,7 @@ async fn resume_pending_tool_call(
             .await?;
             Ok(ToolResumeOutcome::Resumed {
                 source_event_id: resumed.id,
+                turn_anchor_timestamp_ms,
             })
         }
         ToolCallDecision::Rewrite {
@@ -2183,6 +2238,7 @@ async fn resume_pending_tool_call(
             .await?;
             Ok(ToolResumeOutcome::Resumed {
                 source_event_id: resumed.id,
+                turn_anchor_timestamp_ms,
             })
         }
         ToolCallDecision::Deny {
@@ -2217,6 +2273,7 @@ async fn resume_pending_tool_call(
             .await?;
             Ok(ToolResumeOutcome::Resumed {
                 source_event_id: resumed.id,
+                turn_anchor_timestamp_ms,
             })
         }
     }

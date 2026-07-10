@@ -35,8 +35,8 @@ pub fn render_compaction_summary(summary: &str) -> String {
     }
 }
 
-pub fn compaction_summary_message(summary: &str) -> CanonicalMessage {
-    CanonicalMessage::user_text(render_compaction_summary(summary))
+pub fn compaction_summary_message(summary: &str, timestamp_ms: i64) -> CanonicalMessage {
+    CanonicalMessage::user_text_at(render_compaction_summary(summary), timestamp_ms)
 }
 
 #[derive(Debug, Error)]
@@ -2321,9 +2321,15 @@ pub enum CanonicalMessage {
 
 impl CanonicalMessage {
     pub fn user_text(text: impl Into<String>) -> Self {
+        Self::user_text_at(text, now_ms())
+    }
+
+    /// Builds user text at a persisted source time so "assembly is deterministic"
+    /// and synthetic context never depends on the assembly-time clock.
+    pub fn user_text_at(text: impl Into<String>, timestamp_ms: i64) -> Self {
         Self::User {
             content: vec![CanonicalContent::text(text)],
-            timestamp_ms: now_ms(),
+            timestamp_ms,
         }
     }
 
@@ -3050,7 +3056,7 @@ pub fn append_model_visible_messages(
             }
             SessionEntryKind::Compaction { summary } => {
                 messages.clear();
-                messages.push(compaction_summary_message(summary));
+                messages.push(compaction_summary_message(summary, entry.created_at_ms));
             }
             SessionEntryKind::ModelChange { .. }
             | SessionEntryKind::BranchSummary { .. }
