@@ -5,7 +5,10 @@ use cooldis_runtime_contracts::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -148,7 +151,104 @@ impl TurnContext {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnWatchdogPhase {
+    Pending,
+    Active,
+    Finished,
+}
+
+/// Identifies one submitted turn and tracks only that turn's execution phase.
+///
+/// Enqueueing another turn cannot start, replace, or retire this token. The
+/// token becomes active at the canonical runtime turn-entry boundary and
+/// finishes when the corresponding input leaves the runtime.
+pub(super) struct TurnWatchdogToken {
+    id: u64,
+    lease: Arc<TurnWatchdogLease>,
+}
+
+struct TurnWatchdogLease {
+    phase: watch::Sender<TurnWatchdogPhase>,
+}
+
+impl TurnWatchdogToken {
+    pub(super) fn new(id: u64) -> (Self, TurnWatchdogHandle) {
+        let (phase, phase_rx) = watch::channel(TurnWatchdogPhase::Pending);
+        (
+            Self {
+                id,
+                lease: Arc::new(TurnWatchdogLease {
+                    phase: phase.clone(),
+                }),
+            },
+            TurnWatchdogHandle { phase: phase_rx },
+        )
+    }
+
+    fn start(&self) {
+        if *self.lease.phase.borrow() == TurnWatchdogPhase::Pending {
+            self.lease.phase.send_replace(TurnWatchdogPhase::Active);
+        }
+    }
+}
+
+impl Clone for TurnWatchdogToken {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            lease: Arc::clone(&self.lease),
+        }
+    }
+}
+
+impl fmt::Debug for TurnWatchdogToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TurnWatchdogToken")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for TurnWatchdogToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for TurnWatchdogToken {}
+
+impl Drop for TurnWatchdogLease {
+    fn drop(&mut self) {
+        self.phase.send_replace(TurnWatchdogPhase::Finished);
+    }
+}
+
+pub(super) struct TurnWatchdogHandle {
+    phase: watch::Receiver<TurnWatchdogPhase>,
+}
+
+impl TurnWatchdogHandle {
+    pub(super) async fn wait_until_started(&mut self) -> bool {
+        loop {
+            match *self.phase.borrow() {
+                TurnWatchdogPhase::Pending => {}
+                TurnWatchdogPhase::Active => return true,
+                TurnWatchdogPhase::Finished => return false,
+            }
+            if self.phase.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+
+    pub(super) fn is_active(&self) -> bool {
+        *self.phase.borrow() == TurnWatchdogPhase::Active
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnInput {
     pub content: Vec<TurnContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,7 +267,25 @@ pub struct TurnInput {
     pub provider_metadata: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    #[serde(skip)]
+    turn_watchdog: Option<Box<TurnWatchdogToken>>,
 }
+
+impl PartialEq for TurnInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.content == other.content
+            && self.cwd == other.cwd
+            && self.workspace_roots == other.workspace_roots
+            && self.model == other.model
+            && self.provider == other.provider
+            && self.thinking == other.thinking
+            && self.permission_profile == other.permission_profile
+            && self.provider_metadata == other.provider_metadata
+            && self.metadata == other.metadata
+    }
+}
+
+impl Eq for TurnInput {}
 
 impl TurnInput {
     pub fn new(content: impl IntoIterator<Item = TurnContent>) -> Self {
@@ -181,6 +299,17 @@ impl TurnInput {
             permission_profile: None,
             provider_metadata: BTreeMap::new(),
             metadata: BTreeMap::new(),
+            turn_watchdog: None,
+        }
+    }
+
+    pub(super) fn set_turn_watchdog(&mut self, turn_watchdog: TurnWatchdogToken) {
+        self.turn_watchdog = Some(Box::new(turn_watchdog));
+    }
+
+    pub(super) fn start_turn_watchdog(&self) {
+        if let Some(turn_watchdog) = &self.turn_watchdog {
+            turn_watchdog.start();
         }
     }
 
@@ -233,6 +362,7 @@ impl TurnInput {
     }
 
     pub fn text_projection(&self) -> String {
+        self.start_turn_watchdog();
         self.content
             .iter()
             .filter_map(|content| match content {
