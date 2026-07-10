@@ -12,11 +12,10 @@ use cooldis_vbash::CooldisVirtualBashError;
 use cooldis_wasm::CooldisWasmError;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -43,10 +42,12 @@ use loop_continuation::{
 };
 pub use runtime_api::{
     AgentRuntime, AgentRuntimeFactory, RuntimeHostLifecycleSnapshot, RuntimeHostSnapshot,
-    ThreadCheckpoint, ThreadCommand, ThreadEvent, ThreadLifecycleSink, ThreadSnapshot,
+    ThreadCheckpoint, ThreadCheckpointLineage, ThreadCommand, ThreadEvent, ThreadLifecycleSink,
+    ThreadSnapshot,
 };
 pub use runtime_events::{RuntimeEvent, RuntimeEventKind, emit_runtime_event};
 pub use runtime_services::{RuntimeExecutionPolicy, RuntimeServices};
+use turn::TurnWatchdogHandle;
 pub use turn::{TurnContent, TurnContext, TurnContextSnapshot, TurnInput};
 
 pub use cooldis_runtime_contracts::{
@@ -114,6 +115,21 @@ pub enum CooldisError {
         thread_id: ThreadId,
         code: &'static str,
         message: String,
+    },
+    #[error(
+        "checkpoint {checkpoint_id} cannot resume thread {thread_id}: checkpoint resume only supports root threads; parent lineage {parent_thread_id} cannot be restored"
+    )]
+    CheckpointResumeRequiresRoot {
+        checkpoint_id: ThreadCheckpointId,
+        thread_id: ThreadId,
+        parent_thread_id: ThreadId,
+    },
+    #[error(
+        "checkpoint {checkpoint_id} cannot resume thread {thread_id}: root lineage was not recorded; recreate the checkpoint before resuming"
+    )]
+    CheckpointResumeLineageUnknown {
+        checkpoint_id: ThreadCheckpointId,
+        thread_id: ThreadId,
     },
     #[error("lifecycle operation {operation} is not supported yet: {reason}")]
     LifecycleUnsupported {
@@ -203,6 +219,7 @@ struct RuntimeHostInner {
     runtime_store: Arc<dyn RuntimeStore>,
     execution_policy: RuntimeExecutionPolicy,
     threads: RwLock<HashMap<ThreadId, Arc<RuntimeThread>>>,
+    thread_start_reservations: StdMutex<HashMap<ThreadId, ThreadContext>>,
     checkpoints: Mutex<HashMap<ThreadCheckpointId, ThreadCheckpoint>>,
     lifecycle_sink: RwLock<Option<Arc<dyn ThreadLifecycleSink>>>,
 }
@@ -219,7 +236,31 @@ struct RuntimeThread {
     join_handle: Mutex<Option<JoinHandle<()>>>,
     lifecycle: Mutex<ThreadLifecycleRecord>,
     checkpoints: Mutex<Vec<ThreadCheckpoint>>,
-    turn_sequence: AtomicU64,
+    submit_admission: Mutex<()>,
+}
+
+struct ThreadStartReservation<'a> {
+    reservations: &'a StdMutex<HashMap<ThreadId, ThreadContext>>,
+    thread_id: ThreadId,
+    committed: bool,
+}
+
+impl ThreadStartReservation<'_> {
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ThreadStartReservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            lock_unpoisoned(self.reservations).remove(&self.thread_id);
+        }
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> StdMutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 #[derive(Clone)]
@@ -269,6 +310,7 @@ impl RuntimeHost {
                 runtime_store,
                 execution_policy,
                 threads: RwLock::new(HashMap::new()),
+                thread_start_reservations: StdMutex::new(HashMap::new()),
                 checkpoints: Mutex::new(HashMap::new()),
                 lifecycle_sink: RwLock::new(None),
             }),
@@ -306,34 +348,81 @@ impl RuntimeHost {
         topology: ThreadTopology,
         metadata: BTreeMap<String, String>,
     ) -> CooldisResult<RuntimeThreadHandle> {
-        let parent_thread_id = topology.compatibility_parent_thread_id();
+        let context =
+            ThreadContext::with_topology_and_metadata(coordinates, topology, metadata.clone());
+        let start_reservation = self.reserve_thread_start(&context).await?;
+        self.start_reserved_thread(context, metadata, start_reservation)
+            .await
+    }
+
+    async fn reserve_thread_start<'a>(
+        &'a self,
+        context: &ThreadContext,
+    ) -> CooldisResult<ThreadStartReservation<'a>> {
+        let thread_id = context.coordinates.thread_id;
+        let parent_thread_id = context.parent_thread_id;
+        let threads = self.inner.threads.read().await;
+        let mut reservations = lock_unpoisoned(&self.inner.thread_start_reservations);
+        if threads.contains_key(&thread_id) || reservations.contains_key(&thread_id) {
+            return Err(CooldisError::ThreadAlreadyExists(thread_id));
+        }
         if let Some(parent_thread_id) = parent_thread_id
             && let Some(max_child_threads) = self.inner.execution_policy.max_child_threads
         {
-            let child_count = self.children_of(parent_thread_id).await.len();
+            let child_count = threads
+                .values()
+                .filter(|thread| thread.context.parent_thread_id == Some(parent_thread_id))
+                .count()
+                + reservations
+                    .values()
+                    .filter(|context| context.parent_thread_id == Some(parent_thread_id))
+                    .count();
             if child_count >= max_child_threads {
-                if let Ok(parent) = self.get_thread(parent_thread_id).await {
-                    parent.emit_runtime(RuntimeEventKind::PolicyRejected {
-                        code: "max_child_threads".to_string(),
-                        message: format!(
-                            "parent thread already has {child_count} child thread(s); max is {max_child_threads}"
-                        ),
-                    });
+                let parent = threads.get(&parent_thread_id).cloned();
+                let message = format!(
+                    "parent thread already has {child_count} child thread(s); max is {max_child_threads}"
+                );
+                drop(reservations);
+                drop(threads);
+                if let Some(parent) = parent {
+                    RuntimeThreadHandle { thread: parent }.emit_runtime(
+                        RuntimeEventKind::PolicyRejected {
+                            code: "max_child_threads".to_string(),
+                            message: message.clone(),
+                        },
+                    );
                 }
                 return Err(CooldisError::ThreadPolicyViolation {
                     thread_id: parent_thread_id,
                     code: "max_child_threads",
-                    message: format!(
-                        "parent thread already has {child_count} child thread(s); max is {max_child_threads}"
-                    ),
+                    message,
                 });
             }
         }
-        let context =
-            ThreadContext::with_topology_and_metadata(coordinates, topology, metadata.clone());
+        reservations.insert(thread_id, context.clone());
+        Ok(ThreadStartReservation {
+            reservations: &self.inner.thread_start_reservations,
+            thread_id,
+            committed: false,
+        })
+    }
+
+    async fn start_reserved_thread(
+        &self,
+        context: ThreadContext,
+        metadata: BTreeMap<String, String>,
+        mut start_reservation: ThreadStartReservation<'_>,
+    ) -> CooldisResult<RuntimeThreadHandle> {
         let thread_id = context.coordinates.thread_id;
         let runtime = self.inner.factory.build(&context).await?;
-        let (command_tx, command_rx) = mpsc::channel(512);
+        let command_channel_capacity = self
+            .inner
+            .execution_policy
+            .max_pending_inputs
+            .unwrap_or(512)
+            .min(tokio::sync::Semaphore::MAX_PERMITS)
+            .max(512);
+        let (command_tx, command_rx) = mpsc::channel(command_channel_capacity);
         let command_capacity = command_tx.max_capacity();
         let (event_tx, _) = broadcast::channel(1024);
         let (status_tx, status_rx) = watch::channel(ThreadStatus::Starting);
@@ -360,7 +449,11 @@ impl RuntimeHost {
         }
         let runtime_services = services.clone();
 
+        let (runtime_start_tx, runtime_start_rx) = oneshot::channel();
         let join_handle = tokio::spawn(async move {
+            if runtime_start_rx.await.is_err() {
+                return;
+            }
             runtime
                 .run(
                     runtime_context,
@@ -406,17 +499,19 @@ impl RuntimeHost {
             join_handle: Mutex::new(Some(join_handle)),
             lifecycle: Mutex::new(lifecycle),
             checkpoints: Mutex::new(Vec::new()),
-            turn_sequence: AtomicU64::new(0),
+            submit_admission: Mutex::new(()),
         });
 
         {
             let mut threads = self.inner.threads.write().await;
-            if threads.contains_key(&thread_id) {
-                thread.cancellation.cancel();
-                return Err(CooldisError::ThreadAlreadyExists(thread_id));
-            }
-            threads.insert(thread_id, Arc::clone(&thread));
+            let mut reservations = lock_unpoisoned(&self.inner.thread_start_reservations);
+            let reservation = reservations.remove(&thread_id);
+            debug_assert!(reservation.is_some());
+            let previous = threads.insert(thread_id, Arc::clone(&thread));
+            debug_assert!(previous.is_none());
+            start_reservation.commit();
         }
+        let _ = runtime_start_tx.send(());
 
         let handle = RuntimeThreadHandle {
             thread: Arc::clone(&thread),
@@ -425,6 +520,7 @@ impl RuntimeHost {
             && let Err(err) = sink.thread_started(handle.clone()).await
         {
             thread.cancellation.cancel();
+            handle.abort().await;
             self.inner.threads.write().await.remove(&thread_id);
             return Err(err);
         }
@@ -680,15 +776,16 @@ impl RuntimeHost {
         &self,
         thread_id: ThreadId,
         turn_id: impl Into<String>,
-        input: TurnInput,
+        mut input: TurnInput,
         mode: TurnSubmissionMode,
         admission: Option<AdmissionGateContext>,
     ) -> CooldisResult<()> {
         let turn_id = turn_id.into();
         let thread = self.get_thread(thread_id).await?;
-        if mode == TurnSubmissionMode::Queue
+        let command_permit = if mode == TurnSubmissionMode::Queue
             && let Some(max_pending_inputs) = self.inner.execution_policy.max_pending_inputs
         {
+            let _submit_admission = thread.thread.submit_admission.lock().await;
             let queued_commands = thread.queued_command_count();
             if queued_commands >= max_pending_inputs {
                 let message = format!(
@@ -704,18 +801,48 @@ impl RuntimeHost {
                     message,
                 });
             }
-        }
-        let command_permit = thread.reserve_command().await?;
+            #[cfg(test)]
+            tokio::task::yield_now().await;
+            match thread.try_reserve_command() {
+                Ok(command_permit) => command_permit,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(CooldisError::ThreadClosed(thread_id));
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    let queued_commands = thread.queued_command_count();
+                    let message = format!(
+                        "thread has {queued_commands} queued command(s); max pending input count is {max_pending_inputs}"
+                    );
+                    thread.emit_runtime(RuntimeEventKind::PolicyRejected {
+                        code: "max_pending_inputs".to_string(),
+                        message: message.clone(),
+                    });
+                    return Err(CooldisError::ThreadPolicyViolation {
+                        thread_id,
+                        code: "max_pending_inputs",
+                        message,
+                    });
+                }
+            }
+        } else {
+            thread.reserve_command().await?
+        };
         if let Some(admission) = admission {
             append_admission_decided(&thread, admission).await?;
         }
-        let turn_sequence = thread.next_turn_sequence();
+        let turn_watchdog = if self.inner.execution_policy.turn_timeout_ms.is_some() {
+            Some(thread.thread.services.register_turn_watchdog(&mut input))
+        } else {
+            None
+        };
         command_permit.send(ThreadCommand::Submit {
             turn_id: turn_id.clone(),
             input,
             mode,
         });
-        self.spawn_turn_timeout_watchdog(thread.clone(), turn_sequence);
+        if let Some(turn_watchdog) = turn_watchdog {
+            self.spawn_turn_timeout_watchdog(thread.clone(), turn_watchdog);
+        }
         thread
             .record_signal(ThreadSignal::user_submit(
                 &thread.context().coordinates,
@@ -808,30 +935,72 @@ impl RuntimeHost {
         self.get_thread(thread_id).await?.session_context().await
     }
 
+    /// Shuts down descendants before registered ancestors, with thread-id order
+    /// breaking ties at the same topology depth.
     pub async fn shutdown_all(&self) -> CooldisResult<Vec<ThreadId>> {
-        let thread_ids = {
+        fn registered_depth(
+            thread_id: ThreadId,
+            parents: &HashMap<ThreadId, Option<ThreadId>>,
+            path: &mut Vec<ThreadId>,
+        ) -> usize {
+            if path.contains(&thread_id) {
+                return 0;
+            }
+            path.push(thread_id);
+            let depth = parents
+                .get(&thread_id)
+                .copied()
+                .flatten()
+                .filter(|parent_thread_id| parents.contains_key(parent_thread_id))
+                .map(|parent_thread_id| 1 + registered_depth(parent_thread_id, parents, path))
+                .unwrap_or(0);
+            path.pop();
+            depth
+        }
+
+        let parents = {
             let threads = self.inner.threads.read().await;
-            threads.keys().copied().collect::<Vec<_>>()
+            threads
+                .iter()
+                .map(|(thread_id, thread)| (*thread_id, thread.context.parent_thread_id))
+                .collect::<HashMap<_, _>>()
         };
+        let mut thread_ids = parents.keys().copied().collect::<Vec<_>>();
+        thread_ids.sort_by(|left, right| {
+            let left_depth = registered_depth(*left, &parents, &mut Vec::new());
+            let right_depth = registered_depth(*right, &parents, &mut Vec::new());
+            right_depth
+                .cmp(&left_depth)
+                .then_with(|| left.to_string().cmp(&right.to_string()))
+        });
         let mut stopped = Vec::with_capacity(thread_ids.len());
         for thread_id in thread_ids {
             self.shutdown_thread(thread_id).await?;
             stopped.push(thread_id);
         }
-        stopped.sort_by_key(std::string::ToString::to_string);
         Ok(stopped)
     }
 
-    fn spawn_turn_timeout_watchdog(&self, thread: RuntimeThreadHandle, turn_sequence: u64) {
+    fn spawn_turn_timeout_watchdog(
+        &self,
+        thread: RuntimeThreadHandle,
+        mut watchdog: TurnWatchdogHandle,
+    ) {
         let Some(timeout_ms) = self.inner.execution_policy.turn_timeout_ms else {
             return;
         };
         let cancel_grace_timeout_ms = self.inner.execution_policy.cancel_grace_timeout_ms;
+        let thread = Arc::downgrade(&thread.thread);
         tokio::spawn(async move {
+            if !watchdog.wait_until_started().await {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-            if thread.current_turn_sequence() != turn_sequence
-                || thread.status() != ThreadStatus::Running
-            {
+            let Some(thread) = thread.upgrade() else {
+                return;
+            };
+            let thread = RuntimeThreadHandle { thread };
+            if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
                 return;
             }
             thread.emit_runtime(RuntimeEventKind::Timeout {
@@ -842,11 +1011,27 @@ impl RuntimeHost {
                 state: RuntimeTerminalState::TimedOut,
             });
             let reason = format!("turn exceeded {timeout_ms}ms timeout");
-            let _ = thread
-                .send(ThreadCommand::Cancel {
-                    reason: reason.clone(),
-                })
-                .await;
+            if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
+                return;
+            }
+            match thread.try_reserve_command() {
+                Ok(command_permit) => {
+                    if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
+                        return;
+                    }
+                    command_permit.send(ThreadCommand::Cancel {
+                        reason: reason.clone(),
+                    });
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
+                        return;
+                    }
+                    thread.set_status(ThreadStatus::Cancelling);
+                    thread.thread.cancellation.cancel();
+                }
+            }
             thread
                 .record_signal(ThreadSignal::interrupt_cancel(
                     &thread.context().coordinates,
@@ -855,7 +1040,7 @@ impl RuntimeHost {
                 .await;
             if let Some(cancel_timeout_ms) = cancel_grace_timeout_ms {
                 tokio::time::sleep(Duration::from_millis(cancel_timeout_ms)).await;
-                if thread.current_turn_sequence() == turn_sequence
+                if watchdog.is_active()
                     && matches!(
                         thread.status(),
                         ThreadStatus::Running | ThreadStatus::Cancelling
@@ -1023,37 +1208,47 @@ impl RuntimeHost {
         self.resume_thread_from_checkpoint(checkpoint).await
     }
 
+    /// Resumes only checkpoints explicitly recorded with root lineage; V1
+    /// resume rejects parent or unknown lineage instead of flattening it.
     pub async fn resume_thread_from_checkpoint(
         &self,
         checkpoint: ThreadCheckpoint,
     ) -> CooldisResult<RuntimeThreadHandle> {
-        if self
-            .inner
-            .threads
-            .read()
-            .await
-            .contains_key(&checkpoint.coordinates.thread_id)
-        {
-            return Err(CooldisError::ThreadAlreadyExists(
-                checkpoint.coordinates.thread_id,
-            ));
+        match checkpoint.lineage {
+            ThreadCheckpointLineage::Root => {}
+            ThreadCheckpointLineage::Parent { parent_thread_id } => {
+                return Err(CooldisError::CheckpointResumeRequiresRoot {
+                    checkpoint_id: checkpoint.id,
+                    thread_id: checkpoint.coordinates.thread_id,
+                    parent_thread_id,
+                });
+            }
+            ThreadCheckpointLineage::Unknown => {
+                return Err(CooldisError::CheckpointResumeLineageUnknown {
+                    checkpoint_id: checkpoint.id,
+                    thread_id: checkpoint.coordinates.thread_id,
+                });
+            }
         }
-        self.inner
-            .checkpoints
-            .lock()
-            .await
-            .insert(checkpoint.id, checkpoint.clone());
+        let metadata = checkpoint.metadata.clone();
+        let context = ThreadContext::with_topology_and_metadata(
+            checkpoint.coordinates.clone(),
+            ThreadTopology::root(),
+            metadata.clone(),
+        );
+        let start_reservation = self.reserve_thread_start(&context).await?;
         self.inner
             .runtime_store
             .select_branch(&checkpoint.coordinates, checkpoint.active_entry_id)
             .await
             .map_err(|err| CooldisError::History(err.to_string()))?;
-        self.start_thread_with_topology_and_metadata(
-            checkpoint.coordinates.clone(),
-            ThreadTopology::root(),
-            checkpoint.metadata.clone(),
-        )
-        .await
+        self.inner
+            .checkpoints
+            .lock()
+            .await
+            .insert(checkpoint.id, checkpoint);
+        self.start_reserved_thread(context, metadata, start_reservation)
+            .await
     }
 
     pub async fn fork_thread(

@@ -27,12 +27,12 @@ use cooldis::{
     STREAM_BACKEND_CAPABILITIES_SCHEMA_V1, STREAM_CURSOR_SCHEMA_V1, STREAM_RECORD_SCHEMA_V1,
     STREAM_ROUTING_DECISION_SCHEMA_V1, SessionEntryId, StdlibCouplingExecutor, StreamAckClass,
     StreamAppendAckV1, StreamBackendCapabilitiesV1, SystemBlock, ThreadCheckpoint,
-    ThreadCheckpointId, ThreadCoordinates, ThreadId, ThreadInteractionKind, ThreadLifecycleRecord,
-    ThreadLifecycleStatus, ThreadSignal, ThreadSignalId, ThreadSignalKind, ThreadStatus,
-    ThreadTopology, ToolDefinition, TurnBudget, TurnContextSnapshot, UnixExecPayload,
-    UnixExecutionMode, WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest,
-    WasmOperationMode, WasmOperationValueKind, coupling_template_catalog_v1,
-    stream_schema_registry_v1, validate_context_payload_schema_v1,
+    ThreadCheckpointId, ThreadCheckpointLineage, ThreadCoordinates, ThreadId,
+    ThreadInteractionKind, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadSignal,
+    ThreadSignalId, ThreadSignalKind, ThreadStatus, ThreadTopology, ToolDefinition, TurnBudget,
+    TurnContextSnapshot, UnixExecPayload, UnixExecutionMode, WasmOperationDefinition,
+    WasmOperationEventKind, WasmOperationManifest, WasmOperationMode, WasmOperationValueKind,
+    coupling_template_catalog_v1, stream_schema_registry_v1, validate_context_payload_schema_v1,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1817,6 +1817,7 @@ fn thread_lifecycle_contracts_match_fixture() {
     let checkpoint = ThreadCheckpoint {
         id: checkpoint_id(1),
         coordinates: coordinates.clone(),
+        lineage: ThreadCheckpointLineage::Root,
         parent_checkpoint_id: None,
         active_entry_id: Some(session_entry_id(1)),
         label: Some("after-tool".to_string()),
