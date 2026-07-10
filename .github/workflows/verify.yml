@@ -34,3 +34,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
       - name: Verify workspace
         run: scripts/verify.sh
+
+  restart-smoke:
+    name: Process restart smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Build daemon
+        run: cargo build --locked --bin cooldis
+      - name: Verify process restart continuity
+        run: cargo run --locked --bin cooldis-restart-smoke
