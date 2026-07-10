@@ -1161,7 +1161,7 @@ fn stream_backend_capabilities_v1_freezes_sqlite_reference_shape() {
     assert!(capabilities.supports_atomic_batch_append);
     assert!(capabilities.supports_verified_cursor_replay);
     assert!(capabilities.supports_query_projection);
-    assert!(!capabilities.supports_expected_tail);
+    assert!(capabilities.supports_expected_tail);
     assert!(!capabilities.supports_fencing_tokens);
     assert!(!capabilities.supports_live_follow);
     assert!(!capabilities.supports_broadcast);

@@ -1,11 +1,12 @@
 use crate::agent::manifest_bind::canonical_json_hash;
 use crate::{
     AgentManifestBindReceipt, BoundCouplingSet, CooldisError, CooldisResult, EventKind,
-    EventProvenance, EventRecord, EventRecordId, EventStreamId, KernelThreadSpawnAgentBinding,
-    KernelThreadSpawnAgentResolver, NewEventRecord, RuntimeHost, STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
-    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
-    THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA, THREADS_SPAWN_CAPABILITY,
-    ThreadCoordinates, ThreadId, ThreadSpawnRequestedPayload, ThreadSpawnWitness, TurnInput,
+    EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId, HistoryError,
+    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, NewEventRecord, RuntimeHost,
+    STD_SUPERVISOR_SPAWN_TEMPLATE_ID, THREAD_AGENT_MANIFEST_HASH_METADATA,
+    THREAD_BOUND_COUPLING_SET_METADATA, THREAD_SPAWN_GRANTED_METADATA,
+    THREAD_SPAWN_INPUTS_HASH_METADATA, THREADS_SPAWN_CAPABILITY, ThreadCoordinates, ThreadId,
+    ThreadSpawnRequestedPayload, ThreadSpawnWitness, TurnInput,
 };
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeMap;
@@ -15,10 +16,17 @@ const THREAD_SPAWN_PROJECTOR_DISCHARGED_BY: &str = "projector:thread-spawn";
 const THREAD_SPAWN_PROJECTOR_FUNCTION: &str = "thread_spawn_projector/v1";
 const UNBOUND_CHILD_AGENT_REF: &str = "unbound";
 
+enum ThreadSpawnProjectionAttempt {
+    Projected(ThreadSpawnProjected),
+    FenceConflict,
+}
+
 #[derive(Clone)]
 pub struct ThreadSpawnProjector {
     host: RuntimeHost,
     agent_resolver: Option<Arc<dyn KernelThreadSpawnAgentResolver>>,
+    #[cfg(test)]
+    snapshot_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
 impl ThreadSpawnProjector {
@@ -26,6 +34,8 @@ impl ThreadSpawnProjector {
         Self {
             host,
             agent_resolver: None,
+            #[cfg(test)]
+            snapshot_barrier: None,
         }
     }
 
@@ -34,6 +44,12 @@ impl ThreadSpawnProjector {
         resolver: Arc<dyn KernelThreadSpawnAgentResolver>,
     ) -> Self {
         self.agent_resolver = Some(resolver);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_snapshot_barrier(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
+        self.snapshot_barrier = Some(barrier);
         self
     }
 
@@ -48,11 +64,27 @@ impl ThreadSpawnProjector {
             .read_events(&stream_id, None)
             .await
             .map_err(|err| CooldisError::History(err.to_string()))?;
-        let mut receipt = ThreadSpawnProjectionReceipt::default();
-        for event in events
+        #[cfg(test)]
+        if let Some(barrier) = &self.snapshot_barrier {
+            barrier.wait().await;
+        }
+        let requests = events
             .iter()
             .filter(|event| event.kind == EventKind::ThreadSpawnRequested)
-        {
+            .filter(|event| !is_spawn_request_claim(event))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut receipt = ThreadSpawnProjectionReceipt::default();
+        let mut decision_events = events;
+        for (index, event) in requests.iter().enumerate() {
+            if index > 0 {
+                decision_events = self
+                    .host
+                    .runtime_store()
+                    .read_events(&stream_id, None)
+                    .await
+                    .map_err(|err| CooldisError::History(err.to_string()))?;
+            }
             let payload = match serde_json::from_value::<ThreadSpawnRequestedPayload>(
                 event.payload.clone(),
             ) {
@@ -70,12 +102,23 @@ impl ThreadSpawnProjector {
                     continue;
                 }
             };
-            if spawn_request_already_projected(&events, event.id, &payload.correlation_id) {
+            if spawn_request_already_projected(&decision_events, event.id, &payload.correlation_id)
+            {
                 receipt.skipped.push(event.id);
                 continue;
             }
-            match self.project_one(coordinates, event, payload).await {
-                Ok(projected) => receipt.projected.push(projected),
+            let expected_next_sequence = decision_events
+                .last()
+                .map(|event| EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| EventSequence::new(1));
+            match self
+                .project_one(coordinates, event, payload, expected_next_sequence)
+                .await
+            {
+                Ok(ThreadSpawnProjectionAttempt::Projected(projected)) => {
+                    receipt.projected.push(projected)
+                }
+                Ok(ThreadSpawnProjectionAttempt::FenceConflict) => receipt.skipped.push(event.id),
                 Err(err) => {
                     let reason = err.to_string();
                     let failure = self
@@ -97,7 +140,8 @@ impl ThreadSpawnProjector {
         coordinates: &ThreadCoordinates,
         request_event: &EventRecord,
         payload: ThreadSpawnRequestedPayload,
-    ) -> CooldisResult<ThreadSpawnProjected> {
+        expected_next_sequence: EventSequence,
+    ) -> CooldisResult<ThreadSpawnProjectionAttempt> {
         if payload.parent_thread_id != coordinates.thread_id {
             return Err(CooldisError::RuntimeExecution(format!(
                 "thread.spawn.requested parent_thread_id {} does not match projected stream {}",
@@ -118,6 +162,34 @@ impl ThreadSpawnProjector {
         let (agent_binding, metadata) = self
             .spawn_metadata(&parent.context().clone(), &arguments)
             .await?;
+        let claim = NewEventRecord::discharged(
+            coordinates.clone(),
+            EventKind::ThreadSpawnRequested,
+            request_event.payload.clone(),
+            EventProvenance {
+                source_streams: vec![request_event.stream_id.clone()],
+                source_event_ids: vec![request_event.id],
+                discharged_by: Some(THREAD_SPAWN_PROJECTOR_DISCHARGED_BY.to_string()),
+                function: Some(THREAD_SPAWN_PROJECTOR_FUNCTION.to_string()),
+                ..EventProvenance::default()
+            },
+        );
+        match self
+            .host
+            .runtime_store()
+            .append_events_fenced(
+                &request_event.stream_id,
+                expected_next_sequence,
+                vec![claim],
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(HistoryError::AppendFenceConflict { .. }) => {
+                return Ok(ThreadSpawnProjectionAttempt::FenceConflict);
+            }
+            Err(err) => return Err(CooldisError::History(err.to_string())),
+        }
         let receipt = self
             .host
             .kernel_control()
@@ -145,12 +217,14 @@ impl ThreadSpawnProjector {
                 )
                 .await?;
         }
-        Ok(ThreadSpawnProjected {
-            request_event_id: request_event.id,
-            child_thread_id: receipt.thread_id,
-            submitted_turn_id: receipt.submitted_turn_id,
-            correlation_id: payload.correlation_id,
-        })
+        Ok(ThreadSpawnProjectionAttempt::Projected(
+            ThreadSpawnProjected {
+                request_event_id: request_event.id,
+                child_thread_id: receipt.thread_id,
+                submitted_turn_id: receipt.submitted_turn_id,
+                correlation_id: payload.correlation_id,
+            },
+        ))
     }
 
     async fn spawn_metadata(
@@ -298,17 +372,28 @@ fn spawn_request_already_projected(
     correlation_id: &str,
 ) -> bool {
     events.iter().any(|event| {
-        matches!(event.kind, EventKind::ThreadSpawned | EventKind::LoopDenied)
-            && (event
+        (is_spawn_request_claim(event)
+            && event
                 .provenance
                 .source_event_ids
-                .contains(&request_event_id)
-                || event
-                    .payload
-                    .get("correlation_id")
-                    .and_then(JsonValue::as_str)
-                    == Some(correlation_id))
+                .contains(&request_event_id))
+            || (matches!(event.kind, EventKind::ThreadSpawned | EventKind::LoopDenied)
+                && (event
+                    .provenance
+                    .source_event_ids
+                    .contains(&request_event_id)
+                    || event
+                        .payload
+                        .get("correlation_id")
+                        .and_then(JsonValue::as_str)
+                        == Some(correlation_id)))
     })
+}
+
+fn is_spawn_request_claim(event: &EventRecord) -> bool {
+    event.kind == EventKind::ThreadSpawnRequested
+        && event.provenance.discharged_by.as_deref() == Some(THREAD_SPAWN_PROJECTOR_DISCHARGED_BY)
+        && event.provenance.function.as_deref() == Some(THREAD_SPAWN_PROJECTOR_FUNCTION)
 }
 
 #[cfg(test)]
@@ -358,10 +443,16 @@ mod tests {
         );
 
         let control_events = root.read_control_events().await.unwrap();
+        let claim = control_events
+            .iter()
+            .find(|event| is_spawn_request_claim(event))
+            .unwrap();
+        assert_eq!(claim.provenance.source_event_ids, vec![request.id]);
         let spawned = control_events
             .iter()
             .find(|event| event.kind == EventKind::ThreadSpawned)
             .unwrap();
+        assert!(claim.sequence.get() < spawned.sequence.get());
         let payload: ThreadSpawnedPayload =
             serde_json::from_value(spawned.payload.clone()).unwrap();
         assert_eq!(payload.parent_thread_id, coordinates.thread_id);
@@ -372,6 +463,79 @@ mod tests {
         assert_eq!(payload.parent_turn_id.as_deref(), Some("parent-turn-1"));
         assert_eq!(spawned.payload["correlation_id"], "projector-spawn-1");
         assert_eq!(spawned.provenance.source_event_ids, vec![request.id]);
+
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn racing_thread_spawn_projectors_produce_exactly_one_spawn() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        append_spawn_requested(&store, &coordinates, "projector-race-1").await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first =
+            ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(Arc::clone(&barrier));
+        let second = ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(barrier);
+
+        let (first_receipt, second_receipt) = tokio::join!(
+            first.project_control_stream(&coordinates),
+            second.project_control_stream(&coordinates),
+        );
+        let receipts = [first_receipt.unwrap(), second_receipt.unwrap()];
+
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| receipt.projected.len())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| receipt.skipped.len())
+                .sum::<usize>(),
+            1
+        );
+        assert!(receipts.iter().all(|receipt| receipt.failed.is_empty()));
+        assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
+        assert_eq!(
+            store
+                .read_events(
+                    &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                    None,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == EventKind::ThreadSpawned)
+                .count(),
+            1
+        );
+        assert_eq!(
+            store
+                .read_events(
+                    &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                    None,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(is_spawn_request_claim)
+                .count(),
+            1
+        );
 
         host.shutdown_all().await.unwrap();
     }

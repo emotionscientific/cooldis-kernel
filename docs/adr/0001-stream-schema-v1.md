@@ -2,6 +2,8 @@
 
 Status: accepted for V1 RC target
 Date: 2026-06-23
+Amended: 2026-07-09 — `EventStore::append_events_fenced` ships atomic
+expected-next-sequence appends in the in-memory and SQLite stores.
 
 ## Context
 
@@ -728,9 +730,9 @@ Current V1 RC implementation status:
 - `StreamBackendCapabilitiesV1` freezes
   `cooldis.stream.backend_capabilities/1`: backend kind, storage scope, ack
   classes, and feature booleans. The V1 SQLite reference declares local
-  embedded authority storage with query projection and verified cursor replay;
-  it explicitly does not claim expected-tail fencing, live follow, broadcast
-  visibility, or cold archive behavior.
+  embedded authority storage with atomic batch append, expected-tail fencing,
+  query projection, and verified cursor replay; it does not claim fencing
+  tokens, live follow, broadcast visibility, or cold archive behavior.
 - `StreamAppendAckV1` freezes `cooldis.stream.append_ack/1`: stream id,
   contiguous start/end/tail sequence, tail event id, and the ack classes
   actually proven. The V1 local fixture uses `local_committed` and
@@ -766,11 +768,13 @@ This ADR creates or sharpens remaining V1 work:
 - Keep V1 payload fixtures for `context.summary.completed` and
   `context.read_plan.set` fail-closed through the shared schema engine as their
   payloads get richer.
-- Extend the current `EventStore` shape toward a `StreamStore` contract with
-  append expectations and follow semantics. The V1 cursor envelope, append-ack
-  envelope, ack classes, backend capability envelope, and verified replay
-  helper are in place; append fencing, live follow, and additional adapter
-  capability records remain future StreamStore work.
+- Continue extending the current `EventStore` shape toward a `StreamStore`
+  contract with follow semantics and additional append expectations. The V1
+  cursor envelope, append-ack envelope, ack classes, backend capability
+  envelope, verified replay helper, and atomic expected-next-sequence fencing
+  through `EventStore::append_events_fenced` are in place; live follow, fencing
+  tokens, and additional adapter capability records remain future StreamStore
+  work.
 - Extend the stream router/exporter contract from the default pure classifier
   into destination adapters and export receipts for model traces, runtime
   traces, UI streams, and analytics aggregates. Those projections must continue
