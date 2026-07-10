@@ -87,4 +87,5 @@ harness product layer are V2 direction.
 - [Runtime Primitives](developers/runtime-primitives.md)
 - [Protocol Surfaces](developers/protocol-surfaces.md)
 - [OpenAPI Operation Imports](openapi-adapter.md)
+- [How Cooldis Is Tested](how-cooldis-is-tested.md)
 - [Roadmap](roadmap.md)
