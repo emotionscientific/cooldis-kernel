@@ -709,10 +709,58 @@ Unsupported noncritical methods return JSON-RPC `-32601` with the method name.
 Runtime events are projected back into Codex-shaped notifications, including:
 
 - `thread/started`, `thread/status/changed`, and `thread/closed`;
+- `thread/resync/started`, `thread/resynced`, and `thread/resync/failed` for
+  explicit broadcast-lag recovery;
 - `turn/started`, `turn/completed`, and `error`;
 - `item/agentMessage/delta` for streamed assistant text;
 - `item/agentThinking/delta` for streamed thinking text;
 - final `item/completed` messages for completed assistant output.
+
+### Broadcast lag recovery
+
+Thread runtime events use a bounded broadcast channel. If a watcher falls
+behind, it does not silently skip the lost events. It first emits:
+
+```json
+{
+  "method": "thread/resync/started",
+  "params": {
+    "threadId": "...",
+    "reason": "broadcastLag",
+    "laggedEvents": 76
+  }
+}
+```
+
+Clients must treat incremental thread notifications as non-authoritative after
+this marker. Once the runtime reaches a quiescent `idle`, `stopped`, or `failed`
+status, the watcher rebuilds the active turn from durable session messages and
+emits one replacement snapshot:
+
+```json
+{
+  "method": "thread/resynced",
+  "params": {
+    "threadId": "...",
+    "reason": "broadcastLag",
+    "laggedEvents": 76,
+    "thread": { "id": "...", "turns": [] }
+  }
+}
+```
+
+`params.thread` has the same full shape as `thread/read` with
+`includeTurns: true`. `laggedEvents` is the saturated total reported by the
+broadcast receiver for the lag episode. Clients should replace their local
+thread projection with this snapshot before applying later incremental
+notifications.
+
+If durable truth cannot be read, recovery fails closed and the watcher emits
+`thread/resync/failed` with
+`{ threadId, reason: "broadcastLag", laggedEvents, error: { code:
+"resync_failed", message } }` instead of claiming that the incomplete
+projection is synchronized. The watcher then stops; a client can explicitly
+resume or re-read the thread after the underlying error is resolved.
 
 ## Verification
 

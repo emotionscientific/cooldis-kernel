@@ -2,7 +2,7 @@ use super::runtime_events::emit_runtime_event;
 use super::runtime_utils::unix_timestamp_ms;
 use super::{
     CooldisError, CooldisResult, RuntimeEventKind, RuntimeThreadHandle, ThreadCheckpoint,
-    ThreadCommand, ThreadEvent,
+    ThreadCheckpointLineage, ThreadCommand, ThreadEvent,
 };
 use crate::agent::manifest_bind::{
     BoundCouplingSet, MANIFEST_BINDER_DISCHARGED_BY, MANIFEST_BINDER_FUNCTION,
@@ -18,7 +18,6 @@ use cooldis_runtime_contracts::{
     ThreadSignalKind, ThreadStatus,
 };
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -33,14 +32,6 @@ impl RuntimeThreadHandle {
 
     pub fn queued_command_count(&self) -> usize {
         self.thread.command_capacity - self.thread.command_tx.capacity()
-    }
-
-    pub fn next_turn_sequence(&self) -> u64 {
-        self.thread.turn_sequence.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    pub fn current_turn_sequence(&self) -> u64 {
-        self.thread.turn_sequence.load(Ordering::SeqCst)
     }
 
     pub fn set_status(&self, status: ThreadStatus) {
@@ -290,6 +281,12 @@ impl RuntimeThreadHandle {
             .map_err(|_| CooldisError::ThreadClosed(thread_id))
     }
 
+    pub(super) fn try_reserve_command(
+        &self,
+    ) -> Result<mpsc::Permit<'_, ThreadCommand>, mpsc::error::TrySendError<()>> {
+        self.thread.command_tx.try_reserve()
+    }
+
     pub async fn record_signal(&self, signal: ThreadSignal) {
         let mut lifecycle = self.thread.lifecycle.lock().await;
         lifecycle.latest_signal_id = Some(signal.id);
@@ -311,6 +308,10 @@ impl RuntimeThreadHandle {
         let checkpoint = ThreadCheckpoint {
             id: ThreadCheckpointId::new(),
             coordinates: self.thread.context.coordinates.clone(),
+            lineage: match self.thread.context.parent_thread_id {
+                Some(parent_thread_id) => ThreadCheckpointLineage::Parent { parent_thread_id },
+                None => ThreadCheckpointLineage::Root,
+            },
             parent_checkpoint_id,
             active_entry_id: None,
             label,
@@ -327,6 +328,7 @@ impl RuntimeThreadHandle {
                     kind: "thread_checkpoint".to_string(),
                     payload: serde_json::json!({
                         "checkpoint_id": checkpoint.id.to_string(),
+                        "lineage": checkpoint.lineage,
                         "parent_checkpoint_id": checkpoint.parent_checkpoint_id.map(|id| id.to_string()),
                         "label": checkpoint.label.clone(),
                         "metadata": checkpoint.metadata.clone(),

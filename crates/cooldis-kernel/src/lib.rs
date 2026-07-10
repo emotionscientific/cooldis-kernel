@@ -8,6 +8,40 @@
 #[cfg(test)]
 mod test_abort_tripwire;
 
+#[cfg(test)]
+pub(crate) use crate as kernel_test;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/event_trace.rs"]
+mod event_trace_support;
+#[cfg(test)]
+#[path = "../tests/support/fault.rs"]
+mod fault_support;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/scripted_provider.rs"]
+mod scripted_provider_support;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/store_parity.rs"]
+mod store_parity_support;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/transcript.rs"]
+mod transcript;
+#[cfg(test)]
+pub(crate) mod test_support {
+    #[allow(unused_imports)]
+    pub(crate) use super::event_trace_support::*;
+    pub(crate) use super::fault_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::scripted_provider_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::store_parity_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::transcript::*;
+}
+
 pub mod adapters {
     pub mod acp_agent;
     pub mod app_server;
@@ -347,13 +381,13 @@ pub use kernel::runtime_host::{
     RuntimeServices, RuntimeTerminalState, RuntimeThreadHandle, RuntimeToolLogLevel, RuntimeUsage,
     THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
     THREAD_OPERATION_REGISTRY_ROOT_METADATA, THREAD_SPAWN_GRANTED_METADATA,
-    THREAD_SPAWN_INPUTS_HASH_METADATA, ThreadCheckpoint, ThreadCheckpointId, ThreadCommand,
-    ThreadContext, ThreadCoordinates, ThreadEvent, ThreadId, ThreadInitiationSource,
-    ThreadInteractionKind, ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus,
-    ThreadLineage, ThreadScope, ThreadSignal, ThreadSignalId, ThreadSignalKind,
-    ThreadSpawnAttribution, ThreadSpawnWitness, ThreadStatus, ThreadTopology, TurnBudget,
-    TurnContent, TurnContext, TurnContextSnapshot, TurnInput, TurnSubmissionMode,
-    emit_runtime_event,
+    THREAD_SPAWN_INPUTS_HASH_METADATA, ThreadCheckpoint, ThreadCheckpointId,
+    ThreadCheckpointLineage, ThreadCommand, ThreadContext, ThreadCoordinates, ThreadEvent,
+    ThreadId, ThreadInitiationSource, ThreadInteractionKind, ThreadLifecycleRecord,
+    ThreadLifecycleSink, ThreadLifecycleStatus, ThreadLineage, ThreadScope, ThreadSignal,
+    ThreadSignalId, ThreadSignalKind, ThreadSpawnAttribution, ThreadSpawnWitness, ThreadStatus,
+    ThreadTopology, TurnBudget, TurnContent, TurnContext, TurnContextSnapshot, TurnInput,
+    TurnSubmissionMode, emit_runtime_event,
 };
 pub use kernel::secret_store::{
     ManifestSecretResolution, RedactedSecretValue, ResolvedSecret, SecretResolver,

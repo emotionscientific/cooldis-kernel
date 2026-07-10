@@ -7309,6 +7309,244 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
 }
 
 #[tokio::test]
+async fn lagged_thread_stream_resnapshots_from_durable_truth() {
+    let root = unique_test_root("app-server-lagged-stream-resnapshot");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let deltas = (0..1_100)
+        .map(|index| format!("{index:04}|"))
+        .collect::<Vec<_>>();
+    let expected = deltas.concat();
+    let provider_client: Arc<dyn ProviderClient> = Arc::new(BurstStreamClient { deltas });
+    let app = test_app_with_provider_root_and_stream(
+        &root,
+        &workspace,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test fixture config type
+        CapsuleBindingsConfig::default(),
+        true,
+    )
+    .await;
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn = app
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "burst", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    let turn_id = turn["turn"]["id"].as_str().unwrap().to_string();
+
+    let (saw_resync_started, resynced) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut saw_resync_started = false;
+            loop {
+                let message = outbound_rx
+                    .recv()
+                    .await
+                    .expect("notification stream closed");
+                let JsonRpcMessage::Notification(notification) = message else {
+                    continue;
+                };
+                match notification.method.as_str() {
+                    "thread/resync/started" => saw_resync_started = true,
+                    "thread/resynced" => {
+                        break (
+                            saw_resync_started,
+                            notification.params.expect("resync params"),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("lagged stream did not resynchronize");
+
+    assert!(saw_resync_started, "lag recovery must be explicit");
+    assert_eq!(resynced["threadId"].as_str(), Some(thread_id.as_str()));
+    assert!(resynced["laggedEvents"].as_u64().unwrap() > 0);
+    let resynced_turn = resynced["thread"]["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["id"].as_str() == Some(turn_id.as_str()))
+        .expect("resync snapshot should contain active turn");
+    let resynced_text = resynced_turn["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"].as_str() == Some("agentMessage"))
+        .and_then(|item| item["text"].as_str())
+        .expect("resync snapshot should contain assistant text");
+    assert_eq!(resynced_text, expected);
+    assert_eq!(
+        latest_assistant_text(&app, &thread_id).await.as_deref(),
+        Some(expected.as_str()),
+        "durable session truth should contain the complete stream",
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lagged_idle_thread_resynchronizes_without_another_status_change() {
+    let app = test_app().await;
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let handle = app.handle_for_thread(&thread_id).await.unwrap();
+    assert_eq!(handle.status(), ThreadStatus::Idle);
+    tokio::task::yield_now().await;
+
+    for index in 0..1_100 {
+        handle.emit_runtime(RuntimeEventKind::TextDelta {
+            text: format!("idle-{index}"),
+        });
+    }
+
+    let (saw_started, saw_resynced) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut saw_started = false;
+            loop {
+                let message = outbound_rx
+                    .recv()
+                    .await
+                    .expect("notification stream closed");
+                let JsonRpcMessage::Notification(notification) = message else {
+                    continue;
+                };
+                match notification.method.as_str() {
+                    "thread/resync/started" => saw_started = true,
+                    "thread/resynced" => break (saw_started, true),
+                    "thread/resync/failed" => break (saw_started, false),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("idle lag did not finish resynchronization");
+
+    assert!(saw_started, "idle lag recovery must be explicit");
+    assert!(saw_resynced, "idle lag recovery unexpectedly failed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
+    let root = unique_test_root("app-server-lag-resync-status-race");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let client = Arc::new(LagThenBlockStreamClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let app = test_app_with_provider_root_and_stream(
+        &root,
+        &workspace,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test fixture config type
+        CapsuleBindingsConfig::default(),
+        true,
+    )
+    .await;
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let gate = install_thread_resync_test_gate(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "turn/start",
+        Some(json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": "lag first turn", "text_elements": [] }],
+        })),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.wait_until_entered())
+        .await
+        .expect("watcher did not enter lag resynchronization");
+
+    let second = app
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "block second turn", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    let second_turn_id = second["turn"]["id"].as_str().unwrap().to_string();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.wait_for_second_request(),
+    )
+    .await
+    .expect("second provider turn did not start");
+    assert_eq!(
+        app.handle_for_thread(&thread_id).await.unwrap().status(),
+        ThreadStatus::Running
+    );
+    gate.release();
+
+    let status_after_resync = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut saw_resynced = false;
+        loop {
+            let message = outbound_rx
+                .recv()
+                .await
+                .expect("notification stream closed");
+            let JsonRpcMessage::Notification(notification) = message else {
+                continue;
+            };
+            if notification.method == "thread/resynced" {
+                saw_resynced = true;
+            } else if saw_resynced && notification.method == "thread/status/changed" {
+                break notification.params.expect("thread status params");
+            }
+        }
+    })
+    .await
+    .expect("watcher did not publish status after resynchronization");
+
+    assert_eq!(status_after_resync["status"]["type"], "active");
+    {
+        let state = app.inner.state.read().await;
+        let thread = state.threads.get(&thread_id).unwrap();
+        assert_eq!(
+            thread.active_turn_id.as_deref(),
+            Some(second_turn_id.as_str())
+        );
+        assert_eq!(thread.status, ThreadStatus::Running);
+    }
+    client.release_second_request();
+    wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &second_turn_id).await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn fast_stream_after_thread_start_idle_completes_with_assistant_text() {
     let root = unique_test_root("app-server-fast-stream-after-idle");
     let workspace = root.join("workspace");
@@ -10074,6 +10312,96 @@ impl SequencedStreamResponse {
 struct SequencedStreamCapsuleClient {
     requests: std::sync::Mutex<Vec<ProviderRequest>>,
     responses: std::sync::Mutex<Vec<SequencedStreamResponse>>,
+}
+
+struct BurstStreamClient {
+    deltas: Vec<String>,
+}
+
+#[derive(Default)]
+struct LagThenBlockStreamClient {
+    request_count: std::sync::atomic::AtomicUsize,
+    second_request_started: tokio::sync::Notify,
+    release_second_request: tokio::sync::Notify,
+}
+
+impl LagThenBlockStreamClient {
+    async fn wait_for_second_request(&self) {
+        self.second_request_started.notified().await;
+    }
+
+    fn release_second_request(&self) {
+        self.release_second_request.notify_one();
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for BurstStreamClient {
+    async fn complete(&self, _request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text(self.deltas.concat())],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
+    }
+
+    async fn stream(
+        &self,
+        _request: &ProviderRequest,
+    ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        let mut events = self
+            .deltas
+            .iter()
+            .cloned()
+            .map(|text| crate::ProviderStreamEvent::TextDelta { text })
+            .collect::<Vec<_>>();
+        events.push(crate::ProviderStreamEvent::Done {
+            stop_reason: CanonicalStopReason::EndTurn,
+        });
+        Ok(events)
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for LagThenBlockStreamClient {
+    async fn complete(&self, _request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text("lag race completion")],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
+    }
+
+    async fn stream(
+        &self,
+        _request: &ProviderRequest,
+    ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        let request_index = self
+            .request_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if request_index == 0 {
+            let mut events = (0..1_100)
+                .map(|index| crate::ProviderStreamEvent::TextDelta {
+                    text: format!("{index:04}|"),
+                })
+                .collect::<Vec<_>>();
+            events.push(crate::ProviderStreamEvent::Done {
+                stop_reason: CanonicalStopReason::EndTurn,
+            });
+            return Ok(events);
+        }
+
+        self.second_request_started.notify_one();
+        self.release_second_request.notified().await;
+        Ok(vec![
+            crate::ProviderStreamEvent::TextDelta {
+                text: "second turn complete".to_string(),
+            },
+            crate::ProviderStreamEvent::Done {
+                stop_reason: CanonicalStopReason::EndTurn,
+            },
+        ])
+    }
 }
 
 // lexicon-allow: capsule - existing test client name

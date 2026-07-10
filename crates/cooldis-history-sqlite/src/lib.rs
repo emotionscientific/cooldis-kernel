@@ -10,7 +10,7 @@ use cooldis_history::{
     storage_error, validate_entry_coordinates, validate_new_event, validate_thread_base_ref,
 };
 use cooldis_runtime_contracts::{ThreadCheckpointId, ThreadCoordinates, ThreadId};
-use rusqlite::{OpenFlags, OptionalExtension, params};
+use rusqlite::{OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -321,6 +321,32 @@ impl EventStore for SqliteSessionStore {
     ) -> HistoryResult<Vec<EventRecord>> {
         let mut connection = self.lock_connection()?;
         let tx = connection.transaction().map_err(storage_error)?;
+        let mut appended = Vec::with_capacity(records.len());
+        for record in records {
+            appended.push(sqlite_insert_event(&tx, stream_id, record)?);
+        }
+        tx.commit().map_err(storage_error)?;
+        Ok(appended)
+    }
+
+    async fn append_events_fenced(
+        &self,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let actual_next_sequence = sqlite_next_event_sequence(&tx, stream_id)?;
+        if actual_next_sequence != expected_next_sequence.get() {
+            return Err(HistoryError::AppendFenceConflict {
+                stream_id: stream_id.clone(),
+                expected_next_sequence: expected_next_sequence.get(),
+                actual_next_sequence,
+            });
+        }
         let mut appended = Vec::with_capacity(records.len());
         for record in records {
             appended.push(sqlite_insert_event(&tx, stream_id, record)?);
@@ -695,13 +721,18 @@ fn sqlite_insert_event(
     record: NewEventRecord,
 ) -> HistoryResult<EventRecord> {
     validate_new_event(&record)?;
-    let next_sequence = tx
+    let event_id = record.id;
+    let event_id_exists = tx
         .query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM event_records WHERE stream_id = ?1",
-            params![stream_id.as_str()],
-            |row| row.get::<_, i64>(0),
+            "SELECT EXISTS(SELECT 1 FROM event_records WHERE event_id = ?1)",
+            params![event_id.to_string()],
+            |row| row.get::<_, bool>(0),
         )
         .map_err(storage_error)?;
+    if event_id_exists {
+        return Err(HistoryError::DuplicateEventId(event_id));
+    }
+    let next_sequence = sqlite_next_event_sequence(tx, stream_id)?;
     let event = EventRecord::from_new(stream_id.clone(), EventSequence::new(next_sequence), record);
     event.validate_stream_record_v1()?;
     let payload_json = serde_json::to_string(&event.payload).map_err(codec_error)?;
@@ -742,6 +773,19 @@ fn sqlite_insert_event(
     )
     .map_err(storage_error)?;
     Ok(event)
+}
+
+fn sqlite_next_event_sequence(
+    connection: &rusqlite::Connection,
+    stream_id: &EventStreamId,
+) -> HistoryResult<i64> {
+    connection
+        .query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM event_records WHERE stream_id = ?1",
+            params![stream_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(storage_error)
 }
 
 fn sqlite_read_events(

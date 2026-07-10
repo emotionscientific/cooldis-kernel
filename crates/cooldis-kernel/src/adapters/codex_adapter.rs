@@ -134,12 +134,14 @@ impl AgentRuntime for CodexCliRuntime {
                         break;
                     }
                 }
+                let watchdog_token_id = input.turn_watchdog_id();
                 if run_codex_cli_turn(
                     &self.config,
                     &services,
                     &coordinates,
                     thread_id,
                     input.text_projection(),
+                    watchdog_token_id,
                     &events,
                     &status,
                     &mut commands,
@@ -194,12 +196,14 @@ impl AgentRuntime for CodexCliRuntime {
                                     break;
                                 }
                             }
+                            let watchdog_token_id = input.turn_watchdog_id();
                             if run_codex_cli_turn(
                                 &self.config,
                                 &services,
                                 &coordinates,
                                 thread_id,
                                 input.text_projection(),
+                                watchdog_token_id,
                                 &events,
                                 &status,
                                 &mut commands,
@@ -220,6 +224,7 @@ impl AgentRuntime for CodexCliRuntime {
                             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
                             let _ = status.send(ThreadStatus::Idle);
                         }
+                        Some(ThreadCommand::CancelTurn { .. }) => {}
                         Some(ThreadCommand::Compact { .. }) => {
                             emit_runtime_event(
                                 &events,
@@ -271,6 +276,7 @@ async fn run_codex_cli_turn(
     coordinates: &ThreadCoordinates,
     thread_id: crate::ThreadId,
     input: String,
+    watchdog_token_id: Option<u64>,
     events: &broadcast::Sender<ThreadEvent>,
     status: &watch::Sender<ThreadStatus>,
     commands: &mut mpsc::Receiver<ThreadCommand>,
@@ -294,6 +300,28 @@ async fn run_codex_cli_turn(
             command = commands.recv() => {
                 match command {
                     Some(ThreadCommand::Cancel { reason }) => {
+                        let _ = status.send(ThreadStatus::Cancelling);
+                        let _ = events.send(ThreadEvent::Signal {
+                            thread_id,
+                            signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+                        });
+                        emit_runtime_event(
+                            events,
+                            coordinates,
+                            RuntimeEventKind::Cancelled {
+                                reason: reason.clone(),
+                            },
+                        );
+                        turn_cancellation.cancel();
+                        cancelled_reason = Some(reason);
+                    }
+                    Some(ThreadCommand::CancelTurn {
+                        watchdog_token_id: target_token_id,
+                        reason,
+                    }) => {
+                        if watchdog_token_id != Some(target_token_id) {
+                            continue;
+                        }
                         let _ = status.send(ThreadStatus::Cancelling);
                         let _ = events.send(ThreadEvent::Signal {
                             thread_id,

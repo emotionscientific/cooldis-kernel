@@ -141,6 +141,31 @@ runtime threads not yet resident in the fresh supervisor are loaded lazily on
 first use. If that lifecycle load fails, the stale binding is replaced by a
 fresh, durably bound thread before ingress is submitted.
 
+Durable queue apply uses the leased `IngressEnvelope.id` as its idempotency key.
+Before submitting a turn, the daemon appends the thread's
+`io.ingress.received` fact with both `turn_id` and `ingress_message_ids`; a
+coalesced turn records every source message ID in that one fact. The append is
+expected-tail fenced, so competing workers cannot both establish the marker on
+the same thread. This extends the per-conversation ordering law: first persist
+the conversation binding, then persist the applied marker, then submit the
+turn, and only then complete the queue lease.
+
+On redelivery, the daemon checks durable history for the ingress envelope ID
+before resolving or creating a replacement thread. An existing marker makes
+apply a no-op: no admission or turn is submitted, the original control stream
+receives an `io.ingress.received` diagnostic with `dedupe_seen = true` and the
+original `applied_turn_id`, and the worker completes the lease. This closes the
+duplicate side of the apply/ack crash window: a redelivered envelope can never
+run twice. It is not exactly-once. The marker is durable while the submission
+it describes is in-process state, so a process death after the marker commits
+but before the reserved submission is sent loses that turn; redelivery then
+dedupes against the marker instead of retrying. Apply keeps the loss window
+minimal by completing all fallible admission before the marker and sending
+synchronously after it, and the ratified order stands because a duplicate turn
+is the worse failure. Closing the loss window outright needs a durable
+pending/applied outcome protocol; none of this changes the outbound
+send/receipt ambiguity described below.
+
 Runtime hotswap should start as config-level hotswap:
 
 ```toml

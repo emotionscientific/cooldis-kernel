@@ -35,8 +35,8 @@ pub fn render_compaction_summary(summary: &str) -> String {
     }
 }
 
-pub fn compaction_summary_message(summary: &str) -> CanonicalMessage {
-    CanonicalMessage::user_text(render_compaction_summary(summary))
+pub fn compaction_summary_message(summary: &str, timestamp_ms: i64) -> CanonicalMessage {
+    CanonicalMessage::user_text_at(render_compaction_summary(summary), timestamp_ms)
 }
 
 #[derive(Debug, Error)]
@@ -70,6 +70,8 @@ pub enum HistoryError {
     /// A discharged event reached an append path without provenance.
     #[error("discharged event {0} has no provenance")]
     DischargedWithoutProvenance(EventRecordId),
+    #[error("event id already exists: {0}")]
+    DuplicateEventId(EventRecordId),
     #[error("stream cursor targets {cursor_stream_id}, not requested stream {requested_stream_id}")]
     StreamCursorStreamMismatch {
         cursor_stream_id: EventStreamId,
@@ -85,6 +87,16 @@ pub enum HistoryError {
         actual_sequence: Option<i64>,
         actual_event_id: Option<EventRecordId>,
     },
+    #[error(
+        "fenced append to {stream_id} expected next sequence {expected_next_sequence}, stream is at {actual_next_sequence}"
+    )]
+    AppendFenceConflict {
+        stream_id: EventStreamId,
+        expected_next_sequence: i64,
+        actual_next_sequence: i64,
+    },
+    #[error("this event store does not support fenced appends")]
+    FencedAppendUnsupported,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -869,7 +881,7 @@ impl StreamBackendCapabilitiesV1 {
             supports_atomic_batch_append: true,
             supports_verified_cursor_replay: true,
             supports_query_projection: true,
-            supports_expected_tail: false,
+            supports_expected_tail: true,
             supports_fencing_tokens: false,
             supports_live_follow: false,
             supports_broadcast: false,
@@ -2321,9 +2333,15 @@ pub enum CanonicalMessage {
 
 impl CanonicalMessage {
     pub fn user_text(text: impl Into<String>) -> Self {
+        Self::user_text_at(text, now_ms())
+    }
+
+    /// Builds user text at a persisted source time so "assembly is deterministic"
+    /// and synthetic context never depends on the assembly-time clock.
+    pub fn user_text_at(text: impl Into<String>, timestamp_ms: i64) -> Self {
         Self::User {
             content: vec![CanonicalContent::text(text)],
-            timestamp_ms: now_ms(),
+            timestamp_ms,
         }
     }
 
@@ -2538,6 +2556,31 @@ pub trait EventStore: Send + Sync {
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>>;
 
+    /// Append `records` only if the stream's next sequence equals
+    /// `expected_next_sequence` (sequences are 1-based; an empty stream
+    /// expects 1).
+    ///
+    /// On mismatch this returns [`HistoryError::AppendFenceConflict`] and
+    /// appends nothing — never a partial batch. The check and the append are
+    /// atomic with respect to every other append on the same store, so a
+    /// caller that read the stream, decided, and appends through this fence
+    /// cannot race a concurrent writer past its decision (ADR 0001 append
+    /// fencing). Use plain [`EventStore::append_events`] where last-writer
+    /// semantics are correct.
+    ///
+    /// Stores that cannot honor the atomicity contract keep this default
+    /// body, which fails closed with
+    /// [`HistoryError::FencedAppendUnsupported`].
+    async fn append_events_fenced(
+        &self,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        let _ = (stream_id, expected_next_sequence, records);
+        Err(HistoryError::FencedAppendUnsupported)
+    }
+
     async fn read_events(
         &self,
         stream_id: &EventStreamId,
@@ -2604,6 +2647,7 @@ struct InMemorySessionStoreInner {
     active_leaf: HashMap<ThreadId, SessionEntryId>,
     bases: HashMap<ThreadId, ThreadBaseRef>,
     events: HashMap<EventStreamId, Vec<EventRecord>>,
+    event_ids: HashSet<EventRecordId>,
     observations: HashMap<ThreadId, Vec<ObservationRecord>>,
 }
 
@@ -2803,28 +2847,30 @@ impl EventStore for InMemorySessionStore {
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
         let mut inner = self.inner.write().await;
-        let current_len = inner
+        append_in_memory_events(&mut inner, stream_id, records)
+    }
+
+    async fn append_events_fenced(
+        &self,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        let mut inner = self.inner.write().await;
+        let actual_next_sequence = inner
             .events
             .get(stream_id)
             .map(|events| events.len() as i64)
-            .unwrap_or_default();
-        let mut appended = Vec::with_capacity(records.len());
-        for (index, record) in records.into_iter().enumerate() {
-            validate_new_event(&record)?;
-            let event = EventRecord::from_new(
-                stream_id.clone(),
-                EventSequence::new(current_len + index as i64 + 1),
-                record,
-            );
-            event.validate_stream_record_v1()?;
-            appended.push(event);
+            .unwrap_or_default()
+            + 1;
+        if actual_next_sequence != expected_next_sequence.get() {
+            return Err(HistoryError::AppendFenceConflict {
+                stream_id: stream_id.clone(),
+                expected_next_sequence: expected_next_sequence.get(),
+                actual_next_sequence,
+            });
         }
-        inner
-            .events
-            .entry(stream_id.clone())
-            .or_default()
-            .extend(appended.clone());
-        Ok(appended)
+        append_in_memory_events(&mut inner, stream_id, records)
     }
 
     async fn read_events(
@@ -2847,6 +2893,43 @@ impl EventStore for InMemorySessionStore {
             .collect();
         Ok(events)
     }
+}
+
+fn append_in_memory_events(
+    inner: &mut InMemorySessionStoreInner,
+    stream_id: &EventStreamId,
+    records: Vec<NewEventRecord>,
+) -> HistoryResult<Vec<EventRecord>> {
+    let mut batch_ids = HashSet::with_capacity(records.len());
+    for record in &records {
+        validate_new_event(record)?;
+        if inner.event_ids.contains(&record.id) || !batch_ids.insert(record.id) {
+            return Err(HistoryError::DuplicateEventId(record.id));
+        }
+    }
+    let current_len = inner
+        .events
+        .get(stream_id)
+        .map(|events| events.len() as i64)
+        .unwrap_or_default();
+    let mut appended = Vec::with_capacity(records.len());
+    for (index, record) in records.into_iter().enumerate() {
+        validate_new_event(&record)?;
+        let event = EventRecord::from_new(
+            stream_id.clone(),
+            EventSequence::new(current_len + index as i64 + 1),
+            record,
+        );
+        event.validate_stream_record_v1()?;
+        appended.push(event);
+    }
+    inner
+        .events
+        .entry(stream_id.clone())
+        .or_default()
+        .extend(appended.clone());
+    inner.event_ids.extend(batch_ids);
+    Ok(appended)
 }
 
 #[async_trait]
@@ -3050,7 +3133,7 @@ pub fn append_model_visible_messages(
             }
             SessionEntryKind::Compaction { summary } => {
                 messages.clear();
-                messages.push(compaction_summary_message(summary));
+                messages.push(compaction_summary_message(summary, entry.created_at_ms));
             }
             SessionEntryKind::ModelChange { .. }
             | SessionEntryKind::BranchSummary { .. }
@@ -3065,6 +3148,9 @@ fn append_in_memory_event(
     record: NewEventRecord,
 ) -> HistoryResult<EventRecord> {
     validate_new_event(&record)?;
+    if inner.event_ids.contains(&record.id) {
+        return Err(HistoryError::DuplicateEventId(record.id));
+    }
     let sequence = EventSequence::new(
         inner
             .events
@@ -3080,6 +3166,7 @@ fn append_in_memory_event(
         .entry(stream_id.clone())
         .or_default()
         .push(event.clone());
+    inner.event_ids.insert(event.id);
     Ok(event)
 }
 

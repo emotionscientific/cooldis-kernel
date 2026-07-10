@@ -11,10 +11,26 @@ use std::collections::BTreeMap;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+/// Records whether a checkpoint is proven safe for V1 root-only resume.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ThreadCheckpointLineage {
+    /// The checkpoint predates explicit lineage recording and cannot be
+    /// established as safe for root-only resume.
+    #[default]
+    Unknown,
+    Root,
+    Parent {
+        parent_thread_id: ThreadId,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ThreadCheckpoint {
     pub id: ThreadCheckpointId,
     pub coordinates: ThreadCoordinates,
+    #[serde(default)]
+    pub lineage: ThreadCheckpointLineage,
     pub parent_checkpoint_id: Option<ThreadCheckpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_entry_id: Option<SessionEntryId>,
@@ -42,6 +58,10 @@ pub enum ThreadCommand {
         call_id: String,
     },
     Cancel {
+        reason: String,
+    },
+    CancelTurn {
+        watchdog_token_id: u64,
         reason: String,
     },
     Shutdown,

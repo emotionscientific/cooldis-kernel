@@ -76,6 +76,8 @@ pub struct AgentContextCompileInput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_system_sources: Vec<AgentManifestStaticContextSegment>,
     pub session_entries: Vec<SessionEntry>,
+    /// Persisted turn-start or thread-anchor time for synthetics without one entry source.
+    pub turn_anchor_timestamp_ms: i64,
     pub turn_context: TurnContextSnapshot,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hook_contexts: Vec<String>,
@@ -135,7 +137,7 @@ impl AgentContextCompiler {
         for context in render_environment_contexts(&input.turn_context, &input.environment_contexts)
         {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text(context),
+                message: CanonicalMessage::user_text_at(context, input.turn_anchor_timestamp_ms),
                 source: AgentContextSource::Environment,
                 entry_id: None,
             });
@@ -165,7 +167,7 @@ impl AgentContextCompiler {
                         }));
                     messages.clear();
                     messages.push(TrackedMessage {
-                        message: compaction_summary_message(summary),
+                        message: compaction_summary_message(summary, entry.created_at_ms),
                         source: AgentContextSource::CompactionSummary,
                         entry_id: Some(entry.entry_id),
                     });
@@ -182,7 +184,7 @@ impl AgentContextCompiler {
             .filter(|context| !context.trim().is_empty())
         {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text(context),
+                message: CanonicalMessage::user_text_at(context, input.turn_anchor_timestamp_ms),
                 source: AgentContextSource::HookContext,
                 entry_id: None,
             });
@@ -195,7 +197,10 @@ impl AgentContextCompiler {
             .filter(|context| !context.trim().is_empty())
         {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text(context.clone()),
+                message: CanonicalMessage::user_text_at(
+                    context.clone(),
+                    input.turn_anchor_timestamp_ms,
+                ),
                 source: AgentContextSource::TurnContext,
                 entry_id: None,
             });
@@ -203,7 +208,10 @@ impl AgentContextCompiler {
 
         if let Some(attachment_context) = render_attachment_context(&input.attachments) {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text(attachment_context),
+                message: CanonicalMessage::user_text_at(
+                    attachment_context,
+                    input.turn_anchor_timestamp_ms,
+                ),
                 source: AgentContextSource::Attachment,
                 entry_id: None,
             });

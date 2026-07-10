@@ -6,6 +6,7 @@ use super::context_read_plan::{
     session_context_source_cut_for_entries,
 };
 use super::runtime_utils::unix_timestamp_ms;
+use super::turn::{TurnWatchdogHandle, TurnWatchdogToken};
 use super::{CooldisError, CooldisResult, RuntimeKernelControl, TurnInput};
 use crate::agent::manifest_bind::BoundCouplingSet;
 use crate::kernel::coupling_executor_registry::{
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeExecutionPolicy {
@@ -72,6 +74,7 @@ pub struct RuntimeServices {
     kernel_control: Option<RuntimeKernelControl>,
     bound_coupling_set: Option<BoundCouplingSet>,
     operation_registry_root: Option<PathBuf>,
+    turn_watchdog_sequence: Arc<AtomicU64>,
 }
 
 impl RuntimeServices {
@@ -85,6 +88,7 @@ impl RuntimeServices {
             kernel_control: None,
             bound_coupling_set: None,
             operation_registry_root: None,
+            turn_watchdog_sequence: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -113,6 +117,16 @@ impl RuntimeServices {
 
     pub fn kernel_control(&self) -> Option<RuntimeKernelControl> {
         self.kernel_control.clone()
+    }
+
+    pub(super) fn register_turn_watchdog(&self, input: &mut TurnInput) -> TurnWatchdogHandle {
+        let token_id = self
+            .turn_watchdog_sequence
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        let (token, handle) = TurnWatchdogToken::new(token_id);
+        input.set_turn_watchdog(token);
+        handle
     }
 
     pub async fn append_session_entry(
@@ -187,6 +201,7 @@ impl RuntimeServices {
         coordinates: &ThreadCoordinates,
         input: &TurnInput,
     ) -> CooldisResult<SessionEntry> {
+        input.start_turn_watchdog();
         self.append_session_entry(
             coordinates,
             None,

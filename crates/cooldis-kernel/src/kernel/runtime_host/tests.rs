@@ -23,7 +23,6 @@ use crate::kernel::history::{
     EventSequence,
     EventStore,
     EventStreamId,
-    HistoryError,
     HistoryResult,
     NewEventRecord,
     NewObservationRecord,
@@ -39,6 +38,7 @@ use crate::kernel::history::{
     ThreadForkReason,
     TimerFiredPayload,
 };
+use crate::test_support::FaultingRuntimeStore;
 use crate::{
     CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CooldisDaemonClockRoute,
     CouplingScheduler, DaemonClock, LocalOfflineProviderClient, SqliteSessionStore,
@@ -49,6 +49,8 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use cooldis_io_core::{
     IngressAck, IngressContent, IngressEnvelope, IngressSink, IoError, IoResult,
 };
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
@@ -546,6 +548,7 @@ impl AgentRuntime for EchoRuntime {
                             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
                             let _ = status.send(ThreadStatus::Idle);
                         }
+                        Some(ThreadCommand::CancelTurn { .. }) => {}
                         Some(ThreadCommand::Compact { .. }) => {
                             let _ = status.send(ThreadStatus::Idle);
                         }
@@ -569,20 +572,32 @@ impl AgentRuntime for EchoRuntime {
 }
 
 #[derive(Clone)]
-struct AdmissionAppendFailingStore {
+struct AdmissionTestStore {
     inner: InMemorySessionStore,
+    admission_barrier: Option<Arc<AdmissionAppendBarrier>>,
+    select_branch_calls: Arc<AtomicUsize>,
 }
 
-impl AdmissionAppendFailingStore {
-    fn new() -> Self {
+impl AdmissionTestStore {
+    fn blocking(admission_barrier: Arc<AdmissionAppendBarrier>) -> Self {
         Self {
             inner: InMemorySessionStore::new(),
+            admission_barrier: Some(admission_barrier),
+            select_branch_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn tracking_selects() -> Self {
+        Self {
+            inner: InMemorySessionStore::new(),
+            admission_barrier: None,
+            select_branch_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 #[async_trait]
-impl SessionStore for AdmissionAppendFailingStore {
+impl SessionStore for AdmissionTestStore {
     async fn append(
         &self,
         coordinates: &ThreadCoordinates,
@@ -616,6 +631,7 @@ impl SessionStore for AdmissionAppendFailingStore {
         coordinates: &ThreadCoordinates,
         leaf_entry_id: Option<SessionEntryId>,
     ) -> HistoryResult<()> {
+        self.select_branch_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.select_branch(coordinates, leaf_entry_id).await
     }
 
@@ -650,17 +666,17 @@ impl SessionStore for AdmissionAppendFailingStore {
 }
 
 #[async_trait]
-impl EventStore for AdmissionAppendFailingStore {
+impl EventStore for AdmissionTestStore {
     async fn append_events(
         &self,
         stream_id: &EventStreamId,
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
-        if records
+        let appends_admission = records
             .iter()
-            .any(|record| record.kind == EventKind::AdmissionDecided)
-        {
-            return Err(HistoryError::Storage("admission append failed".to_string()));
+            .any(|record| record.kind == EventKind::AdmissionDecided);
+        if appends_admission && let Some(barrier) = &self.admission_barrier {
+            barrier.arrive_and_wait().await;
         }
         self.inner.append_events(stream_id, records).await
     }
@@ -676,7 +692,7 @@ impl EventStore for AdmissionAppendFailingStore {
 
 #[async_trait]
 // lexicon-allow: observation_store - test wrapper must implement the history observation trait
-impl ObservationStore for AdmissionAppendFailingStore {
+impl ObservationStore for AdmissionTestStore {
     async fn append_observation(
         &self,
         record: NewObservationRecord,
@@ -690,6 +706,40 @@ impl ObservationStore for AdmissionAppendFailingStore {
         kind: Option<&str>,
     ) -> HistoryResult<Vec<ObservationRecord>> {
         self.inner.list_observations(scope, kind).await
+    }
+}
+
+#[derive(Default)]
+struct AdmissionAppendBarrier {
+    entered: AtomicUsize,
+    entered_notify: Notify,
+    released: AtomicBool,
+    release_notify: Notify,
+}
+
+impl AdmissionAppendBarrier {
+    async fn arrive_and_wait(&self) {
+        let release = self.release_notify.notified();
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.entered_notify.notify_waiters();
+        if !self.released.load(Ordering::SeqCst) {
+            release.await;
+        }
+    }
+
+    async fn wait_for_entries(&self, expected: usize) {
+        loop {
+            let entered = self.entered_notify.notified();
+            if self.entered.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            entered.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
     }
 }
 
@@ -758,6 +808,7 @@ impl AgentRuntime for AssistantHistoryRuntime {
                             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
                             let _ = status.send(ThreadStatus::Idle);
                         }
+                        Some(ThreadCommand::CancelTurn { .. }) => {}
                         Some(ThreadCommand::Compact { .. }) => {
                             let _ = status.send(ThreadStatus::Idle);
                         }
@@ -863,6 +914,7 @@ impl AgentRuntime for InspectTurnInputRuntime {
                     });
                 }
                 ThreadCommand::Cancel { .. } => {}
+                ThreadCommand::CancelTurn { .. } => {}
                 ThreadCommand::Compact { .. } => {}
                 ThreadCommand::ResumeToolCall { .. } => {}
                 ThreadCommand::Shutdown => break,
@@ -904,6 +956,607 @@ impl AgentRuntime for StuckRuntime {
             }
             std::future::pending::<()>().await;
         }
+    }
+}
+
+#[derive(Default)]
+struct GatedTurnRuntimeState {
+    first_started: Notify,
+    release_first: Notify,
+    second_started: Notify,
+    release_second: Notify,
+}
+
+struct GatedTurnRuntimeFactory {
+    state: Arc<GatedTurnRuntimeState>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for GatedTurnRuntimeFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        Ok(Box::new(GatedTurnRuntime {
+            state: Arc::clone(&self.state),
+        }))
+    }
+}
+
+struct GatedTurnRuntime {
+    state: Arc<GatedTurnRuntimeState>,
+}
+
+#[async_trait]
+impl AgentRuntime for GatedTurnRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let thread_id = context.coordinates.thread_id;
+        let coordinates = context.coordinates.clone();
+        let _ = events.send(ThreadEvent::Started { context });
+        let _ = status.send(ThreadStatus::Idle);
+
+        for (expected_turn_id, started, release) in [
+            (
+                "turn-a",
+                &self.state.first_started,
+                &self.state.release_first,
+            ),
+            (
+                "turn-b",
+                &self.state.second_started,
+                &self.state.release_second,
+            ),
+        ] {
+            let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
+                return;
+            };
+            assert_eq!(turn_id, expected_turn_id);
+            let _ = status.send(ThreadStatus::Running);
+            if let Ok(entry) = services.append_user_turn_input(&coordinates, &input).await {
+                let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+            }
+            started.notify_one();
+            release.notified().await;
+            drop(input);
+            let _ = status.send(ThreadStatus::Idle);
+        }
+    }
+}
+
+#[derive(Default)]
+struct WatchdogHandoffState {
+    first_started: Notify,
+    release_first: Notify,
+    second_started: Notify,
+    stale_cancel_applied: AtomicBool,
+    stale_cancel_observed: Notify,
+}
+
+struct WatchdogHandoffRuntimeFactory {
+    state: Arc<WatchdogHandoffState>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for WatchdogHandoffRuntimeFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        Ok(Box::new(WatchdogHandoffRuntime {
+            state: Arc::clone(&self.state),
+        }))
+    }
+}
+
+struct WatchdogHandoffRuntime {
+    state: Arc<WatchdogHandoffState>,
+}
+
+impl WatchdogHandoffState {
+    async fn wait_for_stale_cancel(&self) {
+        loop {
+            let observed = self.stale_cancel_observed.notified();
+            if self.stale_cancel_applied.load(Ordering::SeqCst) {
+                return;
+            }
+            observed.await;
+        }
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for WatchdogHandoffRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        _events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let coordinates = context.coordinates;
+        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+            return;
+        };
+        let _ = status.send(ThreadStatus::Running);
+        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        self.state.first_started.notify_one();
+        self.state.release_first.notified().await;
+        drop(input);
+        let _ = status.send(ThreadStatus::Idle);
+
+        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+            return;
+        };
+        let _ = status.send(ThreadStatus::Running);
+        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        self.state.second_started.notify_one();
+
+        if let Some(ThreadCommand::Cancel { .. }) = commands.recv().await {
+            self.state
+                .stale_cancel_applied
+                .store(true, Ordering::SeqCst);
+            self.state.stale_cancel_observed.notify_waiters();
+        }
+    }
+}
+
+#[derive(Default)]
+struct DrainedPendingInputState {
+    first_started: Notify,
+    queued_input_drained: Notify,
+    release: Notify,
+}
+
+struct DrainedPendingInputRuntimeFactory {
+    state: Arc<DrainedPendingInputState>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for DrainedPendingInputRuntimeFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        Ok(Box::new(DrainedPendingInputRuntime {
+            state: Arc::clone(&self.state),
+        }))
+    }
+}
+
+struct DrainedPendingInputRuntime {
+    state: Arc<DrainedPendingInputState>,
+}
+
+#[async_trait]
+impl AgentRuntime for DrainedPendingInputRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        _events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let coordinates = context.coordinates;
+        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+            return;
+        };
+        let _ = status.send(ThreadStatus::Running);
+        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        self.state.first_started.notify_one();
+
+        let queued_input = match commands.recv().await {
+            Some(ThreadCommand::Submit { input, .. }) => input,
+            _ => return,
+        };
+        self.state.queued_input_drained.notify_one();
+        self.state.release.notified().await;
+        drop(queued_input);
+    }
+}
+
+#[derive(Default)]
+struct GatedShutdownFactory {
+    builds: AtomicUsize,
+    shutdown_received: Arc<Notify>,
+    release_shutdown: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for GatedShutdownFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        if self.builds.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Box::new(GatedShutdownRuntime {
+                shutdown_received: Arc::clone(&self.shutdown_received),
+                release_shutdown: Arc::clone(&self.release_shutdown),
+            }))
+        } else {
+            Ok(Box::new(EchoRuntime))
+        }
+    }
+}
+
+struct GatedShutdownRuntime {
+    shutdown_received: Arc<Notify>,
+    release_shutdown: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentRuntime for GatedShutdownRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        _services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        _events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let _ = status.send(ThreadStatus::Idle);
+        while let Some(command) = commands.recv().await {
+            if matches!(command, ThreadCommand::Shutdown) {
+                self.shutdown_received.notify_one();
+                self.release_shutdown.notified().await;
+                let _ = status.send(ThreadStatus::Stopped);
+                return;
+            }
+        }
+        let _ = context;
+    }
+}
+
+#[derive(Default)]
+struct ControlledChildBuildFactory {
+    child_builds: AtomicUsize,
+    child_build_notify: Notify,
+    released: AtomicBool,
+    release_notify: Notify,
+    child_runtime_starts: Arc<AtomicUsize>,
+}
+
+impl ControlledChildBuildFactory {
+    async fn wait_for_child_builds(&self, expected: usize) {
+        loop {
+            let entered = self.child_build_notify.notified();
+            if self.child_builds.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            entered.await;
+        }
+    }
+
+    fn release_builds(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for ControlledChildBuildFactory {
+    async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        let is_child = context.parent_thread_id.is_some();
+        if is_child {
+            let release = self.release_notify.notified();
+            self.child_builds.fetch_add(1, Ordering::SeqCst);
+            self.child_build_notify.notify_waiters();
+            if !self.released.load(Ordering::SeqCst) {
+                release.await;
+            }
+        }
+        Ok(Box::new(CountingEchoRuntime {
+            starts: is_child.then(|| Arc::clone(&self.child_runtime_starts)),
+        }))
+    }
+}
+
+struct BlockingThreadBuildFactory {
+    target_thread_id: ThreadId,
+    entered: AtomicBool,
+    entered_notify: Notify,
+    released: AtomicBool,
+    release_notify: Notify,
+}
+
+impl BlockingThreadBuildFactory {
+    fn new(target_thread_id: ThreadId) -> Self {
+        Self {
+            target_thread_id,
+            entered: AtomicBool::new(false),
+            entered_notify: Notify::new(),
+            released: AtomicBool::new(false),
+            release_notify: Notify::new(),
+        }
+    }
+
+    async fn wait_until_blocked(&self) {
+        loop {
+            let entered = self.entered_notify.notified();
+            if self.entered.load(Ordering::SeqCst) {
+                return;
+            }
+            entered.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for BlockingThreadBuildFactory {
+    async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        if context.coordinates.thread_id == self.target_thread_id {
+            let release = self.release_notify.notified();
+            self.entered.store(true, Ordering::SeqCst);
+            self.entered_notify.notify_waiters();
+            if !self.released.load(Ordering::SeqCst) {
+                release.await;
+            }
+        }
+        Ok(Box::new(EchoRuntime))
+    }
+}
+
+struct CountingEchoRuntime {
+    starts: Option<Arc<AtomicUsize>>,
+}
+
+#[async_trait]
+impl AgentRuntime for CountingEchoRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        commands: mpsc::Receiver<ThreadCommand>,
+        events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        cancellation: CancellationToken,
+    ) {
+        if let Some(starts) = &self.starts {
+            starts.fetch_add(1, Ordering::SeqCst);
+        }
+        Box::new(EchoRuntime)
+            .run(context, services, commands, events, status, cancellation)
+            .await;
+    }
+}
+
+#[derive(Default)]
+struct FailFirstChildBuildFactory {
+    failed: AtomicBool,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for FailFirstChildBuildFactory {
+    async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        if context.parent_thread_id.is_some() && !self.failed.swap(true, Ordering::SeqCst) {
+            return Err(CooldisError::RuntimeFactory(
+                "controlled child build failure".to_string(),
+            ));
+        }
+        Ok(Box::new(EchoRuntime))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegistrationProbeOutcome {
+    Pending = 0,
+    DroppedWithoutRun = 1,
+    ObservedThreadNotFound = 2,
+    ObservedRegistered = 3,
+    ObservedOtherError = 4,
+}
+
+#[derive(Default)]
+struct RegistrationProbeFactory {
+    build_completed: AtomicBool,
+    build_notify: Notify,
+    outcome: Arc<AtomicUsize>,
+    outcome_notify: Arc<Notify>,
+}
+
+impl RegistrationProbeFactory {
+    async fn wait_for_build(&self) {
+        loop {
+            let completed = self.build_notify.notified();
+            if self.build_completed.load(Ordering::SeqCst) {
+                return;
+            }
+            completed.await;
+        }
+    }
+
+    async fn wait_for_outcome(&self) -> RegistrationProbeOutcome {
+        loop {
+            let completed = self.outcome_notify.notified();
+            match self.outcome.load(Ordering::SeqCst) {
+                0 => completed.await,
+                1 => return RegistrationProbeOutcome::DroppedWithoutRun,
+                2 => return RegistrationProbeOutcome::ObservedThreadNotFound,
+                3 => return RegistrationProbeOutcome::ObservedRegistered,
+                4 => return RegistrationProbeOutcome::ObservedOtherError,
+                outcome => panic!("unexpected registration probe outcome {outcome}"),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for RegistrationProbeFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        self.build_completed.store(true, Ordering::SeqCst);
+        self.build_notify.notify_waiters();
+        Ok(Box::new(RegistrationProbeRuntime {
+            outcome: Arc::clone(&self.outcome),
+            outcome_notify: Arc::clone(&self.outcome_notify),
+        }))
+    }
+}
+
+struct RegistrationProbeRuntime {
+    outcome: Arc<AtomicUsize>,
+    outcome_notify: Arc<Notify>,
+}
+
+impl RegistrationProbeRuntime {
+    fn record(&self, outcome: RegistrationProbeOutcome) {
+        self.outcome.store(outcome as usize, Ordering::SeqCst);
+        self.outcome_notify.notify_waiters();
+    }
+}
+
+impl Drop for RegistrationProbeRuntime {
+    fn drop(&mut self) {
+        if self
+            .outcome
+            .compare_exchange(
+                RegistrationProbeOutcome::Pending as usize,
+                RegistrationProbeOutcome::DroppedWithoutRun as usize,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            self.outcome_notify.notify_waiters();
+        }
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for RegistrationProbeRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        commands: mpsc::Receiver<ThreadCommand>,
+        events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        cancellation: CancellationToken,
+    ) {
+        let outcome = match services
+            .kernel_control()
+            .expect("runtime host supplies kernel control")
+            .thread_status(&context, context.coordinates.thread_id)
+            .await
+        {
+            Ok(_) => RegistrationProbeOutcome::ObservedRegistered,
+            Err(CooldisError::ThreadNotFound(_)) => {
+                RegistrationProbeOutcome::ObservedThreadNotFound
+            }
+            Err(_) => RegistrationProbeOutcome::ObservedOtherError,
+        };
+        self.record(outcome);
+        Box::new(EchoRuntime)
+            .run(context, services, commands, events, status, cancellation)
+            .await;
+    }
+}
+
+#[derive(Default)]
+struct CancellationTrackedFactory {
+    active_runs: Arc<AtomicUsize>,
+    runtime_started: Arc<Notify>,
+    runtime_stopped: Arc<Notify>,
+}
+
+impl CancellationTrackedFactory {
+    async fn wait_until_stopped(&self) {
+        loop {
+            let stopped = self.runtime_stopped.notified();
+            if self.active_runs.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            stopped.await;
+        }
+    }
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for CancellationTrackedFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        Ok(Box::new(CancellationTrackedRuntime {
+            active_runs: Arc::clone(&self.active_runs),
+            runtime_started: Arc::clone(&self.runtime_started),
+            runtime_stopped: Arc::clone(&self.runtime_stopped),
+        }))
+    }
+}
+
+struct CancellationTrackedRuntime {
+    active_runs: Arc<AtomicUsize>,
+    runtime_started: Arc<Notify>,
+    runtime_stopped: Arc<Notify>,
+}
+
+struct ActiveRunGuard {
+    active_runs: Arc<AtomicUsize>,
+    runtime_stopped: Arc<Notify>,
+}
+
+impl Drop for ActiveRunGuard {
+    fn drop(&mut self) {
+        self.active_runs.fetch_sub(1, Ordering::SeqCst);
+        self.runtime_stopped.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for CancellationTrackedRuntime {
+    async fn run(
+        self: Box<Self>,
+        _context: ThreadContext,
+        _services: RuntimeServices,
+        _commands: mpsc::Receiver<ThreadCommand>,
+        _events: broadcast::Sender<ThreadEvent>,
+        _status: watch::Sender<ThreadStatus>,
+        cancellation: CancellationToken,
+    ) {
+        self.active_runs.fetch_add(1, Ordering::SeqCst);
+        let _guard = ActiveRunGuard {
+            active_runs: Arc::clone(&self.active_runs),
+            runtime_stopped: Arc::clone(&self.runtime_stopped),
+        };
+        self.runtime_started.notify_waiters();
+        cancellation.cancelled().await;
+    }
+}
+
+struct BlockingLifecycleSink {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl ThreadLifecycleSink for BlockingLifecycleSink {
+    async fn thread_started(&self, _handle: RuntimeThreadHandle) -> CooldisResult<()> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+struct FailingAfterRuntimeStartsSink {
+    active_runs: Arc<AtomicUsize>,
+    runtime_started: Arc<Notify>,
+}
+
+#[async_trait]
+impl ThreadLifecycleSink for FailingAfterRuntimeStartsSink {
+    async fn thread_started(&self, _handle: RuntimeThreadHandle) -> CooldisResult<()> {
+        loop {
+            let started = self.runtime_started.notified();
+            if self.active_runs.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            started.await;
+        }
+        Err(CooldisError::RuntimeFactory(
+            "controlled lifecycle sink failure".to_string(),
+        ))
     }
 }
 
@@ -1268,6 +1921,7 @@ async fn lifecycle_record_tracks_root_start_checkpoint_and_stop() {
         )
         .await
         .unwrap();
+    assert_eq!(checkpoint.lineage, ThreadCheckpointLineage::Root);
     assert_eq!(checkpoint.coordinates, thread.context().coordinates);
     assert_eq!(checkpoint.label.as_deref(), Some("before-stop"));
 
@@ -1395,9 +2049,15 @@ async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn failed_admission_append_prevents_runtime_host_turn_execution() {
-    let store = Arc::new(AdmissionAppendFailingStore::new());
+    let store = Arc::new(
+        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
+            "append_events",
+            1,
+            "admission append failed",
+        ),
+    );
     let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
     let thread = host
         .start_thread(
@@ -1417,6 +2077,7 @@ async fn failed_admission_append_prevents_runtime_host_turn_execution() {
         err.to_string().contains("admission append failed"),
         "unexpected error: {err}"
     );
+    assert_eq!(store.call_count("append_events"), 1);
 
     let output = timeout(Duration::from_millis(100), async {
         loop {
@@ -1999,6 +2660,94 @@ async fn execution_policy_limits_child_threads() {
     .await;
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn concurrent_child_starts_reserve_policy_slots_before_runtime_build() {
+    let factory = Arc::new(ControlledChildBuildFactory::default());
+    let host = RuntimeHost::with_policy(
+        factory.clone(),
+        RuntimeExecutionPolicy::default().with_max_child_threads(2),
+    );
+    let root = host
+        .start_thread(
+            coords("tenant_a", "user_1", "concurrent-child-cap"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let root_thread_id = root.context().coordinates.thread_id;
+    let mut starts = Vec::new();
+    for _ in 0..3 {
+        let host = host.clone();
+        starts.push(tokio::spawn(async move {
+            host.start_thread(
+                coords("tenant_a", "user_1", "concurrent-child-cap"),
+                ThreadTopology::spawned_from(root_thread_id),
+            )
+            .await
+        }));
+    }
+
+    factory.wait_for_child_builds(2).await;
+    factory.release_builds();
+    let mut results = Vec::new();
+    for start in starts {
+        results.push(start.await.unwrap());
+    }
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Err(CooldisError::ThreadPolicyViolation {
+                        code: "max_child_threads",
+                        ..
+                    })
+                )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(host.children_of(root_thread_id).await.len(), 2);
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn failed_child_build_releases_reserved_policy_slot() {
+    let host = RuntimeHost::with_policy(
+        Arc::new(FailFirstChildBuildFactory::default()),
+        RuntimeExecutionPolicy::default().with_max_child_threads(1),
+    );
+    let root = host
+        .start_thread(
+            coords("tenant_a", "user_1", "failed-child-reservation"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let root_thread_id = root.context().coordinates.thread_id;
+
+    assert!(matches!(
+        host.start_thread(
+            coords("tenant_a", "user_1", "failed-child-reservation"),
+            ThreadTopology::spawned_from(root_thread_id),
+        )
+        .await,
+        Err(CooldisError::RuntimeFactory(_))
+    ));
+    host.start_thread(
+        coords("tenant_a", "user_1", "failed-child-reservation"),
+        ThreadTopology::spawned_from(root_thread_id),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(host.children_of(root_thread_id).await.len(), 1);
+    host.shutdown_all().await.unwrap();
+}
+
 #[tokio::test]
 async fn execution_policy_rejects_submit_when_command_queue_is_full() {
     let host = RuntimeHost::with_policy(
@@ -2044,7 +2793,457 @@ async fn execution_policy_rejects_submit_when_command_queue_is_full() {
     thread.abort().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
+    let state = Arc::new(GatedTurnRuntimeState::default());
+    let host = RuntimeHost::with_policy(
+        Arc::new(GatedTurnRuntimeFactory {
+            state: Arc::clone(&state),
+        }),
+        RuntimeExecutionPolicy::default().with_turn_timeout_ms(100),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "watchdog"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-a", "hold")
+        .await
+        .unwrap();
+    state.first_started.notified().await;
+
+    tokio::time::advance(Duration::from_millis(50)).await;
+    host.submit(thread.context().coordinates.thread_id, "turn-b", "queued")
+        .await
+        .unwrap();
+
+    tokio::time::advance(Duration::from_millis(50)).await;
+    timeout(
+        Duration::from_millis(1),
+        assert_runtime_kind(&mut events, |kind| {
+            matches!(
+                kind,
+                RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+            )
+        }),
+    )
+    .await
+    .expect("the active first turn watchdog did not fire at its deadline");
+
+    assert!(
+        timeout(
+            Duration::from_millis(51),
+            assert_runtime_kind(&mut events, |kind| {
+                matches!(
+                    kind,
+                    RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+                )
+            }),
+        )
+        .await
+        .is_err(),
+        "the queued second turn started its watchdog before execution"
+    );
+
+    state.release_first.notify_one();
+    state.second_started.notified().await;
+
+    assert!(
+        timeout(
+            Duration::from_millis(99),
+            assert_runtime_kind(&mut events, |kind| {
+                matches!(
+                    kind,
+                    RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+                )
+            }),
+        )
+        .await
+        .is_err(),
+        "the second turn watchdog fired before its execution deadline"
+    );
+    timeout(
+        Duration::from_millis(2),
+        assert_runtime_kind(&mut events, |kind| {
+            matches!(
+                kind,
+                RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+            )
+        }),
+    )
+    .await
+    .expect("the second turn watchdog did not start with execution");
+
+    thread.abort().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn timed_out_turn_cancellation_does_not_apply_to_the_next_turn() {
+    let state = Arc::new(WatchdogHandoffState::default());
+    let host = RuntimeHost::with_policy(
+        Arc::new(WatchdogHandoffRuntimeFactory {
+            state: Arc::clone(&state),
+        }),
+        RuntimeExecutionPolicy::default().with_turn_timeout_ms(100),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "watchdog-handoff"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+    let thread_id = thread.context().coordinates.thread_id;
+
+    host.submit(thread_id, "turn-a", "active").await.unwrap();
+    state.first_started.notified().await;
+    host.submit(thread_id, "turn-b", "queued").await.unwrap();
+
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert_runtime_kind(&mut events, |kind| {
+        matches!(
+            kind,
+            RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+        )
+    })
+    .await;
+    state.release_first.notify_one();
+    state.second_started.notified().await;
+
+    assert!(
+        timeout(Duration::from_millis(1), state.wait_for_stale_cancel())
+            .await
+            .is_err(),
+        "turn A's timeout cancellation was applied after turn B started"
+    );
+    thread.abort().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn turn_watchdog_cancels_without_waiting_for_full_command_queue() {
+    let host = RuntimeHost::with_policy(
+        Arc::new(StuckRuntimeFactory),
+        RuntimeExecutionPolicy::default()
+            .with_turn_timeout_ms(100)
+            .with_cancel_grace_timeout_ms(20),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "watchdog-full-queue"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread.context().coordinates.thread_id;
+    host.submit(thread_id, "active", "hold").await.unwrap();
+    wait_for_status(&thread, ThreadStatus::Running).await;
+
+    for queued in 0..thread.thread.command_capacity {
+        host.submit(thread_id, format!("queued-{queued}"), "queued")
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        thread.queued_command_count(),
+        thread.thread.command_capacity
+    );
+
+    tokio::time::advance(Duration::from_millis(100)).await;
+    wait_for_status(&thread, ThreadStatus::Cancelling).await;
+    tokio::time::advance(Duration::from_millis(20)).await;
+    wait_for_status(&thread, ThreadStatus::Failed).await;
+
+    host.shutdown_thread(thread_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn concurrent_submits_reserve_pending_input_slots_atomically() {
+    let barrier = Arc::new(AdmissionAppendBarrier::default());
+    let store = Arc::new(AdmissionTestStore::blocking(barrier.clone()));
+    let host = RuntimeHost::with_session_store_and_policy(
+        Arc::new(StuckRuntimeFactory),
+        store,
+        RuntimeExecutionPolicy::default().with_max_pending_inputs(2),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "concurrent-submit-cap"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread.context().coordinates.thread_id;
+    let mut submits = Vec::new();
+    for turn in 0..3 {
+        let host = host.clone();
+        submits.push(tokio::spawn(async move {
+            host.submit(thread_id, format!("turn-{turn}"), "queued")
+                .await
+        }));
+    }
+
+    barrier.wait_for_entries(2).await;
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        barrier.entered.load(Ordering::SeqCst),
+        2,
+        "over-cap submits must be rejected before entering the async admission append"
+    );
+    barrier.release();
+    let mut results = Vec::new();
+    for submit in submits {
+        results.push(submit.await.unwrap());
+    }
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Err(CooldisError::ThreadPolicyViolation {
+                        code: "max_pending_inputs",
+                        ..
+                    })
+                )
+            })
+            .count(),
+        1
+    );
+    thread.abort().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn pending_input_cap_counts_commands_drained_into_runtime_queues() {
+    let state = Arc::new(DrainedPendingInputState::default());
+    let host = RuntimeHost::with_policy(
+        Arc::new(DrainedPendingInputRuntimeFactory {
+            state: Arc::clone(&state),
+        }),
+        RuntimeExecutionPolicy::default().with_max_pending_inputs(1),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "drained-pending-input"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread.context().coordinates.thread_id;
+
+    host.submit(thread_id, "turn-a", "active").await.unwrap();
+    state.first_started.notified().await;
+    host.submit(thread_id, "turn-b", "pending").await.unwrap();
+    state.queued_input_drained.notified().await;
+
+    assert!(matches!(
+        host.submit(thread_id, "turn-c", "over-cap").await,
+        Err(CooldisError::ThreadPolicyViolation {
+            code: "max_pending_inputs",
+            ..
+        })
+    ));
+
+    state.release.notify_one();
+    thread.abort().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn duplicate_start_is_rejected_before_factory_build_or_runtime_spawn() {
+    let factory = Arc::new(ControlledChildBuildFactory::default());
+    let host = RuntimeHost::new(factory.clone());
+    let root = host
+        .start_thread(
+            coords("tenant_a", "user_1", "duplicate-start"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let duplicate_coordinates = coords("tenant_a", "user_1", "duplicate-start");
+    let topology = ThreadTopology::spawned_from(root.context().coordinates.thread_id);
+    let first_host = host.clone();
+    let first_coordinates = duplicate_coordinates.clone();
+    let first_topology = topology.clone();
+    let first = tokio::spawn(async move {
+        first_host
+            .start_thread(first_coordinates, first_topology)
+            .await
+    });
+    factory.wait_for_child_builds(1).await;
+
+    let second_host = host.clone();
+    let mut second = tokio::spawn(async move {
+        second_host
+            .start_thread(duplicate_coordinates, topology)
+            .await
+    });
+    let mut early_second_result = None;
+    tokio::select! {
+        result = &mut second => {
+            early_second_result = Some(result.unwrap());
+        }
+        _ = factory.wait_for_child_builds(2) => {}
+    }
+
+    assert_eq!(
+        factory.child_builds.load(Ordering::SeqCst),
+        1,
+        "duplicate start must be rejected before runtime construction"
+    );
+    factory.release_builds();
+    let first = first.await.unwrap().unwrap();
+    let second = match early_second_result {
+        Some(result) => result,
+        None => second.await.unwrap(),
+    };
+    assert!(matches!(second, Err(CooldisError::ThreadAlreadyExists(_))));
+    wait_for_status(&first, ThreadStatus::Idle).await;
+    assert_eq!(factory.child_runtime_starts.load(Ordering::SeqCst), 1);
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cancelled_start_wakes_reservation_waiters() {
+    let coordinates = coords("tenant_a", "user_1", "cancelled-start-reservation");
+    let thread_id = coordinates.thread_id;
+    let factory = Arc::new(BlockingThreadBuildFactory::new(thread_id));
+    let host = RuntimeHost::new(factory.clone());
+    let start_host = host.clone();
+    let start = tokio::spawn(async move {
+        start_host
+            .start_thread(coordinates, ThreadTopology::root())
+            .await
+    });
+    factory.wait_until_blocked().await;
+
+    let wait_host = host.clone();
+    let mut waiter = tokio::spawn(async move {
+        wait_host.wait_for_thread_start_reservation(thread_id).await;
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut waiter)
+            .await
+            .is_err(),
+        "waiter must remain pending while the start reservation is held"
+    );
+
+    start.abort();
+    match start.await {
+        Err(err) => assert!(err.is_cancelled()),
+        Ok(_) => panic!("blocked start unexpectedly completed"),
+    }
+    tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("reservation waiter should wake after start cancellation")
+        .unwrap();
+    assert!(matches!(
+        host.get_thread(thread_id).await,
+        Err(CooldisError::ThreadNotFound(missing)) if missing == thread_id
+    ));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn runtime_is_registered_before_its_first_kernel_control_call() {
+    let factory = Arc::new(RegistrationProbeFactory::default());
+    let host = RuntimeHost::new(factory.clone());
+    let registration_barrier = host.inner.threads.read().await;
+    let start_host = host.clone();
+    let start = tokio::spawn(async move {
+        start_host
+            .start_thread(
+                coords("tenant_a", "user_1", "startup-registration"),
+                ThreadTopology::root(),
+            )
+            .await
+    });
+
+    factory.wait_for_build().await;
+    start.abort();
+    match start.await {
+        Err(err) => assert!(err.is_cancelled()),
+        Ok(_) => panic!("registration-barrier start unexpectedly completed"),
+    }
+    drop(registration_barrier);
+
+    assert_eq!(
+        factory.wait_for_outcome().await,
+        RegistrationProbeOutcome::DroppedWithoutRun
+    );
+    assert!(host.snapshot().await.threads.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn lifecycle_sink_failure_joins_spawned_runtime_before_returning() {
+    let factory = Arc::new(CancellationTrackedFactory::default());
+    let host = RuntimeHost::new(factory.clone());
+    host.set_lifecycle_sink(Some(Arc::new(FailingAfterRuntimeStartsSink {
+        active_runs: Arc::clone(&factory.active_runs),
+        runtime_started: Arc::clone(&factory.runtime_started),
+    })))
+    .await;
+
+    assert!(matches!(
+        host.start_thread(
+            coords("tenant_a", "user_1", "sink-start-failure"),
+            ThreadTopology::root(),
+        )
+        .await,
+        Err(CooldisError::RuntimeFactory(_))
+    ));
+    assert_eq!(
+        factory.active_runs.load(Ordering::SeqCst),
+        0,
+        "failed start returned before its runtime task was joined"
+    );
+    assert!(host.snapshot().await.threads.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cancelled_start_after_publication_cleans_up_registered_runtime() {
+    let factory = Arc::new(CancellationTrackedFactory::default());
+    let sink_entered = Arc::new(Notify::new());
+    let sink_release = Arc::new(Notify::new());
+    let host = RuntimeHost::new(factory.clone());
+    host.set_lifecycle_sink(Some(Arc::new(BlockingLifecycleSink {
+        entered: Arc::clone(&sink_entered),
+        release: Arc::clone(&sink_release),
+    })))
+    .await;
+    let coordinates = coords("tenant_a", "user_1", "cancel-after-publication");
+    let thread_id = coordinates.thread_id;
+    let start_host = host.clone();
+    let start = tokio::spawn(async move {
+        start_host
+            .start_thread(coordinates, ThreadTopology::root())
+            .await
+    });
+
+    sink_entered.notified().await;
+    assert_eq!(factory.active_runs.load(Ordering::SeqCst), 1);
+    start.abort();
+    match start.await {
+        Err(err) => assert!(err.is_cancelled()),
+        Ok(_) => panic!("blocked lifecycle-sink start unexpectedly completed"),
+    }
+
+    timeout(Duration::from_millis(1), factory.wait_until_stopped())
+        .await
+        .expect("cancelled start left its published runtime running");
+    assert!(matches!(
+        host.get_thread(thread_id).await,
+        Err(CooldisError::ThreadNotFound(missing)) if missing == thread_id
+    ));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn turn_timeout_emits_timeout_and_cancel_timeout_recovery_events() {
     let host = RuntimeHost::with_policy(
         Arc::new(StuckRuntimeFactory),
@@ -2090,7 +3289,7 @@ async fn turn_timeout_emits_timeout_and_cancel_timeout_recovery_events() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
     let host = RuntimeHost::with_policy(
         Arc::new(StuckRuntimeFactory),
@@ -2132,7 +3331,7 @@ async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn shutdown_timeout_aborts_runtime_and_removes_thread() {
     let host = RuntimeHost::with_policy(
         Arc::new(StuckRuntimeFactory),
@@ -2234,6 +3433,106 @@ async fn resume_and_fork_use_loaded_checkpoint_records() {
             .map(String::as_str),
         Some("value")
     );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn resume_rejects_checkpoints_created_by_non_root_threads() {
+    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let parent = host
+        .start_thread(
+            coords("tenant_a", "user_1", "resume-parent"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let parent_thread_id = parent.context().coordinates.thread_id;
+
+    for topology in [
+        ThreadTopology::spawned_from(parent_thread_id),
+        ThreadTopology::branch_from(parent_thread_id, None),
+    ] {
+        let child = host
+            .start_thread(coords("tenant_a", "user_1", "resume-child"), topology)
+            .await
+            .unwrap();
+        let child_thread_id = child.context().coordinates.thread_id;
+        let checkpoint = host
+            .create_checkpoint(child_thread_id, None, None, BTreeMap::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            checkpoint.lineage,
+            ThreadCheckpointLineage::Parent { parent_thread_id }
+        );
+        host.shutdown_thread(child_thread_id).await.unwrap();
+
+        assert!(
+            matches!(
+                host.resume_thread(checkpoint.id).await,
+                Err(CooldisError::CheckpointResumeRequiresRoot {
+                    checkpoint_id,
+                    thread_id,
+                    parent_thread_id: recorded_parent_thread_id,
+                }) if checkpoint_id == checkpoint.id
+                    && thread_id == child_thread_id
+                    && recorded_parent_thread_id == parent_thread_id
+            ),
+            "non-root checkpoint resume must return the typed root-only error"
+        );
+    }
+
+    let root_checkpoint = host
+        .create_checkpoint(parent_thread_id, None, None, BTreeMap::new())
+        .await
+        .unwrap();
+    let mut legacy_value = serde_json::to_value(&root_checkpoint).unwrap();
+    legacy_value.as_object_mut().unwrap().remove("lineage");
+    let legacy_checkpoint: ThreadCheckpoint = serde_json::from_value(legacy_value).unwrap();
+    assert_eq!(legacy_checkpoint.lineage, ThreadCheckpointLineage::Unknown);
+    assert!(matches!(
+        host.resume_thread_from_checkpoint(legacy_checkpoint).await,
+        Err(CooldisError::CheckpointResumeLineageUnknown {
+            checkpoint_id,
+            thread_id,
+        }) if checkpoint_id == root_checkpoint.id && thread_id == parent_thread_id
+    ));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn concurrent_resume_rejects_reserved_duplicate_before_store_mutation() {
+    let coordinates = coords("tenant_a", "user_1", "resume-reservation");
+    let thread_id = coordinates.thread_id;
+    let factory = Arc::new(BlockingThreadBuildFactory::new(thread_id));
+    let store = Arc::new(AdmissionTestStore::tracking_selects());
+    let host = RuntimeHost::with_session_store(factory.clone(), store.clone());
+    let start_host = host.clone();
+    let start_coordinates = coordinates.clone();
+    let start = tokio::spawn(async move {
+        start_host
+            .start_thread(start_coordinates, ThreadTopology::root())
+            .await
+    });
+    factory.wait_until_blocked().await;
+
+    let checkpoint = ThreadCheckpoint {
+        id: ThreadCheckpointId::new(),
+        coordinates,
+        lineage: ThreadCheckpointLineage::Root,
+        parent_checkpoint_id: None,
+        active_entry_id: None,
+        label: None,
+        metadata: BTreeMap::new(),
+        created_at_ms: 0,
+    };
+    assert!(matches!(
+        host.resume_thread_from_checkpoint(checkpoint).await,
+        Err(CooldisError::ThreadAlreadyExists(existing)) if existing == thread_id
+    ));
+    assert_eq!(store.select_branch_calls.load(Ordering::SeqCst), 0);
+
+    factory.release();
+    start.await.unwrap().unwrap();
+    host.shutdown_thread(thread_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -2410,6 +3709,127 @@ async fn shutdown_all_drains_every_thread() {
             .any(|thread_id| *thread_id == b.context().coordinates.thread_id)
     );
     assert!(host.snapshot().await.threads.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn stale_shutdown_cleanup_does_not_remove_same_id_replacement() {
+    let thread_id = ThreadId::parse_str("00000000-0000-0000-0000-000000000051").unwrap();
+    let coordinates = ThreadCoordinates {
+        tenant_id: "tenant_a".to_string(),
+        user_id: "user_1".to_string(),
+        session_id: "stale-shutdown-cleanup".to_string(),
+        thread_id,
+    };
+    let factory = Arc::new(GatedShutdownFactory::default());
+    let host = RuntimeHost::new(factory.clone());
+    let old = host
+        .start_thread(coordinates.clone(), ThreadTopology::root())
+        .await
+        .unwrap();
+    wait_for_status(&old, ThreadStatus::Idle).await;
+
+    let shutdown_host = host.clone();
+    let shutdown = tokio::spawn(async move { shutdown_host.shutdown_thread(thread_id).await });
+    factory.shutdown_received.notified().await;
+
+    let removed = host
+        .inner
+        .threads
+        .write()
+        .await
+        .remove(&thread_id)
+        .expect("old runtime must still be registered");
+    assert!(Arc::ptr_eq(&removed, &old.thread));
+    let replacement = host
+        .start_thread(coordinates, ThreadTopology::root())
+        .await
+        .unwrap();
+    wait_for_status(&replacement, ThreadStatus::Idle).await;
+
+    factory.release_shutdown.notify_one();
+    shutdown.await.unwrap().unwrap();
+
+    let resident = host
+        .get_thread(thread_id)
+        .await
+        .expect("stale shutdown cleanup removed the replacement runtime");
+    assert!(Arc::ptr_eq(&resident.thread, &replacement.thread));
+    host.shutdown_thread(thread_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn shutdown_all_uses_repeatable_children_before_parent_effect_order() {
+    let parent_thread_id = ThreadId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let first_child_thread_id =
+        ThreadId::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let second_child_thread_id =
+        ThreadId::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    let expected_order = vec![
+        first_child_thread_id,
+        second_child_thread_id,
+        parent_thread_id,
+    ];
+    let expected_finished = vec![first_child_thread_id, second_child_thread_id];
+
+    for run in 0..32 {
+        let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+        let parent = host
+            .start_thread(
+                ThreadCoordinates {
+                    tenant_id: "tenant_a".to_string(),
+                    user_id: "user_1".to_string(),
+                    session_id: format!("shutdown-order-{run}"),
+                    thread_id: parent_thread_id,
+                },
+                ThreadTopology::root(),
+            )
+            .await
+            .unwrap();
+        host.start_thread(
+            ThreadCoordinates {
+                tenant_id: "tenant_a".to_string(),
+                user_id: "user_1".to_string(),
+                session_id: format!("shutdown-order-{run}"),
+                thread_id: second_child_thread_id,
+            },
+            ThreadTopology::spawned_from(parent_thread_id),
+        )
+        .await
+        .unwrap();
+        host.start_thread(
+            ThreadCoordinates {
+                tenant_id: "tenant_a".to_string(),
+                user_id: "user_1".to_string(),
+                session_id: format!("shutdown-order-{run}"),
+                thread_id: first_child_thread_id,
+            },
+            ThreadTopology::spawned_from(parent_thread_id),
+        )
+        .await
+        .unwrap();
+        let mut parent_events = parent.subscribe_events();
+
+        assert_eq!(host.shutdown_all().await.unwrap(), expected_order);
+
+        let mut finished = Vec::new();
+        while let Ok(event) = parent_events.try_recv() {
+            if let ThreadEvent::Runtime {
+                event:
+                    RuntimeEvent {
+                        kind:
+                            RuntimeEventKind::SubthreadFinished {
+                                child_thread_id, ..
+                            },
+                        ..
+                    },
+                ..
+            } = event
+            {
+                finished.push(child_thread_id);
+            }
+        }
+        assert_eq!(finished, expected_finished, "shutdown run {run}");
+    }
 }
 
 async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
@@ -2886,6 +4306,7 @@ struct TsAgentThreadCheckpointFixture {
     user_id: String,
     session_id: String,
     thread_id: String,
+    lineage: ThreadCheckpointLineage,
     parent_checkpoint_id: Option<String>,
     active_entry_id: Option<String>,
     label: Option<String>,
@@ -2900,6 +4321,7 @@ impl TsAgentThreadCheckpointFixture {
             user_id: checkpoint.coordinates.user_id.clone(),
             session_id: checkpoint.coordinates.session_id.clone(),
             thread_id: checkpoint.coordinates.thread_id.to_string(),
+            lineage: checkpoint.lineage,
             parent_checkpoint_id: checkpoint.parent_checkpoint_id.map(|id| id.to_string()),
             active_entry_id: checkpoint.active_entry_id.map(|id| id.to_string()),
             label: checkpoint.label.clone(),
@@ -2916,6 +4338,7 @@ impl TsAgentThreadCheckpointFixture {
                 session_id: self.session_id,
                 thread_id: ThreadId::parse_str(&self.thread_id).unwrap(),
             },
+            lineage: self.lineage,
             parent_checkpoint_id: self
                 .parent_checkpoint_id
                 .map(|id| ThreadCheckpointId::from_uuid(Uuid::parse_str(&id).unwrap())),
@@ -2962,6 +4385,7 @@ fn ts_style_lifecycle_thread_fixture_round_trips_core_fields_and_metadata() {
 #[test]
 fn ts_style_signal_and_checkpoint_fixtures_round_trip_without_product_fields() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
+    let parent_thread_id = ThreadId::new();
     let signal =
         ThreadSignal::user_steer(&coordinates, "turn-1").with_metadata(BTreeMap::from([(
             "source_message_id".to_string(),
@@ -2970,6 +4394,7 @@ fn ts_style_signal_and_checkpoint_fixtures_round_trip_without_product_fields() {
     let checkpoint = ThreadCheckpoint {
         id: ThreadCheckpointId::new(),
         coordinates: coordinates.clone(),
+        lineage: ThreadCheckpointLineage::Parent { parent_thread_id },
         parent_checkpoint_id: Some(ThreadCheckpointId::new()),
         active_entry_id: Some(SessionEntryId::new()),
         label: Some("after-tool".to_string()),
@@ -2987,6 +4412,7 @@ fn ts_style_signal_and_checkpoint_fixtures_round_trip_without_product_fields() {
     assert_eq!(signal_roundtrip.metadata, signal.metadata);
     assert_eq!(checkpoint_roundtrip.id, checkpoint.id);
     assert_eq!(checkpoint_roundtrip.coordinates, checkpoint.coordinates);
+    assert_eq!(checkpoint_roundtrip.lineage, checkpoint.lineage);
     assert_eq!(
         checkpoint_roundtrip.parent_checkpoint_id,
         checkpoint.parent_checkpoint_id

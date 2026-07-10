@@ -201,6 +201,7 @@ impl AgentRuntime for WasmRuntime {
                             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
                             let _ = status.send(ThreadStatus::Idle);
                         }
+                        ThreadCommand::CancelTurn { .. } => {}
                         ThreadCommand::Compact { .. } => {
                             emit_runtime_event(
                                 &events,
@@ -296,6 +297,28 @@ async fn run_wasm_turn(
             command = commands.recv() => {
                 match command {
                     Some(ThreadCommand::Cancel { reason }) => {
+                        let _ = status.send(ThreadStatus::Cancelling);
+                        let _ = events.send(ThreadEvent::Signal {
+                            thread_id,
+                            signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+                        });
+                        emit_runtime_event(
+                            events,
+                            coordinates,
+                            RuntimeEventKind::Cancelled {
+                                reason: reason.clone(),
+                            },
+                        );
+                        cancelled_reason = Some(reason);
+                        break None;
+                    }
+                    Some(ThreadCommand::CancelTurn {
+                        watchdog_token_id,
+                        reason,
+                    }) => {
+                        if input.turn_watchdog_id() != Some(watchdog_token_id) {
+                            continue;
+                        }
                         let _ = status.send(ThreadStatus::Cancelling);
                         let _ = events.send(ThreadEvent::Signal {
                             thread_id,
