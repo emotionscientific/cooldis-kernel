@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -236,7 +236,7 @@ struct RuntimeThread {
     join_handle: Mutex<Option<JoinHandle<()>>>,
     lifecycle: Mutex<ThreadLifecycleRecord>,
     checkpoints: Mutex<Vec<ThreadCheckpoint>>,
-    submit_admission: Mutex<()>,
+    pending_input_slots: Option<Arc<Semaphore>>,
 }
 
 struct ThreadStartReservationState {
@@ -274,6 +274,85 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> StdMutexGuard<'_, T> {
 #[derive(Clone)]
 pub struct RuntimeThreadHandle {
     thread: Arc<RuntimeThread>,
+}
+
+pub(crate) struct ReservedTurnSubmission {
+    host: RuntimeHost,
+    thread: RuntimeThreadHandle,
+    command_permit: mpsc::OwnedPermit<ThreadCommand>,
+    turn_id: String,
+    input: TurnInput,
+    mode: TurnSubmissionMode,
+    turn_watchdog: Option<TurnWatchdogHandle>,
+}
+
+struct PublishedThreadStartGuard {
+    host: RuntimeHost,
+    thread: Arc<RuntimeThread>,
+    armed: bool,
+}
+
+impl PublishedThreadStartGuard {
+    fn new(host: RuntimeHost, thread: Arc<RuntimeThread>) -> Self {
+        Self {
+            host,
+            thread,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PublishedThreadStartGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.thread.cancellation.cancel();
+        let host = self.host.clone();
+        let thread = Arc::clone(&self.thread);
+        tokio::spawn(async move {
+            RuntimeThreadHandle {
+                thread: Arc::clone(&thread),
+            }
+            .abort()
+            .await;
+            host.remove_thread_if_current(&thread).await;
+        });
+    }
+}
+
+impl ReservedTurnSubmission {
+    /// Publishes a submission after all fallible admission work has completed.
+    pub(crate) async fn submit(self) {
+        let Self {
+            host,
+            thread,
+            command_permit,
+            turn_id,
+            input,
+            mode,
+            turn_watchdog,
+        } = self;
+        let _ = command_permit.send(ThreadCommand::Submit {
+            turn_id: turn_id.clone(),
+            input,
+            mode,
+        });
+        if let Some(turn_watchdog) = turn_watchdog {
+            host.spawn_turn_timeout_watchdog(thread.clone(), turn_watchdog);
+        }
+        thread
+            .record_signal(ThreadSignal::user_submit(
+                &thread.context().coordinates,
+                turn_id,
+                mode,
+            ))
+            .await;
+    }
 }
 
 impl RuntimeHost {
@@ -457,6 +536,11 @@ impl RuntimeHost {
             .max(512);
         let (command_tx, command_rx) = mpsc::channel(command_channel_capacity);
         let command_capacity = command_tx.max_capacity();
+        let pending_input_slots = self
+            .inner
+            .execution_policy
+            .max_pending_inputs
+            .map(|limit| Arc::new(Semaphore::new(limit.min(Semaphore::MAX_PERMITS))));
         let (event_tx, _) = broadcast::channel(1024);
         let (status_tx, status_rx) = watch::channel(ThreadStatus::Starting);
         let runtime_status_rx = status_rx.clone();
@@ -532,7 +616,7 @@ impl RuntimeHost {
             join_handle: Mutex::new(Some(join_handle)),
             lifecycle: Mutex::new(lifecycle),
             checkpoints: Mutex::new(Vec::new()),
-            submit_admission: Mutex::new(()),
+            pending_input_slots,
         });
 
         {
@@ -545,6 +629,7 @@ impl RuntimeHost {
             start_reservation.commit();
         }
         let _ = runtime_start_tx.send(());
+        let mut published_start = PublishedThreadStartGuard::new(self.clone(), Arc::clone(&thread));
 
         let handle = RuntimeThreadHandle {
             thread: Arc::clone(&thread),
@@ -554,7 +639,8 @@ impl RuntimeHost {
         {
             thread.cancellation.cancel();
             handle.abort().await;
-            self.inner.threads.write().await.remove(&thread_id);
+            self.remove_thread_if_current(&thread).await;
+            published_start.disarm();
             return Err(err);
         }
 
@@ -566,7 +652,22 @@ impl RuntimeHost {
             }
         }
 
+        published_start.disarm();
         Ok(handle)
+    }
+
+    async fn remove_thread_if_current(&self, thread: &Arc<RuntimeThread>) -> bool {
+        let thread_id = thread.context.coordinates.thread_id;
+        let mut threads = self.inner.threads.write().await;
+        if threads
+            .get(&thread_id)
+            .is_some_and(|current| Arc::ptr_eq(current, thread))
+        {
+            threads.remove(&thread_id);
+            true
+        } else {
+            false
+        }
     }
 
     pub async fn get_thread(&self, thread_id: ThreadId) -> CooldisResult<RuntimeThreadHandle> {
@@ -809,40 +910,42 @@ impl RuntimeHost {
         &self,
         thread_id: ThreadId,
         turn_id: impl Into<String>,
-        mut input: TurnInput,
+        input: TurnInput,
         mode: TurnSubmissionMode,
         admission: Option<AdmissionGateContext>,
     ) -> CooldisResult<()> {
+        self.reserve_turn_submission_with_admission(thread_id, turn_id, input, mode, admission)
+            .await?
+            .submit()
+            .await;
+        Ok(())
+    }
+
+    pub(crate) async fn reserve_turn_submission_with_admission(
+        &self,
+        thread_id: ThreadId,
+        turn_id: impl Into<String>,
+        mut input: TurnInput,
+        mode: TurnSubmissionMode,
+        admission: Option<AdmissionGateContext>,
+    ) -> CooldisResult<ReservedTurnSubmission> {
         let turn_id = turn_id.into();
         let thread = self.get_thread(thread_id).await?;
-        let command_permit = if mode == TurnSubmissionMode::Queue
+        if mode == TurnSubmissionMode::Queue
             && let Some(max_pending_inputs) = self.inner.execution_policy.max_pending_inputs
         {
-            let _submit_admission = thread.thread.submit_admission.lock().await;
-            let queued_commands = thread.queued_command_count();
-            if queued_commands >= max_pending_inputs {
-                let message = format!(
-                    "thread has {queued_commands} queued command(s); max pending input count is {max_pending_inputs}"
-                );
-                thread.emit_runtime(RuntimeEventKind::PolicyRejected {
-                    code: "max_pending_inputs".to_string(),
-                    message: message.clone(),
-                });
-                return Err(CooldisError::ThreadPolicyViolation {
-                    thread_id,
-                    code: "max_pending_inputs",
-                    message,
-                });
-            }
-            #[cfg(test)]
-            tokio::task::yield_now().await;
-            match thread.try_reserve_command() {
-                Ok(command_permit) => command_permit,
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    return Err(CooldisError::ThreadClosed(thread_id));
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    let queued_commands = thread.queued_command_count();
+            let pending_input_slots =
+                thread.thread.pending_input_slots.as_ref().ok_or_else(|| {
+                    CooldisError::RuntimeExecution(
+                        "configured pending-input policy has no slot semaphore".to_string(),
+                    )
+                })?;
+            let pending_input_permit = match Arc::clone(pending_input_slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    let effective_limit = max_pending_inputs.min(Semaphore::MAX_PERMITS);
+                    let queued_commands =
+                        effective_limit.saturating_sub(pending_input_slots.available_permits());
                     let message = format!(
                         "thread has {queued_commands} queued command(s); max pending input count is {max_pending_inputs}"
                     );
@@ -856,10 +959,19 @@ impl RuntimeHost {
                         message,
                     });
                 }
-            }
-        } else {
-            thread.reserve_command().await?
-        };
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    return Err(CooldisError::ThreadClosed(thread_id));
+                }
+            };
+            input.set_pending_input_permit(pending_input_permit);
+        }
+        let command_permit = thread
+            .thread
+            .command_tx
+            .clone()
+            .reserve_owned()
+            .await
+            .map_err(|_| CooldisError::ThreadClosed(thread_id))?;
         if let Some(admission) = admission {
             append_admission_decided(&thread, admission).await?;
         }
@@ -868,22 +980,15 @@ impl RuntimeHost {
         } else {
             None
         };
-        command_permit.send(ThreadCommand::Submit {
-            turn_id: turn_id.clone(),
+        Ok(ReservedTurnSubmission {
+            host: self.clone(),
+            thread,
+            command_permit,
+            turn_id,
             input,
             mode,
-        });
-        if let Some(turn_watchdog) = turn_watchdog {
-            self.spawn_turn_timeout_watchdog(thread.clone(), turn_watchdog);
-        }
-        thread
-            .record_signal(ThreadSignal::user_submit(
-                &thread.context().coordinates,
-                turn_id,
-                mode,
-            ))
-            .await;
-        Ok(())
+            turn_watchdog,
+        })
     }
 
     pub async fn compact_thread(
@@ -948,8 +1053,8 @@ impl RuntimeHost {
             Err(err) => return Err(err),
         }
         let timed_out = self.wait_for_shutdown(&thread).await?;
-        self.inner.threads.write().await.remove(&thread_id);
-        if let Some(parent_thread_id) = parent_thread_id {
+        let removed = self.remove_thread_if_current(&thread.thread).await;
+        if removed && let Some(parent_thread_id) = parent_thread_id {
             if let Ok(parent) = self.get_thread(parent_thread_id).await {
                 parent.emit_runtime(RuntimeEventKind::SubthreadFinished {
                     child_thread_id: thread_id,
@@ -1023,6 +1128,7 @@ impl RuntimeHost {
             return;
         };
         let cancel_grace_timeout_ms = self.inner.execution_policy.cancel_grace_timeout_ms;
+        let watchdog_token_id = watchdog.id();
         let thread = Arc::downgrade(&thread.thread);
         tokio::spawn(async move {
             if !watchdog.wait_until_started().await {
@@ -1033,7 +1139,7 @@ impl RuntimeHost {
                 return;
             };
             let thread = RuntimeThreadHandle { thread };
-            if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
+            if thread.status() != ThreadStatus::Running || !watchdog.try_timeout() {
                 return;
             }
             thread.emit_runtime(RuntimeEventKind::Timeout {
@@ -1044,21 +1150,16 @@ impl RuntimeHost {
                 state: RuntimeTerminalState::TimedOut,
             });
             let reason = format!("turn exceeded {timeout_ms}ms timeout");
-            if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
-                return;
-            }
             match thread.try_reserve_command() {
                 Ok(command_permit) => {
-                    if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
-                        return;
-                    }
-                    command_permit.send(ThreadCommand::Cancel {
+                    command_permit.send(ThreadCommand::CancelTurn {
+                        watchdog_token_id,
                         reason: reason.clone(),
                     });
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => return,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    if !watchdog.is_active() || thread.status() != ThreadStatus::Running {
+                    if !watchdog.is_timed_out() || thread.status() != ThreadStatus::Running {
                         return;
                     }
                     thread.set_status(ThreadStatus::Cancelling);
@@ -1073,7 +1174,7 @@ impl RuntimeHost {
                 .await;
             if let Some(cancel_timeout_ms) = cancel_grace_timeout_ms {
                 tokio::time::sleep(Duration::from_millis(cancel_timeout_ms)).await;
-                if watchdog.is_active()
+                if watchdog.is_timed_out()
                     && matches!(
                         thread.status(),
                         ThreadStatus::Running | ThreadStatus::Cancelling

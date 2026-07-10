@@ -548,6 +548,7 @@ impl AgentRuntime for EchoRuntime {
                             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
                             let _ = status.send(ThreadStatus::Idle);
                         }
+                        Some(ThreadCommand::CancelTurn { .. }) => {}
                         Some(ThreadCommand::Compact { .. }) => {
                             let _ = status.send(ThreadStatus::Idle);
                         }
@@ -807,6 +808,7 @@ impl AgentRuntime for AssistantHistoryRuntime {
                             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
                             let _ = status.send(ThreadStatus::Idle);
                         }
+                        Some(ThreadCommand::CancelTurn { .. }) => {}
                         Some(ThreadCommand::Compact { .. }) => {
                             let _ = status.send(ThreadStatus::Idle);
                         }
@@ -912,6 +914,7 @@ impl AgentRuntime for InspectTurnInputRuntime {
                     });
                 }
                 ThreadCommand::Cancel { .. } => {}
+                ThreadCommand::CancelTurn { .. } => {}
                 ThreadCommand::Compact { .. } => {}
                 ThreadCommand::ResumeToolCall { .. } => {}
                 ThreadCommand::Shutdown => break,
@@ -1022,6 +1025,185 @@ impl AgentRuntime for GatedTurnRuntime {
             drop(input);
             let _ = status.send(ThreadStatus::Idle);
         }
+    }
+}
+
+#[derive(Default)]
+struct WatchdogHandoffState {
+    first_started: Notify,
+    release_first: Notify,
+    second_started: Notify,
+    stale_cancel_applied: AtomicBool,
+    stale_cancel_observed: Notify,
+}
+
+struct WatchdogHandoffRuntimeFactory {
+    state: Arc<WatchdogHandoffState>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for WatchdogHandoffRuntimeFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        Ok(Box::new(WatchdogHandoffRuntime {
+            state: Arc::clone(&self.state),
+        }))
+    }
+}
+
+struct WatchdogHandoffRuntime {
+    state: Arc<WatchdogHandoffState>,
+}
+
+impl WatchdogHandoffState {
+    async fn wait_for_stale_cancel(&self) {
+        loop {
+            let observed = self.stale_cancel_observed.notified();
+            if self.stale_cancel_applied.load(Ordering::SeqCst) {
+                return;
+            }
+            observed.await;
+        }
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for WatchdogHandoffRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        _events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let coordinates = context.coordinates;
+        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+            return;
+        };
+        let _ = status.send(ThreadStatus::Running);
+        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        self.state.first_started.notify_one();
+        self.state.release_first.notified().await;
+        drop(input);
+        let _ = status.send(ThreadStatus::Idle);
+
+        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+            return;
+        };
+        let _ = status.send(ThreadStatus::Running);
+        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        self.state.second_started.notify_one();
+
+        if let Some(ThreadCommand::Cancel { .. }) = commands.recv().await {
+            self.state
+                .stale_cancel_applied
+                .store(true, Ordering::SeqCst);
+            self.state.stale_cancel_observed.notify_waiters();
+        }
+    }
+}
+
+#[derive(Default)]
+struct DrainedPendingInputState {
+    first_started: Notify,
+    queued_input_drained: Notify,
+    release: Notify,
+}
+
+struct DrainedPendingInputRuntimeFactory {
+    state: Arc<DrainedPendingInputState>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for DrainedPendingInputRuntimeFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        Ok(Box::new(DrainedPendingInputRuntime {
+            state: Arc::clone(&self.state),
+        }))
+    }
+}
+
+struct DrainedPendingInputRuntime {
+    state: Arc<DrainedPendingInputState>,
+}
+
+#[async_trait]
+impl AgentRuntime for DrainedPendingInputRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        _events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let coordinates = context.coordinates;
+        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+            return;
+        };
+        let _ = status.send(ThreadStatus::Running);
+        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        self.state.first_started.notify_one();
+
+        let queued_input = match commands.recv().await {
+            Some(ThreadCommand::Submit { input, .. }) => input,
+            _ => return,
+        };
+        self.state.queued_input_drained.notify_one();
+        self.state.release.notified().await;
+        drop(queued_input);
+    }
+}
+
+#[derive(Default)]
+struct GatedShutdownFactory {
+    builds: AtomicUsize,
+    shutdown_received: Arc<Notify>,
+    release_shutdown: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for GatedShutdownFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        if self.builds.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Box::new(GatedShutdownRuntime {
+                shutdown_received: Arc::clone(&self.shutdown_received),
+                release_shutdown: Arc::clone(&self.release_shutdown),
+            }))
+        } else {
+            Ok(Box::new(EchoRuntime))
+        }
+    }
+}
+
+struct GatedShutdownRuntime {
+    shutdown_received: Arc<Notify>,
+    release_shutdown: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentRuntime for GatedShutdownRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        _services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        _events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let _ = status.send(ThreadStatus::Idle);
+        while let Some(command) = commands.recv().await {
+            if matches!(command, ThreadCommand::Shutdown) {
+                self.shutdown_received.notify_one();
+                self.release_shutdown.notified().await;
+                let _ = status.send(ThreadStatus::Stopped);
+                return;
+            }
+        }
+        let _ = context;
     }
 }
 
@@ -1278,6 +1460,19 @@ impl AgentRuntime for RegistrationProbeRuntime {
 struct CancellationTrackedFactory {
     active_runs: Arc<AtomicUsize>,
     runtime_started: Arc<Notify>,
+    runtime_stopped: Arc<Notify>,
+}
+
+impl CancellationTrackedFactory {
+    async fn wait_until_stopped(&self) {
+        loop {
+            let stopped = self.runtime_stopped.notified();
+            if self.active_runs.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            stopped.await;
+        }
+    }
 }
 
 #[async_trait]
@@ -1286,6 +1481,7 @@ impl AgentRuntimeFactory for CancellationTrackedFactory {
         Ok(Box::new(CancellationTrackedRuntime {
             active_runs: Arc::clone(&self.active_runs),
             runtime_started: Arc::clone(&self.runtime_started),
+            runtime_stopped: Arc::clone(&self.runtime_stopped),
         }))
     }
 }
@@ -1293,13 +1489,18 @@ impl AgentRuntimeFactory for CancellationTrackedFactory {
 struct CancellationTrackedRuntime {
     active_runs: Arc<AtomicUsize>,
     runtime_started: Arc<Notify>,
+    runtime_stopped: Arc<Notify>,
 }
 
-struct ActiveRunGuard(Arc<AtomicUsize>);
+struct ActiveRunGuard {
+    active_runs: Arc<AtomicUsize>,
+    runtime_stopped: Arc<Notify>,
+}
 
 impl Drop for ActiveRunGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.active_runs.fetch_sub(1, Ordering::SeqCst);
+        self.runtime_stopped.notify_waiters();
     }
 }
 
@@ -1315,9 +1516,26 @@ impl AgentRuntime for CancellationTrackedRuntime {
         cancellation: CancellationToken,
     ) {
         self.active_runs.fetch_add(1, Ordering::SeqCst);
-        let _guard = ActiveRunGuard(Arc::clone(&self.active_runs));
+        let _guard = ActiveRunGuard {
+            active_runs: Arc::clone(&self.active_runs),
+            runtime_stopped: Arc::clone(&self.runtime_stopped),
+        };
         self.runtime_started.notify_waiters();
         cancellation.cancelled().await;
+    }
+}
+
+struct BlockingLifecycleSink {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl ThreadLifecycleSink for BlockingLifecycleSink {
+    async fn thread_started(&self, _handle: RuntimeThreadHandle) -> CooldisResult<()> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 
@@ -2664,6 +2882,49 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn timed_out_turn_cancellation_does_not_apply_to_the_next_turn() {
+    let state = Arc::new(WatchdogHandoffState::default());
+    let host = RuntimeHost::with_policy(
+        Arc::new(WatchdogHandoffRuntimeFactory {
+            state: Arc::clone(&state),
+        }),
+        RuntimeExecutionPolicy::default().with_turn_timeout_ms(100),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "watchdog-handoff"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+    let thread_id = thread.context().coordinates.thread_id;
+
+    host.submit(thread_id, "turn-a", "active").await.unwrap();
+    state.first_started.notified().await;
+    host.submit(thread_id, "turn-b", "queued").await.unwrap();
+
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert_runtime_kind(&mut events, |kind| {
+        matches!(
+            kind,
+            RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+        )
+    })
+    .await;
+    state.release_first.notify_one();
+    state.second_started.notified().await;
+
+    assert!(
+        timeout(Duration::from_millis(1), state.wait_for_stale_cancel())
+            .await
+            .is_err(),
+        "turn A's timeout cancellation was applied after turn B started"
+    );
+    thread.abort().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn turn_watchdog_cancels_without_waiting_for_full_command_queue() {
     let host = RuntimeHost::with_policy(
         Arc::new(StuckRuntimeFactory),
@@ -2757,6 +3018,41 @@ async fn concurrent_submits_reserve_pending_input_slots_atomically() {
             .count(),
         1
     );
+    thread.abort().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn pending_input_cap_counts_commands_drained_into_runtime_queues() {
+    let state = Arc::new(DrainedPendingInputState::default());
+    let host = RuntimeHost::with_policy(
+        Arc::new(DrainedPendingInputRuntimeFactory {
+            state: Arc::clone(&state),
+        }),
+        RuntimeExecutionPolicy::default().with_max_pending_inputs(1),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "drained-pending-input"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread.context().coordinates.thread_id;
+
+    host.submit(thread_id, "turn-a", "active").await.unwrap();
+    state.first_started.notified().await;
+    host.submit(thread_id, "turn-b", "pending").await.unwrap();
+    state.queued_input_drained.notified().await;
+
+    assert!(matches!(
+        host.submit(thread_id, "turn-c", "over-cap").await,
+        Err(CooldisError::ThreadPolicyViolation {
+            code: "max_pending_inputs",
+            ..
+        })
+    ));
+
+    state.release.notify_one();
     thread.abort().await;
 }
 
@@ -2908,6 +3204,43 @@ async fn lifecycle_sink_failure_joins_spawned_runtime_before_returning() {
         "failed start returned before its runtime task was joined"
     );
     assert!(host.snapshot().await.threads.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cancelled_start_after_publication_cleans_up_registered_runtime() {
+    let factory = Arc::new(CancellationTrackedFactory::default());
+    let sink_entered = Arc::new(Notify::new());
+    let sink_release = Arc::new(Notify::new());
+    let host = RuntimeHost::new(factory.clone());
+    host.set_lifecycle_sink(Some(Arc::new(BlockingLifecycleSink {
+        entered: Arc::clone(&sink_entered),
+        release: Arc::clone(&sink_release),
+    })))
+    .await;
+    let coordinates = coords("tenant_a", "user_1", "cancel-after-publication");
+    let thread_id = coordinates.thread_id;
+    let start_host = host.clone();
+    let start = tokio::spawn(async move {
+        start_host
+            .start_thread(coordinates, ThreadTopology::root())
+            .await
+    });
+
+    sink_entered.notified().await;
+    assert_eq!(factory.active_runs.load(Ordering::SeqCst), 1);
+    start.abort();
+    match start.await {
+        Err(err) => assert!(err.is_cancelled()),
+        Ok(_) => panic!("blocked lifecycle-sink start unexpectedly completed"),
+    }
+
+    timeout(Duration::from_millis(1), factory.wait_until_stopped())
+        .await
+        .expect("cancelled start left its published runtime running");
+    assert!(matches!(
+        host.get_thread(thread_id).await,
+        Err(CooldisError::ThreadNotFound(missing)) if missing == thread_id
+    ));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -3376,6 +3709,52 @@ async fn shutdown_all_drains_every_thread() {
             .any(|thread_id| *thread_id == b.context().coordinates.thread_id)
     );
     assert!(host.snapshot().await.threads.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn stale_shutdown_cleanup_does_not_remove_same_id_replacement() {
+    let thread_id = ThreadId::parse_str("00000000-0000-0000-0000-000000000051").unwrap();
+    let coordinates = ThreadCoordinates {
+        tenant_id: "tenant_a".to_string(),
+        user_id: "user_1".to_string(),
+        session_id: "stale-shutdown-cleanup".to_string(),
+        thread_id,
+    };
+    let factory = Arc::new(GatedShutdownFactory::default());
+    let host = RuntimeHost::new(factory.clone());
+    let old = host
+        .start_thread(coordinates.clone(), ThreadTopology::root())
+        .await
+        .unwrap();
+    wait_for_status(&old, ThreadStatus::Idle).await;
+
+    let shutdown_host = host.clone();
+    let shutdown = tokio::spawn(async move { shutdown_host.shutdown_thread(thread_id).await });
+    factory.shutdown_received.notified().await;
+
+    let removed = host
+        .inner
+        .threads
+        .write()
+        .await
+        .remove(&thread_id)
+        .expect("old runtime must still be registered");
+    assert!(Arc::ptr_eq(&removed, &old.thread));
+    let replacement = host
+        .start_thread(coordinates, ThreadTopology::root())
+        .await
+        .unwrap();
+    wait_for_status(&replacement, ThreadStatus::Idle).await;
+
+    factory.release_shutdown.notify_one();
+    shutdown.await.unwrap().unwrap();
+
+    let resident = host
+        .get_thread(thread_id)
+        .await
+        .expect("stale shutdown cleanup removed the replacement runtime");
+    assert!(Arc::ptr_eq(&resident.thread, &replacement.thread));
+    host.shutdown_thread(thread_id).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

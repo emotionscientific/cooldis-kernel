@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::watch;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::{OwnedSemaphorePermit, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -152,9 +153,11 @@ impl TurnContext {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 enum TurnWatchdogPhase {
     Pending,
     Active,
+    TimedOut,
     Finished,
 }
 
@@ -169,26 +172,53 @@ pub(super) struct TurnWatchdogToken {
 }
 
 struct TurnWatchdogLease {
-    phase: watch::Sender<TurnWatchdogPhase>,
+    state: Arc<TurnWatchdogState>,
+}
+
+struct TurnWatchdogState {
+    phase: AtomicU8,
+    updates: watch::Sender<TurnWatchdogPhase>,
 }
 
 impl TurnWatchdogToken {
     pub(super) fn new(id: u64) -> (Self, TurnWatchdogHandle) {
         let (phase, phase_rx) = watch::channel(TurnWatchdogPhase::Pending);
+        let state = Arc::new(TurnWatchdogState {
+            phase: AtomicU8::new(TurnWatchdogPhase::Pending as u8),
+            updates: phase,
+        });
         (
             Self {
                 id,
                 lease: Arc::new(TurnWatchdogLease {
-                    phase: phase.clone(),
+                    state: Arc::clone(&state),
                 }),
             },
-            TurnWatchdogHandle { phase: phase_rx },
+            TurnWatchdogHandle {
+                id,
+                state,
+                phase: phase_rx,
+            },
         )
     }
 
     fn start(&self) {
-        if *self.lease.phase.borrow() == TurnWatchdogPhase::Pending {
-            self.lease.phase.send_replace(TurnWatchdogPhase::Active);
+        if self
+            .lease
+            .state
+            .phase
+            .compare_exchange(
+                TurnWatchdogPhase::Pending as u8,
+                TurnWatchdogPhase::Active as u8,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            self.lease
+                .state
+                .updates
+                .send_replace(TurnWatchdogPhase::Active);
         }
     }
 }
@@ -221,20 +251,29 @@ impl Eq for TurnWatchdogToken {}
 
 impl Drop for TurnWatchdogLease {
     fn drop(&mut self) {
-        self.phase.send_replace(TurnWatchdogPhase::Finished);
+        self.state
+            .phase
+            .store(TurnWatchdogPhase::Finished as u8, Ordering::SeqCst);
+        self.state.updates.send_replace(TurnWatchdogPhase::Finished);
     }
 }
 
 pub(super) struct TurnWatchdogHandle {
+    id: u64,
+    state: Arc<TurnWatchdogState>,
     phase: watch::Receiver<TurnWatchdogPhase>,
 }
 
 impl TurnWatchdogHandle {
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
     pub(super) async fn wait_until_started(&mut self) -> bool {
         loop {
             match *self.phase.borrow() {
                 TurnWatchdogPhase::Pending => {}
-                TurnWatchdogPhase::Active => return true,
+                TurnWatchdogPhase::Active | TurnWatchdogPhase::TimedOut => return true,
                 TurnWatchdogPhase::Finished => return false,
             }
             if self.phase.changed().await.is_err() {
@@ -243,9 +282,76 @@ impl TurnWatchdogHandle {
         }
     }
 
-    pub(super) fn is_active(&self) -> bool {
-        *self.phase.borrow() == TurnWatchdogPhase::Active
+    pub(super) fn try_timeout(&self) -> bool {
+        if self
+            .state
+            .phase
+            .compare_exchange(
+                TurnWatchdogPhase::Active as u8,
+                TurnWatchdogPhase::TimedOut as u8,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            self.state.updates.send_replace(TurnWatchdogPhase::TimedOut);
+            true
+        } else {
+            false
+        }
     }
+
+    pub(super) fn is_timed_out(&self) -> bool {
+        self.state.phase.load(Ordering::SeqCst) == TurnWatchdogPhase::TimedOut as u8
+    }
+}
+
+struct PendingInputPermitToken {
+    lease: Arc<PendingInputPermitLease>,
+}
+
+struct PendingInputPermitLease {
+    permit: StdMutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl PendingInputPermitToken {
+    fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            lease: Arc::new(PendingInputPermitLease {
+                permit: StdMutex::new(Some(permit)),
+            }),
+        }
+    }
+
+    fn start(&self) {
+        self.lease
+            .permit
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+    }
+}
+
+impl Clone for PendingInputPermitToken {
+    fn clone(&self) -> Self {
+        Self {
+            lease: Arc::clone(&self.lease),
+        }
+    }
+}
+
+impl fmt::Debug for PendingInputPermitToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingInputPermitToken")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TurnRuntimeState {
+    turn_watchdog: Option<TurnWatchdogToken>,
+    pending_input_permit: Option<PendingInputPermitToken>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -268,7 +374,7 @@ pub struct TurnInput {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
     #[serde(skip)]
-    turn_watchdog: Option<Box<TurnWatchdogToken>>,
+    runtime_state: Option<Box<TurnRuntimeState>>,
 }
 
 impl PartialEq for TurnInput {
@@ -299,16 +405,37 @@ impl TurnInput {
             permission_profile: None,
             provider_metadata: BTreeMap::new(),
             metadata: BTreeMap::new(),
-            turn_watchdog: None,
+            runtime_state: None,
         }
     }
 
     pub(super) fn set_turn_watchdog(&mut self, turn_watchdog: TurnWatchdogToken) {
-        self.turn_watchdog = Some(Box::new(turn_watchdog));
+        self.runtime_state
+            .get_or_insert_with(Default::default)
+            .turn_watchdog = Some(turn_watchdog);
+    }
+
+    pub(super) fn set_pending_input_permit(&mut self, permit: OwnedSemaphorePermit) {
+        self.runtime_state
+            .get_or_insert_with(Default::default)
+            .pending_input_permit = Some(PendingInputPermitToken::new(permit));
+    }
+
+    pub(crate) fn turn_watchdog_id(&self) -> Option<u64> {
+        self.runtime_state
+            .as_ref()
+            .and_then(|state| state.turn_watchdog.as_ref())
+            .map(|watchdog| watchdog.id)
     }
 
     pub(super) fn start_turn_watchdog(&self) {
-        if let Some(turn_watchdog) = &self.turn_watchdog {
+        let Some(runtime_state) = &self.runtime_state else {
+            return;
+        };
+        if let Some(pending_input_permit) = &runtime_state.pending_input_permit {
+            pending_input_permit.start();
+        }
+        if let Some(turn_watchdog) = &runtime_state.turn_watchdog {
             turn_watchdog.start();
         }
     }

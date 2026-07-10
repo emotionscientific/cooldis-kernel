@@ -70,6 +70,8 @@ pub enum HistoryError {
     /// A discharged event reached an append path without provenance.
     #[error("discharged event {0} has no provenance")]
     DischargedWithoutProvenance(EventRecordId),
+    #[error("event id already exists: {0}")]
+    DuplicateEventId(EventRecordId),
     #[error("stream cursor targets {cursor_stream_id}, not requested stream {requested_stream_id}")]
     StreamCursorStreamMismatch {
         cursor_stream_id: EventStreamId,
@@ -2645,6 +2647,7 @@ struct InMemorySessionStoreInner {
     active_leaf: HashMap<ThreadId, SessionEntryId>,
     bases: HashMap<ThreadId, ThreadBaseRef>,
     events: HashMap<EventStreamId, Vec<EventRecord>>,
+    event_ids: HashSet<EventRecordId>,
     observations: HashMap<ThreadId, Vec<ObservationRecord>>,
 }
 
@@ -2897,6 +2900,13 @@ fn append_in_memory_events(
     stream_id: &EventStreamId,
     records: Vec<NewEventRecord>,
 ) -> HistoryResult<Vec<EventRecord>> {
+    let mut batch_ids = HashSet::with_capacity(records.len());
+    for record in &records {
+        validate_new_event(record)?;
+        if inner.event_ids.contains(&record.id) || !batch_ids.insert(record.id) {
+            return Err(HistoryError::DuplicateEventId(record.id));
+        }
+    }
     let current_len = inner
         .events
         .get(stream_id)
@@ -2918,6 +2928,7 @@ fn append_in_memory_events(
         .entry(stream_id.clone())
         .or_default()
         .extend(appended.clone());
+    inner.event_ids.extend(batch_ids);
     Ok(appended)
 }
 
@@ -3137,6 +3148,9 @@ fn append_in_memory_event(
     record: NewEventRecord,
 ) -> HistoryResult<EventRecord> {
     validate_new_event(&record)?;
+    if inner.event_ids.contains(&record.id) {
+        return Err(HistoryError::DuplicateEventId(record.id));
+    }
     let sequence = EventSequence::new(
         inner
             .events
@@ -3152,6 +3166,7 @@ fn append_in_memory_event(
         .entry(stream_id.clone())
         .or_default()
         .push(event.clone());
+    inner.event_ids.insert(event.id);
     Ok(event)
 }
 

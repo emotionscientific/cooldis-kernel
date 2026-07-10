@@ -721,6 +721,17 @@ fn sqlite_insert_event(
     record: NewEventRecord,
 ) -> HistoryResult<EventRecord> {
     validate_new_event(&record)?;
+    let event_id = record.id;
+    let event_id_exists = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM event_records WHERE event_id = ?1)",
+            params![event_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage_error)?;
+    if event_id_exists {
+        return Err(HistoryError::DuplicateEventId(event_id));
+    }
     let next_sequence = sqlite_next_event_sequence(tx, stream_id)?;
     let event = EventRecord::from_new(stream_id.clone(), EventSequence::new(next_sequence), record);
     event.validate_stream_record_v1()?;

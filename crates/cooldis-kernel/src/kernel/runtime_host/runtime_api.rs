@@ -60,6 +60,10 @@ pub enum ThreadCommand {
     Cancel {
         reason: String,
     },
+    CancelTurn {
+        watchdog_token_id: u64,
+        reason: String,
+    },
     Shutdown,
 }
 

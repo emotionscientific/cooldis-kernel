@@ -527,6 +527,7 @@ impl AgentRuntime for ChildEchoRuntime {
                             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
                             let _ = status.send(ThreadStatus::Idle);
                         }
+                        Some(ThreadCommand::CancelTurn { .. }) => {}
                         Some(ThreadCommand::Compact { .. }) => {
                             let _ = status.send(ThreadStatus::Idle);
                         }

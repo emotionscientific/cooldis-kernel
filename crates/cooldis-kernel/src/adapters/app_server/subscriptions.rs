@@ -34,6 +34,62 @@ struct ResyncedTurnProjection {
     items: Vec<ResyncedTurnItem>,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct ThreadResyncTestGate {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+impl ThreadResyncTestGate {
+    pub(super) async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(super) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_thread_resync_test_gate(thread_id: &str) -> ThreadResyncTestGate {
+    let gate = ThreadResyncTestGate {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    thread_resync_test_gates()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(thread_id.to_string(), gate.clone());
+    gate
+}
+
+#[cfg(test)]
+fn thread_resync_test_gates() -> &'static std::sync::Mutex<HashMap<String, ThreadResyncTestGate>> {
+    static GATES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ThreadResyncTestGate>>> =
+        std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+async fn pause_thread_resync_for_test(thread_id: &str) {
+    let gate = thread_resync_test_gates()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(thread_id)
+        .cloned();
+    let Some(gate) = gate else {
+        return;
+    };
+    gate.entered.notify_one();
+    gate.release.notified().await;
+    thread_resync_test_gates()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(thread_id);
+}
+
 impl CooldisAppServer {
     pub(super) async fn subscribe_thread_connection(
         &self,
@@ -194,7 +250,31 @@ pub(super) async fn watch_thread(app: CooldisAppServer, handle: RuntimeThreadHan
                 match event {
                     Ok(event) => {
                         handle_thread_event(&app, &thread_id, event).await;
-                        let status_value = handle.status();
+                        let mut status_value = handle.status();
+                        if lagged_events > 0
+                            && events.len() == 0
+                            && matches!(
+                                status_value,
+                                ThreadStatus::Idle | ThreadStatus::Stopped | ThreadStatus::Failed
+                            )
+                        {
+                            if !resynchronize_thread_after_lag(
+                                &app,
+                                &handle,
+                                &thread_id,
+                                lagged_events,
+                                lagged_turn.as_deref(),
+                            )
+                            .await
+                            {
+                                status_value = handle.status();
+                                handle_thread_status(&app, &thread_id, status_value).await;
+                                break;
+                            }
+                            lagged_events = 0;
+                            lagged_turn = None;
+                            status_value = handle.status();
+                        }
                         if matches!(status_value, ThreadStatus::Stopped | ThreadStatus::Failed)
                             && !app.thread_has_active_turn(&thread_id).await
                         {
@@ -269,7 +349,7 @@ pub(super) async fn watch_thread(app: CooldisAppServer, handle: RuntimeThreadHan
                     }
                     break;
                 }
-                let status_value = *status.borrow();
+                let mut status_value = *status.borrow();
                 if lagged_events > 0
                     && matches!(
                         status_value,
@@ -285,11 +365,13 @@ pub(super) async fn watch_thread(app: CooldisAppServer, handle: RuntimeThreadHan
                     )
                     .await
                     {
+                        status_value = handle.status();
                         handle_thread_status(&app, &thread_id, status_value).await;
                         break;
                     }
                     lagged_events = 0;
                     lagged_turn = None;
+                    status_value = handle.status();
                 }
                 handle_thread_status(&app, &thread_id, status_value).await;
                 if status_value == ThreadStatus::Failed {
@@ -311,6 +393,9 @@ async fn resynchronize_thread_after_lag(
     lagged_events: u64,
     lagged_turn: Option<&str>,
 ) -> bool {
+    #[cfg(test)]
+    pause_thread_resync_for_test(thread_id).await;
+
     let projection = if let Some(turn_id) = lagged_turn {
         let context = match handle.session_context().await {
             Ok(context) => context,

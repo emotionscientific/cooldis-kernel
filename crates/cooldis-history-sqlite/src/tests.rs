@@ -79,6 +79,26 @@ async fn assert_fenced_append_conformance(store: &dyn EventStore) -> EventStream
     let after_conflict =
         serde_json::to_vec(&store.read_events(&stream_id, None).await.unwrap()).unwrap();
     assert_eq!(after_conflict, before_conflict);
+
+    let duplicate_stream = EventStreamId::new("duplicate-id-stream");
+    let mut duplicate = record("duplicate-event-id");
+    let duplicate_event_id = initial[0].id;
+    duplicate.id = duplicate_event_id;
+    let duplicate_err = store
+        .append_events_fenced(&duplicate_stream, EventSequence::new(1), vec![duplicate])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        duplicate_err,
+        HistoryError::DuplicateEventId(event_id) if event_id == duplicate_event_id
+    ));
+    assert!(
+        store
+            .read_events(&duplicate_stream, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     stream_id
 }
 

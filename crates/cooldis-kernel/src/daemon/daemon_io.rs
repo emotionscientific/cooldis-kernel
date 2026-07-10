@@ -464,6 +464,7 @@ struct IngressReceiptContext {
     target: IoTarget,
     metadata: BTreeMap<String, String>,
     source_ingress_id: Option<String>,
+    turn_id: Option<String>,
 }
 
 enum IngressMarkerAppend {
@@ -477,6 +478,7 @@ enum AppliedIngressLookup {
     Partial,
 }
 
+#[derive(Eq, PartialEq)]
 struct AppliedIngressMarker {
     coordinates: ThreadCoordinates,
     turn_id: String,
@@ -495,7 +497,7 @@ pub struct CooldisDaemonIoBridge {
     threads: Arc<Mutex<HashMap<String, ThreadCoordinates>>>,
     thread_scope_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     thread_load_locks: Arc<Mutex<HashMap<ThreadId, Arc<Mutex<()>>>>>,
-    active_turns: Arc<Mutex<HashMap<String, String>>>,
+    active_turns: Arc<StdMutex<HashMap<String, String>>>,
     egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
     egress_route_configs: Arc<RwLock<HashMap<String, RouteEgressConfig>>>,
     egress_states: Arc<RwLock<HashMap<String, Arc<DaemonEgressState>>>>,
@@ -522,7 +524,7 @@ impl CooldisDaemonIoBridge {
             threads: Arc::new(Mutex::new(HashMap::new())),
             thread_scope_locks: Arc::new(Mutex::new(HashMap::new())),
             thread_load_locks: Arc::new(Mutex::new(HashMap::new())),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_turns: Arc::new(StdMutex::new(HashMap::new())),
             egress_adapters: Arc::new(RwLock::new(HashMap::new())),
             egress_route_configs: Arc::new(RwLock::new(HashMap::new())),
             egress_states: Arc::new(RwLock::new(HashMap::new())),
@@ -1133,27 +1135,45 @@ impl CooldisDaemonIoBridge {
                 {
                     continue;
                 }
-                applied.insert(
-                    message_id.to_string(),
-                    AppliedIngressMarker {
-                        coordinates: ThreadCoordinates {
-                            tenant_id: tenant_id.clone(),
-                            user_id: user_id.clone(),
-                            session_id: session_id.clone(),
-                            thread_id: ThreadId::parse_str(&thread_id).map_err(|err| {
-                                IoError::Bridge(format!(
-                                    "durable ingress marker has invalid thread id: {err}"
-                                ))
-                            })?,
-                        },
-                        turn_id: turn_id.to_string(),
+                let marker = AppliedIngressMarker {
+                    coordinates: ThreadCoordinates {
+                        tenant_id: tenant_id.clone(),
+                        user_id: user_id.clone(),
+                        session_id: session_id.clone(),
+                        thread_id: ThreadId::parse_str(&thread_id).map_err(|err| {
+                            IoError::Bridge(format!(
+                                "durable ingress marker has invalid thread id: {err}"
+                            ))
+                        })?,
                     },
-                );
+                    turn_id: turn_id.to_string(),
+                };
+                if applied
+                    .get(message_id)
+                    .is_some_and(|existing| existing != &marker)
+                {
+                    return Err(IoError::Bridge(
+                        "durable ingress batch has inconsistent applied message markers"
+                            .to_string(),
+                    ));
+                }
+                applied.insert(message_id.to_string(), marker);
             }
         }
         match applied.len() {
             0 => Ok(None),
-            count if count == requested.len() => Ok(applied.into_values().next()),
+            count if count == requested.len() => {
+                let mut markers = applied.into_values();
+                let marker = markers.next().expect("non-empty applied ingress map");
+                if markers.all(|other| other == marker) {
+                    Ok(Some(marker))
+                } else {
+                    Err(IoError::Bridge(
+                        "durable ingress batch has inconsistent applied message markers"
+                            .to_string(),
+                    ))
+                }
+            }
             _ => Err(IoError::Bridge(
                 "durable ingress batch partially overlaps applied message markers".to_string(),
             )),
@@ -1167,9 +1187,7 @@ impl CooldisDaemonIoBridge {
         ingress_message_ids: &[String],
     ) -> IoResult<(IngressState, Option<String>)> {
         let active_turn_id = self
-            .active_turns
-            .lock()
-            .await
+            .lock_active_turns()
             .get(&target.address.scope_key())
             .cloned();
         let applied_turn_id = if ingress_message_ids.is_empty() {
@@ -1495,6 +1513,22 @@ impl CooldisDaemonIoBridge {
             .clone()
     }
 
+    fn lock_active_turns(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn clear_active_turn_if_matches(&self, scope_key: &str, completed_turn_id: &str) {
+        let mut active_turns = self.lock_active_turns();
+        if active_turns
+            .get(scope_key)
+            .is_some_and(|active_turn_id| active_turn_id == completed_turn_id)
+        {
+            active_turns.remove(scope_key);
+        }
+    }
+
     async fn durable_ingress_binding(
         &self,
         envelope: &IngressEnvelope,
@@ -1649,11 +1683,10 @@ impl CooldisDaemonIoBridge {
             receipt.thread_id = Some(child_coordinates.thread_id.to_string());
             return Ok((receipt, Some(applied_turn_id)));
         }
-        self.active_turns
-            .lock()
-            .await
+        self.lock_active_turns()
             .insert(target.address.scope_key(), child_key.to_string());
-        self.supervisor
+        if let Err(err) = self
+            .supervisor
             .submit_turn_to_with_admission(
                 &child_coordinates,
                 child_key.to_string(),
@@ -1662,7 +1695,10 @@ impl CooldisDaemonIoBridge {
                 None,
             )
             .await
-            .map_err(cooldis_bridge_error)?;
+        {
+            self.clear_active_turn_if_matches(&target.address.scope_key(), child_key);
+            return Err(cooldis_bridge_error(err));
+        }
 
         let mut receipt_target = target.clone();
         receipt_target.address.thread_id = Some(child_coordinates.thread_id.to_string());
@@ -2029,6 +2065,7 @@ impl CooldisDaemonIoBridge {
                 state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
                 continue;
             };
+            let completed_turn_id = source_context.turn_id.clone();
             let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
             if !after_cursor
                 && !source_has_partial_projected_receipts(
@@ -2058,7 +2095,9 @@ impl CooldisDaemonIoBridge {
             {
                 SourceDeliveryOutcome::Completed => {
                     delivered_sources += 1;
-                    self.active_turns.lock().await.remove(&binding.scope_key);
+                    if let Some(completed_turn_id) = completed_turn_id {
+                        self.clear_active_turn_if_matches(&binding.scope_key, &completed_turn_id);
+                    }
                 }
                 SourceDeliveryOutcome::Blocked => break,
             }
@@ -2313,28 +2352,9 @@ impl CooldisDaemonIoBridge {
                 let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 self.bind_egress_thread(envelope, target, &coordinates)
                     .await?;
-                if let IngressMarkerAppend::AlreadyApplied {
-                    turn_id: applied_turn_id,
-                } = self
-                    .append_ingress_received_event(
-                        &handle,
-                        envelope,
-                        target,
-                        turn_id,
-                        ingress_message_ids,
-                    )
-                    .await?
-                {
-                    let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
-                    receipt.thread_id = Some(coordinates.thread_id.to_string());
-                    return Ok((receipt, Some(applied_turn_id)));
-                }
-                self.active_turns
-                    .lock()
-                    .await
-                    .insert(target.address.scope_key(), turn_id.clone());
-                self.supervisor
-                    .submit_turn_to_with_admission(
+                let reserved = self
+                    .supervisor
+                    .reserve_turn_to_with_admission(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
@@ -2343,14 +2363,6 @@ impl CooldisDaemonIoBridge {
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
-                let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
-                receipt.thread_id = Some(coordinates.thread_id.to_string());
-                Ok((receipt, None))
-            }
-            AdmissionDecision::Steer { turn_id, input, .. } => {
-                let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
-                self.bind_egress_thread(envelope, target, &coordinates)
-                    .await?;
                 if let IngressMarkerAppend::AlreadyApplied {
                     turn_id: applied_turn_id,
                 } = self
@@ -2367,12 +2379,20 @@ impl CooldisDaemonIoBridge {
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
                     return Ok((receipt, Some(applied_turn_id)));
                 }
-                self.active_turns
-                    .lock()
-                    .await
+                self.lock_active_turns()
                     .insert(target.address.scope_key(), turn_id.clone());
-                self.supervisor
-                    .submit_turn_to_with_admission(
+                reserved.submit().await;
+                let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
+                receipt.thread_id = Some(coordinates.thread_id.to_string());
+                Ok((receipt, None))
+            }
+            AdmissionDecision::Steer { turn_id, input, .. } => {
+                let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
+                self.bind_egress_thread(envelope, target, &coordinates)
+                    .await?;
+                let reserved = self
+                    .supervisor
+                    .reserve_turn_to_with_admission(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
@@ -2381,6 +2401,25 @@ impl CooldisDaemonIoBridge {
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
+                if let IngressMarkerAppend::AlreadyApplied {
+                    turn_id: applied_turn_id,
+                } = self
+                    .append_ingress_received_event(
+                        &handle,
+                        envelope,
+                        target,
+                        turn_id,
+                        ingress_message_ids,
+                    )
+                    .await?
+                {
+                    let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
+                    receipt.thread_id = Some(coordinates.thread_id.to_string());
+                    return Ok((receipt, Some(applied_turn_id)));
+                }
+                self.lock_active_turns()
+                    .insert(target.address.scope_key(), turn_id.clone());
+                reserved.submit().await;
                 let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                 receipt.thread_id = Some(coordinates.thread_id.to_string());
                 Ok((receipt, None))
@@ -2391,9 +2430,26 @@ impl CooldisDaemonIoBridge {
                 replacement,
             } => {
                 let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
-                if let (Some(turn_id), Some(_)) = (replacement_turn_id, replacement) {
-                    self.bind_egress_thread(envelope, target, &coordinates)
-                        .await?;
+                let reserved =
+                    if let (Some(turn_id), Some(input)) = (replacement_turn_id, replacement) {
+                        self.bind_egress_thread(envelope, target, &coordinates)
+                            .await?;
+                        Some(
+                            self.supervisor
+                                .reserve_turn_to_with_admission(
+                                    &coordinates,
+                                    turn_id.clone(),
+                                    self.runtime_input(input),
+                                    TurnSubmissionMode::Interrupt,
+                                    None,
+                                )
+                                .await
+                                .map_err(cooldis_bridge_error)?,
+                        )
+                    } else {
+                        None
+                    };
+                if let (Some(turn_id), Some(reserved)) = (replacement_turn_id, reserved) {
                     if let IngressMarkerAppend::AlreadyApplied {
                         turn_id: applied_turn_id,
                     } = self
@@ -2410,24 +2466,16 @@ impl CooldisDaemonIoBridge {
                         receipt.thread_id = Some(coordinates.thread_id.to_string());
                         return Ok((receipt, Some(applied_turn_id)));
                     }
-                }
-                self.supervisor
-                    .cancel_at(&coordinates, reason.clone())
-                    .await
-                    .map_err(cooldis_bridge_error)?;
-                if let (Some(turn_id), Some(input)) = (replacement_turn_id, replacement) {
-                    self.active_turns
-                        .lock()
-                        .await
-                        .insert(target.address.scope_key(), turn_id.clone());
                     self.supervisor
-                        .submit_turn_to_with_admission(
-                            &coordinates,
-                            turn_id.clone(),
-                            self.runtime_input(input),
-                            TurnSubmissionMode::Interrupt,
-                            None,
-                        )
+                        .cancel_at(&coordinates, reason.clone())
+                        .await
+                        .map_err(cooldis_bridge_error)?;
+                    self.lock_active_turns()
+                        .insert(target.address.scope_key(), turn_id.clone());
+                    reserved.submit().await;
+                } else {
+                    self.supervisor
+                        .cancel_at(&coordinates, reason.clone())
                         .await
                         .map_err(cooldis_bridge_error)?;
                 }
@@ -3369,10 +3417,16 @@ fn ingress_context_from_event(event: &EventRecord) -> Option<IngressReceiptConte
         .get("ingress_envelope_id")
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned);
+    let turn_id = event
+        .payload
+        .get("turn_id")
+        .and_then(JsonValue::as_str)
+        .map(ToOwned::to_owned);
     Some(IngressReceiptContext {
         target,
         metadata,
         source_ingress_id,
+        turn_id,
     })
 }
 
@@ -3404,18 +3458,27 @@ fn applied_ingress_lookup(
                 .iter()
                 .any(|requested| requested.as_str() == message_id)
             {
+                if applied
+                    .get(message_id)
+                    .is_some_and(|existing| existing != turn_id)
+                {
+                    return AppliedIngressLookup::Partial;
+                }
                 applied.insert(message_id.to_string(), turn_id.to_string());
             }
         }
     }
     match applied.len() {
         0 => AppliedIngressLookup::Missing,
-        count if count == requested.len() => AppliedIngressLookup::Applied {
-            turn_id: applied
-                .into_values()
-                .next()
-                .expect("non-empty applied ingress map"),
-        },
+        count if count == requested.len() => {
+            let mut turn_ids = applied.into_values();
+            let turn_id = turn_ids.next().expect("non-empty applied ingress map");
+            if turn_ids.all(|other| other == turn_id) {
+                AppliedIngressLookup::Applied { turn_id }
+            } else {
+                AppliedIngressLookup::Partial
+            }
+        }
         _ => AppliedIngressLookup::Partial,
     }
 }
