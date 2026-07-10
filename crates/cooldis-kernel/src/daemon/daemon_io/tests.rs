@@ -1912,6 +1912,24 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
         &egress_db,
     )
     .await;
+    let cold_bindings = restarted_bridge.threads.lock().await.clone();
+    assert_eq!(cold_bindings.len(), 1);
+    assert_eq!(
+        cold_bindings.values().next(),
+        Some(&original_coordinates),
+        "restart must cold-seed the original durable binding"
+    );
+    assert!(
+        matches!(
+            restarted_bridge
+                .supervisor
+                .get_thread_at(&original_coordinates)
+                .await,
+            Err(CooldisError::ThreadNotFound(thread_id))
+                if thread_id == original_coordinates.thread_id
+        ),
+        "cold-seeded binding must remain nonresident before redelivery"
+    );
     let restarted_worker = CooldisDaemonQueueWorker::new(
         queue.clone(),
         restarted_bridge.clone(),
@@ -1921,9 +1939,21 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
     assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
 
     assert!(queue.completed().await);
+    assert_eq!(
+        *restarted_bridge.threads.lock().await,
+        cold_bindings,
+        "dedupe lookup must preserve the cold durable binding"
+    );
     assert!(
-        restarted_bridge.threads.lock().await.is_empty(),
-        "dedupe lookup must complete redelivery before creating a replacement thread"
+        matches!(
+            restarted_bridge
+                .supervisor
+                .get_thread_at(&original_coordinates)
+                .await,
+            Err(CooldisError::ThreadNotFound(thread_id))
+                if thread_id == original_coordinates.thread_id
+        ),
+        "dedupe lookup must complete redelivery without loading a runtime"
     );
     assert_single_durable_ingress_turn(&session_store_path, &original_coordinates, &ingress_id)
         .await;
@@ -3355,32 +3385,43 @@ async fn thread_already_exists_retry_keeps_scope_mismatch_fail_closed() {
         session_id: "other-session".to_string(),
         thread_id,
     };
-    gate.block_first_build(requested.clone());
+    gate.block_first_build(conflicting.clone());
+
+    let conflicting_supervisor = bridge.supervisor.clone();
+    let conflicting_coordinates = conflicting.clone();
+    let conflicting_load = tokio::spawn(async move {
+        conflicting_supervisor
+            .load_thread_from_lifecycle(ThreadLifecycleRecord {
+                coordinates: conflicting_coordinates,
+                parent_thread_id: None,
+                topology: ThreadTopology::root(),
+                status: ThreadLifecycleStatus::Idle,
+                latest_signal_id: None,
+                latest_checkpoint_id: None,
+                created_at_ms: now_ms(),
+                updated_at_ms: now_ms(),
+                metadata: BTreeMap::new(),
+            })
+            .await
+    });
+    gate.wait_for_builds(1).await;
 
     let loading_bridge = bridge.clone();
     let loading_coordinates = requested.clone();
-    let loading = tokio::spawn(async move {
+    let mut loading = tokio::spawn(async move {
         loading_bridge
             .get_or_load_thread_handle(&loading_coordinates)
             .await
     });
-    gate.wait_for_builds(1).await;
-    bridge
-        .supervisor
-        .load_thread_from_lifecycle(ThreadLifecycleRecord {
-            coordinates: conflicting.clone(),
-            parent_thread_id: None,
-            topology: ThreadTopology::root(),
-            status: ThreadLifecycleStatus::Idle,
-            latest_signal_id: None,
-            latest_checkpoint_id: None,
-            created_at_ms: now_ms(),
-            updated_at_ms: now_ms(),
-            metadata: BTreeMap::new(),
-        })
-        .await
-        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut loading)
+            .await
+            .is_err(),
+        "lazy load must wait for the conflicting start reservation to settle"
+    );
+
     gate.release();
+    conflicting_load.await.unwrap().unwrap();
 
     assert!(matches!(
         loading.await.unwrap(),

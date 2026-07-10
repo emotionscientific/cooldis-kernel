@@ -330,6 +330,19 @@ impl CooldisSupervisor {
         Ok(thread)
     }
 
+    pub(crate) async fn wait_for_thread_start_reservation(
+        &self,
+        tenant_id: &str,
+        thread_id: ThreadId,
+    ) -> CooldisResult<()> {
+        self.tenant(tenant_id)
+            .await?
+            .host
+            .wait_for_thread_start_reservation(thread_id)
+            .await;
+        Ok(())
+    }
+
     pub async fn submit(
         &self,
         tenant_id: &str,

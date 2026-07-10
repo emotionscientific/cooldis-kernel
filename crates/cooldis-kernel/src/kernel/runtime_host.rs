@@ -219,7 +219,7 @@ struct RuntimeHostInner {
     runtime_store: Arc<dyn RuntimeStore>,
     execution_policy: RuntimeExecutionPolicy,
     threads: RwLock<HashMap<ThreadId, Arc<RuntimeThread>>>,
-    thread_start_reservations: StdMutex<HashMap<ThreadId, ThreadContext>>,
+    thread_start_reservations: StdMutex<HashMap<ThreadId, ThreadStartReservationState>>,
     checkpoints: Mutex<HashMap<ThreadCheckpointId, ThreadCheckpoint>>,
     lifecycle_sink: RwLock<Option<Arc<dyn ThreadLifecycleSink>>>,
 }
@@ -239,15 +239,22 @@ struct RuntimeThread {
     submit_admission: Mutex<()>,
 }
 
+struct ThreadStartReservationState {
+    context: ThreadContext,
+    settled: watch::Sender<bool>,
+}
+
 struct ThreadStartReservation<'a> {
-    reservations: &'a StdMutex<HashMap<ThreadId, ThreadContext>>,
+    reservations: &'a StdMutex<HashMap<ThreadId, ThreadStartReservationState>>,
     thread_id: ThreadId,
+    settled: watch::Sender<bool>,
     committed: bool,
 }
 
 impl ThreadStartReservation<'_> {
     fn commit(&mut self) {
         self.committed = true;
+        let _ = self.settled.send(true);
     }
 }
 
@@ -255,6 +262,7 @@ impl Drop for ThreadStartReservation<'_> {
     fn drop(&mut self) {
         if !self.committed {
             lock_unpoisoned(self.reservations).remove(&self.thread_id);
+            let _ = self.settled.send(true);
         }
     }
 }
@@ -375,7 +383,9 @@ impl RuntimeHost {
                 .count()
                 + reservations
                     .values()
-                    .filter(|context| context.parent_thread_id == Some(parent_thread_id))
+                    .filter(|reservation| {
+                        reservation.context.parent_thread_id == Some(parent_thread_id)
+                    })
                     .count();
             if child_count >= max_child_threads {
                 let parent = threads.get(&parent_thread_id).cloned();
@@ -399,12 +409,35 @@ impl RuntimeHost {
                 });
             }
         }
-        reservations.insert(thread_id, context.clone());
+        let (settled, _) = watch::channel(false);
+        reservations.insert(
+            thread_id,
+            ThreadStartReservationState {
+                context: context.clone(),
+                settled: settled.clone(),
+            },
+        );
         Ok(ThreadStartReservation {
             reservations: &self.inner.thread_start_reservations,
             thread_id,
+            settled,
             committed: false,
         })
+    }
+
+    /// Waits until an in-flight start either finishes publishing or releases
+    /// its reservation after failure.
+    pub(crate) async fn wait_for_thread_start_reservation(&self, thread_id: ThreadId) {
+        let settled = lock_unpoisoned(&self.inner.thread_start_reservations)
+            .get(&thread_id)
+            .map(|reservation| reservation.settled.subscribe());
+        let Some(mut settled) = settled else {
+            return;
+        };
+        if *settled.borrow() {
+            return;
+        }
+        let _ = settled.changed().await;
     }
 
     async fn start_reserved_thread(

@@ -716,38 +716,42 @@ impl CooldisDaemonIoBridge {
     ) -> Result<RuntimeThreadHandle, ThreadHandleResolutionError> {
         let load_lock = self.thread_load_lock(coordinates.thread_id).await;
         let _load_guard = load_lock.lock().await;
-        match self.supervisor.get_thread_at(coordinates).await {
-            Ok(handle) => Ok(handle),
-            Err(CooldisError::ThreadNotFound(_)) => {
-                match self
-                    .supervisor
-                    .load_thread_from_lifecycle(ThreadLifecycleRecord {
-                        coordinates: coordinates.clone(),
-                        parent_thread_id: None,
-                        topology: ThreadTopology::root(),
-                        status: ThreadLifecycleStatus::Idle,
-                        latest_signal_id: None,
-                        latest_checkpoint_id: None,
-                        created_at_ms: now_ms(),
-                        updated_at_ms: now_ms(),
-                        metadata: BTreeMap::new(),
-                    })
-                    .await
-                {
-                    Ok(handle) => Ok(handle),
-                    Err(CooldisError::ThreadAlreadyExists(_)) => {
-                        match self.supervisor.get_thread_at(coordinates).await {
-                            Ok(handle) => Ok(handle),
-                            Err(err @ CooldisError::ThreadNotFound(_)) => {
-                                Err(ThreadHandleResolutionError::LifecycleLoad(err))
-                            }
-                            Err(err) => Err(ThreadHandleResolutionError::Lookup(err)),
+        loop {
+            match self.supervisor.get_thread_at(coordinates).await {
+                Ok(handle) => return Ok(handle),
+                Err(CooldisError::ThreadNotFound(_)) => {
+                    match self
+                        .supervisor
+                        .load_thread_from_lifecycle(ThreadLifecycleRecord {
+                            coordinates: coordinates.clone(),
+                            parent_thread_id: None,
+                            topology: ThreadTopology::root(),
+                            status: ThreadLifecycleStatus::Idle,
+                            latest_signal_id: None,
+                            latest_checkpoint_id: None,
+                            created_at_ms: now_ms(),
+                            updated_at_ms: now_ms(),
+                            metadata: BTreeMap::new(),
+                        })
+                        .await
+                    {
+                        Ok(handle) => return Ok(handle),
+                        Err(CooldisError::ThreadAlreadyExists(_)) => {
+                            self.supervisor
+                                .wait_for_thread_start_reservation(
+                                    &coordinates.tenant_id,
+                                    coordinates.thread_id,
+                                )
+                                .await
+                                .map_err(ThreadHandleResolutionError::Lookup)?;
+                        }
+                        Err(err) => {
+                            return Err(ThreadHandleResolutionError::LifecycleLoad(err));
                         }
                     }
-                    Err(err) => Err(ThreadHandleResolutionError::LifecycleLoad(err)),
                 }
+                Err(err) => return Err(ThreadHandleResolutionError::Lookup(err)),
             }
-            Err(err) => Err(ThreadHandleResolutionError::Lookup(err)),
         }
     }
 

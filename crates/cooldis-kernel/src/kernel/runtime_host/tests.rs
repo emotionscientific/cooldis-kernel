@@ -2822,6 +2822,46 @@ async fn duplicate_start_is_rejected_before_factory_build_or_runtime_spawn() {
     host.shutdown_all().await.unwrap();
 }
 
+#[tokio::test]
+async fn cancelled_start_wakes_reservation_waiters() {
+    let coordinates = coords("tenant_a", "user_1", "cancelled-start-reservation");
+    let thread_id = coordinates.thread_id;
+    let factory = Arc::new(BlockingThreadBuildFactory::new(thread_id));
+    let host = RuntimeHost::new(factory.clone());
+    let start_host = host.clone();
+    let start = tokio::spawn(async move {
+        start_host
+            .start_thread(coordinates, ThreadTopology::root())
+            .await
+    });
+    factory.wait_until_blocked().await;
+
+    let wait_host = host.clone();
+    let mut waiter = tokio::spawn(async move {
+        wait_host.wait_for_thread_start_reservation(thread_id).await;
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut waiter)
+            .await
+            .is_err(),
+        "waiter must remain pending while the start reservation is held"
+    );
+
+    start.abort();
+    match start.await {
+        Err(err) => assert!(err.is_cancelled()),
+        Ok(_) => panic!("blocked start unexpectedly completed"),
+    }
+    tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("reservation waiter should wake after start cancellation")
+        .unwrap();
+    assert!(matches!(
+        host.get_thread(thread_id).await,
+        Err(CooldisError::ThreadNotFound(missing)) if missing == thread_id
+    ));
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn runtime_is_registered_before_its_first_kernel_control_call() {
     let factory = Arc::new(RegistrationProbeFactory::default());
