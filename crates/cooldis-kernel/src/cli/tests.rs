@@ -2,6 +2,20 @@ use super::*;
 use crate::CooldisDaemonConfig;
 
 #[test]
+fn root_help_is_a_concise_starting_surface() {
+    assert!(ROOT_HELP.contains(
+        "Start here:\n  cooldis console\n  cooldis chat [PROMPT]\n  cooldis init <name>"
+    ));
+    assert!(ROOT_HELP.contains(
+        "Explore:\n  cooldis commands\n  cooldis help <command>\n  cooldis <command> --help\n  man cooldis"
+    ));
+    assert!(!ROOT_HELP.contains("Example usage:"));
+    assert!(!ROOT_HELP.contains("Advanced:"));
+    assert!(!ROOT_HELP.contains("cooldis coupling run --replay"));
+    assert!(!ROOT_HELP.contains("cooldis daemon run"));
+}
+
+#[test]
 fn parse_publish_args_collects_cli_only_fields_without_runtime() {
     let args = vec![
         "--module-path",

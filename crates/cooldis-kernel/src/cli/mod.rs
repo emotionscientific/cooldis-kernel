@@ -7836,29 +7836,24 @@ const COUPLING_DISCHARGE_SCHEMA: &str = r#"{
 }
 "#;
 
-const ROOT_EXAMPLE_COMMANDS: &[&str] = &[
-    "cooldis console",
-    "cooldis chat [PROMPT]",
-    "cooldis init <name>",
-    "cooldis coupling init <name>",
-    "cooldis agent plan <manifest>",
-    "cooldis agent publish <manifest>",
-    "cooldis blob publish <file>",
-    "cooldis import publish --package cooldis.import.toml",
-    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> --thread-id <id> --journal <db>",
-    "cooldis tool build --package cooldis.tool.toml",
-    "cooldis tool publish --package cooldis.tool.toml",
-    "cooldis skill publish <dir>",
-    "cooldis auth status <provider-id>",
-    "cooldis secret list",
-];
+const ROOT_HELP: &str = "cooldis
 
-const ADVANCED_COMMANDS: &[&str] = &[
-    "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]>",
-    "cooldis coupling run --replay --artifact <path|op://ref> --coupling-file <file> (--thread-id <id> --journal <db>|--export <bundle>) [--json]",
-    "cooldis debug rpc call <method> [PARAMS_JSON]",
-    "cooldis daemon run [--config cooldis.toml]",
-];
+Usage:
+  cooldis <command> [args]
+  cooldis help [COMMAND...]
+  cooldis commands
+
+Start here:
+  cooldis console
+  cooldis chat [PROMPT]
+  cooldis init <name>
+
+Explore:
+  cooldis commands
+  cooldis help <command>
+  cooldis <command> --help
+  man cooldis
+";
 
 const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis",
@@ -7912,20 +7907,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
 ];
 
 fn print_help() {
-    println!("cooldis\n");
-    println!("Usage:");
-    println!("  cooldis <command> [args]");
-    println!("  cooldis help [COMMAND...]");
-    println!("  cooldis commands");
-    println!();
-    print_command_group("Example usage:", ROOT_EXAMPLE_COMMANDS);
-    println!();
-    print_command_group("Advanced:", ADVANCED_COMMANDS);
-    println!();
-    println!("Further help:");
-    println!("  cooldis commands");
-    println!("  cooldis help <command>");
-    println!("  cooldis <command> --help");
+    print!("{ROOT_HELP}");
 }
 
 fn print_help_help() {

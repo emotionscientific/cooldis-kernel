@@ -7,6 +7,7 @@ TARGET="${COOLDIS_TARGET:-}"
 BASE_URL="${COOLDIS_BASE_URL:-}"
 INSTALL_ROOT="${COOLDIS_INSTALL_ROOT:-"$HOME/.cooldis"}"
 BIN_DIR="${COOLDIS_BIN_DIR:-"$HOME/.local/bin"}"
+MAN_DIR="${COOLDIS_MAN_DIR:-${XDG_DATA_HOME:-"$HOME/.local/share"}/man/man1}"
 ARCHIVE="${COOLDIS_ARCHIVE:-}"
 CHECKSUM="${COOLDIS_CHECKSUM:-}"
 FORCE=0
@@ -26,9 +27,11 @@ Options:
   --base-url URL          Release asset base URL.
   --install-root DIR      Versioned install root. Default: ~/.cooldis.
   --bin-dir DIR           Symlink directory. Default: ~/.local/bin.
+  --man-dir DIR           Manual symlink directory.
+                          Default: ${XDG_DATA_HOME:-$HOME/.local/share}/man/man1.
   --archive FILE          Install from a local release archive.
   --checksum FILE         Checksum file for --archive.
-  --force                 Replace non-symlink files in --bin-dir.
+  --force                 Replace non-symlink files in --bin-dir and --man-dir.
   -h, --help              Show this help.
 
 Environment overrides use the COOLDIS_* names matching the option names.
@@ -38,6 +41,13 @@ USAGE
 die() {
   echo "cooldis install: $*" >&2
   exit 1
+}
+
+require_replaceable_link() {
+  link="$1"
+  if { [ -e "$link" ] || [ -L "$link" ]; } && [ ! -L "$link" ] && [ "$FORCE" != "1" ]; then
+    die "refusing to replace non-symlink $link; pass --force to replace it"
+  fi
 }
 
 need_value() {
@@ -78,6 +88,11 @@ while [ "$#" -gt 0 ]; do
     --bin-dir)
       need_value "$1" "${2:-}"
       BIN_DIR="$2"
+      shift 2
+      ;;
+    --man-dir)
+      need_value "$1" "${2:-}"
+      MAN_DIR="$2"
       shift 2
       ;;
     --archive)
@@ -228,9 +243,18 @@ PACKAGE_NAME="$(basename "$PACKAGE_DIR")"
 for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
   [ -x "$PACKAGE_DIR/$bin" ] || die "archive is missing executable $bin"
 done
+manual_payload="$PACKAGE_DIR/share/man/man1/cooldis.1"
+[ -f "$manual_payload" ] && [ ! -L "$manual_payload" ] && [ -s "$manual_payload" ] \
+  || die "archive is missing regular manual share/man/man1/cooldis.1"
 
 VERSION_DIR="$INSTALL_ROOT/versions/$PACKAGE_NAME"
-mkdir -p "$INSTALL_ROOT/versions" "$BIN_DIR"
+mkdir -p "$INSTALL_ROOT/versions" "$BIN_DIR" "$MAN_DIR"
+for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
+  require_replaceable_link "$BIN_DIR/$bin"
+done
+manual_link="$MAN_DIR/cooldis.1"
+require_replaceable_link "$manual_link"
+
 rm -rf "$VERSION_DIR.tmp"
 mv "$PACKAGE_DIR" "$VERSION_DIR.tmp"
 rm -rf "$VERSION_DIR"
@@ -241,14 +265,15 @@ ln -s "$VERSION_DIR" "$INSTALL_ROOT/current"
 for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
   link="$BIN_DIR/$bin"
   if [ -e "$link" ] || [ -L "$link" ]; then
-    if [ -L "$link" ] || [ "$FORCE" = "1" ]; then
-      rm -f "$link"
-    else
-      die "refusing to replace non-symlink $link; pass --force to replace it"
-    fi
+    rm -f "$link"
   fi
   ln -s "$INSTALL_ROOT/current/$bin" "$link"
 done
+
+if [ -e "$manual_link" ] || [ -L "$manual_link" ]; then
+  rm -f "$manual_link"
+fi
+ln -s "$INSTALL_ROOT/current/share/man/man1/cooldis.1" "$manual_link"
 
 echo "Installed Cooldis:"
 echo "  $VERSION_DIR"
@@ -256,6 +281,8 @@ echo "Linked binaries:"
 echo "  $BIN_DIR/cooldis"
 echo "  $BIN_DIR/cooldis-acp-agent"
 echo "  $BIN_DIR/cooldis-mcp-server"
+echo "Linked manual:"
+echo "  $MAN_DIR/cooldis.1"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -265,3 +292,10 @@ case ":$PATH:" in
     echo "  export PATH=\"$BIN_DIR:\$PATH\""
     ;;
 esac
+
+echo
+echo "Get started:"
+echo "  cooldis console"
+echo "  cooldis chat"
+echo "  cooldis init <name>"
+echo "  man cooldis"

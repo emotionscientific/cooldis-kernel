@@ -19,6 +19,7 @@ The package contains the public process entrypoints:
   - cooldis-acp-agent
   - cooldis-mcp-server
   - share/cooldis/console static assets
+  - share/man/man1/cooldis.1 manual page
 
 It writes:
   DIR/cooldis-<version>-<target-triple>.tar.gz
@@ -147,6 +148,12 @@ if [[ ! -f "$CONSOLE_DIST/index.html" || ! -d "$CONSOLE_DIST/assets" ]]; then
   exit 1
 fi
 
+MANUAL="$ROOT/docs/man/cooldis.1"
+if [[ ! -f "$MANUAL" || -L "$MANUAL" || ! -s "$MANUAL" ]]; then
+  echo "missing manual page: $MANUAL" >&2
+  exit 1
+fi
+
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
@@ -176,6 +183,8 @@ done
 
 mkdir -p "$STAGE/share/cooldis/console"
 cp -R "$CONSOLE_DIST/." "$STAGE/share/cooldis/console/"
+mkdir -p "$STAGE/share/man/man1"
+cp "$MANUAL" "$STAGE/share/man/man1/cooldis.1"
 
 cat >"$STAGE/README.txt" <<EOF
 Cooldis $RELEASE_VERSION
@@ -188,6 +197,9 @@ Binaries:
 
 Console:
   ./cooldis console
+
+Manual:
+  man ./share/man/man1/cooldis.1
 
 Smoke:
   ./cooldis --help

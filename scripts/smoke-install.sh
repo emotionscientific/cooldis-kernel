@@ -27,16 +27,53 @@ run() {
   "$@"
 }
 
+run_fails() {
+  printf '\n==> expect failure: %s\n' "$*"
+  if "$@" >/dev/null 2>&1; then
+    echo "command unexpectedly succeeded: $*" >&2
+    exit 1
+  fi
+}
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cooldis-install-smoke.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 INSTALL_ROOT="$TMP/home/.cooldis"
 BIN_DIR="$TMP/bin"
+MAN_DIR="$TMP/share/man/man1"
 
 run scripts/install.sh \
   --archive "$ARCHIVE" \
   --install-root "$INSTALL_ROOT" \
-  --bin-dir "$BIN_DIR"
+  --bin-dir "$BIN_DIR" \
+  --man-dir "$MAN_DIR"
+
+run scripts/install.sh \
+  --archive "$ARCHIVE" \
+  --install-root "$INSTALL_ROOT" \
+  --bin-dir "$BIN_DIR" \
+  --man-dir "$MAN_DIR"
+
+touch "$INSTALL_ROOT/current/.refusal-sentinel"
+rm "$MAN_DIR/cooldis.1"
+printf 'existing manual\n' >"$MAN_DIR/cooldis.1"
+run_fails scripts/install.sh \
+  --archive "$ARCHIVE" \
+  --install-root "$INSTALL_ROOT" \
+  --bin-dir "$BIN_DIR" \
+  --man-dir "$MAN_DIR"
+
+if [[ ! -f "$INSTALL_ROOT/current/.refusal-sentinel" ]]; then
+  echo "installer mutated the active version before refusing a non-symlink manual" >&2
+  exit 1
+fi
+
+run scripts/install.sh \
+  --archive "$ARCHIVE" \
+  --install-root "$INSTALL_ROOT" \
+  --bin-dir "$BIN_DIR" \
+  --man-dir "$MAN_DIR" \
+  --force
 
 export PATH="$BIN_DIR:$PATH"
 
@@ -51,6 +88,23 @@ for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
     exit 1
   fi
 done
+
+if [[ ! -L "$MAN_DIR/cooldis.1" ]]; then
+  echo "expected installer manual symlink: $MAN_DIR/cooldis.1" >&2
+  exit 1
+fi
+
+if [[ ! -f "$INSTALL_ROOT/current/share/man/man1/cooldis.1" \
+  || -L "$INSTALL_ROOT/current/share/man/man1/cooldis.1" \
+  || ! -s "$INSTALL_ROOT/current/share/man/man1/cooldis.1" ]]; then
+  echo "expected installed manual under $INSTALL_ROOT/current/share/man/man1" >&2
+  exit 1
+fi
+
+if command -v man >/dev/null 2>&1; then
+  printf '\n==> man %s\n' "$MAN_DIR/cooldis.1"
+  MANPAGER=cat PAGER=cat GROFF_NO_SGR=1 man "$MAN_DIR/cooldis.1" >/dev/null
+fi
 
 if [[ ! -f "$INSTALL_ROOT/current/share/cooldis/console/index.html" || ! -d "$INSTALL_ROOT/current/share/cooldis/console/assets" ]]; then
   echo "expected installed console assets under $INSTALL_ROOT/current/share/cooldis/console" >&2

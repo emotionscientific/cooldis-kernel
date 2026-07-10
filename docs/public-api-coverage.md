@@ -30,7 +30,7 @@ inputs, durable effects, or output semantics.
 
 | Surface | Canonical contract doc | Help/man projection | Status | Gap |
 | --- | --- | --- | --- | --- |
-| `cooldis` | [README](../README.md), [Cooldis Docs](README.md) | `cooldis --help` | partial | Generate a model-facing `man cooldis` page from the command contract. |
+| `cooldis` | [README](../README.md), [Cooldis Docs](README.md) | `cooldis --help`, `cooldis(1)` | covered | Root help is the concise start surface; `cooldis commands`, subcommand help, and the authored manual provide the durable command inventory and overview. |
 | `cooldis init`, `cooldis agent init` | [Cooldis Agent CLI](agent-cli.md) | `cooldis init --help`, `cooldis agent init --help` | partial | Folder-first project graph implemented; add generated synopsis/options/output/exit-status manual. |
 | `cooldis coupling init` | [Rust Wasm Operation Dev Kit](wasm-operation-dev-kit.md), [ABI](abi.md) | `cooldis coupling init --help` | partial | Scaffolds a macro-authored Wasm coupling package with native testkit and fixture proof; generated command manual remains follow-up work. |
 | `cooldis agent plan` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent plan --help` | partial | Document JSON/text output shape and validation exit statuses. |

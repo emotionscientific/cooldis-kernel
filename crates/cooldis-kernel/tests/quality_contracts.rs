@@ -259,7 +259,7 @@ fn public_api_coverage_tracks_docs_and_man_page_gaps() {
 
     for required in [
         "Help/man projection",
-        "Generate a model-facing `man cooldis` page",
+        "`cooldis(1)`",
         "Command contracts",
         "issue [#104]",
         "Virtual-bash commands",

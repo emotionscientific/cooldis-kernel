@@ -1,0 +1,138 @@
+.TH COOLDIS 1 "2026-07-10" "Cooldis" "User Commands"
+.SH NAME
+cooldis \- run and inspect declared agent workloads
+.SH SYNOPSIS
+.B cooldis
+.RI < command >
+.RI [ args ]
+.br
+.B cooldis help
+.RI [ command ...]
+.br
+.B cooldis commands
+.SH DESCRIPTION
+.B cooldis
+is the local command-line surface for the Cooldis runtime.
+It starts browser and terminal consoles, authors and publishes agent artifacts,
+runs tools and couplings, manages local credentials and secrets, and exposes
+the runtime control plane.
+.PP
+Root help is intentionally short.
+Use
+.B cooldis commands
+for the canonical command list, or
+.B cooldis help
+.I command
+for a command's exact syntax and options.
+.SH GETTING STARTED
+.TP
+.B cooldis console
+Start the bundled browser console on loopback and open it in the default
+browser.
+.TP
+.B cooldis chat
+Start the bundled terminal console with a private local runtime.
+.TP
+.BI "cooldis init " name
+Create a folder-first agent project.
+.SH COMMANDS
+.TP
+.B console
+Run the browser console and its local RPC endpoint.
+.TP
+.B chat
+Run the terminal console, or attach it to an existing RPC endpoint.
+.TP
+.B init
+Create an agent project. This is the short form of
+.BR "cooldis agent init" .
+.TP
+.B agent
+Initialize, plan, publish, inspect, and run agent declarations.
+.TP
+.B coupling
+Initialize a Wasm coupling package or replay a coupling against recorded
+events without changing the source journal.
+.TP
+.B tool
+Build, publish, inspect, and run operations. The
+.B source
+subcommands manage imported tool sources.
+.TP
+.B import
+Build and publish operations from a witnessed external contract corpus.
+.TP
+.B skill
+Publish a skill package to the local registry.
+.TP
+.B blob
+Publish immutable file resources to the local registry.
+.TP
+.B auth
+Store and inspect local model-provider credentials. Secret values are read
+from standard input and are not printed.
+.TP
+.B secret
+Store and inspect named runtime secrets. Secret values are read from the
+environment or standard input and are not printed.
+.TP
+.B rpc
+Run the public app-server control plane on a Unix socket or WebSocket
+listener.
+.TP
+.B daemon
+Run, validate, install, or remove the user-level daemon service.
+.TP
+.B debug
+Inspect the RPC protocol of a running daemon. These commands are intended for
+maintainers and smoke tests.
+.TP
+.B commands
+Print the canonical command list.
+.TP
+.B help
+Print root help or the help page for a command path.
+.SH HELP
+The following forms are equivalent for a command:
+.PP
+.nf
+cooldis help agent publish
+cooldis agent publish --help
+.fi
+.PP
+Use
+.B cooldis commands
+when exact command coverage matters. It is the exhaustive command inventory;
+this manual is an orientation and reference overview.
+.SH ENVIRONMENT
+.TP
+.B COOLDIS_HOME
+Override the default Cooldis user directory.
+.TP
+.B COOLDIS_CONSOLE_ASSET_DIR
+Use a built console asset directory containing
+.I index.html
+instead of the assets bundled with a release.
+.PP
+Provider-specific environment variables and environment-file settings are
+described by
+.B cooldis help chat
+and the daemon configuration documentation.
+.SH FILES
+.TP
+.I ~/.cooldis/
+Default user data, installed releases, metadata, and runtime state.
+.TP
+.I .cooldis/
+Default project-local registries and state.
+.TP
+.I cooldis.toml
+Default daemon and runtime configuration file.
+.SH EXIT STATUS
+.B cooldis
+returns zero when a command succeeds and nonzero for invalid usage, rejected
+operations, or runtime failures. Diagnostics are written to standard error.
+.SH SEE ALSO
+Project documentation:
+.br
+https://github.com/emotionscientific/cooldis-kernel/tree/main/docs

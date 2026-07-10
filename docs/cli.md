@@ -12,10 +12,14 @@ cooldis --help
 cooldis commands
 cooldis help chat
 cooldis help tool manual
+man cooldis
 ```
 
-Bare `cooldis` prints the same concise help as `cooldis --help`. Use
-`cooldis commands` for the full canonical command list.
+Bare `cooldis` prints the same concise starting surface as `cooldis --help`.
+It points new users to the browser console, terminal chat, and agent project
+initializer. Use `cooldis commands` for the full canonical command list,
+subcommand help for exact syntax and options, and `cooldis(1)` for the durable
+command-family overview.
 
 ## Main Commands
 
@@ -64,6 +68,7 @@ and smoke tests; it is not the default user console.
 ## Release Contract
 
 Release archives must include the `cooldis`, `cooldis-acp-agent`, and
-`cooldis-mcp-server` binaries plus `share/cooldis/console/*`. Package smoke
-tests assert that the canonical help pages work for `console`, `chat`, `auth`,
-`tool manual`, `rpc`, and `debug rpc`.
+`cooldis-mcp-server` binaries, `share/cooldis/console/*`, and
+`share/man/man1/cooldis.1`. Package smoke tests assert that the manual renders
+and the canonical help pages work for `console`, `chat`, `auth`, `tool manual`,
+`rpc`, and `debug rpc`.

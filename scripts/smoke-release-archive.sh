@@ -56,6 +56,7 @@ COOLDIS="$PACKAGE_DIR/cooldis"
 ACP_AGENT="$PACKAGE_DIR/cooldis-acp-agent"
 MCP_SERVER="$PACKAGE_DIR/cooldis-mcp-server"
 CONSOLE_DIR="$PACKAGE_DIR/share/cooldis/console"
+MANUAL="$PACKAGE_DIR/share/man/man1/cooldis.1"
 
 for bin in "$COOLDIS" "$ACP_AGENT" "$MCP_SERVER"; do
   if [[ ! -x "$bin" ]]; then
@@ -67,6 +68,16 @@ done
 if [[ ! -f "$CONSOLE_DIR/index.html" || ! -d "$CONSOLE_DIR/assets" ]]; then
   echo "missing console assets in archive: $CONSOLE_DIR" >&2
   exit 1
+fi
+
+if [[ ! -f "$MANUAL" || -L "$MANUAL" || ! -s "$MANUAL" ]]; then
+  echo "missing regular manual page in archive: $MANUAL" >&2
+  exit 1
+fi
+
+if command -v man >/dev/null 2>&1; then
+  printf '\n==> man %s\n' "$MANUAL"
+  MANPAGER=cat PAGER=cat GROFF_NO_SGR=1 man "$MANUAL" >/dev/null
 fi
 
 run_quiet "$COOLDIS" --version
