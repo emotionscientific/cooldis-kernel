@@ -2856,6 +2856,93 @@ async fn queue_worker_flushes_coalesce_batch_when_max_batch_is_reached() {
     let _ = std::fs::remove_file(db);
 }
 
+#[tokio::test]
+async fn queue_worker_admits_cross_drain_burst_as_separate_recovery_batches() {
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!(
+            "queue-coalesce-cross-drain-{}.sqlite",
+            uuid::Uuid::now_v7()
+        ));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    queue
+        .submit(coalesce_envelope("first drain", "2501", 60_000, 2))
+        .await
+        .unwrap();
+
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-coalesce-cross-drain-hold",
+        30,
+    )
+    .with_max_messages(1);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(bridge.threads.lock().await.is_empty());
+
+    queue
+        .submit(coalesce_envelope("second drain", "2502", 60_000, 2))
+        .await
+        .unwrap();
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(
+        bridge.threads.lock().await.is_empty(),
+        "a later drain must not silently complete the earlier held batch"
+    );
+
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let released = connection
+        .execute(
+            "UPDATE pgqrs_messages
+             SET vt = datetime('now', '-1 second')
+             WHERE archived_at IS NULL",
+            [],
+        )
+        .unwrap();
+    assert_eq!(released, 2, "both held messages should become visible");
+    drop(connection);
+    drop(worker);
+    drop(queue);
+
+    let reopened = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        reopened,
+        bridge.clone(),
+        "worker-coalesce-cross-drain-restart",
+        30,
+    )
+    .with_max_messages(1);
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let admissions = control_events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .collect::<Vec<_>>();
+    assert_eq!(admissions.len(), 2);
+    assert!(admissions.iter().all(|admission| {
+        admission.payload["decision"].as_str() == Some("coalesce")
+            && admission_source_ids(admission).len() == 1
+    }));
+
+    let user_texts = user_texts_for(&bridge, &coordinates).await;
+    assert!(user_texts.contains(&"first drain".to_string()));
+    assert!(user_texts.contains(&"second drain".to_string()));
+    assert!(!user_texts.contains(&"first drain\nsecond drain".to_string()));
+    let _ = std::fs::remove_file(db);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
     let fixture_root = test_root("queue-coalesce-restart");

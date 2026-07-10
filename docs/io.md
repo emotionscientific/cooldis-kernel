@@ -448,7 +448,9 @@ envelope again.
   with `coalesce_bursts = { window_ms = 750, max_batch = 8 }`. The first
   message starts the window, later messages in the same window join in arrival
   order, and the worker admits one merged text envelope when `window_ms`
-  expires or `max_batch` is reached.
+  expires or `max_batch` is reached. Coalescing is best-effort within a single
+  drain window: a burst that spans drain windows may be admitted as multiple
+  batches, and `max_batch` bounds only a single drain's batch.
 - `observe_system_events`: record webhook/cron events without waking the model.
 - `reject_when_dedupe_seen`: acknowledge repeated protocol updates without
   touching the runtime.
