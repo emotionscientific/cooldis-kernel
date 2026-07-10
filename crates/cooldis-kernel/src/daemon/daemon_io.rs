@@ -1487,16 +1487,17 @@ impl CooldisDaemonIoBridge {
             return Err(cooldis_bridge_error(err));
         }
         let coordinates = handle.context().coordinates.clone();
-        if let Some((route_id, source_scope, state)) = durable_binding
-            && let Err(err) = state.bind_thread(
+        if let Some((route_id, source_scope, state)) = durable_binding {
+            if let Err(err) = state.bind_thread(
                 &route_id,
                 &source_scope,
                 &target.address.scope_key(),
                 &coordinates,
-            )
-        {
-            let _ = self.supervisor.shutdown_thread_at(&coordinates).await;
-            return Err(err);
+            ) {
+                let _ = self.supervisor.shutdown_thread_at(&coordinates).await;
+                return Err(err);
+            }
+            pause_after_ingress_binding_for_restart_smoke().await?;
         }
         self.threads
             .lock()
@@ -4094,6 +4095,27 @@ fn init_egress_state_schema(connection: &rusqlite::Connection) -> IoResult<()> {
             ",
         )
         .map_err(egress_state_error)
+}
+
+/// Deterministic crash cut for `cooldis-restart-smoke`.
+///
+/// When the test-only variable names a marker path, the daemon creates it
+/// after the durable route binding commits and parks before publishing the
+/// binding in memory or submitting the first turn. The smoke then SIGKILLs the
+/// process. Normal daemon runs do not set the variable and return immediately.
+async fn pause_after_ingress_binding_for_restart_smoke() -> IoResult<()> {
+    let Some(marker) = std::env::var_os("COOLDIS_TEST_PAUSE_AFTER_INGRESS_BINDING") else {
+        return Ok(());
+    };
+    let marker = std::path::PathBuf::from(marker);
+    std::fs::write(&marker, b"binding persisted\n").map_err(|err| {
+        IoError::Bridge(format!(
+            "write restart smoke binding marker {}: {err}",
+            marker.display()
+        ))
+    })?;
+    std::future::pending::<()>().await;
+    Ok(())
 }
 
 fn cooldis_bridge_error(err: CooldisError) -> IoError {

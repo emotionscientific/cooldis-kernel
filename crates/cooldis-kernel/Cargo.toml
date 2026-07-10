@@ -74,6 +74,10 @@ name = "cooldis-live-smoke"
 path = "tests/smokes/cooldis-live-smoke.rs"
 
 [[bin]]
+name = "cooldis-restart-smoke"
+path = "tests/smokes/cooldis-restart-smoke.rs"
+
+[[bin]]
 name = "cooldis-manifest-e2e-smoke"
 path = "tests/smokes/cooldis-manifest-e2e-smoke.rs"
 
