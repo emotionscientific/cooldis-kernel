@@ -143,26 +143,27 @@ fresh, durably bound thread before ingress is submitted.
 
 Durable queue apply uses the leased `IngressEnvelope.id` as its idempotency key.
 Before submitting a turn, the daemon appends the thread's
-`io.ingress.received` fact with both `turn_id` and `ingress_message_ids`; a
-coalesced turn records every source message ID in that one fact. The append is
-expected-tail fenced, so competing workers cannot both establish the marker on
-the same thread. This extends the per-conversation ordering law: first persist
-the conversation binding, then persist the applied marker, then submit the
-turn, and only then complete the queue lease.
+`turn.submitted` fact with both `turn_id` and `ingress_message_ids`; a coalesced
+turn records every source message ID in that one fact. This derived thread
+record cites the control-stream `io.ingress.received` witness or witnesses in
+its provenance and carries the target context consumed by the egress projector.
+The append is expected-tail fenced, so competing workers cannot both establish
+the marker on the same thread. This extends the per-conversation ordering law:
+first persist the conversation binding, then persist the applied marker, then
+submit the turn, and only then complete the queue lease.
 
 On redelivery, the daemon checks durable history for the ingress envelope ID
 before resolving or creating a replacement thread. An existing marker makes
-apply a no-op: no admission or turn is submitted, the original control stream
-receives an `io.ingress.received` diagnostic with `dedupe_seen = true` and the
-original `applied_turn_id`, and the worker completes the lease. This closes the
-duplicate side of the apply/ack crash window: a redelivered envelope can never
-run twice. It is not exactly-once. The marker is durable while the submission
-it describes is in-process state, so a process death after the marker commits
-but before the reserved submission is sent loses that turn; redelivery then
-dedupes against the marker instead of retrying. Apply keeps the loss window
-minimal by completing all fallible admission before the marker and sending
-synchronously after it, and the ratified order stands because a duplicate turn
-is the worse failure. Closing the loss window outright needs a durable
+apply a no-op: no second receipt, admission decision, or turn is submitted, and
+the worker completes the lease. This closes the duplicate side of the apply/ack
+crash window: a redelivered envelope can never run twice. It is not exactly-once.
+The marker is durable while the submission it describes is in-process state, so
+a process death after the marker commits but before the reserved submission is
+sent loses that turn; redelivery then dedupes against the marker instead of
+retrying. Apply keeps the loss window minimal by completing all fallible
+admission before the marker and sending synchronously after it, and the ratified
+order stands because a duplicate turn is the worse failure. Closing the loss
+window outright needs a durable
 pending/applied outcome protocol; none of this changes the outbound
 send/receipt ambiguity described below.
 
@@ -384,9 +385,13 @@ index.
 The daemon does not deliver replies from a per-turn in-memory watcher. Each
 enabled route owns an egress projector task. The projector reads the route's
 bound thread event streams from a persisted cursor stored in the same SQLite
-state as the ingress queue, projects assistant output through the route's
+state as the ingress queue. It pairs target context from provenance-bearing
+`turn.submitted` ingress records with user and assistant
+`session.entry.appended` records, projects assistant output through the route's
 `egress_projection` rules, picks up `io.egress.requested` events directly, and
-calls the route adapter.
+calls the route adapter. The control-stream `io.ingress.received` record remains
+the sole ingress receipt; the projector does not consume a second receipt from
+the thread stream.
 
 `io.egress.requested` currently has no in-kernel producer. Producers are
 boundary clients that append the event through the control plane and future
@@ -462,9 +467,10 @@ messages visible again and the recovered worker admits them once as a batch.
 
 Every admitted path emits `admission.decided`. Coalesced admissions use
 `decision = "coalesce"` and list every source `io.ingress.received` event in
-`source_ingress_event_ids`; the thread stream still receives exactly one
-`io.ingress.received` context record for the merged envelope so egress
-projection pairs one inbound context with the eventual assistant entry.
+`source_ingress_event_ids`; the thread stream receives exactly one derived
+`turn.submitted` record for the merged envelope. Its provenance cites those
+control-stream witnesses, and its target context lets egress projection pair
+one inbound context with the eventual assistant entry.
 
 Product deployments can add richer resolvers and policies for auth, billing,
 quotas, frontend ledger projection, model routing, and durable queue semantics

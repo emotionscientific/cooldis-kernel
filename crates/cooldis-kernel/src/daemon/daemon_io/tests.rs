@@ -1341,6 +1341,7 @@ async fn assert_single_durable_ingress_turn(
     coordinates: &ThreadCoordinates,
     message_id: &str,
 ) {
+    let control_events = control_events_for(session_store_path, coordinates).await;
     let mut thread_events = thread_events_for(session_store_path, coordinates).await;
     for _ in 0..100 {
         if thread_events
@@ -1353,12 +1354,13 @@ async fn assert_single_durable_ingress_turn(
         thread_events = thread_events_for(session_store_path, coordinates).await;
     }
     assert_eq!(
-        thread_events
+        control_events
             .iter()
+            .chain(&thread_events)
             .filter(|event| event.kind == EventKind::IoIngressReceived)
             .count(),
         1,
-        "durable ingress redelivery must not apply a second ingress fact"
+        "durable ingress redelivery must leave one receipt across all streams"
     );
     assert_eq!(
         thread_events
@@ -1371,7 +1373,7 @@ async fn assert_single_durable_ingress_turn(
     let markers = thread_events
         .iter()
         .filter(|event| {
-            event.kind == EventKind::IoIngressReceived
+            event.kind == EventKind::TurnSubmitted
                 && event.payload["ingress_message_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(message_id)))
@@ -1379,30 +1381,6 @@ async fn assert_single_durable_ingress_turn(
         .collect::<Vec<_>>();
     assert_eq!(markers.len(), 1, "expected one durable applied marker");
     assert!(markers[0].payload["turn_id"].as_str().is_some());
-}
-
-async fn assert_dedupe_hit_diagnostic(
-    session_store_path: &Path,
-    coordinates: &ThreadCoordinates,
-    message_id: &str,
-) {
-    let control_events = control_events_for(session_store_path, coordinates).await;
-    let diagnostic = control_events.iter().find(|event| {
-        event.kind == EventKind::IoIngressReceived
-            && event.payload["dedupe_seen"].as_bool() == Some(true)
-            && event.payload["ingress_message_id"].as_str() == Some(message_id)
-    });
-    let diagnostic = diagnostic.unwrap_or_else(|| {
-        panic!(
-            "redelivery should emit a dedupe-hit diagnostic; control payloads: {:?}",
-            control_events
-                .iter()
-                .filter(|event| event.kind == EventKind::IoIngressReceived)
-                .map(|event| &event.payload)
-                .collect::<Vec<_>>()
-        )
-    });
-    assert!(diagnostic.payload["applied_turn_id"].as_str().is_some());
 }
 
 async fn user_texts_for(
@@ -2011,7 +1989,6 @@ async fn queue_worker_redelivery_after_complete_failure_does_not_duplicate_turn(
     assert_eq!(faulting_queue.call_count("complete_ingress"), 2);
     let coordinates = only_thread_coordinates(&bridge).await;
     assert_single_durable_ingress_turn(&session_store_path, &coordinates, &ingress_id).await;
-    assert_dedupe_hit_diagnostic(&session_store_path, &coordinates, &ingress_id).await;
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -2044,7 +2021,7 @@ async fn queue_worker_rejection_before_submission_does_not_mark_ingress_applied(
             .await
             .iter()
             .any(|event| {
-                event.kind == EventKind::IoIngressReceived
+                event.kind == EventKind::TurnSubmitted
                     && event.payload[INGRESS_MESSAGE_IDS_FIELD]
                         .as_array()
                         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
@@ -2093,7 +2070,7 @@ async fn fork_worker_rejection_deduplicates_retry_without_spawning_another_child
             .await
             .iter()
             .any(|event| {
-                event.kind == EventKind::IoIngressReceived
+                event.kind == EventKind::TurnSubmitted
                     && event.payload[INGRESS_MESSAGE_IDS_FIELD]
                         .as_array()
                         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
@@ -2189,7 +2166,12 @@ async fn applied_ingress_lookup_rejects_conflicting_turn_and_thread_mappings() {
     let marker = |coordinates: &ThreadCoordinates, turn_id: &str, message_ids: &[&str]| {
         let mut record =
             ingress_received_control_record(coordinates, &envelope, None, None).unwrap();
+        record.kind = EventKind::TurnSubmitted;
         let payload = record.payload.as_object_mut().unwrap();
+        payload.insert(
+            "schema".to_string(),
+            json!(EventKind::TurnSubmitted.payload_schema_id()),
+        );
         payload.insert("turn_id".to_string(), json!(turn_id));
         payload.insert(INGRESS_MESSAGE_IDS_FIELD.to_string(), json!(message_ids));
         record
@@ -2277,7 +2259,7 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
     drop(server);
 
     tokio::time::advance(Duration::from_secs(30)).await;
-    let (restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    let (_restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
     register_route_state(
         &restarted_bridge,
         &route_with_egress(Vec::new(), None),
@@ -2329,12 +2311,6 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
     );
     assert_single_durable_ingress_turn(&session_store_path, &original_coordinates, &ingress_id)
         .await;
-    assert_dedupe_hit_diagnostic(
-        restarted_server.session_store_path(),
-        &original_coordinates,
-        &ingress_id,
-    )
-    .await;
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -2796,7 +2772,7 @@ async fn queue_worker_coalesces_window_expired_batch_into_one_turn_and_source_li
             .iter()
             .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
             .count(),
-        1
+        0
     );
     assert_eq!(
         thread_events
@@ -3017,13 +2993,13 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
             .count(),
         2
     );
     let latest_ingress_context = thread_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
         .next_back()
         .unwrap();
     assert_eq!(
@@ -3059,7 +3035,7 @@ async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
     assert_eq!(
         child_thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
             .count(),
         1
     );
@@ -3235,6 +3211,19 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
         .count();
     assert_eq!(turn_submitted_count, 1);
+    let submitted = thread_events
+        .iter()
+        .find(|event| event.kind == crate::EventKind::TurnSubmitted)
+        .unwrap();
+    assert_eq!(submitted.origin, crate::EventOrigin::Discharged);
+    assert_eq!(
+        submitted.provenance.source_streams,
+        vec![control_stream.clone()]
+    );
+    assert_eq!(
+        submitted.provenance.source_event_ids,
+        vec![control_events[ingress_pos].id]
+    );
 
     let observe_source = IoSource::new("telegram.bot", "main");
     reopened
@@ -3956,10 +3945,9 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
         .unwrap()
         .into_iter()
         .find(|event| {
-            event.kind == EventKind::IoIngressReceived
-                && event.payload["turn_id"].as_str().is_some()
+            event.kind == EventKind::TurnSubmitted && event.payload["turn_id"].as_str().is_some()
         })
-        .expect("thread ingress event");
+        .expect("ingress turn submission");
     let ingress_context = ingress_context_from_event(&ingress_event).unwrap();
     let mut target = ingress_context.target.clone();
     target.metadata = ingress_context.metadata.clone();
@@ -4097,10 +4085,9 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
         .unwrap()
         .into_iter()
         .find(|event| {
-            event.kind == EventKind::IoIngressReceived
-                && event.payload["turn_id"].as_str().is_some()
+            event.kind == EventKind::TurnSubmitted && event.payload["turn_id"].as_str().is_some()
         })
-        .expect("thread ingress event");
+        .expect("ingress turn submission");
     let ingress_context = ingress_context_from_event(&ingress_event).unwrap();
     let mut target = ingress_context.target.clone();
     target.metadata = ingress_context.metadata.clone();
