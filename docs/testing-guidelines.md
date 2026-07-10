@@ -84,13 +84,39 @@ Process smoke should prove wiring, not exhaust every edge case:
 For Cooldis runtime changes, use:
 
 ```bash
-cargo test
-cargo run --bin cooldis-live-smoke
-cargo run --bin cooldis-vbash-smoke
-cargo run --bin cooldis-wasm-smoke
+scripts/cargo-lane.sh test
+scripts/cargo-lane.sh run --bin cooldis-live-smoke
+scripts/cargo-lane.sh run --bin cooldis-vbash-smoke
+scripts/cargo-lane.sh run --bin cooldis-wasm-smoke
 ```
 
 Run app-server and MCP smokes when touching their projections.
+
+## Cargo Build Lanes
+
+Concurrent local worktrees share two exclusive Cargo build lanes. `main` and
+`integration/*` use the integration lane. Every other branch uses the feature
+lane. Commands in one lane wait for each other, while the two lanes may build
+at the same time.
+
+Use `scripts/cargo-lane.sh` for direct Cargo commands. Workspace automation
+selects the same wrapper for commands launched through `cargo`, `just`, or a
+nested script. Do not set `CARGO_TARGET_DIR` or pass `--target-dir`; the wrapper
+owns the target path and rotates it when lane ownership changes.
+Local Cargo aliases and external subcommands are trusted configuration and must
+not inject their own target paths.
+
+The managed profile disables incremental output, keeps line-table debug
+information for development and tests, and bounds compiler caching when
+`sccache` is available. A missing `sccache` installation is a warning, not a
+build failure.
+
+Before claiming a runtime change is complete, run the required test command
+through the lane wrapper. For the full workspace suite:
+
+```bash
+scripts/cargo-lane.sh test --workspace --all-targets --locked
+```
 
 ## Terminology Lint
 
