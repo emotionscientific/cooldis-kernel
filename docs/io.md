@@ -155,8 +155,16 @@ before resolving or creating a replacement thread. An existing marker makes
 apply a no-op: no admission or turn is submitted, the original control stream
 receives an `io.ingress.received` diagnostic with `dedupe_seen = true` and the
 original `applied_turn_id`, and the worker completes the lease. This closes the
-apply/ack crash window; it does not claim exactly-once delivery beyond that
-window or change the outbound send/receipt ambiguity described below.
+duplicate side of the apply/ack crash window: a redelivered envelope can never
+run twice. It is not exactly-once. The marker is durable while the submission
+it describes is in-process state, so a process death after the marker commits
+but before the reserved submission is sent loses that turn; redelivery then
+dedupes against the marker instead of retrying. Apply keeps the loss window
+minimal by completing all fallible admission before the marker and sending
+synchronously after it, and the ratified order stands because a duplicate turn
+is the worse failure. Closing the loss window outright needs a durable
+pending/applied outcome protocol; none of this changes the outbound
+send/receipt ambiguity described below.
 
 Runtime hotswap should start as config-level hotswap:
 
