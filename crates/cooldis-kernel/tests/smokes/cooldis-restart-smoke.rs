@@ -73,7 +73,7 @@ async fn continuity_after_binding_crash_cut(
         tokio::spawn(async move { post_update(addr, 2001, 1, "crash before first turn").await });
     wait_for_path(&marker, Duration::from_secs(5)).await?;
     let bound_before_kill = fixture.wait_for_single_bound_thread().await?;
-    if fixture.thread_event_count(&bound_before_kill, "turn_submitted")? != 0 {
+    if fixture.thread_event_count(&bound_before_kill, "turn.submitted")? != 0 {
         return Err("binding crash cut was reached after the first turn submission".into());
     }
 
