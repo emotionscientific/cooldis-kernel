@@ -139,6 +139,23 @@ binding is durable. Route startup restores live bindings before accepting
 ingress, so a conversation resumes the same thread after a daemon restart;
 bindings to threads no longer known by the supervisor are ignored.
 
+Durable queue apply uses the leased `IngressEnvelope.id` as its idempotency key.
+Before submitting a turn, the daemon appends the thread's
+`io.ingress.received` fact with both `turn_id` and `ingress_message_ids`; a
+coalesced turn records every source message ID in that one fact. The append is
+expected-tail fenced, so competing workers cannot both establish the marker on
+the same thread. This extends the per-conversation ordering law: first persist
+the conversation binding, then persist the applied marker, then submit the
+turn, and only then complete the queue lease.
+
+On redelivery, the daemon checks durable history for the ingress envelope ID
+before resolving or creating a replacement thread. An existing marker makes
+apply a no-op: no admission or turn is submitted, the original control stream
+receives an `io.ingress.received` diagnostic with `dedupe_seen = true` and the
+original `applied_turn_id`, and the worker completes the lease. This closes the
+apply/ack crash window; it does not claim exactly-once delivery beyond that
+window or change the outbound send/receipt ambiguity described below.
+
 Runtime hotswap should start as config-level hotswap:
 
 ```toml

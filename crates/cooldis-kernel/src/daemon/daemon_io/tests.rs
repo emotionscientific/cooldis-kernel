@@ -43,7 +43,8 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
-use tokio::sync::{Barrier, Mutex as TokioMutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Barrier, Mutex as TokioMutex, Notify, mpsc};
 
 #[derive(Clone)]
 struct CaptureSink {
@@ -146,6 +147,131 @@ impl EgressAdapter for ScriptedEgress {
             .pop_front()
             .unwrap_or(fallback_id);
         Ok(DeliveryReceipt::delivered(&envelope, external_id))
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedIngressQueue {
+    state: Arc<TokioMutex<ScriptedIngressQueueState>>,
+    block_next_complete: Arc<AtomicBool>,
+    complete_started: Arc<Notify>,
+    release_complete: Arc<Notify>,
+}
+
+struct ScriptedIngressQueueState {
+    message_id: String,
+    envelope: IngressEnvelope,
+    attempt: u32,
+    visible_at: tokio::time::Instant,
+    completed: bool,
+    complete_errors: VecDeque<String>,
+    complete_calls: usize,
+}
+
+impl ScriptedIngressQueue {
+    fn new(
+        message_id: impl Into<String>,
+        envelope: IngressEnvelope,
+        complete_errors: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            state: Arc::new(TokioMutex::new(ScriptedIngressQueueState {
+                message_id: message_id.into(),
+                envelope,
+                attempt: 0,
+                visible_at: tokio::time::Instant::now(),
+                completed: false,
+                complete_errors: complete_errors.into_iter().map(Into::into).collect(),
+                complete_calls: 0,
+            })),
+            block_next_complete: Arc::new(AtomicBool::new(false)),
+            complete_started: Arc::new(Notify::new()),
+            release_complete: Arc::new(Notify::new()),
+        }
+    }
+
+    fn block_next_complete(&self) {
+        self.block_next_complete.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_complete_started(&self) {
+        self.complete_started.notified().await;
+    }
+
+    async fn completed(&self) -> bool {
+        self.state.lock().await.completed
+    }
+
+    async fn complete_calls(&self) -> usize {
+        self.state.lock().await.complete_calls
+    }
+}
+
+#[async_trait]
+impl IngressSink for ScriptedIngressQueue {
+    async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        let ack = IngressAck::accepted(&envelope);
+        let mut state = self.state.lock().await;
+        state.envelope = envelope;
+        state.attempt = 0;
+        state.visible_at = tokio::time::Instant::now();
+        state.completed = false;
+        Ok(ack)
+    }
+}
+
+#[async_trait]
+impl IngressQueueStore for ScriptedIngressQueue {
+    async fn lease_ingress(
+        &self,
+        worker_id: &str,
+        max_messages: usize,
+        visibility_timeout_secs: u32,
+    ) -> IoResult<Vec<LeasedIngressEnvelope>> {
+        let mut state = self.state.lock().await;
+        if max_messages == 0 || state.completed || state.visible_at > tokio::time::Instant::now() {
+            return Ok(Vec::new());
+        }
+        state.attempt += 1;
+        state.visible_at =
+            tokio::time::Instant::now() + Duration::from_secs(visibility_timeout_secs.into());
+        let mut leased =
+            LeasedIngressEnvelope::new(state.message_id.clone(), state.envelope.clone());
+        leased.attempt = state.attempt;
+        leased.lease_owner = Some(worker_id.to_string());
+        Ok(vec![leased])
+    }
+
+    async fn complete_ingress(&self, message_id: &str) -> IoResult<()> {
+        {
+            let mut state = self.state.lock().await;
+            assert_eq!(message_id, state.message_id);
+            state.complete_calls += 1;
+            if let Some(error) = state.complete_errors.pop_front() {
+                return Err(IoError::Queue(error));
+            }
+        }
+        if self.block_next_complete.swap(false, Ordering::SeqCst) {
+            self.complete_started.notify_one();
+            self.release_complete.notified().await;
+        }
+        self.state.lock().await.completed = true;
+        Ok(())
+    }
+
+    async fn hold_ingress_until(&self, message_id: &str, visible_at_ms: u64) -> IoResult<()> {
+        let mut state = self.state.lock().await;
+        assert_eq!(message_id, state.message_id);
+        state.visible_at = tokio::time::Instant::now()
+            + Duration::from_millis(visible_at_ms.saturating_sub(now_ms()));
+        Ok(())
+    }
+
+    async fn retry_ingress(&self, message_id: &str, _reason: &str) -> IoResult<()> {
+        let mut state = self.state.lock().await;
+        assert_eq!(message_id, state.message_id);
+        state.visible_at = tokio::time::Instant::now();
+        Ok(())
     }
 }
 
@@ -892,6 +1018,75 @@ async fn thread_events_for(
         .unwrap()
 }
 
+async fn assert_single_durable_ingress_turn(
+    session_store_path: &Path,
+    coordinates: &ThreadCoordinates,
+    message_id: &str,
+) {
+    let mut thread_events = thread_events_for(session_store_path, coordinates).await;
+    for _ in 0..100 {
+        if thread_events
+            .iter()
+            .any(|event| event.kind == EventKind::TurnSubmitted)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+        thread_events = thread_events_for(session_store_path, coordinates).await;
+    }
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1,
+        "durable ingress redelivery must not apply a second ingress fact"
+    );
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        1,
+        "durable ingress redelivery must not submit a second turn"
+    );
+    let markers = thread_events
+        .iter()
+        .filter(|event| {
+            event.kind == EventKind::IoIngressReceived
+                && event.payload["ingress_message_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(message_id)))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(markers.len(), 1, "expected one durable applied marker");
+    assert!(markers[0].payload["turn_id"].as_str().is_some());
+}
+
+async fn assert_dedupe_hit_diagnostic(
+    session_store_path: &Path,
+    coordinates: &ThreadCoordinates,
+    message_id: &str,
+) {
+    let control_events = control_events_for(session_store_path, coordinates).await;
+    let diagnostic = control_events.iter().find(|event| {
+        event.kind == EventKind::IoIngressReceived
+            && event.payload["dedupe_seen"].as_bool() == Some(true)
+            && event.payload["ingress_message_id"].as_str() == Some(message_id)
+    });
+    let diagnostic = diagnostic.unwrap_or_else(|| {
+        panic!(
+            "redelivery should emit a dedupe-hit diagnostic; control payloads: {:?}",
+            control_events
+                .iter()
+                .filter(|event| event.kind == EventKind::IoIngressReceived)
+                .map(|event| &event.payload)
+                .collect::<Vec<_>>()
+        )
+    });
+    assert!(diagnostic.payload["applied_turn_id"].as_str().is_some());
+}
+
 async fn user_texts_for(
     bridge: &CooldisDaemonIoBridge,
     coordinates: &ThreadCoordinates,
@@ -1463,6 +1658,123 @@ async fn fork_on_new_dm_child_inherits_route_agent_binding() {
         Some(agent.manifest_hash.as_str())
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_worker_redelivery_after_complete_failure_does_not_duplicate_turn() {
+    let fixture_root = test_root("queue-complete-redelivery");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("apply once after ack failure");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-redelivery",
+        envelope,
+        ["scripted complete failure"],
+    ));
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-redelivery", 30);
+
+    let err = worker.drain_once().await.unwrap_err();
+    assert!(err.to_string().contains("scripted complete failure"));
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    assert_eq!(queue.complete_calls().await, 2);
+    let coordinates = only_thread_coordinates(&bridge).await;
+    assert_single_durable_ingress_turn(&session_store_path, &coordinates, &ingress_id).await;
+    assert_dedupe_hit_diagnostic(&session_store_path, &coordinates, &ingress_id).await;
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_turn() {
+    let fixture_root = test_root("queue-apply-crash-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("survive apply ack crash cut");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-crash-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    queue.block_next_complete();
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-before-crash", 30);
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    queue.wait_for_complete_started().await;
+    let original_coordinates = only_thread_coordinates(&bridge).await;
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let (restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge.clone(),
+        "worker-after-crash",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    assert!(
+        restarted_bridge.threads.lock().await.is_empty(),
+        "dedupe lookup must complete redelivery before creating a replacement thread"
+    );
+    assert_single_durable_ingress_turn(&session_store_path, &original_coordinates, &ingress_id)
+        .await;
+    assert_dedupe_hit_diagnostic(
+        restarted_server.session_store_path(),
+        &original_coordinates,
+        &ingress_id,
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_worker_fresh_envelope_marks_applied_and_completes_once() {
+    let fixture_root = test_root("queue-fresh-applied");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("fresh durable ingress");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-fresh",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let worker = CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-fresh", 30);
+
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    assert_eq!(queue.complete_calls().await, 1);
+    let coordinates = only_thread_coordinates(&bridge).await;
+    assert_single_durable_ingress_turn(&session_store_path, &coordinates, &ingress_id).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    assert!(!control_events.iter().any(|event| {
+        event.kind == EventKind::IoIngressReceived
+            && event.payload["dedupe_seen"].as_bool() == Some(true)
+    }));
+    let _ = std::fs::remove_dir_all(fixture_root);
 }
 
 #[tokio::test]
