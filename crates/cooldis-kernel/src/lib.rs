@@ -8,6 +8,40 @@
 #[cfg(test)]
 mod test_abort_tripwire;
 
+#[cfg(test)]
+pub(crate) use crate as kernel_test;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/event_trace.rs"]
+mod event_trace_support;
+#[cfg(test)]
+#[path = "../tests/support/fault.rs"]
+mod fault_support;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/scripted_provider.rs"]
+mod scripted_provider_support;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/store_parity.rs"]
+mod store_parity_support;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/transcript.rs"]
+mod transcript;
+#[cfg(test)]
+pub(crate) mod test_support {
+    #[allow(unused_imports)]
+    pub(crate) use super::event_trace_support::*;
+    pub(crate) use super::fault_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::scripted_provider_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::store_parity_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::transcript::*;
+}
+
 pub mod adapters {
     pub mod acp_agent;
     pub mod app_server;

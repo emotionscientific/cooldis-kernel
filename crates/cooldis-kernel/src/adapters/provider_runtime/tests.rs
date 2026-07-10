@@ -1,5 +1,6 @@
 use super::*;
 use crate::EventKind;
+use crate::test_support::FaultingProviderClient;
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindReceipt,
     AgentManifestCouplingBinding, AgentManifestCouplingBudget, AgentManifestRuntimeDefaults,
@@ -1049,18 +1050,22 @@ async fn runtime_emits_model_request_failed_on_provider_error() {
     }));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn model_request_retries_retryable_provider_error() {
-    let client = Arc::new(ScriptedClient::new(vec![
-        ScriptedResponse::Error(crate::ProviderError::Http("temporary outage".to_string())),
-        ScriptedResponse::Response(response_text("retry reply")),
-    ]));
+    let inner = Arc::new(RecordingClient::with_responses(vec![response_text(
+        "retry reply",
+    )]));
+    let client = Arc::new(
+        FaultingProviderClient::new(inner.clone())
+            .fail_nth_http("complete", 1, "temporary outage")
+            .delay_nth("complete", 2, Duration::from_millis(25)),
+    );
     let mut config =
         CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let factory = Arc::new(
         CanonicalProviderRuntimeFactory::new(config, client.clone())
-            .with_model_request_retry_policy(ModelRequestRetryPolicy::fixed(2, 0)),
+            .with_model_request_retry_policy(ModelRequestRetryPolicy::fixed(2, 50)),
     );
     let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
     let thread = host
@@ -1077,7 +1082,8 @@ async fn model_request_retries_retryable_provider_error() {
         .unwrap();
     let runtime_events = assert_output_with_runtime_events(&mut events, "retry reply").await;
 
-    assert_eq!(client.requests().len(), 2);
+    assert_eq!(client.call_count("complete"), 2);
+    assert_eq!(inner.requests().len(), 1);
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
@@ -1094,7 +1100,7 @@ async fn model_request_retries_retryable_provider_error() {
             RuntimeEventKind::ModelRequestRetryScheduled {
                 attempt: 1,
                 next_attempt: 2,
-                delay_ms: 0,
+                delay_ms: 50,
                 error_class: RuntimeModelRequestErrorClass::Retryable,
                 ..
             }
@@ -2026,7 +2032,7 @@ async fn witnessed_tool_suspension_pauses_turn_without_invoking_tool() {
     assert_eq!(pending[0].approval_id.as_deref(), Some("approval-1"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn resume_tool_call_consumes_decision_and_invokes_once() {
     let registry = echo_registry("echo").await;
     let client = Arc::new(RecordingClient::with_responses(vec![
@@ -2139,7 +2145,9 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    host.shutdown_thread(thread.context().coordinates.thread_id)
+        .await
+        .unwrap();
     assert_eq!(
         client.requests().len(),
         2,

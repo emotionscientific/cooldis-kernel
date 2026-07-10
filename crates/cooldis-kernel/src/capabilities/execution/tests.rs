@@ -822,7 +822,7 @@ impl ExternalCommandExecutor for SlowDeadlineExecutor {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn harness_execute_process_marks_external_timeout_from_shared_deadline() {
     let mut config = VirtualBashRuntimeConfig::default()
         .with_execution_policy(BashExecutionPolicy::host_always())

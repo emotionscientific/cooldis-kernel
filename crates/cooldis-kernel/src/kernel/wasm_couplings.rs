@@ -631,8 +631,8 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[tokio::test]
-    async fn wasm_coupling_timeout_fails_with_bounded_wall_time() {
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn wasm_coupling_timeout_fails_with_paused_time() {
         let root = temp_dir("wasm-coupling-timeout");
         let operation = publish_spin_operation(&root, "spinner", "run").await;
         let store = InMemorySessionStore::default();
@@ -649,17 +649,18 @@ mod tests {
         coupling.budget.max_ms = Some(10);
         let executor = WasmCouplingExecutor::new(&root);
         let scheduler = CouplingScheduler::new(&store, &executor);
-        let started = std::time::Instant::now();
+        let bindings = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+        let run = scheduler.run_batch(&bindings, appended);
+        tokio::pin!(run);
+        let receipt = loop {
+            tokio::select! {
+                receipt = &mut run => break receipt.unwrap(),
+                _ = tokio::task::yield_now() => {
+                    tokio::time::advance(Duration::from_millis(10)).await;
+                }
+            }
+        };
 
-        let receipt = scheduler
-            .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
-                appended,
-            )
-            .await
-            .unwrap();
-
-        assert!(started.elapsed() < Duration::from_millis(500));
         assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
         assert!(
             receipt.runs[0]

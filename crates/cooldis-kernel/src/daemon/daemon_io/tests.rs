@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::FaultingIngressQueue;
 use crate::{
     APP_SERVER_LOCAL_MODEL,
     APP_SERVER_LOCAL_PROVIDER,
@@ -1858,13 +1859,19 @@ async fn queue_worker_redelivery_after_complete_failure_does_not_duplicate_turn(
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     let envelope = telegram_queue_envelope("apply once after ack failure");
     let ingress_id = envelope.id.clone();
-    let queue = Arc::new(ScriptedIngressQueue::new(
-        "message-redelivery",
-        envelope,
-        ["scripted complete failure"],
+    let queue =
+        ScriptedIngressQueue::new("message-redelivery", envelope, std::iter::empty::<&str>());
+    let faulting_queue = Arc::new(FaultingIngressQueue::new(Arc::new(queue.clone())).fail_nth(
+        "complete_ingress",
+        1,
+        "scripted complete failure",
     ));
-    let worker =
-        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-redelivery", 30);
+    let worker = CooldisDaemonQueueWorker::new(
+        faulting_queue.clone(),
+        bridge.clone(),
+        "worker-redelivery",
+        30,
+    );
 
     let err = worker.drain_once().await.unwrap_err();
     assert!(err.to_string().contains("scripted complete failure"));
@@ -1872,7 +1879,8 @@ async fn queue_worker_redelivery_after_complete_failure_does_not_duplicate_turn(
     assert_eq!(worker.drain_once().await.unwrap(), 1);
 
     assert!(queue.completed().await);
-    assert_eq!(queue.complete_calls().await, 2);
+    assert_eq!(queue.complete_calls().await, 1);
+    assert_eq!(faulting_queue.call_count("complete_ingress"), 2);
     let coordinates = only_thread_coordinates(&bridge).await;
     assert_single_durable_ingress_turn(&session_store_path, &coordinates, &ingress_id).await;
     assert_dedupe_hit_diagnostic(&session_store_path, &coordinates, &ingress_id).await;
@@ -2484,36 +2492,48 @@ async fn queue_worker_flushes_coalesce_batch_when_max_batch_is_reached() {
     let _ = std::fs::remove_file(db);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
     let fixture_root = test_root("queue-coalesce-restart");
     let db = fixture_root.join("queue.sqlite");
-    let queue = Arc::new(
+    let durable_queue = Arc::new(
         PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
             .await
             .unwrap(),
     );
-    queue
+    durable_queue
         .submit(coalesce_envelope("before", "3001", 1_000, 10))
         .await
         .unwrap();
-    queue
+    durable_queue
         .submit(coalesce_envelope("restart", "3002", 1_000, 10))
         .await
         .unwrap();
-
     let (_server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
-    let worker =
-        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-coalesce-hold", 30);
+    let worker = CooldisDaemonQueueWorker::new(
+        durable_queue.clone(),
+        bridge.clone(),
+        "worker-coalesce-hold",
+        30,
+    );
     assert_eq!(worker.drain_once().await.unwrap(), 2);
     assert!(
         bridge.threads.lock().await.is_empty(),
         "held coalesce batches should not submit before the window expires"
     );
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let released = connection
+        .execute(
+            "UPDATE pgqrs_messages
+             SET vt = datetime('now', '-1 second')
+             WHERE archived_at IS NULL",
+            [],
+        )
+        .unwrap();
+    assert_eq!(released, 2, "both held messages should become visible");
+    drop(connection);
     drop(worker);
-    drop(queue);
-
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    drop(durable_queue);
 
     let (restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
     let reopened = Arc::new(
@@ -2522,7 +2542,7 @@ async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
             .unwrap(),
     );
     let worker = CooldisDaemonQueueWorker::new(
-        reopened.clone(),
+        reopened,
         restarted_bridge.clone(),
         "worker-coalesce-restart",
         30,
@@ -2538,10 +2558,35 @@ async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
         .unwrap();
     assert_eq!(admission.payload["decision"].as_str(), Some("coalesce"));
     assert_eq!(admission_source_ids(admission).len(), 2);
+    let thread = restarted_bridge
+        .supervisor
+        .get_thread_at(&coordinates)
+        .await
+        .unwrap();
+    restarted_bridge
+        .supervisor
+        .shutdown_thread_at(&coordinates)
+        .await
+        .unwrap();
+    let user_texts = thread
+        .session_context()
+        .await
+        .unwrap()
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            SessionEntryKind::Message {
+                message: CanonicalMessage::User { content, .. },
+            }
+            | SessionEntryKind::CustomContextMessage {
+                message: CanonicalMessage::User { content, .. },
+            } => Some(text_from_canonical_content(content)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert!(
-        user_texts_for(&restarted_bridge, &coordinates)
-            .await
-            .contains(&"before\nrestart".to_string())
+        user_texts.contains(&"before\nrestart".to_string()),
+        "unexpected coalesced user texts: {user_texts:?}"
     );
     let _ = std::fs::remove_file(db);
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -3315,7 +3360,7 @@ async fn seeded_binding_unloaded_before_ingress_is_reloaded() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
     let root = test_root("ingress-binding-concurrent-load");
     let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;
@@ -3366,7 +3411,7 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn thread_already_exists_retry_keeps_scope_mismatch_fail_closed() {
     let root = test_root("ingress-binding-load-scope-mismatch");
     let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;

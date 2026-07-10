@@ -44,31 +44,53 @@ that contract.
 
 ## Harness Patterns
 
-Prefer shared helpers over bespoke test setup:
+The canonical kernel harness lives in
+`crates/cooldis-kernel/tests/support/`. Integration tests declare
+`mod support;`; inline module tests import the same helpers through the crate's
+`#[cfg(test)]` `test_support` module. Keep additions in this module family as
+plain builders and wrappers rather than introducing a test-framework crate or
+macro DSL.
 
+Use the existing helpers before adding bespoke setup:
+
+- `event_trace.rs` provides `EventTrace`, event collectors, ordering assertions,
+  and canonical text extraction;
+- `scripted_provider.rs` provides `ScriptedProviderClient`, explicit response
+  steps, and provider response/factory builders;
+- `fault.rs` provides store, provider, and ingress-queue wrappers that fail or
+  delay the Nth named trait operation. Scripts are explicit in each test; do
+  not derive fault plans from seeds in this layer;
+- `transcript.rs` records typed events and receipts, then replaces generated
+  IDs, timestamps, and durations with stable aliases. Call `preserve_id` when
+  the literal ID is itself the lineage assertion;
+- `store_parity.rs` runs the canonical append, read, branch, cursor, replay, and
+  fenced-append sequence against any `RuntimeStore`. The `store_parity`
+  integration lane compares `InMemorySessionStore` with
+  `SqliteSessionStore` and uses the normalized transcript as its oracle;
 - runtime builders for tenants, hosts, threads, guests, providers, and stores;
-- mock providers and mock external executors that record received requests;
+- mock external executors that record received requests;
 - temp runtime homes, state homes, workspaces, socket paths, and sqlite stores;
 - deterministic IDs, clocks, and fixture data where possible;
 - event collectors with bounded timeout waits, not blind sleeps;
-- snapshot renderers that hide nondeterministic IDs unless lineage is under
-  test;
 - receipt and grant assertion helpers with stable denial-code checks.
 
-A useful future shape is:
+Timing-logic tests use Tokio's paused clock:
 
-```text
-crates/cooldis-kernel/tests/common/
-  runtime_builder.rs
-  mock_provider.rs
-  mock_external_executor.rs
-  mock_wasm_guest.rs
-  fixture_store.rs
-  event_collector.rs
-  context_snapshot.rs
-  abi_snapshot.rs
-  receipt_assertions.rs
+```rust
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn retries_after_backoff() {
+    // Arrange an explicit start/event barrier before moving the clock.
+    started.notified().await;
+    tokio::time::advance(Duration::from_millis(50)).await;
+    completed.notified().await;
+}
 ```
+
+Use barriers (`Notify`, channels, status watches, or task joins) to prove that
+the operation reached the intended phase before advancing time. A timeout may
+remain as a virtual-time negative assertion. Process-backed, socket, live
+provider, and SQLite platform-timing smokes keep real time because their
+contract is the platform interaction itself.
 
 ## Process Smoke Rules
 

@@ -4,9 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::{Duration, timeout};
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn codex_cli_runtime_invokes_configured_binary_with_tenant_homes() {
     let temp = test_temp_dir("codex-cli-runtime");
     fs::create_dir_all(&temp).unwrap();
@@ -107,10 +106,7 @@ cat
 
 async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
-            .await
-            .expect("event timed out")
-            .expect("event channel closed");
+        let event = events.recv().await.expect("event channel closed");
         if let ThreadEvent::Output { text, .. } = event {
             return text;
         }
@@ -119,10 +115,7 @@ async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
 
 async fn next_mirror(events: &mut broadcast::Receiver<ThreadEvent>) -> crate::SessionEntry {
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
-            .await
-            .expect("event timed out")
-            .expect("event channel closed");
+        let event = events.recv().await.expect("event channel closed");
         if let ThreadEvent::CanonicalMirror { entry, .. } = event {
             return entry;
         }

@@ -23,7 +23,6 @@ use crate::kernel::history::{
     EventSequence,
     EventStore,
     EventStreamId,
-    HistoryError,
     HistoryResult,
     NewEventRecord,
     NewObservationRecord,
@@ -39,6 +38,7 @@ use crate::kernel::history::{
     ThreadForkReason,
     TimerFiredPayload,
 };
+use crate::test_support::FaultingRuntimeStore;
 use crate::{
     CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CooldisDaemonClockRoute,
     CouplingScheduler, DaemonClock, LocalOfflineProviderClient, SqliteSessionStore,
@@ -573,25 +573,14 @@ impl AgentRuntime for EchoRuntime {
 #[derive(Clone)]
 struct AdmissionTestStore {
     inner: InMemorySessionStore,
-    fail_admission_append: bool,
     admission_barrier: Option<Arc<AdmissionAppendBarrier>>,
     select_branch_calls: Arc<AtomicUsize>,
 }
 
 impl AdmissionTestStore {
-    fn failing() -> Self {
-        Self {
-            inner: InMemorySessionStore::new(),
-            fail_admission_append: true,
-            admission_barrier: None,
-            select_branch_calls: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
     fn blocking(admission_barrier: Arc<AdmissionAppendBarrier>) -> Self {
         Self {
             inner: InMemorySessionStore::new(),
-            fail_admission_append: false,
             admission_barrier: Some(admission_barrier),
             select_branch_calls: Arc::new(AtomicUsize::new(0)),
         }
@@ -600,7 +589,6 @@ impl AdmissionTestStore {
     fn tracking_selects() -> Self {
         Self {
             inner: InMemorySessionStore::new(),
-            fail_admission_append: false,
             admission_barrier: None,
             select_branch_calls: Arc::new(AtomicUsize::new(0)),
         }
@@ -688,9 +676,6 @@ impl EventStore for AdmissionTestStore {
             .any(|record| record.kind == EventKind::AdmissionDecided);
         if appends_admission && let Some(barrier) = &self.admission_barrier {
             barrier.arrive_and_wait().await;
-        }
-        if appends_admission && self.fail_admission_append {
-            return Err(HistoryError::Storage("admission append failed".to_string()));
         }
         self.inner.append_events(stream_id, records).await
     }
@@ -1846,9 +1831,15 @@ async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn failed_admission_append_prevents_runtime_host_turn_execution() {
-    let store = Arc::new(AdmissionTestStore::failing());
+    let store = Arc::new(
+        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
+            "append_events",
+            1,
+            "admission append failed",
+        ),
+    );
     let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
     let thread = host
         .start_thread(
@@ -1868,6 +1859,7 @@ async fn failed_admission_append_prevents_runtime_host_turn_execution() {
         err.to_string().contains("admission append failed"),
         "unexpected error: {err}"
     );
+    assert_eq!(store.call_count("append_events"), 1);
 
     let output = timeout(Duration::from_millis(100), async {
         loop {
@@ -2822,7 +2814,7 @@ async fn duplicate_start_is_rejected_before_factory_build_or_runtime_spawn() {
     host.shutdown_all().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn cancelled_start_wakes_reservation_waiters() {
     let coordinates = coords("tenant_a", "user_1", "cancelled-start-reservation");
     let thread_id = coordinates.thread_id;
@@ -2918,7 +2910,7 @@ async fn lifecycle_sink_failure_joins_spawned_runtime_before_returning() {
     assert!(host.snapshot().await.threads.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn turn_timeout_emits_timeout_and_cancel_timeout_recovery_events() {
     let host = RuntimeHost::with_policy(
         Arc::new(StuckRuntimeFactory),
@@ -2964,7 +2956,7 @@ async fn turn_timeout_emits_timeout_and_cancel_timeout_recovery_events() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
     let host = RuntimeHost::with_policy(
         Arc::new(StuckRuntimeFactory),
@@ -3006,7 +2998,7 @@ async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn shutdown_timeout_aborts_runtime_and_removes_thread() {
     let host = RuntimeHost::with_policy(
         Arc::new(StuckRuntimeFactory),
