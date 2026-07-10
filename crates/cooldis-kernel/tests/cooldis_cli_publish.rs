@@ -255,22 +255,22 @@ fn openapi_import_returns_http_500_as_operation_output() {
 fn cooldis_cli_uses_clean_public_entrypoints() {
     let root = run_cooldis([]);
     assert!(root.contains("cooldis init"));
-    assert!(root.contains("cooldis agent"));
-    assert!(root.contains("cooldis tool"));
-    assert!(root.contains("cooldis skill"));
-    assert!(root.contains("cooldis auth"));
-    assert!(root.contains("cooldis secret"));
-    assert!(root.contains("cooldis rpc"));
     assert!(root.contains("cooldis console"));
     assert!(root.contains("cooldis chat"));
     assert!(root.contains("cooldis commands"));
     assert!(root.contains("cooldis help"));
-    assert!(root.contains("cooldis debug rpc"));
     assert_no_command(&root, &["dev"]);
     assert_no_command(&root, &["operator"]);
     assert!(!root.contains("cooldis [PROMPT]"));
 
     let commands = run_cooldis(["commands"]);
+    assert!(commands.contains("cooldis agent"));
+    assert!(commands.contains("cooldis tool"));
+    assert!(commands.contains("cooldis skill"));
+    assert!(commands.contains("cooldis auth"));
+    assert!(commands.contains("cooldis secret"));
+    assert!(commands.contains("cooldis rpc"));
+    assert!(commands.contains("cooldis console"));
     assert!(commands.contains("cooldis chat [PROMPT]"));
     assert!(commands.contains("cooldis debug rpc call"));
     assert!(commands.contains("cooldis tool manual"));
