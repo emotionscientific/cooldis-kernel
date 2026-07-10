@@ -1,6 +1,7 @@
 use super::connection::{ConnectionState, now_ms, turn_error};
 use super::threads::*;
 use super::*;
+use crate::{EventKind, EventRecord, ToolCallCompletedPayload};
 
 #[derive(Default)]
 pub(super) struct AppServerSubscriptions {
@@ -19,6 +20,18 @@ pub(super) struct AppServerSubscriber {
 pub(super) struct AppServerThreadWatcher {
     pub(super) id: u64,
     pub(super) handle: JoinHandle<()>,
+}
+
+enum ResyncedTurnItem {
+    AgentMessage,
+    AgentThinking,
+    DynamicTool(Value),
+}
+
+struct ResyncedTurnProjection {
+    assistant_text: String,
+    thinking_text: String,
+    items: Vec<ResyncedTurnItem>,
 }
 
 impl CooldisAppServer {
@@ -169,6 +182,8 @@ pub(super) async fn watch_thread(app: CooldisAppServer, handle: RuntimeThreadHan
     let thread_id = handle.context().coordinates.thread_id.to_string();
     let mut events = handle.subscribe_events();
     let mut status = handle.subscribe_status();
+    let mut lagged_events = 0_u64;
+    let mut lagged_turn = None;
     {
         let _ = status.borrow_and_update();
     }
@@ -183,19 +198,99 @@ pub(super) async fn watch_thread(app: CooldisAppServer, handle: RuntimeThreadHan
                         if matches!(status_value, ThreadStatus::Stopped | ThreadStatus::Failed)
                             && !app.thread_has_active_turn(&thread_id).await
                         {
+                            if lagged_events > 0
+                                && !resynchronize_thread_after_lag(
+                                    &app,
+                                    &handle,
+                                    &thread_id,
+                                    lagged_events,
+                                    lagged_turn.as_deref(),
+                                )
+                                .await
+                            {
+                                handle_thread_status(&app, &thread_id, status_value).await;
+                                break;
+                            }
                             handle_thread_status(&app, &thread_id, status_value).await;
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let should_announce = lagged_events == 0;
+                        lagged_events = lagged_events.saturating_add(skipped);
+                        if lagged_turn.is_none() {
+                            lagged_turn = {
+                                let state = app.inner.state.read().await;
+                                state
+                                    .threads
+                                    .get(&thread_id)
+                                    .and_then(|thread| thread.active_turn_id.clone())
+                            };
+                        }
+                        if should_announce {
+                            app.notify_thread_subscribers(
+                                &thread_id,
+                                "thread/resync/started",
+                                json!({
+                                    "threadId": thread_id,
+                                    "reason": "broadcastLag",
+                                    "laggedEvents": skipped,
+                                }),
+                            )
+                            .await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        if lagged_events > 0 {
+                            let _ = resynchronize_thread_after_lag(
+                                &app,
+                                &handle,
+                                &thread_id,
+                                lagged_events,
+                                lagged_turn.as_deref(),
+                            )
+                            .await;
+                        }
+                        break;
+                    }
                 }
             }
             changed = status.changed() => {
                 if changed.is_err() {
+                    if lagged_events > 0 {
+                        let _ = resynchronize_thread_after_lag(
+                            &app,
+                            &handle,
+                            &thread_id,
+                            lagged_events,
+                            lagged_turn.as_deref(),
+                        )
+                        .await;
+                    }
                     break;
                 }
                 let status_value = *status.borrow();
+                if lagged_events > 0
+                    && matches!(
+                        status_value,
+                        ThreadStatus::Idle | ThreadStatus::Stopped | ThreadStatus::Failed
+                    )
+                {
+                    if !resynchronize_thread_after_lag(
+                        &app,
+                        &handle,
+                        &thread_id,
+                        lagged_events,
+                        lagged_turn.as_deref(),
+                    )
+                    .await
+                    {
+                        handle_thread_status(&app, &thread_id, status_value).await;
+                        break;
+                    }
+                    lagged_events = 0;
+                    lagged_turn = None;
+                }
                 handle_thread_status(&app, &thread_id, status_value).await;
                 if status_value == ThreadStatus::Failed {
                     handle_failed_thread_status(&app, &thread_id, &mut events).await;
@@ -207,6 +302,291 @@ pub(super) async fn watch_thread(app: CooldisAppServer, handle: RuntimeThreadHan
             }
         }
     }
+}
+
+async fn resynchronize_thread_after_lag(
+    app: &CooldisAppServer,
+    handle: &RuntimeThreadHandle,
+    thread_id: &str,
+    lagged_events: u64,
+    lagged_turn: Option<&str>,
+) -> bool {
+    let projection = if let Some(turn_id) = lagged_turn {
+        let context = match handle.session_context().await {
+            Ok(context) => context,
+            Err(err) => {
+                notify_thread_resync_failed(app, thread_id, lagged_events, err.to_string()).await;
+                return false;
+            }
+        };
+        let events = match handle.read_thread_events(None).await {
+            Ok(events) => events,
+            Err(err) => {
+                notify_thread_resync_failed(app, thread_id, lagged_events, err.to_string()).await;
+                return false;
+            }
+        };
+        let (entry_id, completions) = match resynced_turn_facts(&events, turn_id) {
+            Ok(facts) => facts,
+            Err(message) => {
+                notify_thread_resync_failed(app, thread_id, lagged_events, message).await;
+                return false;
+            }
+        };
+        let Some(projection) = resynced_turn_projection(&context.entries, &entry_id, &completions)
+        else {
+            notify_thread_resync_failed(
+                app,
+                thread_id,
+                lagged_events,
+                format!("durable session did not contain active turn {turn_id}"),
+            )
+            .await;
+            return false;
+        };
+        Some(projection)
+    } else {
+        None
+    };
+
+    let thread = {
+        let mut state = app.inner.state.write().await;
+        state.threads.get_mut(thread_id).map(|thread| {
+            thread.status = handle.status();
+            thread.updated_at_ms = now_ms();
+            if let (Some(turn_id), Some(projection)) = (lagged_turn, projection)
+                && let Some(turn) = thread.turns.get_mut(turn_id)
+            {
+                apply_resynced_turn_projection(turn, projection);
+            }
+            thread_json(thread, true)
+        })
+    };
+    let Some(thread) = thread else {
+        notify_thread_resync_failed(
+            app,
+            thread_id,
+            lagged_events,
+            "thread projection disappeared during resynchronization".to_string(),
+        )
+        .await;
+        return false;
+    };
+
+    app.notify_thread_subscribers(
+        thread_id,
+        "thread/resynced",
+        json!({
+            "threadId": thread_id,
+            "reason": "broadcastLag",
+            "laggedEvents": lagged_events,
+            "thread": thread,
+        }),
+    )
+    .await;
+    true
+}
+
+async fn notify_thread_resync_failed(
+    app: &CooldisAppServer,
+    thread_id: &str,
+    lagged_events: u64,
+    message: String,
+) {
+    app.notify_thread_subscribers(
+        thread_id,
+        "thread/resync/failed",
+        json!({
+            "threadId": thread_id,
+            "reason": "broadcastLag",
+            "laggedEvents": lagged_events,
+            "error": {
+                "code": "resync_failed",
+                "message": message,
+            },
+        }),
+    )
+    .await;
+}
+
+fn resynced_turn_projection(
+    entries: &[SessionEntry],
+    entry_id: &str,
+    completions: &HashMap<String, ToolCallCompletedPayload>,
+) -> Option<ResyncedTurnProjection> {
+    let user_index = entries.iter().position(|entry| {
+        entry.entry_id.to_string() == entry_id
+            && matches!(
+                &entry.kind,
+                SessionEntryKind::Message {
+                    message: CanonicalMessage::User { .. }
+                }
+            )
+    })?;
+    let mut projection = ResyncedTurnProjection {
+        assistant_text: String::new(),
+        thinking_text: String::new(),
+        items: Vec::new(),
+    };
+    let mut saw_agent_message = false;
+    let mut saw_agent_thinking = false;
+
+    for entry in &entries[user_index + 1..] {
+        let SessionEntryKind::Message { message } = &entry.kind else {
+            continue;
+        };
+        match message {
+            CanonicalMessage::User { .. } => break,
+            CanonicalMessage::Assistant { content, .. } => {
+                for content in content {
+                    match content {
+                        CanonicalContent::Text { text, .. } => {
+                            if !text.is_empty() && !saw_agent_message {
+                                projection.items.push(ResyncedTurnItem::AgentMessage);
+                                saw_agent_message = true;
+                            }
+                            projection.assistant_text.push_str(text);
+                        }
+                        CanonicalContent::Thinking { text, .. } => {
+                            if !text.is_empty() && !saw_agent_thinking {
+                                projection.items.push(ResyncedTurnItem::AgentThinking);
+                                saw_agent_thinking = true;
+                            }
+                            projection.thinking_text.push_str(text);
+                        }
+                        CanonicalContent::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            projection.items.push(ResyncedTurnItem::DynamicTool(json!({
+                                "type": "dynamicToolCall",
+                                "id": id,
+                                "namespace": null,
+                                "tool": name,
+                                "arguments": arguments,
+                                "status": "inProgress",
+                                "contentItems": null,
+                                "success": null,
+                                "durationMs": null,
+                            })));
+                        }
+                        CanonicalContent::Image { .. } => {}
+                    }
+                }
+            }
+            CanonicalMessage::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } => {
+                if let Some(ResyncedTurnItem::DynamicTool(item)) =
+                    projection.items.iter_mut().find(|item| {
+                        matches!(
+                            item,
+                            ResyncedTurnItem::DynamicTool(value)
+                                if value.get("id").and_then(Value::as_str)
+                                    == Some(tool_call_id.as_str())
+                        )
+                    })
+                {
+                    item["status"] =
+                        Value::String(if *is_error { "failed" } else { "completed" }.to_string());
+                    item["success"] = Value::Bool(!is_error);
+                    item["contentItems"] = json!([{
+                        "type": "inputText",
+                        "text": text_from_canonical_content(content),
+                    }]);
+                    if let Some(completion) = completions.get(tool_call_id) {
+                        item["status"] = Value::String(
+                            if completion.success {
+                                "completed"
+                            } else {
+                                "failed"
+                            }
+                            .to_string(),
+                        );
+                        item["success"] = Value::Bool(completion.success);
+                        item["durationMs"] = completion
+                            .duration_ms
+                            .map(Value::from)
+                            .unwrap_or(Value::Null);
+                    }
+                }
+            }
+        }
+    }
+    Some(projection)
+}
+
+fn resynced_turn_facts(
+    events: &[EventRecord],
+    turn_id: &str,
+) -> Result<(String, HashMap<String, ToolCallCompletedPayload>), String> {
+    let mut submitted = None;
+    let mut completions = HashMap::new();
+    for event in events {
+        match event.kind {
+            EventKind::TurnSubmitted
+                if event.payload.get("turn_id").and_then(Value::as_str) == Some(turn_id) =>
+            {
+                let entry_id = event
+                    .payload
+                    .get("entry_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "turn.submitted payload is missing entry_id".to_string())?;
+                if submitted
+                    .as_ref()
+                    .is_none_or(|(sequence, _)| event.sequence.get() > *sequence)
+                {
+                    submitted = Some((event.sequence.get(), entry_id.to_string()));
+                }
+            }
+            EventKind::ToolCallCompleted => {
+                let payload =
+                    serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone())
+                        .map_err(|err| format!("tool.call.completed payload is invalid: {err}"))?;
+                if payload.subject.turn_id == turn_id {
+                    completions.insert(payload.subject.call_id.clone(), payload);
+                }
+            }
+            _ => {}
+        }
+    }
+    let entry_id = submitted
+        .map(|(_, entry_id)| entry_id)
+        .ok_or_else(|| format!("durable event stream did not contain turn {turn_id}"))?;
+    Ok((entry_id, completions))
+}
+
+fn apply_resynced_turn_projection(
+    turn: &mut AppServerTurnState,
+    projection: ResyncedTurnProjection,
+) {
+    turn.items.retain(|item| {
+        !matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("agentMessage" | "agentThinking" | "dynamicToolCall")
+        )
+    });
+    for item in projection.items {
+        turn.items.push(match item {
+            ResyncedTurnItem::AgentMessage => {
+                agent_message_item_from_text(&turn.assistant_item_id, &projection.assistant_text)
+            }
+            ResyncedTurnItem::AgentThinking => {
+                agent_thinking_item_from_text(&turn.thinking_item_id, &projection.thinking_text)
+            }
+            ResyncedTurnItem::DynamicTool(item) => item,
+        });
+    }
+    turn.assistant_text = projection.assistant_text;
+    turn.assistant_started = !turn.assistant_text.is_empty();
+    turn.assistant_completed = false;
+    turn.thinking_text = projection.thinking_text;
+    turn.thinking_started = !turn.thinking_text.is_empty();
+    turn.thinking_completed = false;
 }
 
 pub(super) async fn wait_for_initial_thread_status(handle: &RuntimeThreadHandle) {
