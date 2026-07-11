@@ -12,6 +12,7 @@ use cooldis::{
     CouplingTemplateMaturity, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventKind, EventOrigin,
     EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId, FileDeltaKind,
     HookEventName, HookHandlerOutput, HookRequest, HookRunRecord, HookRunStatus,
+    IngressOutcomeIntent, IngressSettledBy, IoIngressClaimedPayload, IoIngressSettledPayload,
     ObservationSourceRange, OpenAIChatCompletionsAdapter, OpenAIResponsesAdapter, OperationEvent,
     OperationExitStatus, OperationId, OperationLogLevel, OperationProjectionSet, ProviderApi,
     ProviderRequest, ProviderWireAdapter, RegisteredOperation, RuntimeApprovalDecision,
@@ -247,6 +248,61 @@ fn runtime_event_kind_contract_matches_fixture() {
     ];
     let actual = serde_json::to_value(cases).unwrap();
     support::assert_json_fixture("contracts/runtime_event_kinds.json", actual);
+}
+
+#[test]
+fn ingress_outcome_protocol_contract_matches_fixture() {
+    let witness_event_id = event_record_id(40);
+    let admission_event_id = event_record_id(41);
+    let claim_event_id = event_record_id(42);
+    let evidence_event_id = event_record_id(43);
+    let claim = IoIngressClaimedPayload {
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        ingress_witness_event_ids: vec![witness_event_id],
+        admission_event_id,
+        intent: IngressOutcomeIntent::Turn {
+            turn_id: "turn-1".to_string(),
+            submission_mode: "queue".to_string(),
+            input_digest: "sha256:input".to_string(),
+        },
+    };
+    let settle = IoIngressSettledPayload {
+        claim_event_id,
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        evidence_event_id: Some(evidence_event_id),
+        settled_by: IngressSettledBy::Recovery,
+    };
+    let claim_value = serde_json::to_value(&claim).unwrap();
+    let settle_value = serde_json::to_value(&settle).unwrap();
+    let registry = stream_schema_registry_v1().unwrap();
+    registry
+        .validate(
+            EventKind::IoIngressClaimed.payload_schema_id(),
+            &claim_value,
+        )
+        .unwrap();
+    registry
+        .validate(
+            EventKind::IoIngressSettled.payload_schema_id(),
+            &settle_value,
+        )
+        .unwrap();
+
+    support::assert_json_fixture(
+        "contracts/ingress_outcome_protocol_v1.json",
+        json!({
+            "claim": {
+                "kind": EventKind::IoIngressClaimed.as_str(),
+                "payload_schema": EventKind::IoIngressClaimed.payload_schema_id(),
+                "payload": claim_value,
+            },
+            "settle": {
+                "kind": EventKind::IoIngressSettled.as_str(),
+                "payload_schema": EventKind::IoIngressSettled.payload_schema_id(),
+                "payload": settle_value,
+            }
+        }),
+    );
 }
 
 #[test]

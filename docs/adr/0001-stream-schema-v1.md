@@ -727,6 +727,12 @@ Current V1 RC implementation status:
   schemas.
 - `EventKind::payload_schema_id` freezes payload schema ids for the current
   event vocabulary.
+- The ratified `io.ingress.claimed` and `io.ingress.settled` runtime-trace kinds
+  use `cooldis.event.io.ingress.claimed/1` and
+  `cooldis.event.io.ingress.settled/1`. Their typed payloads and schemas are
+  frozen by `contracts/ingress_outcome_protocol_v1.json`. In these names,
+  `io.ingress` identifies the ingress-envelope outcome lifecycle rather than a
+  producing component or stream.
 - SQLite event rows persist the V1 stream `schema` and `payload_schema`
   identity columns, migrate legacy rows forward, and fail closed if a stored
   payload schema no longer matches the event kind. `config_hash` is a

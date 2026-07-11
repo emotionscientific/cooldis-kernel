@@ -1,0 +1,33 @@
+{
+  "claim": {
+    "kind": "io.ingress.claimed",
+    "payload": {
+      "admission_event_id": "018f0000-0000-7000-8000-000000000029",
+      "ingress_envelope_ids": [
+        "ingress-1"
+      ],
+      "ingress_witness_event_ids": [
+        "018f0000-0000-7000-8000-000000000028"
+      ],
+      "intent": {
+        "input_digest": "sha256:input",
+        "outcome": "turn",
+        "submission_mode": "queue",
+        "turn_id": "turn-1"
+      }
+    },
+    "payload_schema": "cooldis.event.io.ingress.claimed/1"
+  },
+  "settle": {
+    "kind": "io.ingress.settled",
+    "payload": {
+      "claim_event_id": "018f0000-0000-7000-8000-00000000002a",
+      "evidence_event_id": "018f0000-0000-7000-8000-00000000002b",
+      "ingress_envelope_ids": [
+        "ingress-1"
+      ],
+      "settled_by": "recovery"
+    },
+    "payload_schema": "cooldis.event.io.ingress.settled/1"
+  }
+}

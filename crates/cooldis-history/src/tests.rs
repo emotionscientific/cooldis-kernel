@@ -629,6 +629,14 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         "cooldis.event.io.ingress.received/1"
     );
     assert_eq!(
+        EventKind::IoIngressClaimed.payload_schema_id(),
+        "cooldis.event.io.ingress.claimed/1"
+    );
+    assert_eq!(
+        EventKind::IoIngressSettled.payload_schema_id(),
+        "cooldis.event.io.ingress.settled/1"
+    );
+    assert_eq!(
         EventKind::IoEgressRequested.payload_schema_id(),
         "cooldis.event.io.egress.requested/1"
     );
@@ -669,6 +677,62 @@ fn thread_reload_degraded_payload_schema_is_registered() {
         .unwrap();
 }
 
+fn ingress_outcome_payloads_round_trip_whole_and_validate() {
+    let witness_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000011").unwrap(),
+    );
+    let admission_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000012").unwrap(),
+    );
+    let claim_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000013").unwrap(),
+    );
+    let evidence_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000014").unwrap(),
+    );
+    let claim = IoIngressClaimedPayload {
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        ingress_witness_event_ids: vec![witness_event_id],
+        admission_event_id,
+        intent: IngressOutcomeIntent::Turn {
+            turn_id: "turn-1".to_string(),
+            submission_mode: "queue".to_string(),
+            input_digest: "sha256:input".to_string(),
+        },
+    };
+    let settle = IoIngressSettledPayload {
+        claim_event_id,
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        evidence_event_id: Some(evidence_event_id),
+        settled_by: IngressSettledBy::Recovery,
+    };
+    let claim_value = serde_json::to_value(&claim).unwrap();
+    let settle_value = serde_json::to_value(&settle).unwrap();
+    let registry = stream_schema_registry_v1().unwrap();
+
+    registry
+        .validate(
+            EventKind::IoIngressClaimed.payload_schema_id(),
+            &claim_value,
+        )
+        .unwrap();
+    registry
+        .validate(
+            EventKind::IoIngressSettled.payload_schema_id(),
+            &settle_value,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_value::<IoIngressClaimedPayload>(claim_value).unwrap(),
+        claim
+    );
+    assert_eq!(
+        serde_json::from_value::<IoIngressSettledPayload>(settle_value).unwrap(),
+        settle
+    );
+}
+
+#[test]
 #[test]
 fn events_0_3_payload_fixtures_round_trip_and_validate() {
     let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();

@@ -1,6 +1,6 @@
 # ADR 0003: Durable Ingress Outcome Protocol
 
-Status: proposed (event kinds pending ratification; implementation gated on it)
+Status: accepted (event kinds ratified by docket D-10 on 2026-07-10)
 Date: 2026-07-10
 
 ## Context
@@ -49,8 +49,9 @@ io.ingress.settled     the claimed outcome reached its terminal state,
                        with evidence
 ```
 
-Both kinds are additions to the frozen event-kind vocabulary and are therefore
-ratification-gated; this ADR is not implementable until they are ratified.
+Both kinds were ratified as additions to the frozen event-kind vocabulary by
+docket D-10 on 2026-07-10. `io.ingress` names the ingress-envelope outcome
+lifecycle, not the producing component or stream.
 
 ### The outcome model
 
@@ -152,6 +153,14 @@ the `turn.submitted` record for an ingress turn is the submitting side's
 apply-time record, adopted by the executing side through turn-id idempotency,
 so it is not execution evidence.
 
+Amended 2026-07-11: evidence is per intent. Queue and interrupt-replacement
+claims exclude `session.entry.appended` records; the executing side's input
+persistence proves ownership, not execution, and recovery re-submits in the
+window between input persistence and the first turn-trace event, adopting the
+persisted input by turn id. The context compile receipt carries its turn id and
+is the canonical earliest evidence. Steer claims settle on the persisted steer
+input entry; durable consumption is the steer outcome.
+
 Recovery must be safe against a still-live original apply (a slow apply whose
 lease expired), and re-submission must be safe when execution started but
 left no evidence yet. Three requirements make it so:
@@ -197,7 +206,7 @@ executing side's own `turn.submitted` append used to make moot.
 
 ## Consequences
 
-- Two new event kinds enter the frozen vocabulary (ratification-gated).
+- Two ratified event kinds enter the frozen vocabulary.
 - The global applied-marker lookup (payload scan over thread streams) is
   replaced by a claim/settle fold over control streams; a rebuildable index
   keyed by envelope id may cache it as a view.

@@ -232,9 +232,11 @@ impl AgentRuntime for ChildEchoRuntime {
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { input, .. }) => {
+                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
-                            let _ = services.append_user_turn_input(&coordinates, &input).await;
+                            let _ = services
+                                .append_user_turn_input(&coordinates, &turn_id, &input)
+                                .await;
                             let _ = events.send(ThreadEvent::Output {
                                 thread_id,
                                 text: format!("child:{}", input.text_projection()),

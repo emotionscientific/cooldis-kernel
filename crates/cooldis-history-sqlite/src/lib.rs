@@ -135,6 +135,56 @@ impl SessionStore for SqliteSessionStore {
             .await
     }
 
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let thread_id = coordinates.thread_id.to_string();
+        let existing = tx
+            .query_row(
+                "SELECT entry_json FROM session_entries WHERE thread_id = ?1 AND turn_id = ?2",
+                params![thread_id, turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .map(|json| decode_entry(&json))
+            .transpose()?;
+        if let Some(existing) = existing {
+            validate_entry_coordinates(coordinates, &existing)?;
+            if !cooldis_history::turn_input_kinds_match(&existing.kind, &kind) {
+                return Err(HistoryError::Storage(format!(
+                    "turn {turn_id} input does not match its persisted session entry"
+                )));
+            }
+            tx.commit().map_err(storage_error)?;
+            return Ok(existing);
+        }
+        let parent_entry_id = sqlite_active_leaf_entry(&tx, &thread_id)?
+            .map(|entry| {
+                validate_entry_coordinates(coordinates, &entry)?;
+                Ok(entry.entry_id)
+            })
+            .transpose()?;
+        let entry = SessionEntry::for_turn(coordinates.clone(), parent_entry_id, turn_id, kind);
+        sqlite_insert_entry(&tx, &entry)?;
+        tx.execute(
+            "INSERT INTO active_leaves (thread_id, entry_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
+            params![thread_id, entry.entry_id.to_string()],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(entry)
+    }
+
     async fn active_leaf(
         &self,
         coordinates: &ThreadCoordinates,
@@ -422,6 +472,7 @@ fn init_sqlite_schema(connection: &rusqlite::Connection) -> HistoryResult<()> {
             CREATE TABLE IF NOT EXISTS session_entries (
                 entry_id TEXT PRIMARY KEY NOT NULL,
                 parent_entry_id TEXT REFERENCES session_entries(entry_id),
+                turn_id TEXT,
                 thread_id TEXT NOT NULL,
                 tenant_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
@@ -497,6 +548,19 @@ fn init_sqlite_schema(connection: &rusqlite::Connection) -> HistoryResult<()> {
             CREATE INDEX IF NOT EXISTS idx_observation_records_scope
                 ON observation_records(tenant_id, user_id, session_id, thread_id, kind, created_at_ms);
             "#,
+        )
+        .map_err(storage_error)?;
+    if !sqlite_table_has_column(connection, "session_entries", "turn_id")? {
+        connection
+            .execute("ALTER TABLE session_entries ADD COLUMN turn_id TEXT", [])
+            .map_err(storage_error)?;
+    }
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_turn
+             ON session_entries(thread_id, turn_id)
+             WHERE turn_id IS NOT NULL",
+            [],
         )
         .map_err(storage_error)?;
     sqlite_migrate_event_records_schema(connection)?;
@@ -813,16 +877,18 @@ fn sqlite_insert_entry_with_optional_provenance(
         "INSERT INTO session_entries (
             entry_id,
             parent_entry_id,
+            turn_id,
             thread_id,
             tenant_id,
             user_id,
             session_id,
             created_at_ms,
             entry_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             entry.entry_id.to_string(),
             entry.parent_entry_id.map(|id| id.to_string()),
+            entry.turn_id,
             entry.coordinates.thread_id.to_string(),
             entry.coordinates.tenant_id.as_str(),
             entry.coordinates.user_id.as_str(),

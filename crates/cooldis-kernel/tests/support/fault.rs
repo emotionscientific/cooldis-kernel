@@ -153,6 +153,18 @@ impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
             .await
     }
 
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        self.before("append_turn_input").await?;
+        self.inner
+            .append_turn_input(coordinates, turn_id, kind)
+            .await
+    }
+
     async fn active_leaf(
         &self,
         coordinates: &ThreadCoordinates,

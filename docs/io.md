@@ -142,30 +142,47 @@ first use. If that lifecycle load fails, the stale binding is replaced by a
 fresh, durably bound thread before ingress is submitted.
 
 Durable queue apply uses the leased `IngressEnvelope.id` as its idempotency key.
-Before submitting a turn, the daemon appends the thread's
-`turn.submitted` fact with both `turn_id` and `ingress_message_ids`; a coalesced
-turn records every source message ID in that one fact. This derived thread
-record cites the control-stream `io.ingress.received` witness or witnesses in
-its provenance and carries the target context consumed by the egress projector.
-The append is expected-tail fenced, so competing workers cannot both establish
-the marker on the same thread. This extends the per-conversation ordering law:
-first persist the conversation binding, then persist the applied marker, then
-submit the turn, and only then complete the queue lease.
+The resolved thread's control stream owns the envelope outcome lifecycle. Here
+`io.ingress` names that lifecycle, not the component or stream that produced the
+envelope. After `io.ingress.received` and `admission.decided`, the daemon appends
+an expected-tail fenced `io.ingress.claimed` event before cancellation or turn
+submission. The typed claim names every covered envelope, its ingress witnesses,
+the admission event, and exactly one intended outcome. Queue and steer claims
+carry the reserved `turn_id`, submission mode, and input digest. Interrupt claims
+carry the replacement turn ID when present, cancellation reason, and input
+digest.
 
-On redelivery, the daemon checks durable history for the ingress envelope ID
-before resolving or creating a replacement thread. An existing marker makes
-apply a no-op: no second receipt, admission decision, or turn is submitted, and
-the worker completes the lease. This closes the duplicate side of the apply/ack
-crash window: a redelivered envelope can never run twice. It is not exactly-once.
-The marker is durable while the submission it describes is in-process state, so
-a process death after the marker commits but before the reserved submission is
-sent loses that turn; redelivery then dedupes against the marker instead of
-retrying. Apply keeps the loss window minimal by completing all fallible
-admission before the marker and sending synchronously after it, and the ratified
-order stands because a duplicate turn is the worse failure. Closing the loss
-window outright needs a durable
-pending/applied outcome protocol; none of this changes the outbound
-send/receipt ambiguity described below.
+After the reserved submission is sent, the daemon waits for execution evidence
+and then appends `io.ingress.settled`. Evidence is per intent. A queue or
+interrupt-replacement claim needs the earliest executing-side turn-trace event
+carrying its turn ID, and the executing side's own input persistence does not
+qualify: the canonical earliest evidence is the context compile receipt, which
+names its turn. A steer claim settles on its persisted steer input entry,
+because durable consumption of the input is the steer outcome whether the
+running turn accepted it or the idle thread recorded and rejected it.
+`turn.submitted` is never evidence because it is the submitting side's
+apply-time record. A settle cites its claim and evidence and records whether
+execution or recovery settled it. Only then does the queue worker complete the
+lease. The derived thread-stream `turn.submitted` record still carries target
+context for the egress projector and cites the control stream ingress
+witnesses, but it no longer owns ingress idempotency.
+
+Redelivery folds claim and settle state through the `EventStore` on that one
+control stream. A settled claim is terminal and dedupes without repeating a
+receipt, admission decision, cancellation, or submission. An unsettled turn
+claim checks the thread journal for executing-side evidence. Evidence settles
+the claim as recovery; no evidence re-submits the same turn ID and then settles.
+Supervisor reservation is idempotent on turn ID, turn input persistence adopts
+the existing entry for a replayed turn ID, and cancellation of an absent or
+finished turn is a witnessed no-op. Interrupt recovery re-runs cancellation and
+then applies the same rule to its replacement turn. Observe and reject claims
+are appended with their settle in one fenced batch because they have no control
+effect to recover.
+
+This claim/settle protocol closes the process-death window between durable
+intent and volatile submission without changing the outbound send/receipt
+ambiguity described below. `best_effort_direct` remains lossy and does not use
+the durable outcome protocol.
 
 Runtime hotswap should start as config-level hotswap:
 
