@@ -33,6 +33,28 @@
       "supports_verified_cursor_replay": true
     }
   ],
+  "branch_selection": {
+    "coordinates": {
+      "session_id": "session_1",
+      "tenant_id": "tenant_a",
+      "thread_id": "018f0000-0000-7000-8000-000000000001",
+      "user_id": "user_1"
+    },
+    "created_at_ms": 1771718400400,
+    "event_id": "018f0000-0000-7000-8000-000000000005",
+    "kind": "thread.branch.selected",
+    "origin": "witnessed",
+    "payload": {
+      "prior_entry_id": "018f0000-0000-7000-8000-000000000003",
+      "selected_entry_id": "018f0000-0000-7000-8000-000000000002",
+      "thread_id": "018f0000-0000-7000-8000-000000000001"
+    },
+    "payload_schema": "cooldis.event.thread.branch.selected/1",
+    "provenance": {},
+    "schema": "cooldis.stream.record/1",
+    "sequence": 8,
+    "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+  },
   "cursors": [
     {
       "event_id": "018f0000-0000-7000-8000-000000000001",

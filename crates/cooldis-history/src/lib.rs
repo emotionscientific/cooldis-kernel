@@ -1,3 +1,15 @@
+//! Canonical history stores treat the journal as authority and mutable tables
+//! such as SQLite `active_leaves` as derived read models. On open, branch
+//! selection events rebuild that cache with the last selection per thread
+//! winning.
+//!
+//! Legacy databases are the migration exception. A thread with no
+//! `thread.branch.selected` event retains its pre-event `active_leaves` row so
+//! an upgrade does not erase the only surviving branch choice. One-time schema
+//! migrations may also update legacy event rows to add frozen schema identity
+//! and honest migration provenance. These retrofits are migration work only;
+//! runtime branch selection must append witnessed journal authority.
+
 use async_trait::async_trait;
 use cooldis_runtime_contracts::{
     JsonSchemaValidationError, SchemaRegistry, ThreadCheckpointId, ThreadCoordinates, ThreadId,
@@ -1324,6 +1336,10 @@ pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidatio
         thread_joined_payload_schema_v1(),
     )?;
     registry.register(
+        EventKind::ThreadBranchSelected.payload_schema_id(),
+        thread_branch_selected_payload_schema_v1(),
+    )?;
+    registry.register(
         EventKind::PolicyBound.payload_schema_id(),
         policy_bound_payload_schema_v1(),
     )?;
@@ -1829,6 +1845,19 @@ fn thread_joined_payload_schema_v1() -> Value {
                 "enum": ["completed", "failed", "cancelled", "budget_exhausted"]
             },
             "result_digest": {"type": "string"}
+        }
+    })
+}
+
+fn thread_branch_selected_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["thread_id"],
+        "additionalProperties": true,
+        "properties": {
+            "thread_id": {"type": "string"},
+            "selected_entry_id": {"type": ["string", "null"]},
+            "prior_entry_id": {"type": ["string", "null"]}
         }
     })
 }
@@ -2839,18 +2868,39 @@ impl SessionStore for InMemorySessionStore {
         leaf_entry_id: Option<SessionEntryId>,
     ) -> HistoryResult<()> {
         let mut inner = self.inner.write().await;
-        let Some(leaf_entry_id) = leaf_entry_id else {
-            inner.active_leaf.remove(&coordinates.thread_id);
-            return Ok(());
-        };
-        let entries_by_id = inner
-            .entries
-            .get(&coordinates.thread_id)
-            .ok_or(HistoryError::EntryNotFound(leaf_entry_id))?;
-        branch_path(entries_by_id, leaf_entry_id, coordinates)?;
-        inner
-            .active_leaf
-            .insert(coordinates.thread_id, leaf_entry_id);
+        let prior_entry_id = inner.active_leaf.get(&coordinates.thread_id).copied();
+        if let Some(leaf_entry_id) = leaf_entry_id {
+            let entries_by_id = inner
+                .entries
+                .get(&coordinates.thread_id)
+                .ok_or(HistoryError::EntryNotFound(leaf_entry_id))?;
+            branch_path(entries_by_id, leaf_entry_id, coordinates)?;
+        }
+        let payload = serde_json::to_value(ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: leaf_entry_id,
+            prior_entry_id,
+        })
+        .map_err(codec_error)?;
+        append_in_memory_event(
+            &mut inner,
+            &EventStreamId::for_thread(coordinates),
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ThreadBranchSelected,
+                payload,
+            ),
+        )?;
+        match leaf_entry_id {
+            Some(leaf_entry_id) => {
+                inner
+                    .active_leaf
+                    .insert(coordinates.thread_id, leaf_entry_id);
+            }
+            None => {
+                inner.active_leaf.remove(&coordinates.thread_id);
+            }
+        }
         Ok(())
     }
 
