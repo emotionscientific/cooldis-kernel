@@ -260,9 +260,21 @@ struct QueueLeaseReceipt {
     visible_until_tick: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct QueueCompleteReceipt {
+    message_id: String,
+    attempt: u32,
+    tick: u64,
+}
+
+enum QueueProbeReceipt {
+    Lease(QueueLeaseReceipt),
+    Complete(QueueCompleteReceipt),
+}
+
 #[derive(Default)]
 struct QueueProbeLog {
-    leases: Vec<QueueLeaseReceipt>,
+    receipts: Vec<QueueProbeReceipt>,
 }
 
 struct ScenarioQueuedMessage {
@@ -432,17 +444,40 @@ impl<Q: IngressQueueStore + 'static> IngressQueueStore for ProbedIngressQueue<Q>
         let now = self.tick.load(std::sync::atomic::Ordering::SeqCst);
         let mut probes = self.probes.lock().unwrap();
         for message in &leased {
-            probes.leases.push(QueueLeaseReceipt {
-                message_id: message.message_id.clone(),
-                attempt: message.attempt,
-                visible_until_tick: now + u64::from(visibility_timeout_secs),
-            });
+            probes
+                .receipts
+                .push(QueueProbeReceipt::Lease(QueueLeaseReceipt {
+                    message_id: message.message_id.clone(),
+                    attempt: message.attempt,
+                    visible_until_tick: now + u64::from(visibility_timeout_secs),
+                }));
         }
         Ok(leased)
     }
 
     async fn complete_ingress(&self, message_id: &str) -> IoResult<()> {
-        self.inner.complete_ingress(message_id).await
+        self.inner.complete_ingress(message_id).await?;
+        let tick = self.tick.load(std::sync::atomic::Ordering::SeqCst);
+        let mut probes = self.probes.lock().unwrap();
+        let attempt = probes
+            .receipts
+            .iter()
+            .rev()
+            .find_map(|receipt| match receipt {
+                QueueProbeReceipt::Lease(lease) if lease.message_id == message_id => {
+                    Some(lease.attempt)
+                }
+                _ => None,
+            })
+            .expect("accepted scenario queue completion must follow a lease");
+        probes
+            .receipts
+            .push(QueueProbeReceipt::Complete(QueueCompleteReceipt {
+                message_id: message_id.to_string(),
+                attempt,
+                tick,
+            }));
+        Ok(())
     }
 
     async fn hold_ingress_until(&self, message_id: &str, visible_at_ms: u64) -> IoResult<()> {
@@ -932,20 +967,31 @@ impl ScenarioHarness {
 
     fn flush_queue_probes(&mut self) {
         let probes = self.probes.lock().unwrap();
-        let observed_lease = self.probe_cursor < probes.leases.len();
-        for lease in probes.leases.iter().skip(self.probe_cursor) {
-            self.transcript.push_receipt("queue.lease", lease);
-            if lease.attempt > 1 {
-                self.transcript.push_receipt(
-                    "queue.redelivery",
-                    &json!({
-                        "message_id": lease.message_id,
-                        "attempt": lease.attempt,
-                    }),
-                );
+        let observed_lease = probes
+            .receipts
+            .iter()
+            .skip(self.probe_cursor)
+            .any(|receipt| matches!(receipt, QueueProbeReceipt::Lease(_)));
+        for receipt in probes.receipts.iter().skip(self.probe_cursor) {
+            match receipt {
+                QueueProbeReceipt::Lease(lease) => {
+                    self.transcript.push_receipt("queue.lease", lease);
+                    if lease.attempt > 1 {
+                        self.transcript.push_receipt(
+                            "queue.redelivery",
+                            &json!({
+                                "message_id": lease.message_id,
+                                "attempt": lease.attempt,
+                            }),
+                        );
+                    }
+                }
+                QueueProbeReceipt::Complete(complete) => {
+                    self.transcript.push_receipt("queue.complete", complete);
+                }
             }
         }
-        self.probe_cursor = probes.leases.len();
+        self.probe_cursor = probes.receipts.len();
         if observed_lease {
             self.transcript.push_receipt(
                 "queue.clock",
@@ -1637,6 +1683,9 @@ pub struct ScenarioWorld<'a> {
     /// The ingress queue under test, when the scenario exercises ingress;
     /// bounded-queue invariants pass when it is absent.
     pub queue: Option<&'a (dyn IngressQueueStore + Send + Sync)>,
+    /// Normalized durable events and non-mutating witness receipts. Queue
+    /// witnesses are `queue.lease`, `queue.redelivery`, `queue.complete`,
+    /// `queue.clock`, and `queue.drain.completed`.
     pub transcript: &'a NormalizedTranscript,
     /// Index into `Scenario::ops` of the operation just executed.
     pub step: usize,
@@ -2143,6 +2192,34 @@ mod tests {
                 .iter()
                 .any(|item| item.label == "thread.reservation")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_lease_is_not_lost_when_later_fault_advances_clock_past_expiry() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let seed = 4_286_450_925_398_396_449;
+        let scenario = Scenario {
+            seed,
+            ops: vec![ScenarioOp::StartThread, ScenarioOp::StartThread],
+            plan: FaultPlan {
+                seed,
+                vocabulary_version: FAULT_VOCABULARY_VERSION,
+                intensity: Intensity::Sparse,
+                directives: vec![FaultDirective {
+                    component: FaultComponent::Queue,
+                    operation: "lease_ingress",
+                    nth: 2,
+                    timing: FaultTiming::Before,
+                    action: PlannedAction::Fail,
+                }],
+            },
+        };
+
+        run_scenario_once(&scenario, &[])
+            .await
+            .expect("a completed first lease must not require redelivery");
     }
 
     #[tokio::test(start_paused = true)]
