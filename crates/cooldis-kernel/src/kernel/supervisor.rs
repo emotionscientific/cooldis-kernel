@@ -261,6 +261,28 @@ impl CooldisSupervisor {
             .await
     }
 
+    pub(crate) async fn start_thread_with_id(
+        &self,
+        request: ThreadStartRequest,
+        thread_id: ThreadId,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        let tenant = self.tenant(&request.tenant_id).await?;
+        let coordinates = ThreadCoordinates {
+            tenant_id: request.tenant_id,
+            user_id: request.user_id,
+            session_id: request.session_id,
+            thread_id,
+        };
+        let requested_scope = coordinates.scope();
+        let topology = request.topology;
+        let metadata = request.metadata;
+        Self::validate_thread_topology(&tenant, &requested_scope, &topology).await?;
+        tenant
+            .host
+            .start_thread_with_topology_and_metadata(coordinates, topology, metadata)
+            .await
+    }
+
     pub async fn load_thread_from_lifecycle(
         &self,
         record: ThreadLifecycleRecord,
@@ -684,6 +706,18 @@ impl CooldisSupervisor {
             .await?
             .host
             .fork_thread_from_checkpoint(checkpoint)
+            .await
+    }
+
+    pub(crate) async fn fork_thread_from_checkpoint_with_id_at(
+        &self,
+        checkpoint: ThreadCheckpoint,
+        child_thread_id: ThreadId,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        self.tenant(&checkpoint.coordinates.tenant_id)
+            .await?
+            .host
+            .fork_thread_from_checkpoint_with_id(checkpoint, child_thread_id)
             .await
     }
 

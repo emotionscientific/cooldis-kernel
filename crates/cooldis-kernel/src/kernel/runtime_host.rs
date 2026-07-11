@@ -4,7 +4,10 @@ use crate::kernel::admission::{
     AdmissionGateContext, HOST_SUBMIT_SURFACE, append_admission_decided,
 };
 use crate::kernel::control_decision::{TurnContinuationDecision, TurnContinuationDecisionRequest};
-use crate::kernel::history::{InMemorySessionStore, RuntimeStore, SessionContext, ThreadBaseRef};
+use crate::kernel::history::{
+    EventKind, EventStreamId, InMemorySessionStore, RuntimeStore, SessionContext, SessionEntryKind,
+    ThreadBaseRef,
+};
 use cooldis_agent::CooldisAgentError;
 use cooldis_operations::CooldisOperationsError;
 use cooldis_process::CooldisProcessError;
@@ -212,6 +215,16 @@ fn operation_registry_root_from_metadata(metadata: &BTreeMap<String, String>) ->
 #[derive(Clone)]
 pub struct RuntimeHost {
     inner: Arc<RuntimeHostInner>,
+}
+
+fn fork_child_context_is_compatible(
+    context: &ThreadContext,
+    coordinates: &ThreadCoordinates,
+    parent_thread_id: ThreadId,
+) -> bool {
+    context.coordinates == *coordinates
+        && context.topology.branch_parent_thread_id() == Some(parent_thread_id)
+        && context.metadata.get("forked_from_thread_id") == Some(&parent_thread_id.to_string())
 }
 
 struct RuntimeHostInner {
@@ -483,8 +496,14 @@ impl RuntimeHost {
         let context =
             ThreadContext::with_topology_and_metadata(coordinates, topology, metadata.clone());
         let start_reservation = self.reserve_thread_start(&context).await?;
-        self.start_reserved_thread(context, metadata, start_reservation, record_start_identity)
-            .await
+        self.start_reserved_thread(
+            context,
+            metadata,
+            start_reservation,
+            record_start_identity,
+            true,
+        )
+        .await
     }
 
     async fn reserve_thread_start<'a>(
@@ -570,6 +589,7 @@ impl RuntimeHost {
         metadata: BTreeMap<String, String>,
         mut start_reservation: ThreadStartReservation<'_>,
         record_start_identity: bool,
+        notify_lifecycle_sink: bool,
     ) -> CooldisResult<RuntimeThreadHandle> {
         let thread_id = context.coordinates.thread_id;
         let runtime = self.inner.factory.build(&context).await?;
@@ -688,7 +708,8 @@ impl RuntimeHost {
             return Err(err);
         }
         let _ = runtime_start_tx.send(());
-        if let Some(sink) = self.lifecycle_sink().await
+        if notify_lifecycle_sink
+            && let Some(sink) = self.lifecycle_sink().await
             && let Err(err) = sink.thread_started(handle.clone()).await
         {
             thread.cancellation.cancel();
@@ -1467,7 +1488,7 @@ impl RuntimeHost {
             .lock()
             .await
             .insert(checkpoint.id, checkpoint);
-        self.start_reserved_thread(context, metadata, start_reservation, false)
+        self.start_reserved_thread(context, metadata, start_reservation, false, true)
             .await
     }
 
@@ -1509,20 +1530,31 @@ impl RuntimeHost {
         &self,
         checkpoint: ThreadCheckpoint,
     ) -> CooldisResult<RuntimeThreadHandle> {
-        let fork_coordinates = ThreadCoordinates::new(
-            checkpoint.coordinates.tenant_id.clone(),
-            checkpoint.coordinates.user_id.clone(),
-            checkpoint.coordinates.session_id.clone(),
-        );
-        self.inner
-            .runtime_store
-            .clone_branch(
-                &checkpoint.coordinates,
-                checkpoint.active_entry_id,
-                &fork_coordinates,
-            )
+        self.fork_thread_from_checkpoint_with_id_inner(checkpoint, ThreadId::new(), true)
             .await
-            .map_err(|err| CooldisError::History(err.to_string()))?;
+    }
+
+    pub(crate) async fn fork_thread_from_checkpoint_with_id(
+        &self,
+        checkpoint: ThreadCheckpoint,
+        child_thread_id: ThreadId,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        self.fork_thread_from_checkpoint_with_id_inner(checkpoint, child_thread_id, false)
+            .await
+    }
+
+    async fn fork_thread_from_checkpoint_with_id_inner(
+        &self,
+        checkpoint: ThreadCheckpoint,
+        child_thread_id: ThreadId,
+        notify_lifecycle_sink: bool,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        let fork_coordinates = ThreadCoordinates {
+            tenant_id: checkpoint.coordinates.tenant_id.clone(),
+            user_id: checkpoint.coordinates.user_id.clone(),
+            session_id: checkpoint.coordinates.session_id.clone(),
+            thread_id: child_thread_id,
+        };
         let mut metadata = checkpoint.metadata.clone();
         metadata.insert(
             "forked_from_thread_id".to_string(),
@@ -1532,12 +1564,190 @@ impl RuntimeHost {
             "forked_from_checkpoint_id".to_string(),
             checkpoint.id.to_string(),
         );
-        self.start_thread_with_topology_and_metadata(
-            fork_coordinates,
-            ThreadTopology::branch_from(checkpoint.coordinates.thread_id, Some(checkpoint.id)),
-            metadata,
-        )
-        .await
+        let topology =
+            ThreadTopology::branch_from(checkpoint.coordinates.thread_id, Some(checkpoint.id));
+        let desired_context = ThreadContext::with_topology_and_metadata(
+            fork_coordinates.clone(),
+            topology,
+            metadata.clone(),
+        );
+
+        loop {
+            match self.get_thread(child_thread_id).await {
+                Ok(handle) => {
+                    if !fork_child_context_is_compatible(
+                        handle.context(),
+                        &fork_coordinates,
+                        checkpoint.coordinates.thread_id,
+                    ) {
+                        return Err(CooldisError::History(format!(
+                            "reserved fork child {child_thread_id} has incompatible runtime identity"
+                        )));
+                    }
+                    return Ok(handle);
+                }
+                Err(CooldisError::ThreadNotFound(_)) => {}
+                Err(err) => return Err(err),
+            }
+
+            let start_reservation = match self.reserve_thread_start(&desired_context).await {
+                Ok(reservation) => reservation,
+                Err(CooldisError::ThreadAlreadyExists(existing)) if existing == child_thread_id => {
+                    self.wait_for_thread_start_reservation(child_thread_id)
+                        .await;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            let stream_id = EventStreamId::for_thread(&fork_coordinates);
+            let events = self
+                .inner
+                .runtime_store
+                .read_events(&stream_id, None)
+                .await
+                .map_err(|err| CooldisError::History(err.to_string()))?;
+            let mut durable_start_context = None;
+            for start in events.iter().rev().filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event
+                        .payload
+                        .get("entry_kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("runtime")
+                    && event
+                        .payload
+                        .get("runtime_kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("thread_started")
+            }) {
+                let Some(payload) = start
+                    .payload
+                    .get("runtime_payload")
+                    .and_then(serde_json::Value::as_object)
+                else {
+                    continue;
+                };
+                let Ok(topology) = serde_json::from_value(payload["topology"].clone()) else {
+                    continue;
+                };
+                let Ok(start_metadata) = serde_json::from_value(payload["metadata"].clone()) else {
+                    continue;
+                };
+                let context = ThreadContext::with_topology_and_metadata(
+                    fork_coordinates.clone(),
+                    topology,
+                    start_metadata,
+                );
+                if fork_child_context_is_compatible(
+                    &context,
+                    &fork_coordinates,
+                    checkpoint.coordinates.thread_id,
+                ) {
+                    durable_start_context = Some(context);
+                    break;
+                }
+            }
+            let has_start_identity = durable_start_context.is_some();
+            let has_cloned_branch = self
+                .inner
+                .runtime_store
+                .active_leaf(&fork_coordinates)
+                .await
+                .map_err(|err| CooldisError::History(err.to_string()))?
+                .is_some();
+            let (context, start_metadata) = if let Some(context) = durable_start_context {
+                (context.clone(), context.metadata.clone())
+            } else if has_cloned_branch {
+                let cloned_context = self
+                    .inner
+                    .runtime_store
+                    .build_context(&fork_coordinates)
+                    .await
+                    .map_err(|err| CooldisError::History(err.to_string()))?;
+                let checkpoint_payload = cloned_context
+                    .entries
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match &entry.kind {
+                        SessionEntryKind::Runtime { kind, payload }
+                            if kind == "thread_checkpoint" =>
+                        {
+                            Some(payload)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        CooldisError::History(format!(
+                            "reserved fork child {child_thread_id} has cloned history without a checkpoint"
+                        ))
+                    })?;
+                let checkpoint_id = checkpoint_payload
+                    .get("checkpoint_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        CooldisError::History(format!(
+                            "reserved fork child {child_thread_id} has cloned history with an invalid checkpoint"
+                        ))
+                    })
+                    .and_then(|id| {
+                        ThreadCheckpointId::parse_str(id).map_err(|err| {
+                            CooldisError::History(format!(
+                                "reserved fork child {child_thread_id} checkpoint is invalid: {err}"
+                            ))
+                        })
+                    })?;
+                let mut recovered_metadata: BTreeMap<String, String> = checkpoint_payload
+                    .get("metadata")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|err| {
+                        CooldisError::History(format!(
+                            "reserved fork child {child_thread_id} checkpoint metadata is invalid: {err}"
+                        ))
+                    })?
+                    .unwrap_or_default();
+                recovered_metadata.insert(
+                    "forked_from_thread_id".to_string(),
+                    checkpoint.coordinates.thread_id.to_string(),
+                );
+                recovered_metadata.insert(
+                    "forked_from_checkpoint_id".to_string(),
+                    checkpoint_id.to_string(),
+                );
+                let context = ThreadContext::with_topology_and_metadata(
+                    fork_coordinates.clone(),
+                    ThreadTopology::branch_from(
+                        checkpoint.coordinates.thread_id,
+                        Some(checkpoint_id),
+                    ),
+                    recovered_metadata,
+                );
+                (context.clone(), context.metadata.clone())
+            } else {
+                (desired_context.clone(), metadata.clone())
+            };
+            if !has_start_identity && !has_cloned_branch {
+                self.inner
+                    .runtime_store
+                    .clone_branch(
+                        &checkpoint.coordinates,
+                        checkpoint.active_entry_id,
+                        &fork_coordinates,
+                    )
+                    .await
+                    .map_err(|err| CooldisError::History(err.to_string()))?;
+            }
+            return self
+                .start_reserved_thread(
+                    context,
+                    start_metadata,
+                    start_reservation,
+                    !has_start_identity,
+                    notify_lifecycle_sink,
+                )
+                .await;
+        }
     }
 
     pub async fn checkpoint(

@@ -27,6 +27,10 @@ mod fault_support;
 mod invariant_claims;
 #[cfg(test)]
 #[allow(dead_code)]
+#[path = "../tests/support/invariant_forks.rs"]
+mod invariant_forks;
+#[cfg(test)]
+#[allow(dead_code)]
 #[path = "../tests/support/invariants.rs"]
 mod invariants_support;
 #[cfg(test)]
@@ -56,6 +60,8 @@ pub(crate) mod test_support {
     pub(crate) use super::fault_support::*;
     #[allow(unused_imports)]
     pub(crate) use super::invariant_claims::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::invariant_forks::*;
     #[allow(unused_imports)]
     pub(crate) use super::invariants_support::*;
     #[allow(unused_imports)]

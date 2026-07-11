@@ -710,6 +710,7 @@ pub enum IngressOutcomeIntent {
     },
     Fork {
         child_key: String,
+        child_thread_id: ThreadId,
         input_digest: String,
     },
     Interrupt {

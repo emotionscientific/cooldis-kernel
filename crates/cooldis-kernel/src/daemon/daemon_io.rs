@@ -15,10 +15,10 @@ use crate::{
     NewEventRecord, PolicyBoundPayload, PolicyKind, RuntimeThreadHandle, SessionEntry,
     SessionEntryKind, SqliteSessionStore, StreamCursorV1, THREAD_AGENT_MANIFEST_HASH_METADATA,
     THREAD_SPAWN_GRANTED_METADATA, TIMER_FIRED_ENVELOPE_KIND, ThreadCheckpoint, ThreadCoordinates,
-    ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadReloadDegradedPayload,
-    ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload,
-    ThreadStartRequest, ThreadTopology, TimerFiredPayload, TurnInput, TurnSubmissionMode,
-    control_stream_id, list_active_mandates, parse_mandate_event_id,
+    ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadLineage,
+    ThreadReloadDegradedPayload, ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload,
+    ThreadSpawnedPayload, ThreadStartRequest, ThreadTopology, TimerFiredPayload, TurnInput,
+    TurnSubmissionMode, control_stream_id, list_active_mandates, parse_mandate_event_id,
 };
 use async_trait::async_trait;
 use cooldis_io_core::{
@@ -922,6 +922,10 @@ pub struct CooldisDaemonIoBridge {
     #[cfg(test)]
     ingress_ownership_paused: Arc<tokio::sync::Notify>,
     #[cfg(test)]
+    pause_after_fork_creation: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    fork_creation_paused: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
     pause_after_fork_spawn: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     fork_spawn_paused: Arc<tokio::sync::Notify>,
@@ -929,6 +933,8 @@ pub struct CooldisDaemonIoBridge {
     thread_load_root_barrier: Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>>,
     #[cfg(test)]
     ingress_binding_barrier: Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    initial_root_candidates: Arc<StdMutex<Vec<ThreadCoordinates>>>,
     #[cfg(test)]
     fork_claim_scan_count: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -967,6 +973,10 @@ impl CooldisDaemonIoBridge {
             #[cfg(test)]
             ingress_ownership_paused: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
+            pause_after_fork_creation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            fork_creation_paused: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
             pause_after_fork_spawn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             fork_spawn_paused: Arc::new(tokio::sync::Notify::new()),
@@ -974,6 +984,8 @@ impl CooldisDaemonIoBridge {
             thread_load_root_barrier: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             ingress_binding_barrier: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            initial_root_candidates: Arc::new(StdMutex::new(Vec::new())),
             #[cfg(test)]
             fork_claim_scan_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -2441,30 +2453,42 @@ impl CooldisDaemonIoBridge {
         let scope_lock = self.thread_scope_lock(&scope_key).await;
         let _scope_guard = scope_lock.lock().await;
 
-        let existing_coordinates = {
+        let mut reserved_coordinates = {
             let threads = self.threads.lock().await;
             threads.get(&scope_key).cloned()
         };
-        if let Some(coordinates) = existing_coordinates {
-            match self.get_or_load_thread_handle(&coordinates).await {
-                Ok(handle) => return Ok((coordinates, handle)),
-                Err(ThreadHandleResolutionError::LifecycleLoad(_)) => {
-                    let mut threads = self.threads.lock().await;
-                    if threads.get(&scope_key) == Some(&coordinates) {
-                        threads.remove(&scope_key);
+        if let Some(coordinates) = &reserved_coordinates {
+            let store = self
+                .supervisor
+                .runtime_store(&coordinates.tenant_id)
+                .await
+                .map_err(cooldis_bridge_error)?;
+            let events = store
+                .read_events(&EventStreamId::for_thread(coordinates), None)
+                .await
+                .map_err(cooldis_history_error)?;
+            if !events.is_empty() {
+                match self.get_or_load_thread_handle(coordinates).await {
+                    Ok(handle) => return Ok((coordinates.clone(), handle)),
+                    Err(ThreadHandleResolutionError::LifecycleLoad(_)) => {
+                        let mut threads = self.threads.lock().await;
+                        if threads.get(&scope_key) == Some(coordinates) {
+                            threads.remove(&scope_key);
+                        }
+                        drop(threads);
+                        if let Some((route_id, source_scope, state)) = &durable_binding {
+                            state.clear_ingress_thread_binding_if_matches(
+                                route_id,
+                                source_scope,
+                                &scope_key,
+                                coordinates.thread_id,
+                            )?;
+                        }
+                        reserved_coordinates = None;
                     }
-                    drop(threads);
-                    if let Some((route_id, source_scope, state)) = &durable_binding {
-                        state.clear_ingress_thread_binding_if_matches(
-                            route_id,
-                            source_scope,
-                            &scope_key,
-                            coordinates.thread_id,
-                        )?;
+                    Err(ThreadHandleResolutionError::Lookup(err)) => {
+                        return Err(cooldis_bridge_error(err));
                     }
-                }
-                Err(ThreadHandleResolutionError::Lookup(err)) => {
-                    return Err(cooldis_bridge_error(err));
                 }
             }
         }
@@ -2483,30 +2507,25 @@ impl CooldisDaemonIoBridge {
             .map(|binding| binding.metadata.clone())
             .unwrap_or_default();
 
-        let mut handle = self
-            .supervisor
-            .start_thread(ThreadStartRequest {
+        let request = || ThreadStartRequest {
+            tenant_id: target.address.tenant_id.clone(),
+            user_id: target.address.user_id.clone(),
+            session_id: target.address.session_id.clone(),
+            topology: topology.clone(),
+            metadata: metadata.clone(),
+        };
+        let (coordinates, handle) = if let Some((route_id, source_scope, state)) = durable_binding {
+            let candidate = ThreadCoordinates {
                 tenant_id: target.address.tenant_id.clone(),
                 user_id: target.address.user_id.clone(),
                 session_id: target.address.session_id.clone(),
-                topology,
-                metadata,
-            })
-            .await
-            .map_err(cooldis_bridge_error)?;
-        if let Some(binding) = agent_binding
-            && let Err(err) = handle
-                .record_manifest_receipts(binding.compile_receipt, binding.bind_receipt)
-                .await
-        {
-            let _ = self
-                .supervisor
-                .shutdown_thread_at(&handle.context().coordinates)
-                .await;
-            return Err(cooldis_bridge_error(err));
-        }
-        let mut coordinates = handle.context().coordinates.clone();
-        if let Some((route_id, source_scope, state)) = durable_binding {
+                thread_id: ThreadId::new(),
+            };
+            #[cfg(test)]
+            self.initial_root_candidates
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .push(candidate.clone());
             #[cfg(test)]
             {
                 let barrier = self
@@ -2522,29 +2541,102 @@ impl CooldisDaemonIoBridge {
                 &route_id,
                 &source_scope,
                 &target.address.scope_key(),
-                &coordinates,
+                reserved_coordinates.as_ref().unwrap_or(&candidate),
             ) {
                 Ok(selected) => selected,
-                Err(err) => {
-                    let _ = self.supervisor.shutdown_thread_at(&coordinates).await;
-                    return Err(err);
-                }
+                Err(err) => return Err(err),
             };
-            if selected != coordinates {
-                let _ = self.supervisor.shutdown_thread_at(&coordinates).await;
-                handle = self
-                    .get_or_load_thread_handle(&selected)
-                    .await
-                    .map_err(|err| cooldis_bridge_error(err.into_inner()))?;
-                coordinates = selected;
-            }
+            let handle = self
+                .start_or_adopt_reserved_root(request(), &selected, agent_binding.as_ref())
+                .await?;
             pause_after_ingress_binding_for_restart_smoke().await?;
-        }
+            (selected, handle)
+        } else {
+            let handle = self
+                .supervisor
+                .start_thread(request())
+                .await
+                .map_err(cooldis_bridge_error)?;
+            if let Some(binding) = agent_binding
+                && let Err(err) = handle
+                    .record_manifest_receipts(binding.compile_receipt, binding.bind_receipt)
+                    .await
+            {
+                let _ = self
+                    .supervisor
+                    .shutdown_thread_at(&handle.context().coordinates)
+                    .await;
+                return Err(cooldis_bridge_error(err));
+            }
+            (handle.context().coordinates.clone(), handle)
+        };
         self.threads
             .lock()
             .await
             .insert(scope_key, coordinates.clone());
         Ok((coordinates, handle))
+    }
+
+    async fn start_or_adopt_reserved_root(
+        &self,
+        request: ThreadStartRequest,
+        coordinates: &ThreadCoordinates,
+        agent_binding: Option<&KernelThreadSpawnAgentBinding>,
+    ) -> IoResult<RuntimeThreadHandle> {
+        loop {
+            let store = self
+                .supervisor
+                .runtime_store(&coordinates.tenant_id)
+                .await
+                .map_err(cooldis_bridge_error)?;
+            let events = store
+                .read_events(&EventStreamId::for_thread(coordinates), None)
+                .await
+                .map_err(cooldis_history_error)?;
+            if !events.is_empty() {
+                return self
+                    .get_or_load_thread_handle(coordinates)
+                    .await
+                    .map_err(|err| cooldis_bridge_error(err.into_inner()));
+            }
+            match self
+                .supervisor
+                .start_thread_with_id(request.clone(), coordinates.thread_id)
+                .await
+            {
+                Ok(handle) => {
+                    if let Some(binding) = agent_binding
+                        && let Err(err) = handle
+                            .record_manifest_receipts(
+                                binding.compile_receipt.clone(),
+                                binding.bind_receipt.clone(),
+                            )
+                            .await
+                    {
+                        let _ = self.supervisor.shutdown_thread_at(coordinates).await;
+                        return Err(cooldis_bridge_error(err));
+                    }
+                    return Ok(handle);
+                }
+                Err(CooldisError::ThreadAlreadyExists(existing))
+                    if existing == coordinates.thread_id =>
+                {
+                    self.supervisor
+                        .wait_for_thread_start_reservation(
+                            &coordinates.tenant_id,
+                            coordinates.thread_id,
+                        )
+                        .await
+                        .map_err(cooldis_bridge_error)?;
+                    match self.supervisor.get_thread_at(coordinates).await {
+                        Ok(handle) => return Ok(handle),
+                        Err(CooldisError::ThreadNotFound(_)) => continue,
+                        Err(err) => return Err(cooldis_bridge_error(err)),
+                    }
+                }
+                Err(err) => return Err(cooldis_bridge_error(err)),
+            }
+        }
     }
 
     async fn thread_scope_lock(&self, scope_key: &str) -> Arc<Mutex<()>> {
@@ -2677,6 +2769,7 @@ impl CooldisDaemonIoBridge {
                     ingress_source_stream,
                     source_ingress_event_ids,
                     None,
+                    ThreadId::new(),
                     false,
                 )
                 .await?;
@@ -2688,16 +2781,20 @@ impl CooldisDaemonIoBridge {
         let source_stream = ingress_source_stream.ok_or_else(|| {
             IoError::Bridge("durable ingress claim requires its control stream".to_string())
         })?;
+        let reserved_child_thread_id = ThreadId::new();
         let claim = self
             .append_ingress_claim(
                 &parent_coordinates,
                 ingress_message_ids,
                 source_ingress_event_ids,
                 admission_event_id,
-                Self::ingress_claim_intent(&AdmissionDecision::Fork {
-                    child_key: child_key.to_string(),
-                    input: input.clone(),
-                })?,
+                Self::ingress_claim_intent(
+                    &AdmissionDecision::Fork {
+                        child_key: child_key.to_string(),
+                        input: input.clone(),
+                    },
+                    Some(reserved_child_thread_id),
+                )?,
                 ingress_ownership,
             )
             .await?;
@@ -2718,6 +2815,16 @@ impl CooldisDaemonIoBridge {
         let claim_payload =
             serde_json::from_value::<IoIngressClaimedPayload>(claim.payload.clone())
                 .map_err(|err| IoError::Bridge(format!("decode appended ingress claim: {err}")))?;
+        let reserved_child_thread_id = match &claim_payload.intent {
+            IngressOutcomeIntent::Fork {
+                child_thread_id, ..
+            } => *child_thread_id,
+            _ => {
+                return Err(IoError::Bridge(
+                    "appended fork claim carried a non-fork intent".to_string(),
+                ));
+            }
+        };
         let (receipt, spawned) = self
             .run_fork_effects(
                 envelope,
@@ -2729,6 +2836,7 @@ impl CooldisDaemonIoBridge {
                 Some(source_stream),
                 &claim_payload.ingress_witness_event_ids,
                 Some(claim.id),
+                reserved_child_thread_id,
                 false,
             )
             .await?;
@@ -2754,6 +2862,7 @@ impl CooldisDaemonIoBridge {
         ingress_source_stream: Option<&EventStreamId>,
         source_ingress_event_ids: &[EventRecordId],
         claim_event_id: Option<EventRecordId>,
+        reserved_child_thread_id: ThreadId,
         scan_for_existing_spawn: bool,
     ) -> IoResult<(KernelIoReceipt, EventRecord)> {
         let existing_spawn = match (claim_event_id, scan_for_existing_spawn) {
@@ -2765,6 +2874,12 @@ impl CooldisDaemonIoBridge {
         };
         let (child_handle, spawned, recovering_spawned_child) = match existing_spawn {
             Some((spawned, payload)) => {
+                if payload.child_thread_id != reserved_child_thread_id {
+                    return Err(IoError::Bridge(format!(
+                        "fork claim reserved child {reserved_child_thread_id}, but thread.spawned names {}",
+                        payload.child_thread_id
+                    )));
+                }
                 let child_coordinates = ThreadCoordinates {
                     tenant_id: parent_coordinates.tenant_id.clone(),
                     user_id: parent_coordinates.user_id.clone(),
@@ -2788,12 +2903,25 @@ impl CooldisDaemonIoBridge {
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
-                let source_cut = fork_source_cut_payload(parent_coordinates, &checkpoint, None);
                 let child_handle = self
                     .supervisor
-                    .fork_thread_from_checkpoint_at(checkpoint)
+                    .fork_thread_from_checkpoint_with_id_at(
+                        checkpoint.clone(),
+                        reserved_child_thread_id,
+                    )
                     .await
                     .map_err(cooldis_bridge_error)?;
+                #[cfg(test)]
+                if self
+                    .pause_after_fork_creation
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.fork_creation_paused.notify_waiters();
+                    std::future::pending::<()>().await;
+                }
+                let source_cut = self
+                    .fork_source_cut_for_child(parent_handle, &child_handle, &checkpoint)
+                    .await?;
                 let spawned = self
                     .append_fork_thread_spawned_event(
                         parent_handle,
@@ -2903,6 +3031,67 @@ impl CooldisDaemonIoBridge {
             }
         }
         Ok(None)
+    }
+
+    async fn fork_source_cut_for_child(
+        &self,
+        parent_handle: &RuntimeThreadHandle,
+        child_handle: &RuntimeThreadHandle,
+        attempted_checkpoint: &ThreadCheckpoint,
+    ) -> IoResult<ThreadSpawnedForkSourceCutPayload> {
+        let child_context = child_handle.context();
+        let ThreadLineage::Branch {
+            parent_thread_id,
+            checkpoint_id: Some(checkpoint_id),
+        } = child_context.topology.lineage
+        else {
+            return Err(IoError::Bridge(format!(
+                "reserved fork child {} has no checkpoint lineage",
+                child_context.coordinates.thread_id
+            )));
+        };
+        if parent_thread_id != parent_handle.context().coordinates.thread_id {
+            return Err(IoError::Bridge(format!(
+                "reserved fork child {} names parent {parent_thread_id}, expected {}",
+                child_context.coordinates.thread_id,
+                parent_handle.context().coordinates.thread_id
+            )));
+        }
+        if checkpoint_id == attempted_checkpoint.id {
+            return Ok(fork_source_cut_payload(
+                &parent_handle.context().coordinates,
+                attempted_checkpoint,
+                None,
+            ));
+        }
+
+        let parent_context = parent_handle
+            .session_context()
+            .await
+            .map_err(cooldis_bridge_error)?;
+        let checkpoint_id_text = checkpoint_id.to_string();
+        let checkpoint_entry = parent_context.entries.iter().rev().find(|entry| {
+            matches!(
+                &entry.kind,
+                SessionEntryKind::Runtime { kind, payload }
+                    if kind == "thread_checkpoint"
+                        && payload.get("checkpoint_id").and_then(Value::as_str)
+                            == Some(checkpoint_id_text.as_str())
+            )
+        });
+        let checkpoint_entry = checkpoint_entry.ok_or_else(|| {
+            IoError::Bridge(format!(
+                "reserved fork child {} cites checkpoint {checkpoint_id}, but the parent has no matching durable checkpoint",
+                child_context.coordinates.thread_id
+            ))
+        })?;
+        Ok(ThreadSpawnedForkSourceCutPayload {
+            thread_id: parent_thread_id,
+            checkpoint_id,
+            leaf_entry_id: Some(checkpoint_entry.entry_id),
+            stream_id: EventStreamId::for_thread(&parent_handle.context().coordinates),
+            stream_to_sequence: None,
+        })
     }
 
     async fn append_fork_thread_spawned_event(
@@ -3538,7 +3727,10 @@ struct ReceiptDedupeCursor {
 }
 
 impl CooldisDaemonIoBridge {
-    fn ingress_claim_intent(decision: &AdmissionDecision) -> IoResult<IngressOutcomeIntent> {
+    fn ingress_claim_intent(
+        decision: &AdmissionDecision,
+        reserved_child_thread_id: Option<ThreadId>,
+    ) -> IoResult<IngressOutcomeIntent> {
         let input_digest = |input: &IoTurnInput| {
             serde_json::to_value(input)
                 .map_err(|err| IoError::Bridge(format!("encode ingress turn input: {err}")))
@@ -3567,10 +3759,18 @@ impl CooldisDaemonIoBridge {
                     None => canonical_json_hash(&JsonValue::Null).map_err(cooldis_bridge_error)?,
                 },
             }),
-            AdmissionDecision::Fork { child_key, input } => Ok(IngressOutcomeIntent::Fork {
-                child_key: child_key.clone(),
-                input_digest: input_digest(input)?,
-            }),
+            AdmissionDecision::Fork { child_key, input } => {
+                let child_thread_id = reserved_child_thread_id.ok_or_else(|| {
+                    IoError::Bridge(
+                        "fork ingress claim requires a reserved child thread id".to_string(),
+                    )
+                })?;
+                Ok(IngressOutcomeIntent::Fork {
+                    child_key: child_key.clone(),
+                    child_thread_id,
+                    input_digest: input_digest(input)?,
+                })
+            }
             AdmissionDecision::ObserveOnly { reason } => Ok(IngressOutcomeIntent::Observe {
                 reason: reason.clone(),
             }),
@@ -3672,6 +3872,7 @@ impl CooldisDaemonIoBridge {
     ) -> IoResult<KernelIoReceipt> {
         let IngressOutcomeIntent::Fork {
             child_key,
+            child_thread_id,
             input_digest,
         } = &claim_payload.intent
         else {
@@ -3706,6 +3907,7 @@ impl CooldisDaemonIoBridge {
                 Some(ingress_source_stream),
                 &claim_payload.ingress_witness_event_ids,
                 Some(claim.id),
+                *child_thread_id,
                 true,
             )
             .await?;
@@ -3995,7 +4197,7 @@ impl CooldisDaemonIoBridge {
                         ingress_message_ids,
                         source_ingress_event_ids,
                         admission_event_id,
-                        Self::ingress_claim_intent(decision)?,
+                        Self::ingress_claim_intent(decision, None)?,
                         ingress_ownership,
                     )
                     .await?;
@@ -4080,7 +4282,7 @@ impl CooldisDaemonIoBridge {
                         ingress_message_ids,
                         source_ingress_event_ids,
                         admission_event_id,
-                        Self::ingress_claim_intent(decision)?,
+                        Self::ingress_claim_intent(decision, None)?,
                         ingress_ownership,
                     )
                     .await?;
@@ -4181,7 +4383,7 @@ impl CooldisDaemonIoBridge {
                         ingress_message_ids,
                         source_ingress_event_ids,
                         admission_event_id,
-                        Self::ingress_claim_intent(decision)?,
+                        Self::ingress_claim_intent(decision, None)?,
                         ingress_ownership,
                     )
                     .await?;
@@ -4253,7 +4455,7 @@ impl CooldisDaemonIoBridge {
                         ingress_message_ids,
                         source_ingress_event_ids,
                         admission_event_id,
-                        Self::ingress_claim_intent(decision)?,
+                        Self::ingress_claim_intent(decision, None)?,
                         ingress_ownership,
                     )
                     .await?;

@@ -2621,7 +2621,32 @@ async fn racing_initial_applies_share_the_durable_conversation_binding() {
     assert_eq!(
         tenant.runtime.threads.len(),
         1,
-        "the losing provisional root must be removed"
+        "only the reserved root may become resident"
+    );
+    let mut candidates = bridge.initial_root_candidates.lock().unwrap().clone();
+    candidates.extend(
+        competing_bridge
+            .initial_root_candidates
+            .lock()
+            .unwrap()
+            .clone(),
+    );
+    candidates.sort_by_key(|candidate| candidate.thread_id.to_string());
+    candidates.dedup_by_key(|candidate| candidate.thread_id);
+    assert_eq!(
+        candidates.len(),
+        2,
+        "both racers must preallocate a root id"
+    );
+    let loser = candidates
+        .iter()
+        .find(|candidate| candidate.thread_id != coordinates.thread_id)
+        .expect("one candidate must lose the durable route reservation");
+    assert!(
+        thread_events_for(server.session_store_path(), loser)
+            .await
+            .is_empty(),
+        "the losing root candidate must write zero durable start history"
     );
     let _ = std::fs::remove_dir_all(fixture_root);
 }
@@ -2871,6 +2896,125 @@ async fn fork_claim_before_fork_recovers_one_child_after_restart() {
             .filter(|event| event.kind == EventKind::TurnSubmitted)
             .count(),
         1
+    );
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() {
+    let fixture_root = test_root("fork-creation-before-spawn-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("recover reserved fork child")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-fork-creation-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    bridge
+        .pause_after_fork_creation
+        .store(true, Ordering::SeqCst);
+    let creation_paused = bridge.fork_creation_paused.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-fork-creation-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    creation_paused.await;
+
+    let parent_coordinates = route_bindings(&bridge).await[0].coordinates.clone();
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("the reservation claim must precede creation");
+    let claim_payload: IoIngressClaimedPayload =
+        serde_json::from_value(claim.payload.clone()).unwrap();
+    let reserved_child_thread_id = match claim_payload.intent {
+        IngressOutcomeIntent::Fork {
+            child_thread_id, ..
+        } => child_thread_id,
+        other => panic!("unexpected claim intent: {other:?}"),
+    };
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::ThreadSpawned),
+        "the cut must land before thread.spawned"
+    );
+    let child_coordinates = ThreadCoordinates {
+        tenant_id: parent_coordinates.tenant_id.clone(),
+        user_id: parent_coordinates.user_id.clone(),
+        session_id: parent_coordinates.session_id.clone(),
+        thread_id: reserved_child_thread_id,
+    };
+    let child_events = thread_events_for(&session_store_path, &child_coordinates).await;
+    assert_eq!(
+        child_events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["runtime_kind"].as_str() == Some("thread_started")
+                    && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
+                        .as_str()
+                        .is_some_and(|id| id == parent_coordinates.thread_id.to_string())
+            })
+            .count(),
+        1,
+        "the child must exist durably inside the creation-before-spawn window"
+    );
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge.clone(),
+        "worker-after-fork-creation-cut",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    let spawned = control_events
+        .iter()
+        .filter(|event| event.kind == EventKind::ThreadSpawned)
+        .collect::<Vec<_>>();
+    assert_eq!(spawned.len(), 1, "recovery must join the topology once");
+    let spawned_payload: ThreadSpawnedPayload =
+        serde_json::from_value(spawned[0].payload.clone()).unwrap();
+    assert_eq!(spawned_payload.child_thread_id, reserved_child_thread_id);
+    assert_eq!(spawned_payload.fork.unwrap().claim_event_id, Some(claim.id));
+    assert_eq!(
+        thread_events_for(&session_store_path, &child_coordinates)
+            .await
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["runtime_kind"].as_str() == Some("thread_started")
+                    && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
+                        .as_str()
+                        .is_some_and(|id| id == parent_coordinates.thread_id.to_string())
+            })
+            .count(),
+        1,
+        "recovery must adopt rather than recreate the reserved child"
     );
     assert!(queue.completed().await);
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -5922,7 +6066,7 @@ async fn failed_durable_bind_does_not_publish_thread_in_memory() {
 }
 
 #[tokio::test]
-async fn lifecycle_load_failure_repairs_and_durably_rebinds_seeded_scope() {
+async fn reserved_root_start_failure_retries_the_same_durable_binding() {
     let root = test_root("ingress-binding-load-failure");
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
@@ -5950,27 +6094,39 @@ async fn lifecycle_load_failure_repairs_and_durably_rebinds_seeded_scope() {
             .cloned(),
         Some(stale_coordinates.clone())
     );
-    let receipt = bridge.submit_envelope(envelope).await.unwrap();
-    let fresh_thread_id = receipt.thread_id.as_deref().unwrap();
-
-    assert_ne!(
-        Some(fresh_thread_id),
-        Some(stale_coordinates.thread_id.to_string().as_str())
-    );
+    let err = bridge.submit_envelope(envelope.clone()).await.unwrap_err();
+    assert!(err.to_string().contains("test rejected lifecycle load"));
     assert_eq!(failure_probe.failures(), vec![stale_coordinates.thread_id]);
-    let fresh_coordinates = bridge
+    assert_eq!(
+        bridge
+            .threads
+            .lock()
+            .await
+            .get(&target.address.scope_key())
+            .cloned(),
+        Some(stale_coordinates.clone()),
+        "a failed start must not discard the durable root reservation"
+    );
+
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    let reserved_thread_id = stale_coordinates.thread_id.to_string();
+    assert_eq!(
+        receipt.thread_id.as_deref(),
+        Some(reserved_thread_id.as_str())
+    );
+    let recovered_coordinates = bridge
         .threads
         .lock()
         .await
         .get(&target.address.scope_key())
         .cloned()
         .unwrap();
-    wait_for_user_text(&bridge, &fresh_coordinates, "fresh thread").await;
+    wait_for_user_text(&bridge, &recovered_coordinates, "fresh thread").await;
     let bindings = route_bindings(&bridge).await;
-    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings.len(), 1);
     assert_eq!(
-        bindings.last().unwrap().coordinates.thread_id.to_string(),
-        fresh_thread_id
+        bindings[0].coordinates.thread_id,
+        stale_coordinates.thread_id
     );
     let _ = std::fs::remove_dir_all(root);
 }
