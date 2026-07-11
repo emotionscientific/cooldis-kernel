@@ -259,6 +259,7 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(root.contains("cooldis chat"));
     assert!(root.contains("cooldis commands"));
     assert!(root.contains("cooldis help"));
+    assert!(root.contains("man cooldis"));
     assert_no_command(&root, &["dev"]);
     assert_no_command(&root, &["operator"]);
     assert!(!root.contains("cooldis [PROMPT]"));
