@@ -5,12 +5,12 @@
         "local_committed",
         "query_projected"
       ],
-      "end_sequence": 8,
+      "end_sequence": 9,
       "schema": "cooldis.stream.append_ack/1",
       "start_sequence": 4,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
-      "tail_event_id": "018f0000-0000-7000-8000-000000000005",
-      "tail_sequence": 8
+      "tail_event_id": "018f0000-0000-7000-8000-000000000006",
+      "tail_sequence": 9
     }
   ],
   "backend_capabilities": [
@@ -84,6 +84,12 @@
       "event_id": "018f0000-0000-7000-8000-000000000005",
       "schema": "cooldis.stream.cursor/1",
       "sequence": 8,
+      "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+    },
+    {
+      "event_id": "018f0000-0000-7000-8000-000000000006",
+      "schema": "cooldis.stream.cursor/1",
+      "sequence": 9,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
     }
   ],
@@ -362,6 +368,28 @@
       },
       "created_at_ms": 1771718400400,
       "event_id": "018f0000-0000-7000-8000-000000000005",
+      "kind": "thread.branch.selected",
+      "origin": "witnessed",
+      "payload": {
+        "prior_entry_id": "018f0000-0000-7000-8000-000000000003",
+        "selected_entry_id": "018f0000-0000-7000-8000-000000000002",
+        "thread_id": "018f0000-0000-7000-8000-000000000001"
+      },
+      "payload_schema": "cooldis.event.thread.branch.selected/1",
+      "provenance": {},
+      "schema": "cooldis.stream.record/1",
+      "sequence": 8,
+      "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+    },
+    {
+      "coordinates": {
+        "session_id": "session_1",
+        "tenant_id": "tenant_a",
+        "thread_id": "018f0000-0000-7000-8000-000000000001",
+        "user_id": "user_1"
+      },
+      "created_at_ms": 1771718400500,
+      "event_id": "018f0000-0000-7000-8000-000000000006",
       "kind": "thread.reload.degraded",
       "origin": "witnessed",
       "payload": {
@@ -376,7 +404,7 @@
       "payload_schema": "cooldis.event.thread.reload.degraded/1",
       "provenance": {},
       "schema": "cooldis.stream.record/1",
-      "sequence": 8,
+      "sequence": 9,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
     }
   ],
@@ -484,6 +512,30 @@
     {
       "event_id": "018f0000-0000-7000-8000-000000000005",
       "keys": {
+        "kind": "thread.branch.selected",
+        "origin": "witnessed",
+        "payload_schema": "cooldis.event.thread.branch.selected/1",
+        "schema": "cooldis.stream.record/1",
+        "session_id": "session_1",
+        "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
+        "tenant_id": "tenant_a",
+        "thread_id": "018f0000-0000-7000-8000-000000000001",
+        "user_id": "user_1"
+      },
+      "kind": "thread.branch.selected",
+      "routes": [
+        "authority_store",
+        "export_bundle",
+        "runtime_trace",
+        "browser_safe_projection"
+      ],
+      "schema": "cooldis.stream.routing_decision/1",
+      "sequence": 8,
+      "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+    },
+    {
+      "event_id": "018f0000-0000-7000-8000-000000000006",
+      "keys": {
         "kind": "thread.reload.degraded",
         "origin": "witnessed",
         "payload_schema": "cooldis.event.thread.reload.degraded/1",
@@ -502,7 +554,7 @@
         "browser_safe_projection"
       ],
       "schema": "cooldis.stream.routing_decision/1",
-      "sequence": 8,
+      "sequence": 9,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
     }
   ]

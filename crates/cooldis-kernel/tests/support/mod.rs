@@ -281,6 +281,13 @@ pub fn fixture_path(relative: &str) -> PathBuf {
 
 pub fn assert_json_fixture(relative: &str, actual: Value) {
     let path = fixture_path(relative);
+    if std::env::var_os("COOLDIS_UPDATE_FIXTURES").is_some() {
+        let mut text = serde_json::to_string_pretty(&actual).unwrap();
+        text.push('\n');
+        std::fs::write(&path, text)
+            .unwrap_or_else(|err| panic!("write fixture {}: {err}", path.display()));
+        return;
+    }
     let expected_text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         let actual_pretty = serde_json::to_string_pretty(&actual).unwrap();
         panic!(

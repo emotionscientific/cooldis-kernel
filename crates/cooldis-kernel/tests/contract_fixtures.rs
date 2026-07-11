@@ -466,15 +466,6 @@ fn stream_schema_v1_contract_matches_fixture() {
         })
         .unwrap(),
     };
-    branch_selection.validate_stream_record_v1().unwrap();
-    stream_schema_registry_v1()
-        .unwrap()
-        .validate(
-            EventKind::ThreadBranchSelected.payload_schema_id(),
-            &branch_selection.payload,
-        )
-        .unwrap();
-
     let reload_degraded = EventRecord {
         id: event_record_id(6),
         stream_id: stream_id.clone(),
@@ -496,6 +487,7 @@ fn stream_schema_v1_contract_matches_fixture() {
         summary,
         read_plan_set,
         compile_after_policy,
+        branch_selection.clone(),
         reload_degraded,
     ];
     let schema_registry = stream_schema_registry_v1().unwrap();
