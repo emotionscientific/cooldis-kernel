@@ -31,6 +31,7 @@ use crate::{
     PublishedOperationSource,
     RuntimeExecutionPolicy,
     RuntimeServices,
+    SessionStore,
     StreamCursorV1,
     THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
     TenantRegistration,
@@ -2456,6 +2457,14 @@ async fn racing_fork_applies_create_one_child_behind_one_parent_claim() {
     );
     first.unwrap();
     second.unwrap();
+    assert_eq!(
+        bridge.fork_claim_scan_count.load(Ordering::SeqCst)
+            + competing_bridge
+                .fork_claim_scan_count
+                .load(Ordering::SeqCst),
+        0,
+        "fresh fork admission must not scan for recovery evidence under the scope lock"
+    );
 
     let bindings = route_bindings(&bridge).await;
     assert_eq!(
@@ -2491,6 +2500,190 @@ async fn racing_fork_applies_create_one_child_behind_one_parent_claim() {
         1
     );
     assert_eq!(submitted, 1);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn durable_ingress_witness_and_admission_are_single_under_racing_applies() {
+    let fixture_root = test_root("durable-ingress-single-preclaim-facts");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let envelope = telegram_queue_envelope("race the pre-claim facts");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let coordinates = start_thread_for_target(&bridge, &target).await;
+    let competing_bridge = CooldisDaemonIoBridge::from_app_server(&server);
+
+    let (first, second) = tokio::join!(
+        bridge.record_ingress_received(&coordinates, &envelope, Some(&envelope.id)),
+        competing_bridge.record_ingress_received(&coordinates, &envelope, Some(&envelope.id)),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(
+        first.id, second.id,
+        "racing applies must share one ingress witness"
+    );
+
+    let decision = AdmissionDecision::queue(
+        "turn-preclaim-race",
+        IoTurnInput::from_envelope(&envelope, &target),
+    );
+    let (first, second) = tokio::join!(
+        bridge.record_admission_decided(
+            &coordinates,
+            &envelope,
+            &decision,
+            "sha256:policy",
+            vec![first.id],
+            false,
+            true,
+        ),
+        competing_bridge.record_admission_decided(
+            &coordinates,
+            &envelope,
+            &decision,
+            "sha256:policy",
+            vec![first.id],
+            false,
+            true,
+        ),
+    );
+    assert_eq!(
+        first.unwrap().id,
+        second.unwrap().id,
+        "racing applies must share one admission decision"
+    );
+
+    let events = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::AdmissionDecided)
+            .count(),
+        1
+    );
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn racing_initial_applies_share_the_durable_conversation_binding() {
+    let fixture_root = test_root("durable-ingress-racing-initial-binding");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let competing_bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    register_route_state(
+        &competing_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let barrier = Arc::new(Barrier::new(2));
+    *bridge.ingress_binding_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+    *competing_bridge.ingress_binding_barrier.lock().unwrap() = Some(barrier);
+    let envelope = telegram_queue_envelope("race the initial binding");
+
+    let (first, second) = tokio::join!(
+        bridge.submit_queued_envelope(envelope.clone(), 1),
+        competing_bridge.submit_queued_envelope(envelope.clone(), 1),
+    );
+    first.unwrap();
+    second.unwrap();
+
+    let bindings = route_bindings(&bridge).await;
+    assert_eq!(
+        bindings.len(),
+        1,
+        "the durable scope must select one root thread"
+    );
+    let coordinates = &bindings[0].coordinates;
+    let events = control_events_for(server.session_store_path(), coordinates).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    let snapshot = bridge.supervisor.snapshot().await;
+    let tenant = snapshot
+        .tenants
+        .iter()
+        .find(|tenant| tenant.tenant_id == bridge.tenant_id)
+        .unwrap();
+    assert_eq!(
+        tenant.runtime.threads.len(),
+        1,
+        "the losing provisional root must be removed"
+    );
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn coalesced_fork_first_attempt_loser_runs_no_recovery_effects() {
+    let fixture_root = test_root("coalesced-fork-first-attempt-loser");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    bridge
+        .submit_envelope(test_envelope("seed the coalesced fork parent"))
+        .await
+        .unwrap();
+    let parent_coordinates = only_thread_coordinates(&bridge).await;
+    let competing_bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    register_route_state(
+        &competing_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let envelope = telegram_queue_envelope("coalesced fork contention")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    bridge
+        .pause_after_ingress_claim
+        .store(true, Ordering::SeqCst);
+    let claim_paused = bridge.ingress_claim_paused.notified();
+    let first_bridge = bridge.clone();
+    let first_envelope = envelope.clone();
+    let first = tokio::spawn(async move {
+        first_bridge
+            .submit_coalesced_queued_envelopes(
+                first_envelope.clone(),
+                &[first_envelope.clone()],
+                &[first_envelope.id.clone()],
+                1,
+            )
+            .await
+    });
+    claim_paused.await;
+
+    competing_bridge
+        .submit_coalesced_queued_envelopes(
+            envelope.clone(),
+            &[envelope.clone()],
+            &[envelope.id.clone()],
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(
+        bridge
+            .supervisor
+            .children_of_at(&parent_coordinates)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a racing first-attempt loser must not recover the claim owner's fork"
+    );
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -3440,13 +3633,18 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
     );
     drain.abort();
     assert!(drain.await.unwrap_err().is_cancelled());
-    bridge
-        .supervisor
-        .shutdown_thread_at(&coordinates)
-        .await
-        .unwrap();
+    assert_eq!(
+        bridge
+            .supervisor
+            .get_thread_at(&coordinates)
+            .await
+            .unwrap()
+            .status(),
+        ThreadStatus::Failed,
+        "the failed runtime must still be resident at redelivery"
+    );
     queue
-        .retry_ingress("message-runtime-failure", "runtime restarted")
+        .retry_ingress("message-runtime-failure", "runtime redelivery")
         .await
         .unwrap();
 
@@ -3474,6 +3672,87 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
             })
     );
     assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn concurrent_lazy_load_of_cyclic_topology_fails_closed_without_lock_deadlock() {
+    let fixture_root = test_root("lazy-load-cyclic-topology");
+    let bridge = bridge_with_runtime_factory_at_root(
+        &fixture_root,
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            CanonicalProviderRuntimeConfig::new(
+                ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+                APP_SERVER_LOCAL_PROVIDER,
+                APP_SERVER_LOCAL_MODEL,
+            ),
+            Arc::new(RecordingRouteProviderClient::default()),
+        )),
+    )
+    .await;
+    let store = SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap()).unwrap();
+    let first = ThreadCoordinates {
+        tenant_id: bridge.tenant_id.clone(),
+        user_id: bridge.user_id.clone(),
+        session_id: "cyclic-session".to_string(),
+        thread_id: ThreadId::new(),
+    };
+    let second = ThreadCoordinates {
+        thread_id: ThreadId::new(),
+        ..first.clone()
+    };
+    for (coordinates, parent_thread_id) in [(&first, second.thread_id), (&second, first.thread_id)]
+    {
+        store
+            .append(
+                coordinates,
+                None,
+                SessionEntryKind::Runtime {
+                    kind: "thread_started".to_string(),
+                    payload: json!({
+                        "parent_thread_id": parent_thread_id,
+                        "topology": ThreadTopology::branch_from(parent_thread_id, None),
+                        "metadata": {},
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    *bridge.thread_load_root_barrier.lock().unwrap() = Some(barrier);
+    let first_bridge = bridge.clone();
+    let first_coordinates = first.clone();
+    let first_load = tokio::spawn(async move {
+        first_bridge
+            .get_or_load_thread_handle(&first_coordinates)
+            .await
+    });
+    let second_bridge = bridge.clone();
+    let second_coordinates = second.clone();
+    let second_load = tokio::spawn(async move {
+        second_bridge
+            .get_or_load_thread_handle(&second_coordinates)
+            .await
+    });
+
+    let (first_error, second_error) = tokio::time::timeout(Duration::from_secs(1), async {
+        (
+            match first_load.await.unwrap() {
+                Ok(_) => panic!("first cyclic load unexpectedly succeeded"),
+                Err(err) => err,
+            },
+            match second_load.await.unwrap() {
+                Ok(_) => panic!("second cyclic load unexpectedly succeeded"),
+                Err(err) => err,
+            },
+        )
+    })
+    .await
+    .expect("cyclic concurrent loads must fail instead of deadlocking");
+    for error in [first_error, second_error] {
+        assert!(error.into_inner().to_string().contains("topology cycle"));
+    }
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -5544,6 +5823,22 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
     assert_eq!(first_handle.context().coordinates, coordinates);
     assert_eq!(second_handle.context().coordinates, coordinates);
     assert_eq!(gate.matching_builds(), 1);
+    let store = bridge
+        .supervisor
+        .runtime_store(&coordinates.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .read_events(&EventStreamId::for_thread(&coordinates), None)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadReloadDegraded)
+            .count(),
+        1,
+        "racing lazy loads must share one degraded-reload witness"
+    );
     bridge
         .supervisor
         .shutdown_thread_at(&coordinates)
@@ -5646,6 +5941,71 @@ async fn duplicate_ingress_bindings_seed_the_latest_thread() {
         Some(latest.thread_id.to_string().as_str())
     );
     assert_eq!(route_bindings(&bridge).await.len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn equal_timestamp_ingress_bindings_seed_the_last_committed_thread() {
+    let root = test_root("ingress-binding-equal-timestamp");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = test_envelope("latest equal-time binding");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let older = ThreadCoordinates {
+        tenant_id: target.address.tenant_id.clone(),
+        user_id: target.address.user_id.clone(),
+        session_id: target.address.session_id.clone(),
+        thread_id: ThreadId::parse_str("ffffffff-ffff-7fff-bfff-ffffffffffff").unwrap(),
+    };
+    let latest = ThreadCoordinates {
+        thread_id: ThreadId::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
+        ..older.clone()
+    };
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    insert_route_binding(&state, &target.address.scope_key(), &older, 1);
+    insert_route_binding(&state, &target.address.scope_key(), &latest, 1);
+    drop(state);
+
+    register_route_state(&bridge, &route, &db).await;
+    assert_eq!(
+        bridge.threads.lock().await.get(&target.address.scope_key()),
+        Some(&latest),
+        "row commit order must break equal-timestamp binding ties"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn egress_refresh_does_not_roll_back_the_active_ingress_rebind() {
+    let root = test_root("egress-refresh-keeps-ingress-rebind");
+    let db = root.join("io.sqlite");
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    let scope_key = "test.protocol:main:conversation:123";
+    let parent = ThreadCoordinates::new("tenant", "user", "session");
+    let child = ThreadCoordinates {
+        thread_id: ThreadId::new(),
+        ..parent.clone()
+    };
+    assert_eq!(
+        state
+            .claim_ingress_thread_binding("main", "test.protocol:main", scope_key, &parent)
+            .unwrap(),
+        parent
+    );
+    state
+        .bind_thread("main", "test.protocol:main", scope_key, &child)
+        .unwrap();
+    state
+        .rebind_ingress_thread("main", "test.protocol:main", scope_key, &child)
+        .unwrap();
+    state
+        .bind_thread("main", "test.protocol:main", scope_key, &parent)
+        .unwrap();
+
+    let active = state.active_ingress_threads("main").unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].coordinates, child);
     let _ = std::fs::remove_dir_all(root);
 }
 

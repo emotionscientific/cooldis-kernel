@@ -677,6 +677,7 @@ fn thread_reload_degraded_payload_schema_is_registered() {
         .unwrap();
 }
 
+#[test]
 fn ingress_outcome_payloads_round_trip_whole_and_validate() {
     let witness_event_id = EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000011").unwrap(),
@@ -732,7 +733,6 @@ fn ingress_outcome_payloads_round_trip_whole_and_validate() {
     );
 }
 
-#[test]
 #[test]
 fn events_0_3_payload_fixtures_round_trip_and_validate() {
     let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();

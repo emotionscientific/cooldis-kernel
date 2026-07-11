@@ -1,9 +1,11 @@
 use crate::agent::manifest_bind::canonical_json_hash;
-use crate::kernel::admission::{AdmissionGateContext, append_admission_decided};
+use crate::kernel::admission::{
+    AdmissionGateContext, admission_decided_record, append_admission_decided,
+};
 use crate::kernel::runtime_host::ReservedTurnSubmission;
 use crate::{
-    AdmissionDecision as EventAdmissionDecision, CLOCK_TICK_ROUTE_KIND, CanonicalContent,
-    CanonicalMessage, CooldisAppServer, CooldisCoalesceBurstsConfig,
+    AdmissionDecidedPayload, AdmissionDecision as EventAdmissionDecision, CLOCK_TICK_ROUTE_KIND,
+    CanonicalContent, CanonicalMessage, CooldisAppServer, CooldisCoalesceBurstsConfig,
     CooldisEgressProjectionRuleConfig, CooldisEgressRetryConfig, CooldisError,
     CooldisIoRouteConfig, CooldisResult, CooldisSupervisor, CooldisTypingSimulationConfig,
     EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore,
@@ -28,7 +30,7 @@ use cooldis_io_core::{
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
 use futures_util::future::BoxFuture;
 use regex::{Captures, Regex};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, Value as JsonValue, json};
 use sha2::{Digest, Sha256};
@@ -289,6 +291,208 @@ impl DaemonEgressState {
         Ok(())
     }
 
+    fn claim_ingress_thread_binding(
+        &self,
+        route_id: &str,
+        source_scope: &str,
+        scope_key: &str,
+        coordinates: &ThreadCoordinates,
+    ) -> IoResult<ThreadCoordinates> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(egress_state_error)?;
+        let existing = tx
+            .query_row(
+                "SELECT tenant_id, user_id, session_id, thread_id
+                 FROM cooldis_daemon_ingress_bindings
+                 WHERE route_id = ?1 AND source_scope = ?2 AND scope_key = ?3
+                 LIMIT 1",
+                params![route_id, source_scope, scope_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(egress_state_error)?;
+        let selected = match existing {
+            Some((tenant_id, user_id, session_id, thread_id)) => ThreadCoordinates {
+                tenant_id,
+                user_id,
+                session_id,
+                thread_id: ThreadId::parse_str(&thread_id).map_err(|err| {
+                    IoError::Queue(format!(
+                        "invalid ingress binding thread id {thread_id:?}: {err}"
+                    ))
+                })?,
+            },
+            None => {
+                tx.execute(
+                    "INSERT INTO cooldis_daemon_ingress_bindings (
+                        route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        route_id,
+                        source_scope,
+                        scope_key,
+                        coordinates.tenant_id,
+                        coordinates.user_id,
+                        coordinates.session_id,
+                        coordinates.thread_id.to_string(),
+                        now_ms() as i64,
+                    ],
+                )
+                .map_err(egress_state_error)?;
+                tx.execute(
+                    "INSERT INTO cooldis_daemon_egress_threads (
+                        route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        route_id,
+                        source_scope,
+                        scope_key,
+                        coordinates.tenant_id,
+                        coordinates.user_id,
+                        coordinates.session_id,
+                        coordinates.thread_id.to_string(),
+                        now_ms() as i64,
+                    ],
+                )
+                .map_err(egress_state_error)?;
+                coordinates.clone()
+            }
+        };
+        tx.commit().map_err(egress_state_error)?;
+        Ok(selected)
+    }
+
+    fn rebind_ingress_thread(
+        &self,
+        route_id: &str,
+        source_scope: &str,
+        scope_key: &str,
+        coordinates: &ThreadCoordinates,
+    ) -> IoResult<()> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(egress_state_error)?;
+        tx.execute(
+            "INSERT INTO cooldis_daemon_egress_threads (
+                route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(route_id, thread_id) DO UPDATE SET
+                source_scope = excluded.source_scope,
+                scope_key = excluded.scope_key,
+                tenant_id = excluded.tenant_id,
+                user_id = excluded.user_id,
+                session_id = excluded.session_id,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                route_id,
+                source_scope,
+                scope_key,
+                coordinates.tenant_id,
+                coordinates.user_id,
+                coordinates.session_id,
+                coordinates.thread_id.to_string(),
+                now_ms() as i64,
+            ],
+        )
+        .map_err(egress_state_error)?;
+        tx
+            .execute(
+                "INSERT INTO cooldis_daemon_ingress_bindings (
+                    route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(route_id, source_scope, scope_key) DO UPDATE SET
+                    tenant_id = excluded.tenant_id,
+                    user_id = excluded.user_id,
+                    session_id = excluded.session_id,
+                    thread_id = excluded.thread_id,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    route_id,
+                    source_scope,
+                    scope_key,
+                    coordinates.tenant_id,
+                    coordinates.user_id,
+                    coordinates.session_id,
+                    coordinates.thread_id.to_string(),
+                    now_ms() as i64,
+                ],
+            )
+            .map_err(egress_state_error)?;
+        tx.commit().map_err(egress_state_error)
+    }
+
+    fn clear_ingress_thread_binding_if_matches(
+        &self,
+        route_id: &str,
+        source_scope: &str,
+        scope_key: &str,
+        thread_id: ThreadId,
+    ) -> IoResult<()> {
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "DELETE FROM cooldis_daemon_ingress_bindings
+                 WHERE route_id = ?1 AND source_scope = ?2 AND scope_key = ?3 AND thread_id = ?4",
+                params![route_id, source_scope, scope_key, thread_id.to_string()],
+            )
+            .map_err(egress_state_error)?;
+        Ok(())
+    }
+
+    fn active_ingress_threads(&self, route_id: &str) -> IoResult<Vec<BoundEgressThread>> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT route_id, scope_key, tenant_id, user_id, session_id, thread_id
+                 FROM cooldis_daemon_ingress_bindings
+                 WHERE route_id = ?1
+                 ORDER BY scope_key",
+            )
+            .map_err(egress_state_error)?;
+        let rows = statement
+            .query_map(params![route_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(egress_state_error)?;
+        let mut bindings = Vec::new();
+        for row in rows {
+            let (route_id, scope_key, tenant_id, user_id, session_id, thread_id) =
+                row.map_err(egress_state_error)?;
+            bindings.push(BoundEgressThread {
+                route_id,
+                scope_key,
+                coordinates: ThreadCoordinates {
+                    tenant_id,
+                    user_id,
+                    session_id,
+                    thread_id: ThreadId::parse_str(&thread_id).map_err(|err| {
+                        IoError::Queue(format!(
+                            "invalid active ingress thread id {thread_id:?}: {err}"
+                        ))
+                    })?,
+                },
+            });
+        }
+        Ok(bindings)
+    }
+
     fn bound_threads(&self, route_id: &str) -> IoResult<Vec<BoundEgressThread>> {
         let connection = self.lock_connection()?;
         let mut statement = connection
@@ -296,7 +500,7 @@ impl DaemonEgressState {
                 "SELECT route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id
                  FROM cooldis_daemon_egress_threads
                  WHERE route_id = ?1
-                 ORDER BY updated_at_ms, thread_id",
+                 ORDER BY updated_at_ms, rowid",
             )
             .map_err(egress_state_error)?;
         let rows = statement
@@ -511,6 +715,12 @@ pub struct CooldisDaemonIoBridge {
     pause_after_fork_spawn: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     fork_spawn_paused: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    thread_load_root_barrier: Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    ingress_binding_barrier: Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    fork_claim_scan_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl CooldisDaemonIoBridge {
@@ -546,6 +756,12 @@ impl CooldisDaemonIoBridge {
             pause_after_fork_spawn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             fork_spawn_paused: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            thread_load_root_barrier: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            ingress_binding_barrier: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            fork_claim_scan_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -658,20 +874,17 @@ impl CooldisDaemonIoBridge {
 
     /// Loads durable ingress bindings for the startup hot-path map seed.
     ///
-    /// Rows are ordered oldest-first by `bound_threads`, so replacing by
-    /// `scope_key` reduces duplicate crash residue to the latest binding.
     /// Runtime handles are loaded lazily on first ingress or egress use.
     fn ingress_bindings(
         &self,
         state: &DaemonEgressState,
         route_id: &str,
     ) -> IoResult<Vec<(String, ThreadCoordinates)>> {
-        let mut latest_by_scope = HashMap::new();
-        for binding in state.bound_threads(route_id)? {
-            latest_by_scope.insert(binding.scope_key, binding.coordinates);
-        }
-
-        Ok(latest_by_scope.into_iter().collect())
+        Ok(state
+            .active_ingress_threads(route_id)?
+            .into_iter()
+            .map(|binding| (binding.scope_key, binding.coordinates))
+            .collect())
     }
 
     pub async fn start_egress_projector_sqlite_dsn(
@@ -752,20 +965,63 @@ impl CooldisDaemonIoBridge {
                     )),
                 ));
             }
-            let load_lock = self.thread_load_lock(coordinates.thread_id).await;
-            let _load_guard = load_lock.lock().await;
             loop {
                 match self.supervisor.get_thread_at(coordinates).await {
                     Ok(handle) => return Ok(handle),
                     Err(CooldisError::ThreadNotFound(_)) => {
-                        let lifecycle = match self
+                        let reconstructed = self
                             .reconstruct_thread_lifecycle(coordinates)
                             .await
-                            .map_err(ThreadHandleResolutionError::LifecycleLoad)?
-                        {
+                            .map_err(ThreadHandleResolutionError::LifecycleLoad)?;
+                        if let Some(lifecycle) = &reconstructed {
+                            #[cfg(test)]
+                            if loading.len() == 1 {
+                                let barrier = self
+                                    .thread_load_root_barrier
+                                    .lock()
+                                    .unwrap_or_else(|err| err.into_inner())
+                                    .clone();
+                                if let Some(barrier) = barrier {
+                                    barrier.wait().await;
+                                }
+                            }
+                            let mut seen_related = HashSet::new();
+                            for related_thread_id in lifecycle
+                                .topology
+                                .related_thread_ids()
+                                .into_iter()
+                                .filter(|thread_id| seen_related.insert(*thread_id))
+                            {
+                                let related_coordinates = ThreadCoordinates {
+                                    tenant_id: coordinates.tenant_id.clone(),
+                                    user_id: coordinates.user_id.clone(),
+                                    session_id: coordinates.session_id.clone(),
+                                    thread_id: related_thread_id,
+                                };
+                                self.get_or_load_thread_handle_inner(
+                                    &related_coordinates,
+                                    loading.clone(),
+                                )
+                                .await?;
+                            }
+                        }
+
+                        let load_lock = self.thread_load_lock(coordinates.thread_id).await;
+                        let _load_guard = load_lock.lock().await;
+                        if let Ok(handle) = self.supervisor.get_thread_at(coordinates).await {
+                            return Ok(handle);
+                        }
+                        let lifecycle = match reconstructed {
                             Some(lifecycle) => lifecycle,
                             None => {
-                                let payload = serde_json::to_value(ThreadReloadDegradedPayload {
+                                match self
+                                    .reconstruct_thread_lifecycle(coordinates)
+                                    .await
+                                    .map_err(ThreadHandleResolutionError::LifecycleLoad)?
+                                {
+                                    Some(_) => continue,
+                                    None => {
+                                        let payload = serde_json::to_value(ThreadReloadDegradedPayload {
                                     thread_id: coordinates.thread_id,
                                     missing: vec![
                                         "topology".to_string(),
@@ -781,58 +1037,41 @@ impl CooldisDaemonIoBridge {
                                         )),
                                     )
                                 })?;
-                                let stream_id = EventStreamId::for_thread(coordinates);
-                                self.supervisor
-                                    .runtime_store(&coordinates.tenant_id)
-                                    .await
-                                    .map_err(ThreadHandleResolutionError::LifecycleLoad)?
-                                    .append_events(
-                                        &stream_id,
-                                        vec![NewEventRecord::witnessed(
-                                            coordinates.clone(),
-                                            EventKind::ThreadReloadDegraded,
-                                            payload,
-                                        )],
-                                    )
-                                    .await
-                                    .map_err(|err| {
-                                        ThreadHandleResolutionError::LifecycleLoad(
-                                            CooldisError::History(err.to_string()),
-                                        )
-                                    })?;
-                                let now = now_ms();
-                                ThreadLifecycleRecord {
-                                    coordinates: coordinates.clone(),
-                                    parent_thread_id: None,
-                                    topology: ThreadTopology::root(),
-                                    status: ThreadLifecycleStatus::Idle,
-                                    latest_signal_id: None,
-                                    latest_checkpoint_id: None,
-                                    created_at_ms: now,
-                                    updated_at_ms: now,
-                                    metadata: BTreeMap::new(),
+                                        let stream_id = EventStreamId::for_thread(coordinates);
+                                        self.supervisor
+                                            .runtime_store(&coordinates.tenant_id)
+                                            .await
+                                            .map_err(ThreadHandleResolutionError::LifecycleLoad)?
+                                            .append_events(
+                                                &stream_id,
+                                                vec![NewEventRecord::witnessed(
+                                                    coordinates.clone(),
+                                                    EventKind::ThreadReloadDegraded,
+                                                    payload,
+                                                )],
+                                            )
+                                            .await
+                                            .map_err(|err| {
+                                                ThreadHandleResolutionError::LifecycleLoad(
+                                                    CooldisError::History(err.to_string()),
+                                                )
+                                            })?;
+                                        let now = now_ms();
+                                        ThreadLifecycleRecord {
+                                            coordinates: coordinates.clone(),
+                                            parent_thread_id: None,
+                                            topology: ThreadTopology::root(),
+                                            status: ThreadLifecycleStatus::Idle,
+                                            latest_signal_id: None,
+                                            latest_checkpoint_id: None,
+                                            created_at_ms: now,
+                                            updated_at_ms: now,
+                                            metadata: BTreeMap::new(),
+                                        }
+                                    }
                                 }
                             }
                         };
-                        let mut seen_related = HashSet::new();
-                        let related_thread_ids = lifecycle
-                            .topology
-                            .related_thread_ids()
-                            .into_iter()
-                            .filter(|thread_id| seen_related.insert(*thread_id));
-                        for related_thread_id in related_thread_ids {
-                            let related_coordinates = ThreadCoordinates {
-                                tenant_id: coordinates.tenant_id.clone(),
-                                user_id: coordinates.user_id.clone(),
-                                session_id: coordinates.session_id.clone(),
-                                thread_id: related_thread_id,
-                            };
-                            self.get_or_load_thread_handle_inner(
-                                &related_coordinates,
-                                loading.clone(),
-                            )
-                            .await?;
-                        }
                         match self.supervisor.load_thread_from_lifecycle(lifecycle).await {
                             Ok(handle) => return Ok(handle),
                             Err(CooldisError::ThreadAlreadyExists(_)) => {
@@ -1031,6 +1270,7 @@ impl CooldisDaemonIoBridge {
         envelope: IngressEnvelope,
         source_envelopes: &[IngressEnvelope],
         ingress_message_ids: &[String],
+        ingress_attempt: u32,
     ) -> IoResult<KernelIoReceipt> {
         if source_envelopes.is_empty() || source_envelopes.len() != ingress_message_ids.len() {
             return Err(IoError::Bridge(
@@ -1047,7 +1287,7 @@ impl CooldisDaemonIoBridge {
             source_envelopes,
             ingress_message_ids,
             true,
-            None,
+            Some(ingress_attempt),
         )
         .await
     }
@@ -1109,6 +1349,7 @@ impl CooldisDaemonIoBridge {
                 &policy_hash,
                 ingress_event_ids.clone(),
                 coalesced,
+                !ingress_message_ids.is_empty(),
             )
             .await?;
         let (receipt, _) = self
@@ -1647,19 +1888,58 @@ impl CooldisDaemonIoBridge {
         envelope: &IngressEnvelope,
         ingress_message_id: Option<&str>,
     ) -> IoResult<crate::EventRecord> {
-        let handle = self
-            .supervisor
-            .get_thread_at(coordinates)
-            .await
-            .map_err(cooldis_bridge_error)?;
-        handle
-            .append_control_event(ingress_received_control_record(
-                coordinates,
-                envelope,
-                ingress_message_id,
-            )?)
-            .await
-            .map_err(cooldis_bridge_error)
+        let record = ingress_received_control_record(coordinates, envelope, ingress_message_id)?;
+        let Some(ingress_message_id) = ingress_message_id else {
+            let handle = self
+                .supervisor
+                .get_thread_at(coordinates)
+                .await
+                .map_err(cooldis_bridge_error)?;
+            return handle
+                .append_control_event(record)
+                .await
+                .map_err(cooldis_bridge_error);
+        };
+        let store = self.ingress_event_store()?;
+        let stream_id = control_stream_id(coordinates);
+        loop {
+            let events = store
+                .read_events(&stream_id, None)
+                .await
+                .map_err(cooldis_history_error)?;
+            if let Some(existing) = events.iter().find(|event| {
+                event.kind == EventKind::IoIngressReceived
+                    && event
+                        .payload
+                        .get(INGRESS_MESSAGE_ID_FIELD)
+                        .and_then(Value::as_str)
+                        == Some(ingress_message_id)
+            }) {
+                if existing.payload.get("envelope_digest") != record.payload.get("envelope_digest")
+                {
+                    return Err(IoError::Bridge(format!(
+                        "durable ingress message {ingress_message_id:?} changed envelope digest"
+                    )));
+                }
+                return Ok(existing.clone());
+            }
+            let expected_next_sequence = events
+                .last()
+                .map(|event| EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| EventSequence::new(1));
+            match store
+                .append_events_fenced(&stream_id, expected_next_sequence, vec![record.clone()])
+                .await
+            {
+                Ok(mut appended) => {
+                    return appended.pop().ok_or_else(|| {
+                        IoError::Bridge("ingress witness append returned no record".to_string())
+                    });
+                }
+                Err(HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(err) => return Err(cooldis_history_error(err)),
+            }
+        }
     }
 
     async fn record_admission_decided(
@@ -1670,6 +1950,7 @@ impl CooldisDaemonIoBridge {
         policy_hash: &str,
         ingress_event_ids: Vec<crate::EventRecordId>,
         coalesced: bool,
+        durable: bool,
     ) -> IoResult<crate::EventRecord> {
         let handle = self
             .supervisor
@@ -1688,9 +1969,57 @@ impl CooldisDaemonIoBridge {
             admissible_decisions_for_envelope(envelope),
             ingress_event_ids,
         );
-        append_admission_decided(&handle, context)
-            .await
-            .map_err(cooldis_bridge_error)
+        if !durable {
+            return append_admission_decided(&handle, context)
+                .await
+                .map_err(cooldis_bridge_error);
+        }
+        let record =
+            admission_decided_record(coordinates.clone(), context).map_err(cooldis_bridge_error)?;
+        let desired: AdmissionDecidedPayload = serde_json::from_value(record.payload.clone())
+            .map_err(|err| IoError::Bridge(format!("decode admission decision payload: {err}")))?;
+        let store = self.ingress_event_store()?;
+        let stream_id = control_stream_id(coordinates);
+        loop {
+            let events = store
+                .read_events(&stream_id, None)
+                .await
+                .map_err(cooldis_history_error)?;
+            if let Some(existing) = events.iter().find(|event| {
+                event.kind == EventKind::AdmissionDecided
+                    && serde_json::from_value::<AdmissionDecidedPayload>(event.payload.clone())
+                        .is_ok_and(|payload| {
+                            payload.source_ingress_event_ids == desired.source_ingress_event_ids
+                        })
+            }) {
+                let existing_payload: AdmissionDecidedPayload =
+                    serde_json::from_value(existing.payload.clone()).map_err(|err| {
+                        IoError::Bridge(format!("decode existing admission decision: {err}"))
+                    })?;
+                if existing_payload != desired {
+                    return Err(IoError::Bridge(
+                        "durable ingress admission decision changed under redelivery".to_string(),
+                    ));
+                }
+                return Ok(existing.clone());
+            }
+            let expected_next_sequence = events
+                .last()
+                .map(|event| EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| EventSequence::new(1));
+            match store
+                .append_events_fenced(&stream_id, expected_next_sequence, vec![record.clone()])
+                .await
+            {
+                Ok(mut appended) => {
+                    return appended.pop().ok_or_else(|| {
+                        IoError::Bridge("admission decision append returned no record".to_string())
+                    });
+                }
+                Err(HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(err) => return Err(cooldis_history_error(err)),
+            }
+        }
     }
 
     async fn ensure_thread(
@@ -1732,6 +2061,15 @@ impl CooldisDaemonIoBridge {
                     if threads.get(&scope_key) == Some(&coordinates) {
                         threads.remove(&scope_key);
                     }
+                    drop(threads);
+                    if let Some((route_id, source_scope, state)) = &durable_binding {
+                        state.clear_ingress_thread_binding_if_matches(
+                            route_id,
+                            source_scope,
+                            &scope_key,
+                            coordinates.thread_id,
+                        )?;
+                    }
                 }
                 Err(ThreadHandleResolutionError::Lookup(err)) => {
                     return Err(cooldis_bridge_error(err));
@@ -1753,7 +2091,7 @@ impl CooldisDaemonIoBridge {
             .map(|binding| binding.metadata.clone())
             .unwrap_or_default();
 
-        let handle = self
+        let mut handle = self
             .supervisor
             .start_thread(ThreadStartRequest {
                 tenant_id: target.address.tenant_id.clone(),
@@ -1775,16 +2113,38 @@ impl CooldisDaemonIoBridge {
                 .await;
             return Err(cooldis_bridge_error(err));
         }
-        let coordinates = handle.context().coordinates.clone();
+        let mut coordinates = handle.context().coordinates.clone();
         if let Some((route_id, source_scope, state)) = durable_binding {
-            if let Err(err) = state.bind_thread(
+            #[cfg(test)]
+            {
+                let barrier = self
+                    .ingress_binding_barrier
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .clone();
+                if let Some(barrier) = barrier {
+                    barrier.wait().await;
+                }
+            }
+            let selected = match state.claim_ingress_thread_binding(
                 &route_id,
                 &source_scope,
                 &target.address.scope_key(),
                 &coordinates,
             ) {
+                Ok(selected) => selected,
+                Err(err) => {
+                    let _ = self.supervisor.shutdown_thread_at(&coordinates).await;
+                    return Err(err);
+                }
+            };
+            if selected != coordinates {
                 let _ = self.supervisor.shutdown_thread_at(&coordinates).await;
-                return Err(err);
+                handle = self
+                    .get_or_load_thread_handle(&selected)
+                    .await
+                    .map_err(|err| cooldis_bridge_error(err.into_inner()))?;
+                coordinates = selected;
             }
             pause_after_ingress_binding_for_restart_smoke().await?;
         }
@@ -1924,6 +2284,7 @@ impl CooldisDaemonIoBridge {
                     ingress_source_stream,
                     source_ingress_event_ids,
                     None,
+                    false,
                 )
                 .await?;
             return Ok((receipt, None));
@@ -1974,6 +2335,7 @@ impl CooldisDaemonIoBridge {
                 Some(source_stream),
                 &claim_payload.ingress_witness_event_ids,
                 Some(claim.id),
+                false,
             )
             .await?;
         self.append_ingress_settle(
@@ -1998,13 +2360,14 @@ impl CooldisDaemonIoBridge {
         ingress_source_stream: Option<&EventStreamId>,
         source_ingress_event_ids: &[EventRecordId],
         claim_event_id: Option<EventRecordId>,
+        scan_for_existing_spawn: bool,
     ) -> IoResult<(KernelIoReceipt, EventRecord)> {
-        let existing_spawn = match claim_event_id {
-            Some(claim_event_id) => {
+        let existing_spawn = match (claim_event_id, scan_for_existing_spawn) {
+            (Some(claim_event_id), true) => {
                 self.fork_spawned_for_claim(parent_coordinates, claim_event_id)
                     .await?
             }
-            None => None,
+            _ => None,
         };
         let (child_handle, spawned, recovering_spawned_child) = match existing_spawn {
             Some((spawned, payload)) => {
@@ -2058,7 +2421,7 @@ impl CooldisDaemonIoBridge {
             }
         };
         let child_coordinates = child_handle.context().coordinates.clone();
-        self.bind_egress_thread(envelope, target, &child_coordinates)
+        self.rebind_ingress_thread(envelope, target, &child_coordinates)
             .await?;
         self.threads
             .lock()
@@ -2127,6 +2490,9 @@ impl CooldisDaemonIoBridge {
         parent_coordinates: &ThreadCoordinates,
         claim_event_id: EventRecordId,
     ) -> IoResult<Option<(EventRecord, ThreadSpawnedPayload)>> {
+        #[cfg(test)]
+        self.fork_claim_scan_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let store = self.ingress_event_store()?;
         let events = store
             .read_events(&control_stream_id(parent_coordinates), None)
@@ -2219,6 +2585,26 @@ impl CooldisDaemonIoBridge {
         let state = self.egress_states.read().await.get(&key).cloned();
         if let Some(state) = state {
             state.bind_thread(&route_id, &key, &target.address.scope_key(), coordinates)?;
+        }
+        Ok(())
+    }
+
+    async fn rebind_ingress_thread(
+        &self,
+        envelope: &IngressEnvelope,
+        target: &ResolvedIoTarget,
+        coordinates: &ThreadCoordinates,
+    ) -> IoResult<()> {
+        let route_id = route_id_for_ingress(envelope);
+        let key = source_scope(&envelope.source.protocol, &route_id);
+        let state = self.egress_states.read().await.get(&key).cloned();
+        if let Some(state) = state {
+            state.rebind_ingress_thread(
+                &route_id,
+                &key,
+                &target.address.scope_key(),
+                coordinates,
+            )?;
         }
         Ok(())
     }
@@ -2926,6 +3312,7 @@ impl CooldisDaemonIoBridge {
                 Some(ingress_source_stream),
                 &claim_payload.ingress_witness_event_ids,
                 Some(claim.id),
+                true,
             )
             .await?;
         self.append_ingress_settle(
@@ -2960,10 +3347,20 @@ impl CooldisDaemonIoBridge {
                     "claimed ingress outcome has no resolved control stream".to_string(),
                 )
             })?;
-        let handle = self
+        let mut handle = self
             .get_or_load_thread_handle(&coordinates)
             .await
             .map_err(|err| cooldis_bridge_error(err.into_inner()))?;
+        if handle.status() == crate::ThreadStatus::Failed {
+            self.supervisor
+                .shutdown_thread_at(&coordinates)
+                .await
+                .map_err(cooldis_bridge_error)?;
+            handle = self
+                .get_or_load_thread_handle(&coordinates)
+                .await
+                .map_err(|err| cooldis_bridge_error(err.into_inner()))?;
+        }
         let decision = Self::claimed_decision(envelope, target, &payload.intent);
         let source_stream = control_stream_id(&coordinates);
         match &payload.intent {
@@ -3776,9 +4173,19 @@ impl CooldisDaemonQueueWorker {
                 .iter()
                 .map(|message| message.envelope.id.clone())
                 .collect::<Vec<_>>();
+            let ingress_attempt = batch
+                .iter()
+                .map(|message| message.attempt)
+                .max()
+                .unwrap_or(1);
             match self
                 .bridge
-                .submit_coalesced_queued_envelopes(merged, &source_envelopes, &ingress_message_ids)
+                .submit_coalesced_queued_envelopes(
+                    merged,
+                    &source_envelopes,
+                    &ingress_message_ids,
+                    ingress_attempt,
+                )
                 .await
             {
                 Ok(_) => {
@@ -5218,6 +5625,31 @@ fn init_egress_state_schema(connection: &rusqlite::Connection) -> IoResult<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_cooldis_daemon_egress_threads_route
                 ON cooldis_daemon_egress_threads (route_id, updated_at_ms);
+            CREATE TABLE IF NOT EXISTS cooldis_daemon_ingress_bindings (
+                route_id TEXT NOT NULL,
+                source_scope TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (route_id, source_scope, scope_key)
+            );
+            INSERT OR IGNORE INTO cooldis_daemon_ingress_bindings (
+                route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+            )
+            SELECT route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+            FROM cooldis_daemon_egress_threads AS candidate
+            WHERE candidate.rowid = (
+                SELECT latest.rowid
+                FROM cooldis_daemon_egress_threads AS latest
+                WHERE latest.route_id = candidate.route_id
+                  AND latest.source_scope = candidate.source_scope
+                  AND latest.scope_key = candidate.scope_key
+                ORDER BY latest.updated_at_ms DESC, latest.rowid DESC
+                LIMIT 1
+            );
             CREATE TABLE IF NOT EXISTS cooldis_daemon_egress_cursors (
                 route_id TEXT NOT NULL,
                 thread_id TEXT NOT NULL,
