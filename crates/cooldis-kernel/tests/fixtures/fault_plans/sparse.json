@@ -1,0 +1,40 @@
+{
+  "directives": [
+    {
+      "action": "Fail",
+      "component": "Store",
+      "nth": 2,
+      "operation": "select_branch",
+      "timing": "Before"
+    },
+    {
+      "action": {
+        "Delay": {
+          "nanos": 1000000,
+          "secs": 0
+        }
+      },
+      "component": "Queue",
+      "nth": 2,
+      "operation": "retry_ingress",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Provider",
+      "nth": 3,
+      "operation": "stream",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Process",
+      "nth": 3,
+      "operation": "spawn-snapshot",
+      "timing": "Before"
+    }
+  ],
+  "intensity": "Sparse",
+  "seed": 16400139538738882021,
+  "vocabulary_version": 1
+}
