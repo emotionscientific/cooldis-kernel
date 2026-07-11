@@ -1,6 +1,6 @@
 # Cooldis
 
-Cooldis is an open serverless agent platform built on the Cool Declarative Intelligence Substrate.
+Cooldis is an open serverless agent platform.
 
 Define the agent, not the app around it.
 

@@ -11,8 +11,7 @@
 
 ## What Is Cooldis
 
-Cooldis is an open serverless agent platform built on the Cool Declarative
-Intelligence Substrate.
+Cooldis is an open serverless agent platform.
 
 At the kernel level, Cooldis is a Rust runtime for declared agent workloads. An
 agent declaration describes the model profile, tools, resources, secrets,
@@ -27,17 +26,15 @@ contracts those systems depend on.
 
 ## What We Mean By Kernel, Runtime, Harness
 
-"Kernel" is an overloaded word, so here is how this repository uses it. We
-mean it in the operating-system sense — the microkernel tradition
-specifically: a small, privileged core that owns mechanism and refuses to own
-policy. The test for what belongs in it is the trusted-computing-base test: if
-changing a thing could make the system's audit receipts lie, it is compiled
-into the kernel — event ordering, provenance, fail-closed grants, budgets,
-receipts — and everything else lives above it, named, versioned, and
-swappable. The kernel does not think, does not prompt, and does not
-orchestrate. (So: not "kernel" as in a Jupyter kernel, which is an evaluator,
-and not "kernel" as in an orchestration SDK. Closer to seL4 than to Semantic
-Kernel.) The **runtime** is that kernel in motion — the running system that
+"Kernel" is an overloaded word, so here is how this repository uses it: the
+privileged core that owns mechanism and refuses to own policy. The test for
+what belongs in it is simple: if changing a thing could make the system's
+audit receipts lie, it is compiled into the kernel (event ordering,
+provenance, fail-closed grants, budgets, receipts), and everything else lives
+above it, named, versioned, and swappable. The kernel does not think, does not
+prompt, and does not orchestrate. (So: not "kernel" as in a Jupyter kernel,
+which is an evaluator, and not "kernel" as in an orchestration SDK.) The
+**runtime** is that kernel in motion — the running system that
 executes turns and witnesses facts; when we say "the runtime did it," we mean
 an event whose authority is the system's own attestation, not some function's
 output. And a **harness** — the industry's word for everything wrapped around
