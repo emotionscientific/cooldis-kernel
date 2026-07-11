@@ -641,6 +641,7 @@ impl CanonicalProviderRuntime {
             provider_retained_text_bytes = provider_compilation.retained_text_bytes;
         }
         let receipt_payload = context_compile_receipt_payload(
+            &turn_context.turn_id,
             &session_entries,
             &compiled_context,
             &context_receipt_static_segments(&static_context_segments, &skill_context_segments),
@@ -2127,6 +2128,7 @@ fn context_receipt_static_segments(
 }
 
 fn context_compile_receipt_payload(
+    turn_id: &str,
     session_entries: &[SessionEntry],
     compiled_context: &CompiledAgentContext,
     static_context_segments: &[AgentManifestStaticContextSegment],
@@ -2157,6 +2159,7 @@ fn context_compile_receipt_payload(
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
+        "turn_id": turn_id,
         "strategy": "naive_assembly",
         "strategy_version": "v1",
         "session_entry_ids": session_entries

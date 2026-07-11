@@ -152,14 +152,20 @@ carry the reserved `turn_id`, submission mode, and input digest. Interrupt claim
 carry the replacement turn ID when present, cancellation reason, and input
 digest.
 
-After the reserved submission is sent, the daemon waits for the earliest
-executing-side turn-trace evidence carrying that turn ID, then appends
-`io.ingress.settled`. `turn.submitted` is not execution evidence because it is
-the submitting side's apply-time record. A settle cites its claim and evidence
-and records whether execution or recovery settled it. Only then does the queue
-worker complete the lease. The derived thread-stream `turn.submitted` record
-still carries target context for the egress projector and cites the control
-stream ingress witnesses, but it no longer owns ingress idempotency.
+After the reserved submission is sent, the daemon waits for execution evidence
+and then appends `io.ingress.settled`. Evidence is per intent. A queue or
+interrupt-replacement claim needs the earliest executing-side turn-trace event
+carrying its turn ID, and the executing side's own input persistence does not
+qualify: the canonical earliest evidence is the context compile receipt, which
+names its turn. A steer claim settles on its persisted steer input entry,
+because durable consumption of the input is the steer outcome whether the
+running turn accepted it or the idle thread recorded and rejected it.
+`turn.submitted` is never evidence because it is the submitting side's
+apply-time record. A settle cites its claim and evidence and records whether
+execution or recovery settled it. Only then does the queue worker complete the
+lease. The derived thread-stream `turn.submitted` record still carries target
+context for the egress projector and cites the control stream ingress
+witnesses, but it no longer owns ingress idempotency.
 
 Redelivery folds claim and settle state through the `EventStore` on that one
 control stream. A settled claim is terminal and dedupes without repeating a

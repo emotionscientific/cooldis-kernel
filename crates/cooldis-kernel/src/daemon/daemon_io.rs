@@ -1249,17 +1249,22 @@ impl CooldisDaemonIoBridge {
         &self,
         coordinates: &ThreadCoordinates,
         turn_id: &str,
+        submission_mode: TurnSubmissionMode,
     ) -> IoResult<EventRecord> {
         let store = self.ingress_event_store()?;
         let stream_id = EventStreamId::for_thread(coordinates);
         tokio::time::timeout(Duration::from_secs(30), async {
+            let mut next_sequence = EventSequence::new(1);
             loop {
                 let events = store
-                    .read_events(&stream_id, None)
+                    .read_events(&stream_id, Some(next_sequence))
                     .await
                     .map_err(cooldis_history_error)?;
-                if let Some(evidence) = turn_execution_evidence(&events, turn_id) {
+                if let Some(evidence) = turn_execution_evidence(&events, turn_id, submission_mode) {
                     return Ok(evidence);
+                }
+                if let Some(last) = events.last() {
+                    next_sequence = EventSequence::new(last.sequence.get() + 1);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -2432,6 +2437,7 @@ impl CooldisDaemonIoBridge {
         claim: &EventRecord,
         claim_payload: &IoIngressClaimedPayload,
         turn_id: &str,
+        submission_mode: TurnSubmissionMode,
         reserved: ReservedTurnSubmission,
         ingress_source_stream: &EventStreamId,
         settled_by: IngressSettledBy,
@@ -2451,7 +2457,7 @@ impl CooldisDaemonIoBridge {
             .insert(target.address.scope_key(), turn_id.to_string());
         reserved.submit().await;
         let evidence = self
-            .wait_for_turn_execution_evidence(coordinates, turn_id)
+            .wait_for_turn_execution_evidence(coordinates, turn_id, submission_mode)
             .await?;
         self.append_ingress_settle(
             coordinates,
@@ -2510,11 +2516,20 @@ impl CooldisDaemonIoBridge {
                         "recovered ingress input does not match the claimed digest".to_string(),
                     ));
                 }
+                let mode = match submission_mode.as_str() {
+                    "queue" => TurnSubmissionMode::Queue,
+                    "steer" => TurnSubmissionMode::Steer,
+                    other => {
+                        return Err(IoError::Bridge(format!(
+                            "claimed ingress turn has unknown submission mode {other:?}"
+                        )));
+                    }
+                };
                 let thread_events = handle
                     .read_thread_events(None)
                     .await
                     .map_err(cooldis_bridge_error)?;
-                if let Some(evidence) = turn_execution_evidence(&thread_events, turn_id) {
+                if let Some(evidence) = turn_execution_evidence(&thread_events, turn_id, mode) {
                     self.append_ingress_settle(
                         &coordinates,
                         &claim,
@@ -2527,15 +2542,6 @@ impl CooldisDaemonIoBridge {
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
                     return Ok(receipt);
                 }
-                let mode = match submission_mode.as_str() {
-                    "queue" => TurnSubmissionMode::Queue,
-                    "steer" => TurnSubmissionMode::Steer,
-                    other => {
-                        return Err(IoError::Bridge(format!(
-                            "claimed ingress turn has unknown submission mode {other:?}"
-                        )));
-                    }
-                };
                 let reserved = self
                     .supervisor
                     .reserve_turn_to_with_admission(
@@ -2556,6 +2562,7 @@ impl CooldisDaemonIoBridge {
                     &claim,
                     &payload,
                     turn_id,
+                    mode,
                     reserved,
                     &source_stream,
                     IngressSettledBy::Recovery,
@@ -2599,7 +2606,9 @@ impl CooldisDaemonIoBridge {
                     .read_thread_events(None)
                     .await
                     .map_err(cooldis_bridge_error)?;
-                if let Some(evidence) = turn_execution_evidence(&thread_events, turn_id) {
+                if let Some(evidence) =
+                    turn_execution_evidence(&thread_events, turn_id, TurnSubmissionMode::Interrupt)
+                {
                     self.append_ingress_settle(
                         &coordinates,
                         &claim,
@@ -2632,6 +2641,7 @@ impl CooldisDaemonIoBridge {
                     &claim,
                     &payload,
                     turn_id,
+                    TurnSubmissionMode::Interrupt,
                     reserved,
                     &source_stream,
                     IngressSettledBy::Recovery,
@@ -2736,6 +2746,7 @@ impl CooldisDaemonIoBridge {
                         &claim,
                         &claim_payload,
                         turn_id,
+                        TurnSubmissionMode::Queue,
                         reserved,
                         source_stream,
                         IngressSettledBy::Execution,
@@ -2819,6 +2830,7 @@ impl CooldisDaemonIoBridge {
                         &claim,
                         &claim_payload,
                         turn_id,
+                        TurnSubmissionMode::Steer,
                         reserved,
                         source_stream,
                         IngressSettledBy::Execution,
@@ -2923,6 +2935,7 @@ impl CooldisDaemonIoBridge {
                             &claim,
                             &claim_payload,
                             turn_id,
+                            TurnSubmissionMode::Interrupt,
                             reserved,
                             source_stream,
                             IngressSettledBy::Execution,
@@ -4056,11 +4069,17 @@ fn ingress_outcome_turn_id(state: &IngressOutcomeState) -> Option<&str> {
     }
 }
 
-fn turn_execution_evidence(events: &[EventRecord], turn_id: &str) -> Option<EventRecord> {
+fn turn_execution_evidence(
+    events: &[EventRecord],
+    turn_id: &str,
+    submission_mode: TurnSubmissionMode,
+) -> Option<EventRecord> {
     events
         .iter()
         .find(|event| {
             event.kind != EventKind::TurnSubmitted
+                && (submission_mode == TurnSubmissionMode::Steer
+                    || event.kind != EventKind::SessionEntryAppended)
                 && (event.payload.get("turn_id").and_then(Value::as_str) == Some(turn_id)
                     || event
                         .payload

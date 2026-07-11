@@ -153,6 +153,14 @@ the `turn.submitted` record for an ingress turn is the submitting side's
 apply-time record, adopted by the executing side through turn-id idempotency,
 so it is not execution evidence.
 
+Amended 2026-07-11: evidence is per intent. Queue and interrupt-replacement
+claims exclude `session.entry.appended` records; the executing side's input
+persistence proves ownership, not execution, and recovery re-submits in the
+window between input persistence and the first turn-trace event, adopting the
+persisted input by turn id. The context compile receipt carries its turn id and
+is the canonical earliest evidence. Steer claims settle on the persisted steer
+input entry; durable consumption is the steer outcome.
+
 Recovery must be safe against a still-live original apply (a slow apply whose
 lease expired), and re-submission must be safe when execution started but
 left no evidence yet. Three requirements make it so:
