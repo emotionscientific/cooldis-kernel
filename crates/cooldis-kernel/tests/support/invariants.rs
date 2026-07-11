@@ -11,8 +11,9 @@
 //!   durable event payloads and uses the ordered `shutdown_all.completed`
 //!   transcript receipt as the completed-shutdown cut;
 //! - inv3 reads non-mutating queue probe receipts (`queue.lease`,
-//!   `queue.redelivery`, `queue.clock`, and `queue.drain.completed`) because
-//!   `IngressQueueStore` has no read-only inspection operation;
+//!   `queue.redelivery`, `queue.complete`, `queue.clock`, and
+//!   `queue.drain.completed`) because `IngressQueueStore` has no read-only
+//!   inspection operation;
 //! - inv5 uses a `recovery.probe` transcript receipt naming a
 //!   `reservation_key`. A durable event with `resident_state = failed |
 //!   completed` and that key must be followed by a durable event carrying
@@ -313,6 +314,7 @@ impl ScenarioInvariant for BoundedQueueInvariant {
         let mut now = None;
         let mut leases: HashMap<String, LeaseWitness> = HashMap::new();
         let mut redeliveries: HashMap<String, Vec<(usize, u64)>> = HashMap::new();
+        let mut completions: HashMap<String, Vec<usize>> = HashMap::new();
         let mut violations = Vec::new();
         for (index, item) in world.transcript.items.iter().enumerate() {
             match item.label.as_str() {
@@ -344,6 +346,14 @@ impl ScenarioInvariant for BoundedQueueInvariant {
                             .push((index, attempt));
                     }
                 }
+                "queue.complete" => {
+                    if let Some(message_id) = item.value.get("message_id").and_then(Value::as_str) {
+                        completions
+                            .entry(message_id.to_string())
+                            .or_default()
+                            .push(index);
+                    }
+                }
                 "queue.drain.completed" => {
                     if let Some(remaining) = item.value.get("remaining").and_then(Value::as_u64)
                         && remaining != 0
@@ -363,6 +373,12 @@ impl ScenarioInvariant for BoundedQueueInvariant {
         if let Some(now) = now {
             for (message_id, lease) in leases {
                 if now <= lease.visible_until_tick {
+                    continue;
+                }
+                let completed = completions
+                    .get(&message_id)
+                    .is_some_and(|indices| indices.iter().any(|index| *index > lease.item_index));
+                if completed {
                     continue;
                 }
                 let redelivered = redeliveries.get(&message_id).is_some_and(|attempts| {
@@ -791,6 +807,49 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn inv3_discharges_completed_lease_but_reports_uncompleted_expired_lease() {
+        let store = InMemorySessionStore::new();
+        let queue = EmptyQueue;
+        let completed = NormalizedTranscript {
+            items: vec![
+                receipt(
+                    "queue.lease",
+                    json!({"message_id": "completed", "attempt": 1, "visible_until_tick": 5}),
+                ),
+                receipt(
+                    "queue.complete",
+                    json!({"message_id": "completed", "attempt": 1, "tick": 3}),
+                ),
+                receipt("queue.clock", json!({"tick": 6})),
+            ],
+        };
+        let mut completed_world = world(&store, &completed);
+        completed_world.queue = Some(&queue);
+        assert!(
+            BoundedQueueInvariant
+                .check(&completed_world)
+                .await
+                .is_empty(),
+            "an accepted completion after the lease must discharge it"
+        );
+
+        let uncompleted = NormalizedTranscript {
+            items: vec![
+                receipt(
+                    "queue.lease",
+                    json!({"message_id": "uncompleted", "attempt": 1, "visible_until_tick": 5}),
+                ),
+                receipt("queue.clock", json!({"tick": 6})),
+            ],
+        };
+        let mut uncompleted_world = world(&store, &uncompleted);
+        uncompleted_world.queue = Some(&queue);
+        let violations = BoundedQueueInvariant.check(&uncompleted_world).await;
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].detail.contains("no later redelivery"));
     }
 
     #[tokio::test]
