@@ -138,8 +138,11 @@ For routes using `threading = "per_conversation"`, the conversation-to-thread
 binding is durable. Route startup restores durable bindings before accepting
 ingress, so a conversation resumes the same thread after a daemon restart;
 runtime threads not yet resident in the fresh supervisor are loaded lazily on
-first use. If that lifecycle load fails, the stale binding is replaced by a
-fresh, durably bound thread before ingress is submitted.
+first use. If durable thread history exists and that lifecycle load fails, the
+stale binding is replaced by a fresh, durably bound thread before ingress is
+submitted. A binding with no thread history is instead an incomplete initial
+route reservation: a failed kernel start leaves that row in place, and the next
+attempt retries the same reserved id.
 
 Durable queue apply uses the leased `IngressEnvelope.id` as its idempotency key.
 The resolved thread's control stream owns the envelope outcome lifecycle. Here
@@ -150,11 +153,13 @@ submission. The typed claim names every covered envelope, its ingress witnesses,
 the admission event, and exactly one intended outcome. Queue and steer claims
 carry the reserved `turn_id`, submission mode, and input digest. Interrupt claims
 carry the replacement turn ID when present, cancellation reason, and input
-digest. Fork claims carry the child turn key and input digest. Only after the
-parent control stream accepts that claim does the daemon checkpoint the parent,
-fork one child, append `thread.spawned`, bind egress to the child, and submit the
-child turn. Racing applies fold the same parent claim, so the loser performs no
-fork effects.
+digest. Fork claims written by this version carry the child turn key, a
+preallocated child thread id, and the input digest. The claim is the durable
+child reservation required by ADR 0004 Decision 4. Only after the parent
+control stream accepts that claim does the daemon checkpoint the parent,
+find-or-create that exact child, append `thread.spawned`, bind egress to the
+child, and submit the child turn. Racing applies fold the same parent claim, so
+the loser performs no fork effects and cannot allocate a second child.
 
 After the reserved submission is sent, the daemon waits for execution evidence
 and then appends `io.ingress.settled`. Evidence is per intent. A queue or
@@ -212,7 +217,18 @@ as corrupt history instead of being recovered.
 
 Fork recovery reuses the child named by a matching `thread.spawned`, completes
 binding and child submit, and settles. If no matching spawn exists, recovery
-checkpoints the parent at recovery time and runs the fork effects once.
+uses the child id reserved by the claim. It adopts that child's durable start
+identity and original checkpoint ancestry when creation completed before the
+crash; otherwise it creates the reserved id from a recovery-time checkpoint.
+Either path appends exactly one `thread.spawned`, so the checkpoint clone stays
+one ancestry batch and the creation-before-spawn cut cannot orphan a child.
+
+For a new per-conversation root, the daemon preallocates a thread id and claims
+the existing durable initial-route row before calling the kernel start path.
+Contenders find-or-start only the id selected by that row. A losing candidate
+therefore writes no `thread_started`, manifest, turn, or other thread history;
+an interrupted winner can be adopted by a later attempt using the same
+reservation.
 
 This claim/settle protocol closes the process-death window between durable
 intent and volatile submission without changing the outbound send/receipt
@@ -498,11 +514,11 @@ envelope again.
   it.
 - `fork_on_new_dm`: new direct messages fork the resolved source thread through
   `thread/fork`, then submit the incoming text to the child thread. Durable queue
-  admission first claims the envelope on the parent's control stream. The
-  checkpoint, child creation, lineage witness, egress binding, and child submit
-  all follow that claim. The parent control stream witnesses lineage with
-  `thread.spawned`, the existing `fork.sourceCut` shape, and the optional
-  `fork.claim_event_id` recovery join.
+  admission first claims the envelope on the parent's control stream. The claim
+  reserves its child thread id before the checkpoint, child creation, lineage
+  witness, egress binding, and child submit. The parent control stream witnesses
+  lineage with `thread.spawned`, the existing `fork.sourceCut` shape, and the
+  optional `fork.claim_event_id` recovery join used by durable ingress.
 - `coalesce_bursts`: durable queue workers batch inbound messages from the same
   route/source/external conversation before admission. Configure it per route
   with `coalesce_bursts = { window_ms = 750, max_batch = 8 }`. The first

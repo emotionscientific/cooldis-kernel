@@ -710,6 +710,8 @@ pub enum IngressOutcomeIntent {
     },
     Fork {
         child_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_thread_id: Option<ThreadId>,
         input_digest: String,
     },
     Interrupt {

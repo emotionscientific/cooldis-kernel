@@ -6,6 +6,7 @@ mod event_trace;
 mod fault;
 mod fault_plan;
 mod invariant_claims;
+mod invariant_forks;
 mod invariants;
 mod scenario;
 mod scripted_provider;
@@ -20,6 +21,8 @@ pub use fault::*;
 pub use fault_plan::*;
 #[allow(unused_imports)]
 pub use invariant_claims::*;
+#[allow(unused_imports)]
+pub use invariant_forks::*;
 #[allow(unused_imports)]
 pub use invariants::*;
 #[allow(unused_imports)]

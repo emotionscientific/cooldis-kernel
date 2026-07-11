@@ -3484,6 +3484,103 @@ async fn resume_and_fork_use_loaded_checkpoint_records() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
+    let child_thread_id = ThreadId::new();
+    let factory = Arc::new(BlockingThreadBuildFactory::new(child_thread_id));
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(factory.clone(), store.clone());
+    let parent = host
+        .start_thread(
+            coords("tenant_a", "user_1", "fork-reserved-no-start"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let first_checkpoint = host
+        .create_checkpoint(
+            parent.context().coordinates.thread_id,
+            None,
+            Some("first fork cut".to_string()),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let fork_host = host.clone();
+    let attempted_checkpoint = first_checkpoint.clone();
+    let first_attempt = tokio::spawn(async move {
+        fork_host
+            .fork_thread_from_checkpoint_with_id(attempted_checkpoint, child_thread_id)
+            .await
+    });
+    factory.wait_until_blocked().await;
+    assert!(
+        store
+            .active_leaf(&ThreadCoordinates {
+                tenant_id: parent.context().coordinates.tenant_id.clone(),
+                user_id: parent.context().coordinates.user_id.clone(),
+                session_id: parent.context().coordinates.session_id.clone(),
+                thread_id: child_thread_id,
+            })
+            .await
+            .unwrap()
+            .is_some(),
+        "the cut must land after the branch clone"
+    );
+    first_attempt.abort();
+    match first_attempt.await {
+        Err(err) => assert!(err.is_cancelled()),
+        Ok(_) => panic!("blocked fork unexpectedly completed"),
+    }
+
+    let recovery_checkpoint = host
+        .create_checkpoint(
+            parent.context().coordinates.thread_id,
+            None,
+            Some("recovery checkpoint".to_string()),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    factory.release();
+    let child = host
+        .fork_thread_from_checkpoint_with_id(recovery_checkpoint, child_thread_id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        child.context().topology.lineage,
+        ThreadLineage::Branch {
+            parent_thread_id,
+            checkpoint_id: Some(checkpoint_id),
+        } if parent_thread_id == parent.context().coordinates.thread_id
+            && checkpoint_id == first_checkpoint.id
+    ));
+    let events = store
+        .read_events(
+            &EventStreamId::for_thread(&child.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let first_checkpoint_id = first_checkpoint.id.to_string();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["runtime_kind"].as_str() == Some("thread_started")
+                    && event.payload["runtime_payload"]["metadata"]["forked_from_checkpoint_id"]
+                        .as_str()
+                        == Some(first_checkpoint_id.as_str())
+            })
+            .count(),
+        1,
+        "recovery must append one child start identity over the existing clone"
+    );
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn resume_rejects_checkpoints_created_by_non_root_threads() {
     let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
     let parent = host

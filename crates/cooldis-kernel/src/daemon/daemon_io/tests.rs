@@ -2621,7 +2621,32 @@ async fn racing_initial_applies_share_the_durable_conversation_binding() {
     assert_eq!(
         tenant.runtime.threads.len(),
         1,
-        "the losing provisional root must be removed"
+        "only the reserved root may become resident"
+    );
+    let mut candidates = bridge.initial_root_candidates.lock().unwrap().clone();
+    candidates.extend(
+        competing_bridge
+            .initial_root_candidates
+            .lock()
+            .unwrap()
+            .clone(),
+    );
+    candidates.sort_by_key(|candidate| candidate.thread_id.to_string());
+    candidates.dedup_by_key(|candidate| candidate.thread_id);
+    assert_eq!(
+        candidates.len(),
+        2,
+        "both racers must preallocate a root id"
+    );
+    let loser = candidates
+        .iter()
+        .find(|candidate| candidate.thread_id != coordinates.thread_id)
+        .expect("one candidate must lose the durable route reservation");
+    assert!(
+        thread_events_for(server.session_store_path(), loser)
+            .await
+            .is_empty(),
+        "the losing root candidate must write zero durable start history"
     );
     let _ = std::fs::remove_dir_all(fixture_root);
 }
@@ -2871,6 +2896,308 @@ async fn fork_claim_before_fork_recovers_one_child_after_restart() {
             .filter(|event| event.kind == EventKind::TurnSubmitted)
             .count(),
         1
+    );
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+async fn append_raw_legacy_fork_claim(
+    session_store_path: &Path,
+    coordinates: &ThreadCoordinates,
+    ingress_envelope_id: &str,
+    settled: bool,
+) -> EventRecord {
+    let store = SqliteSessionStore::open(session_store_path).unwrap();
+    let control_stream = control_stream_id(coordinates);
+    let ingress_witness_event_id = EventRecordId::new();
+    let admission_event_id = EventRecordId::new();
+    let claim = NewEventRecord::discharged(
+        coordinates.clone(),
+        EventKind::IoIngressClaimed,
+        serde_json::json!({
+            "ingress_envelope_ids": [ingress_envelope_id],
+            "ingress_witness_event_ids": [ingress_witness_event_id],
+            "admission_event_id": admission_event_id,
+            "intent": {
+                "outcome": "fork",
+                "child_key": "legacy-child-turn",
+                "input_digest": "sha256:legacy-input"
+            }
+        }),
+        ingress_claim_provenance(
+            &control_stream,
+            &[ingress_witness_event_id],
+            admission_event_id,
+        ),
+    );
+    let claim_id = claim.id;
+    let mut records = vec![claim];
+    if settled {
+        records.push(NewEventRecord::discharged(
+            coordinates.clone(),
+            EventKind::IoIngressSettled,
+            serde_json::json!({
+                "claim_event_id": claim_id,
+                "ingress_envelope_ids": [ingress_envelope_id],
+                "settled_by": "recovery"
+            }),
+            ingress_settle_provenance(&control_stream, coordinates, claim_id, None),
+        ));
+    }
+    store
+        .append_events(&control_stream, records)
+        .await
+        .unwrap()
+        .remove(0)
+}
+
+#[tokio::test(start_paused = true)]
+async fn settled_legacy_fork_claim_does_not_poison_new_scope_envelopes() {
+    let fixture_root = test_root("settled-legacy-fork-claim-scope");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    bridge
+        .submit_envelope(telegram_queue_envelope_with_update(
+            "seed legacy claim scope",
+            "6100",
+        ))
+        .await
+        .unwrap();
+    let coordinates = only_thread_coordinates(&bridge).await;
+    append_raw_legacy_fork_claim(
+        &session_store_path,
+        &coordinates,
+        "rc6-settled-fork-envelope",
+        true,
+    )
+    .await;
+
+    let envelope = telegram_queue_envelope_with_update("new work after rc6 upgrade", "6101");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-after-settled-legacy-fork",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-after-settled-legacy-fork",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(queue.completed().await);
+
+    let events = control_events_for(&session_store_path, &coordinates).await;
+    let new_claim = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::IoIngressClaimed
+                && event.payload["ingress_envelope_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
+        })
+        .expect("the new envelope should claim normally beside legacy history");
+    assert!(events.iter().any(|event| {
+        event.kind == EventKind::IoIngressSettled
+            && event.payload["claim_event_id"].as_str() == Some(new_claim.id.to_string().as_str())
+    }));
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unsettled_legacy_fork_claim_errors_only_its_own_envelope() {
+    let fixture_root = test_root("unsettled-legacy-fork-claim-scope");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    bridge
+        .submit_envelope(telegram_queue_envelope_with_update(
+            "seed unsettled legacy scope",
+            "6200",
+        ))
+        .await
+        .unwrap();
+    let coordinates = only_thread_coordinates(&bridge).await;
+
+    let legacy_envelope = telegram_queue_envelope_with_update("legacy redelivery", "6201")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    append_raw_legacy_fork_claim(
+        &session_store_path,
+        &coordinates,
+        &legacy_envelope.id,
+        false,
+    )
+    .await;
+    let legacy_queue = Arc::new(ScriptedIngressQueue::new(
+        "message-unsettled-legacy-fork",
+        legacy_envelope,
+        std::iter::empty::<&str>(),
+    ));
+    legacy_queue.state.lock().await.attempt = 1;
+    let legacy_worker = CooldisDaemonQueueWorker::new(
+        legacy_queue.clone(),
+        bridge.clone(),
+        "worker-unsettled-legacy-fork",
+        30,
+    );
+    let err = legacy_worker.drain_once().await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("predates reservation-before-creation and cannot be recovered"),
+        "unexpected legacy recovery error: {err}"
+    );
+    assert!(!legacy_queue.completed().await);
+
+    let fresh_envelope = telegram_queue_envelope_with_update("fresh work beside legacy", "6202");
+    let fresh_ingress_id = fresh_envelope.id.clone();
+    let fresh_queue = Arc::new(ScriptedIngressQueue::new(
+        "message-beside-unsettled-legacy-fork",
+        fresh_envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let fresh_worker = CooldisDaemonQueueWorker::new(
+        fresh_queue.clone(),
+        bridge.clone(),
+        "worker-beside-unsettled-legacy-fork",
+        30,
+    );
+    assert_eq!(fresh_worker.drain_once().await.unwrap(), 1);
+    assert!(fresh_queue.completed().await);
+    let events = control_events_for(&session_store_path, &coordinates).await;
+    let fresh_claim = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::IoIngressClaimed
+                && event.payload["ingress_envelope_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&fresh_ingress_id)))
+        })
+        .expect("a different envelope should not be poisoned by the legacy claim");
+    assert!(events.iter().any(|event| {
+        event.kind == EventKind::IoIngressSettled
+            && event.payload["claim_event_id"].as_str() == Some(fresh_claim.id.to_string().as_str())
+    }));
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() {
+    let fixture_root = test_root("fork-creation-before-spawn-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("recover reserved fork child")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-fork-creation-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    bridge
+        .pause_after_fork_creation
+        .store(true, Ordering::SeqCst);
+    let creation_paused = bridge.fork_creation_paused.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-fork-creation-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    creation_paused.await;
+
+    let parent_coordinates = route_bindings(&bridge).await[0].coordinates.clone();
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("the reservation claim must precede creation");
+    let claim_payload: IoIngressClaimedPayload =
+        serde_json::from_value(claim.payload.clone()).unwrap();
+    let reserved_child_thread_id = match claim_payload.intent {
+        IngressOutcomeIntent::Fork {
+            child_thread_id, ..
+        } => child_thread_id.expect("new fork claims must reserve their child id"),
+        other => panic!("unexpected claim intent: {other:?}"),
+    };
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::ThreadSpawned),
+        "the cut must land before thread.spawned"
+    );
+    let child_coordinates = ThreadCoordinates {
+        tenant_id: parent_coordinates.tenant_id.clone(),
+        user_id: parent_coordinates.user_id.clone(),
+        session_id: parent_coordinates.session_id.clone(),
+        thread_id: reserved_child_thread_id,
+    };
+    let child_events = thread_events_for(&session_store_path, &child_coordinates).await;
+    assert_eq!(
+        child_events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["runtime_kind"].as_str() == Some("thread_started")
+                    && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
+                        .as_str()
+                        .is_some_and(|id| id == parent_coordinates.thread_id.to_string())
+            })
+            .count(),
+        1,
+        "the child must exist durably inside the creation-before-spawn window"
+    );
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge.clone(),
+        "worker-after-fork-creation-cut",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    let spawned = control_events
+        .iter()
+        .filter(|event| event.kind == EventKind::ThreadSpawned)
+        .collect::<Vec<_>>();
+    assert_eq!(spawned.len(), 1, "recovery must join the topology once");
+    let spawned_payload: ThreadSpawnedPayload =
+        serde_json::from_value(spawned[0].payload.clone()).unwrap();
+    assert_eq!(spawned_payload.child_thread_id, reserved_child_thread_id);
+    assert_eq!(spawned_payload.fork.unwrap().claim_event_id, Some(claim.id));
+    assert_eq!(
+        thread_events_for(&session_store_path, &child_coordinates)
+            .await
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["runtime_kind"].as_str() == Some("thread_started")
+                    && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
+                        .as_str()
+                        .is_some_and(|id| id == parent_coordinates.thread_id.to_string())
+            })
+            .count(),
+        1,
+        "recovery must adopt rather than recreate the reserved child"
     );
     assert!(queue.completed().await);
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -5922,7 +6249,7 @@ async fn failed_durable_bind_does_not_publish_thread_in_memory() {
 }
 
 #[tokio::test]
-async fn lifecycle_load_failure_repairs_and_durably_rebinds_seeded_scope() {
+async fn reserved_root_start_failure_retries_the_same_durable_binding() {
     let root = test_root("ingress-binding-load-failure");
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
@@ -5950,27 +6277,39 @@ async fn lifecycle_load_failure_repairs_and_durably_rebinds_seeded_scope() {
             .cloned(),
         Some(stale_coordinates.clone())
     );
-    let receipt = bridge.submit_envelope(envelope).await.unwrap();
-    let fresh_thread_id = receipt.thread_id.as_deref().unwrap();
-
-    assert_ne!(
-        Some(fresh_thread_id),
-        Some(stale_coordinates.thread_id.to_string().as_str())
-    );
+    let err = bridge.submit_envelope(envelope.clone()).await.unwrap_err();
+    assert!(err.to_string().contains("test rejected lifecycle load"));
     assert_eq!(failure_probe.failures(), vec![stale_coordinates.thread_id]);
-    let fresh_coordinates = bridge
+    assert_eq!(
+        bridge
+            .threads
+            .lock()
+            .await
+            .get(&target.address.scope_key())
+            .cloned(),
+        Some(stale_coordinates.clone()),
+        "a failed start must not discard the durable root reservation"
+    );
+
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    let reserved_thread_id = stale_coordinates.thread_id.to_string();
+    assert_eq!(
+        receipt.thread_id.as_deref(),
+        Some(reserved_thread_id.as_str())
+    );
+    let recovered_coordinates = bridge
         .threads
         .lock()
         .await
         .get(&target.address.scope_key())
         .cloned()
         .unwrap();
-    wait_for_user_text(&bridge, &fresh_coordinates, "fresh thread").await;
+    wait_for_user_text(&bridge, &recovered_coordinates, "fresh thread").await;
     let bindings = route_bindings(&bridge).await;
-    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings.len(), 1);
     assert_eq!(
-        bindings.last().unwrap().coordinates.thread_id.to_string(),
-        fresh_thread_id
+        bindings[0].coordinates.thread_id,
+        stale_coordinates.thread_id
     );
     let _ = std::fs::remove_dir_all(root);
 }
