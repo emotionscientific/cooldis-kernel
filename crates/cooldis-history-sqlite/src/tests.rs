@@ -187,6 +187,130 @@ async fn sqlite_store_persists_canonical_history_across_reopen() {
 }
 
 #[tokio::test]
+async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corruption() {
+    let path = temp_db_path("cooldis-history-branch-selection-rebuild");
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let (selected, other, advanced) = {
+        let store = SqliteSessionStore::open(&path).unwrap();
+        let root = store
+            .append(
+                &coordinates,
+                None,
+                SessionEntryKind::Message {
+                    message: CanonicalMessage::user_text("root"),
+                },
+            )
+            .await
+            .unwrap();
+        let selected = store
+            .append(
+                &coordinates,
+                Some(root.entry_id),
+                SessionEntryKind::Message {
+                    message: CanonicalMessage::user_text("selected"),
+                },
+            )
+            .await
+            .unwrap();
+        let other = store
+            .append(
+                &coordinates,
+                Some(root.entry_id),
+                SessionEntryKind::Message {
+                    message: CanonicalMessage::user_text("other"),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .select_branch(&coordinates, Some(selected.entry_id))
+            .await
+            .unwrap();
+        let advanced = store
+            .append(
+                &coordinates,
+                None,
+                SessionEntryKind::Message {
+                    message: CanonicalMessage::user_text("advanced selected branch"),
+                },
+            )
+            .await
+            .unwrap();
+        (selected.entry_id, other.entry_id, advanced.entry_id)
+    };
+
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute("DROP TABLE active_leaves", []).unwrap();
+    }
+    let reopened = SqliteSessionStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.active_leaf(&coordinates).await.unwrap(),
+        Some(advanced)
+    );
+    drop(reopened);
+
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE active_leaves SET entry_id = ?1 WHERE thread_id = ?2",
+                params![other.to_string(), coordinates.thread_id.to_string()],
+            )
+            .unwrap();
+    }
+    let reopened = SqliteSessionStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.active_leaf(&coordinates).await.unwrap(),
+        Some(advanced)
+    );
+    reopened.select_branch(&coordinates, None).await.unwrap();
+    drop(reopened);
+
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO active_leaves (thread_id, entry_id) VALUES (?1, ?2)",
+                params![coordinates.thread_id.to_string(), other.to_string()],
+            )
+            .unwrap();
+    }
+    let reopened = SqliteSessionStore::open(&path).unwrap();
+    assert_eq!(reopened.active_leaf(&coordinates).await.unwrap(), None);
+
+    let events = reopened
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    let selections = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ThreadBranchSelected)
+        .map(|event| {
+            serde_json::from_value::<ThreadBranchSelectedPayload>(event.payload.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selections,
+        vec![
+            ThreadBranchSelectedPayload {
+                thread_id: coordinates.thread_id,
+                selected_entry_id: Some(selected),
+                prior_entry_id: Some(other),
+            },
+            ThreadBranchSelectedPayload {
+                thread_id: coordinates.thread_id,
+                selected_entry_id: None,
+                prior_entry_id: Some(advanced),
+            },
+        ]
+    );
+
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn sqlite_store_resumes_active_branch_and_compaction() {
     let path = temp_db_path("cooldis-history-branch");
     let coordinates = coords("tenant_a", "user_1", "session_1");

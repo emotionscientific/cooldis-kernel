@@ -102,7 +102,7 @@ async fn select_branch_restores_checkpoint_leaf() {
         )
         .await
         .unwrap();
-    store
+    let after = store
         .append(
             &coordinates,
             None,
@@ -123,6 +123,42 @@ async fn select_branch_restores_checkpoint_leaf() {
     assert_eq!(
         context.entries.last().unwrap().entry_id,
         checkpoint_leaf.entry_id
+    );
+
+    store.select_branch(&coordinates, None).await.unwrap();
+
+    let events = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    let selections = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ThreadBranchSelected)
+        .collect::<Vec<_>>();
+    assert_eq!(selections.len(), 2);
+    assert_eq!(selections[0].origin, EventOrigin::Witnessed);
+    assert!(selections[0].provenance.is_empty());
+    assert_eq!(
+        selections[0].to_stream_record_v1().payload_schema,
+        EventKind::ThreadBranchSelected.payload_schema_id()
+    );
+    assert_eq!(
+        serde_json::from_value::<ThreadBranchSelectedPayload>(selections[0].payload.clone())
+            .unwrap(),
+        ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: Some(checkpoint_leaf.entry_id),
+            prior_entry_id: Some(after.entry_id),
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<ThreadBranchSelectedPayload>(selections[1].payload.clone())
+            .unwrap(),
+        ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: None,
+            prior_entry_id: Some(checkpoint_leaf.entry_id),
+        }
     );
 }
 
@@ -569,6 +605,10 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         "cooldis.event.thread.joined/1"
     );
     assert_eq!(
+        EventKind::ThreadBranchSelected.payload_schema_id(),
+        "cooldis.event.thread.branch.selected/1"
+    );
+    assert_eq!(
         EventKind::PolicyBound.payload_schema_id(),
         "cooldis.event.policy.bound/1"
     );
@@ -603,7 +643,7 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
 }
 
 #[test]
-fn events_0_2_payload_fixtures_round_trip_and_validate() {
+fn events_0_3_payload_fixtures_round_trip_and_validate() {
     let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
     let child_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000002").unwrap();
     let spawned_event_id = EventRecordId::from_uuid(
@@ -683,6 +723,15 @@ fn events_0_2_payload_fixtures_round_trip_and_validate() {
                 spawned_event_id,
                 terminal_state: ThreadTerminalState::Completed,
                 result_digest: Some("sha256:result".to_string()),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::ThreadBranchSelected,
+            serde_json::to_value(ThreadBranchSelectedPayload {
+                thread_id: child_thread_id,
+                selected_entry_id: Some(leaf_entry_id),
+                prior_entry_id: None,
             })
             .unwrap(),
         ),

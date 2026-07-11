@@ -1,5 +1,6 @@
 mod support;
 
+use cooldis::kernel::history::ThreadBranchSelectedPayload;
 use cooldis::{
     AgentContextCompilationDiagnostics, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
     AgentProcessSubmitReceipt, AnthropicMessagesAdapter, BoundCoupling, BoundCouplingFunction,
@@ -441,6 +442,30 @@ fn stream_schema_v1_contract_matches_fixture() {
             }
         }),
     };
+    let branch_selection = EventRecord {
+        id: event_record_id(5),
+        stream_id: stream_id.clone(),
+        sequence: EventSequence::new(8),
+        coordinates: coordinates.clone(),
+        created_at_ms: 1_771_718_400_400,
+        kind: EventKind::ThreadBranchSelected,
+        origin: EventOrigin::Witnessed,
+        provenance: EventProvenance::default(),
+        payload: serde_json::to_value(ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: Some(session_entry_id(2)),
+            prior_entry_id: Some(session_entry_id(3)),
+        })
+        .unwrap(),
+    };
+    branch_selection.validate_stream_record_v1().unwrap();
+    stream_schema_registry_v1()
+        .unwrap()
+        .validate(
+            EventKind::ThreadBranchSelected.payload_schema_id(),
+            &branch_selection.payload,
+        )
+        .unwrap();
 
     let records = vec![compile, summary, read_plan_set, compile_after_policy];
     let schema_registry = stream_schema_registry_v1().unwrap();
@@ -515,6 +540,7 @@ fn stream_schema_v1_contract_matches_fixture() {
         json!({
             "append_acks": append_acks,
             "backend_capabilities": backend_capabilities,
+            "branch_selection": branch_selection.to_stream_record_v1(),
             "cursors": cursors,
             "records": records
                 .iter()
