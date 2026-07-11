@@ -144,6 +144,21 @@ information for development and tests, and bounds compiler caching when
 `sccache` is available. A missing `sccache` installation is a warning, not a
 build failure.
 
+## Scenario Invariant Library
+
+ADR 0004's v1 scenario library checks these numbered invariants after each
+scenario step:
+
+- `inv1-replay-equivalence`;
+- `inv2-unique-active-topology`;
+- `inv3-bounded-queue`;
+- `inv4-no-duplicate-projected-output`;
+- `inv5-terminal-consistency`.
+
+Each new composed-review gate finding lands as a numbered invariant and carries
+a deterministic corpus seed that reproduces the finding. The seed joins the
+fixed corpus with a provenance line naming the defect or gate finding it pins.
+
 Before claiming a runtime change is complete, run the required test command
 through the lane wrapper. For the full workspace suite:
 

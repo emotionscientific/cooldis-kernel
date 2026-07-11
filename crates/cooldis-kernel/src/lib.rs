@@ -15,6 +15,7 @@ pub(crate) use crate as kernel_test;
 #[path = "../tests/support/event_trace.rs"]
 mod event_trace_support;
 #[cfg(test)]
+#[rustfmt::skip]
 #[path = "../tests/support/fault.rs"]
 mod fault_support;
 #[cfg(test)]
@@ -23,8 +24,14 @@ mod fault_support;
 mod fault_plan;
 #[cfg(test)]
 #[allow(dead_code)]
+#[path = "../tests/support/invariants.rs"]
+mod invariants_support;
+#[cfg(test)]
+#[allow(dead_code)]
 #[path = "../tests/support/scenario.rs"]
 mod scenario_support;
+#[cfg(test)]
+pub(crate) use scenario_support::{InvariantViolation, ScenarioInvariant, ScenarioWorld};
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/scripted_provider.rs"]
@@ -44,6 +51,8 @@ pub(crate) mod test_support {
     #[allow(unused_imports)]
     pub(crate) use super::fault_plan::*;
     pub(crate) use super::fault_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::invariants_support::*;
     #[allow(unused_imports)]
     pub(crate) use super::scenario_support::*;
     #[allow(unused_imports)]
