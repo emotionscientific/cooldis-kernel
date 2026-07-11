@@ -564,6 +564,24 @@ impl CooldisAppServer {
     }
 
     #[cfg(test)]
+    pub(crate) async fn with_runtime_factory_and_session_store_decorator(
+        config: CooldisAppServerConfig,
+        runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
+        decorate: impl FnOnce(Arc<dyn RuntimeStore>) -> Arc<dyn RuntimeStore> + Send + 'static,
+    ) -> CooldisResult<Self> {
+        let metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
+        let user_metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
+        Self::with_runtime_factory_and_metadata_stores_inner(
+            config,
+            runtime_factory,
+            metadata_store,
+            user_metadata_store,
+            Some(Box::new(decorate)),
+        )
+        .await
+    }
+
+    #[cfg(test)]
     async fn with_runtime_factory_and_metadata_store(
         config: CooldisAppServerConfig,
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
@@ -580,10 +598,29 @@ impl CooldisAppServer {
     }
 
     async fn with_runtime_factory_and_metadata_stores(
+        config: CooldisAppServerConfig,
+        runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
+        metadata_store: SqliteMetadataStore,
+        user_metadata_store: SqliteMetadataStore,
+    ) -> CooldisResult<Self> {
+        Self::with_runtime_factory_and_metadata_stores_inner(
+            config,
+            runtime_factory,
+            metadata_store,
+            user_metadata_store,
+            None,
+        )
+        .await
+    }
+
+    async fn with_runtime_factory_and_metadata_stores_inner(
         mut config: CooldisAppServerConfig,
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
         metadata_store: SqliteMetadataStore,
         user_metadata_store: SqliteMetadataStore,
+        session_store_decorator: Option<
+            Box<dyn FnOnce(Arc<dyn RuntimeStore>) -> Arc<dyn RuntimeStore> + Send>,
+        >,
     ) -> CooldisResult<Self> {
         normalize_registry_roots(&mut config);
         let provider_surface =
@@ -596,13 +633,20 @@ impl CooldisAppServer {
         let metadata_store_path = config.metadata_store_path();
         let user_metadata_store_path = config.user_metadata_store_path();
         let supervisor = CooldisSupervisor::new();
-        let tenant_context = TenantRuntimeContext::local(
+        let mut tenant_context = TenantRuntimeContext::local(
             config.tenant_id.clone(),
             config.runtime_home.clone(),
             config.state_home.clone(),
         );
         let codex_home = tenant_context.codex_home();
         let session_store_path = tenant_context.session_history_path();
+        if let Some(decorate) = session_store_decorator {
+            let session_store = Arc::new(
+                SqliteSessionStore::open(&session_store_path)
+                    .map_err(|err| CooldisError::History(err.to_string()))?,
+            ) as Arc<dyn RuntimeStore>;
+            tenant_context = tenant_context.with_session_store(decorate(session_store));
+        }
         supervisor
             .register_tenant(TenantRegistration {
                 context: tenant_context,

@@ -1005,6 +1005,30 @@ impl CooldisDaemonIoBridge {
         bridge
     }
 
+    #[cfg(test)]
+    pub(crate) fn ingress_binding_barrier(
+        &self,
+    ) -> Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>> {
+        Arc::clone(&self.ingress_binding_barrier)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_after_ingress_claim(
+        &self,
+    ) -> (Arc<std::sync::atomic::AtomicBool>, Arc<tokio::sync::Notify>) {
+        (
+            Arc::clone(&self.pause_after_ingress_claim),
+            Arc::clone(&self.ingress_claim_paused),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thread_load_root_barrier(
+        &self,
+    ) -> Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>> {
+        Arc::clone(&self.thread_load_root_barrier)
+    }
+
     pub fn direct_sink(&self) -> Arc<dyn IngressSink> {
         Arc::new(DirectRuntimeIngressSink::new(self.clone()))
     }

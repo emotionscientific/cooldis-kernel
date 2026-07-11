@@ -100,7 +100,7 @@ impl ThreadSpawnProjector {
     }
 
     #[cfg(test)]
-    fn with_snapshot_barrier(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
+    pub(crate) fn with_snapshot_barrier(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
         self.snapshot_barrier = Some(barrier);
         self
     }

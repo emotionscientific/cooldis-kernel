@@ -26,13 +26,19 @@ mod fault_support;
 #[path = "../tests/support/invariant_claims.rs"]
 mod invariant_claims;
 #[cfg(test)]
+pub(crate) use invariant_claims::*;
+#[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/invariant_forks.rs"]
 mod invariant_forks;
 #[cfg(test)]
+pub(crate) use invariant_forks::*;
+#[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/invariants.rs"]
 mod invariants_support;
+#[cfg(test)]
+pub(crate) use invariants_support::*;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/scenario.rs"]
@@ -72,6 +78,91 @@ pub(crate) mod test_support {
     pub(crate) use super::store_parity_support::*;
     #[allow(unused_imports)]
     pub(crate) use super::transcript::*;
+}
+
+#[cfg(test)]
+async fn scenario_app_server(
+    config: adapters::app_server::CooldisAppServerConfig,
+    runtime_factory: std::sync::Arc<dyn AgentRuntimeFactory>,
+    decorate: impl FnOnce(std::sync::Arc<dyn RuntimeStore>) -> std::sync::Arc<dyn RuntimeStore>
+    + Send
+    + 'static,
+) -> CooldisResult<adapters::app_server::CooldisAppServer> {
+    adapters::app_server::CooldisAppServer::with_runtime_factory_and_session_store_decorator(
+        config,
+        runtime_factory,
+        decorate,
+    )
+    .await
+}
+
+#[cfg(test)]
+fn scenario_unit_harness() -> bool {
+    true
+}
+
+#[cfg(test)]
+async fn scenario_fork_with_id(
+    server: &adapters::app_server::CooldisAppServer,
+    parent: &ThreadCoordinates,
+    child_thread_id: ThreadId,
+) -> CooldisResult<ThreadCoordinates> {
+    let checkpoint = server
+        .supervisor()
+        .create_checkpoint_at(
+            parent,
+            None,
+            Some("scenario-fork".to_string()),
+            std::collections::BTreeMap::new(),
+        )
+        .await?;
+    let child = server
+        .supervisor()
+        .fork_thread_from_checkpoint_with_id_at(checkpoint, child_thread_id)
+        .await?;
+    Ok(child.context().coordinates.clone())
+}
+
+#[cfg(test)]
+async fn scenario_project_spawn_snapshot(
+    host: RuntimeHost,
+    coordinates: ThreadCoordinates,
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+) -> CooldisResult<kernel::thread_spawn_projector::ThreadSpawnProjectionReceipt> {
+    host.load_thread_with_topology_and_metadata(
+        coordinates.clone(),
+        ThreadTopology::root(),
+        std::collections::BTreeMap::new(),
+    )
+    .await?;
+    kernel::thread_spawn_projector::ThreadSpawnProjector::new(host)
+        .with_snapshot_barrier(barrier)
+        .project_control_stream(&coordinates)
+        .await
+}
+
+#[cfg(test)]
+fn scenario_ingress_binding_barrier(
+    bridge: &daemon::daemon_io::CooldisDaemonIoBridge,
+) -> std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>> {
+    bridge.ingress_binding_barrier()
+}
+
+#[cfg(test)]
+fn scenario_pause_after_ingress_claim(
+    bridge: &daemon::daemon_io::CooldisDaemonIoBridge,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<tokio::sync::Notify>,
+) {
+    bridge.pause_after_ingress_claim()
+}
+
+#[cfg(test)]
+fn scenario_thread_load_root_barrier(
+    bridge: &daemon::daemon_io::CooldisDaemonIoBridge,
+) -> std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>> {
+    bridge.thread_load_root_barrier()
 }
 
 pub mod adapters {
