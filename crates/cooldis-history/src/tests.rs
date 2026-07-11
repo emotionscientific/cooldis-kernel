@@ -609,6 +609,10 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         "cooldis.event.thread.branch.selected/1"
     );
     assert_eq!(
+        EventKind::ThreadReloadDegraded.payload_schema_id(),
+        "cooldis.event.thread.reload.degraded/1"
+    );
+    assert_eq!(
         EventKind::PolicyBound.payload_schema_id(),
         "cooldis.event.policy.bound/1"
     );
@@ -640,6 +644,29 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         EventKind::AdmissionDecided.payload_schema_id(),
         "cooldis.event.admission.decided/1"
     );
+}
+
+#[test]
+fn thread_reload_degraded_payload_schema_is_registered() {
+    let thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
+    let payload = serde_json::to_value(ThreadReloadDegradedPayload {
+        thread_id,
+        missing: vec![
+            "topology".to_string(),
+            "parent_thread_id".to_string(),
+            "metadata".to_string(),
+        ],
+        fallback: "fabricated_root".to_string(),
+    })
+    .unwrap();
+
+    stream_schema_registry_v1()
+        .unwrap()
+        .validate(
+            EventKind::ThreadReloadDegraded.payload_schema_id(),
+            &payload,
+        )
+        .unwrap();
 }
 
 #[test]

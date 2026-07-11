@@ -435,10 +435,31 @@ impl RuntimeHost {
         topology: ThreadTopology,
         metadata: BTreeMap<String, String>,
     ) -> CooldisResult<RuntimeThreadHandle> {
+        self.start_thread_with_topology_and_metadata_inner(coordinates, topology, metadata, true)
+            .await
+    }
+
+    pub(crate) async fn load_thread_with_topology_and_metadata(
+        &self,
+        coordinates: ThreadCoordinates,
+        topology: ThreadTopology,
+        metadata: BTreeMap<String, String>,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        self.start_thread_with_topology_and_metadata_inner(coordinates, topology, metadata, false)
+            .await
+    }
+
+    async fn start_thread_with_topology_and_metadata_inner(
+        &self,
+        coordinates: ThreadCoordinates,
+        topology: ThreadTopology,
+        metadata: BTreeMap<String, String>,
+        record_start_identity: bool,
+    ) -> CooldisResult<RuntimeThreadHandle> {
         let context =
             ThreadContext::with_topology_and_metadata(coordinates, topology, metadata.clone());
         let start_reservation = self.reserve_thread_start(&context).await?;
-        self.start_reserved_thread(context, metadata, start_reservation)
+        self.start_reserved_thread(context, metadata, start_reservation, record_start_identity)
             .await
     }
 
@@ -524,6 +545,7 @@ impl RuntimeHost {
         context: ThreadContext,
         metadata: BTreeMap<String, String>,
         mut start_reservation: ThreadStartReservation<'_>,
+        record_start_identity: bool,
     ) -> CooldisResult<RuntimeThreadHandle> {
         let thread_id = context.coordinates.thread_id;
         let runtime = self.inner.factory.build(&context).await?;
@@ -628,12 +650,19 @@ impl RuntimeHost {
             debug_assert!(previous.is_none());
             start_reservation.commit();
         }
-        let _ = runtime_start_tx.send(());
         let mut published_start = PublishedThreadStartGuard::new(self.clone(), Arc::clone(&thread));
 
         let handle = RuntimeThreadHandle {
             thread: Arc::clone(&thread),
         };
+        if record_start_identity && let Err(err) = handle.record_thread_start_identity().await {
+            thread.cancellation.cancel();
+            handle.abort().await;
+            self.remove_thread_if_current(&thread).await;
+            published_start.disarm();
+            return Err(err);
+        }
+        let _ = runtime_start_tx.send(());
         if let Some(sink) = self.lifecycle_sink().await
             && let Err(err) = sink.thread_started(handle.clone()).await
         {
@@ -1381,7 +1410,7 @@ impl RuntimeHost {
             .lock()
             .await
             .insert(checkpoint.id, checkpoint);
-        self.start_reserved_thread(context, metadata, start_reservation)
+        self.start_reserved_thread(context, metadata, start_reservation, false)
             .await
     }
 

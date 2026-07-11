@@ -6,7 +6,8 @@ contract diffs stay reviewable.
 
 `stream_schema_v1.json` freezes the Stream Schema V1 spine: stream record
 envelopes, cursors, append acknowledgements, backend capabilities, routing
-decisions, and the read-plan entries used by context assembly.
+decisions, the read-plan entries used by context assembly, and the witnessed
+`thread.reload.degraded` fallback payload.
 
 `debug_thread_export_v1.json` freezes the normalized
 `cooldis.debug.thread_export/1` evidence bundle shape used by

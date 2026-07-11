@@ -1,5 +1,20 @@
 [
   {
+    "metadata": {
+      "cooldis.agent.manifest_hash": "sha256:manifest"
+    },
+    "parent_thread_id": null,
+    "topology": {
+      "initiation": {
+        "type": "root"
+      },
+      "lineage": {
+        "type": "root"
+      }
+    },
+    "type": "thread_started"
+  },
+  {
     "interaction_id": "018f0000-0000-7000-8000-000000000001",
     "kind": "prompt_submitted",
     "metadata": {

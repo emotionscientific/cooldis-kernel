@@ -125,7 +125,11 @@ pub(crate) fn assert_admission_precedes_turn_records<'a>(
         .expect("control stream missing admission.decided");
     let turn_events = thread_events
         .iter()
-        .filter(|event| event.kind.as_str() == "session.entry.appended")
+        .filter(|event| {
+            event.kind.as_str() == "session.entry.appended"
+                && event.payload.get("runtime_kind").and_then(Value::as_str)
+                    != Some("thread_started")
+        })
         .collect::<Vec<_>>();
     assert!(
         !turn_events.is_empty(),
@@ -162,7 +166,14 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
     let admission_key = value_order_key(admission);
     let turn_events = thread_events
         .iter()
-        .filter(|event| event.get("kind").and_then(Value::as_str) == Some("session.entry.appended"))
+        .filter(|event| {
+            event.get("kind").and_then(Value::as_str) == Some("session.entry.appended")
+                && event
+                    .get("payload")
+                    .and_then(|payload| payload.get("runtime_kind"))
+                    .and_then(Value::as_str)
+                    != Some("thread_started")
+        })
         .collect::<Vec<_>>();
     assert!(
         !turn_events.is_empty(),

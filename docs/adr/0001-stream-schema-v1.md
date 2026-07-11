@@ -209,6 +209,13 @@ fixture-backed. A new optional field may be added to a payload schema version
 only when older readers can ignore it without changing receipt meaning.
 Otherwise a new payload schema version is required.
 
+`thread.reload.degraded` uses
+`cooldis.event.thread.reload.degraded/1`. It witnesses a lazy reload that
+could not recover full lifecycle identity from a pre-payload thread journal.
+Its payload records the thread id, the missing identity fields, and the
+`fabricated_root` fallback applied by the loader. Every fallback appends this
+event, so topology or agent-context loss is never silent.
+
 ### Branch Selection Authority
 
 `thread.branch.selected` is a witnessed authority event emitted whenever the

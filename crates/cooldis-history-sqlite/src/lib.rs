@@ -7,8 +7,8 @@ use cooldis_history::{
     ThreadBaseRef, ThreadBranchSelectedPayload, ThreadForkReason, append_model_visible_messages,
     codec_error, coordinates_with_thread_id, decode_entry, parse_event_origin, parse_thread_id,
     parse_uuid, session_entry_event, session_entry_event_with_provenance,
-    session_entry_is_user_authored, storage_error, validate_entry_coordinates, validate_new_event,
-    validate_thread_base_ref,
+    session_entry_is_user_authored, storage_error, strip_thread_start_identity_entries,
+    validate_entry_coordinates, validate_new_event, validate_thread_base_ref,
 };
 use cooldis_runtime_contracts::{ThreadCheckpointId, ThreadCoordinates, ThreadId};
 use rusqlite::{OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -1200,6 +1200,7 @@ fn sqlite_build_context(
     }
 
     visiting.remove(&coordinates.thread_id);
+    strip_thread_start_identity_entries(&mut entries, &mut source_cuts);
     let mut messages = Vec::new();
     append_model_visible_messages(&entries, &mut messages);
     Ok(SessionContext {

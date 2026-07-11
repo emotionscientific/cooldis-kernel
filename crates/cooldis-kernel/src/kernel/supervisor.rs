@@ -272,8 +272,15 @@ impl CooldisSupervisor {
         Self::validate_thread_topology(&tenant, &requested_scope, &topology).await?;
         tenant
             .host
-            .start_thread_with_topology_and_metadata(record.coordinates, topology, metadata)
+            .load_thread_with_topology_and_metadata(record.coordinates, topology, metadata)
             .await
+    }
+
+    pub(crate) async fn runtime_store(
+        &self,
+        tenant_id: &str,
+    ) -> CooldisResult<Arc<dyn RuntimeStore>> {
+        Ok(self.tenant(tenant_id).await?.host.runtime_store())
     }
 
     async fn validate_thread_topology(

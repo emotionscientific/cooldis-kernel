@@ -1794,6 +1794,205 @@ async fn route_agent_ref_binds_manifest_prompt_metadata_and_receipts() {
 }
 
 #[tokio::test]
+async fn route_agent_identity_survives_true_runtime_restart() {
+    let root = test_root("route-agent-restart-identity");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation = publish_route_test_operation(&operation_registry_root).await;
+    let agent_registry_root = root.join("agents");
+    publish_route_agent_manifest(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        &operation.active_artifact_hash,
+    );
+    let db = root.join("io.sqlite");
+    let mut route = route_with_egress(Vec::new(), None);
+    route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
+
+    let first_client = Arc::new(RecordingRouteProviderClient::default());
+    let first_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        first_client.clone(),
+    )
+    .await;
+    let first_bridge = CooldisDaemonIoBridge::from_app_server(&first_server);
+    register_route_state(&first_bridge, &route, &db).await;
+    RouteIngressSink::new(first_bridge.direct_sink(), &route)
+        .submit(test_envelope("before restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&first_client, 1).await;
+    let coordinates = only_thread_coordinates(&first_bridge).await;
+    drop(first_bridge);
+    drop(first_server);
+
+    let restarted_client = Arc::new(RecordingRouteProviderClient::default());
+    let restarted_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        restarted_client.clone(),
+    )
+    .await;
+    let restarted = CooldisDaemonIoBridge::from_app_server(&restarted_server);
+    register_route_state(&restarted, &route, &db).await;
+    assert!(matches!(
+        restarted.supervisor.get_thread_at(&coordinates).await,
+        Err(CooldisError::ThreadNotFound(_))
+    ));
+
+    RouteIngressSink::new(restarted.direct_sink(), &route)
+        .submit(test_envelope("after restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&restarted_client, 1).await;
+
+    let requests = restarted_client.requests();
+    assert_eq!(
+        requests[0].system[0].text,
+        "You are the daemon route prompt runner.\n"
+    );
+    assert!(requests[0].tools.iter().any(|tool| tool.name == "lookup"));
+    let reloaded = restarted
+        .supervisor
+        .get_thread_at(&coordinates)
+        .await
+        .unwrap();
+    assert!(
+        reloaded
+            .context()
+            .metadata
+            .contains_key(THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn fork_child_identity_survives_true_runtime_restart() {
+    let root = test_root("route-fork-restart-identity");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation = publish_route_test_operation(&operation_registry_root).await;
+    let agent_registry_root = root.join("agents");
+    publish_route_agent_manifest(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        &operation.active_artifact_hash,
+    );
+    let db = root.join("io.sqlite");
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("fork_on_new_dm".to_string());
+    route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
+
+    let first_client = Arc::new(RecordingRouteProviderClient::default());
+    let first_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        first_client.clone(),
+    )
+    .await;
+    let first_bridge = CooldisDaemonIoBridge::from_app_server(&first_server);
+    register_route_state(&first_bridge, &route, &db).await;
+    RouteIngressSink::new(first_bridge.direct_sink(), &route)
+        .submit(test_envelope("before fork restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&first_client, 1).await;
+    let child_coordinates = only_thread_coordinates(&first_bridge).await;
+    let child = first_bridge
+        .supervisor
+        .get_thread_at(&child_coordinates)
+        .await
+        .unwrap();
+    let expected_parent = child.context().parent_thread_id.unwrap();
+    let expected_topology = child.context().topology.clone();
+    drop(first_bridge);
+    drop(first_server);
+
+    let restarted_client = Arc::new(RecordingRouteProviderClient::default());
+    let restarted_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        restarted_client.clone(),
+    )
+    .await;
+    let restarted = CooldisDaemonIoBridge::from_app_server(&restarted_server);
+    register_route_state(&restarted, &route, &db).await;
+    RouteIngressSink::new(restarted.direct_sink(), &route)
+        .submit(test_envelope("after fork restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&restarted_client, 1).await;
+
+    let child = restarted
+        .supervisor
+        .get_thread_at(&child_coordinates)
+        .await
+        .unwrap();
+    assert_eq!(child.context().parent_thread_id, Some(expected_parent));
+    assert_eq!(child.context().topology, expected_topology);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
+    let root = test_root("legacy-reload-degraded");
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = test_envelope("legacy reload");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let coordinates = ThreadCoordinates {
+        tenant_id: target.address.tenant_id,
+        user_id: target.address.user_id,
+        session_id: target.address.session_id,
+        thread_id: ThreadId::new(),
+    };
+
+    for expected_witnesses in 1..=2 {
+        let handle = bridge
+            .get_or_load_thread_handle(&coordinates)
+            .await
+            .unwrap();
+        assert_eq!(handle.context().parent_thread_id, None);
+        assert_eq!(handle.context().topology, ThreadTopology::root());
+        assert!(handle.context().metadata.is_empty());
+        bridge
+            .supervisor
+            .shutdown_thread_at(&coordinates)
+            .await
+            .unwrap();
+
+        let events =
+            thread_events_for(bridge.session_store_path.as_ref().unwrap(), &coordinates).await;
+        let degraded = events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadReloadDegraded)
+            .collect::<Vec<_>>();
+        assert_eq!(degraded.len(), expected_witnesses);
+        let payload: crate::ThreadReloadDegradedPayload =
+            serde_json::from_value(degraded.last().unwrap().payload.clone()).unwrap();
+        assert_eq!(payload.thread_id, coordinates.thread_id);
+        assert_eq!(
+            payload.missing,
+            vec!["topology", "parent_thread_id", "metadata"]
+        );
+        assert_eq!(payload.fallback, "fabricated_root");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn route_without_agent_ref_stays_unbound() {
     let root = test_root("route-without-agent-ref");
     let workspace = root.join("workspace");

@@ -350,9 +350,10 @@ pub use kernel::history::{
     StreamAppendAckV1, StreamBackendCapabilitiesV1, StreamBackendKindV1, StreamCursorV1,
     StreamRecordEnvelopeV1, StreamRouteProfile, StreamRoutingDecisionV1, StreamRoutingKeysV1,
     StreamStorageScopeV1, ThinkingMetadata, ThinkingProvider, ThreadBaseRef, ThreadForkReason,
-    ThreadJoinedPayload, ThreadSpawnRequestedPayload, ThreadSpawnedForkPayload,
-    ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload, ThreadTerminalState,
-    TimerFiredPayload, stream_schema_registry_v1, validate_context_payload_schema_v1,
+    ThreadJoinedPayload, ThreadReloadDegradedPayload, ThreadSpawnRequestedPayload,
+    ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload,
+    ThreadTerminalState, TimerFiredPayload, stream_schema_registry_v1,
+    validate_context_payload_schema_v1,
 };
 pub use kernel::mandate_lifecycle::{
     ActiveMandate, MIN_MANDATE_INTERVAL_MS, MandateRevokeReceipt, MandateRevokeStatus,

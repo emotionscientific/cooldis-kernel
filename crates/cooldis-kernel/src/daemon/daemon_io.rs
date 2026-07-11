@@ -11,10 +11,10 @@ use crate::{
     NewEventRecord, PolicyBoundPayload, PolicyKind, RuntimeThreadHandle, SessionEntry,
     SessionEntryKind, SqliteSessionStore, StreamCursorV1, THREAD_AGENT_MANIFEST_HASH_METADATA,
     THREAD_SPAWN_GRANTED_METADATA, TIMER_FIRED_ENVELOPE_KIND, ThreadCheckpoint, ThreadCoordinates,
-    ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadSpawnedForkPayload,
-    ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload, ThreadStartRequest, ThreadTopology,
-    TimerFiredPayload, TurnInput, TurnSubmissionMode, control_stream_id, list_active_mandates,
-    parse_mandate_event_id,
+    ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadReloadDegradedPayload,
+    ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload, ThreadSpawnedPayload,
+    ThreadStartRequest, ThreadTopology, TimerFiredPayload, TurnInput, TurnSubmissionMode,
+    control_stream_id, list_active_mandates, parse_mandate_event_id,
 };
 use async_trait::async_trait;
 use cooldis_io_core::{
@@ -24,6 +24,7 @@ use cooldis_io_core::{
     ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
+use futures_util::future::BoxFuture;
 use regex::{Captures, Regex};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -716,50 +717,129 @@ impl CooldisDaemonIoBridge {
         &self,
         coordinates: &ThreadCoordinates,
     ) -> Result<RuntimeThreadHandle, ThreadHandleResolutionError> {
-        let load_lock = self.thread_load_lock(coordinates.thread_id).await;
-        let _load_guard = load_lock.lock().await;
-        loop {
-            match self.supervisor.get_thread_at(coordinates).await {
-                Ok(handle) => return Ok(handle),
-                Err(CooldisError::ThreadNotFound(_)) => {
-                    let lifecycle = self
-                        .reconstruct_thread_lifecycle(coordinates)
-                        .await
-                        .map_err(ThreadHandleResolutionError::LifecycleLoad)?
-                        .unwrap_or_else(|| ThreadLifecycleRecord {
-                            coordinates: coordinates.clone(),
-                            parent_thread_id: None,
-                            topology: ThreadTopology::root(),
-                            status: ThreadLifecycleStatus::Idle,
-                            latest_signal_id: None,
-                            latest_checkpoint_id: None,
-                            created_at_ms: now_ms(),
-                            updated_at_ms: now_ms(),
-                            metadata: BTreeMap::new(),
-                        });
-                    match self.supervisor.load_thread_from_lifecycle(lifecycle).await {
-                        Ok(handle) => return Ok(handle),
-                        Err(CooldisError::ThreadAlreadyExists(_)) => {
-                            self.supervisor
-                                .wait_for_thread_start_reservation(
-                                    &coordinates.tenant_id,
-                                    coordinates.thread_id,
-                                )
-                                .await
-                                .map_err(ThreadHandleResolutionError::Lookup)?;
+        self.get_or_load_thread_handle_inner(coordinates, HashSet::new())
+            .await
+    }
+
+    fn get_or_load_thread_handle_inner<'a>(
+        &'a self,
+        coordinates: &'a ThreadCoordinates,
+        mut loading: HashSet<ThreadId>,
+    ) -> BoxFuture<'a, Result<RuntimeThreadHandle, ThreadHandleResolutionError>> {
+        Box::pin(async move {
+            if !loading.insert(coordinates.thread_id) {
+                return Err(ThreadHandleResolutionError::LifecycleLoad(
+                    CooldisError::History(format!(
+                        "thread lifecycle topology cycle while lazily loading {}",
+                        coordinates.thread_id
+                    )),
+                ));
+            }
+            let load_lock = self.thread_load_lock(coordinates.thread_id).await;
+            let _load_guard = load_lock.lock().await;
+            loop {
+                match self.supervisor.get_thread_at(coordinates).await {
+                    Ok(handle) => return Ok(handle),
+                    Err(CooldisError::ThreadNotFound(_)) => {
+                        let lifecycle = match self
+                            .reconstruct_thread_lifecycle(coordinates)
+                            .await
+                            .map_err(ThreadHandleResolutionError::LifecycleLoad)?
+                        {
+                            Some(lifecycle) => lifecycle,
+                            None => {
+                                let payload = serde_json::to_value(ThreadReloadDegradedPayload {
+                                    thread_id: coordinates.thread_id,
+                                    missing: vec![
+                                        "topology".to_string(),
+                                        "parent_thread_id".to_string(),
+                                        "metadata".to_string(),
+                                    ],
+                                    fallback: "fabricated_root".to_string(),
+                                })
+                                .map_err(|err| {
+                                    ThreadHandleResolutionError::LifecycleLoad(
+                                        CooldisError::History(format!(
+                                            "thread.reload.degraded payload codec failed: {err}"
+                                        )),
+                                    )
+                                })?;
+                                let stream_id = EventStreamId::for_thread(coordinates);
+                                self.supervisor
+                                    .runtime_store(&coordinates.tenant_id)
+                                    .await
+                                    .map_err(ThreadHandleResolutionError::LifecycleLoad)?
+                                    .append_events(
+                                        &stream_id,
+                                        vec![NewEventRecord::witnessed(
+                                            coordinates.clone(),
+                                            EventKind::ThreadReloadDegraded,
+                                            payload,
+                                        )],
+                                    )
+                                    .await
+                                    .map_err(|err| {
+                                        ThreadHandleResolutionError::LifecycleLoad(
+                                            CooldisError::History(err.to_string()),
+                                        )
+                                    })?;
+                                let now = now_ms();
+                                ThreadLifecycleRecord {
+                                    coordinates: coordinates.clone(),
+                                    parent_thread_id: None,
+                                    topology: ThreadTopology::root(),
+                                    status: ThreadLifecycleStatus::Idle,
+                                    latest_signal_id: None,
+                                    latest_checkpoint_id: None,
+                                    created_at_ms: now,
+                                    updated_at_ms: now,
+                                    metadata: BTreeMap::new(),
+                                }
+                            }
+                        };
+                        let mut seen_related = HashSet::new();
+                        let related_thread_ids = lifecycle
+                            .topology
+                            .related_thread_ids()
+                            .into_iter()
+                            .filter(|thread_id| seen_related.insert(*thread_id));
+                        for related_thread_id in related_thread_ids {
+                            let related_coordinates = ThreadCoordinates {
+                                tenant_id: coordinates.tenant_id.clone(),
+                                user_id: coordinates.user_id.clone(),
+                                session_id: coordinates.session_id.clone(),
+                                thread_id: related_thread_id,
+                            };
+                            self.get_or_load_thread_handle_inner(
+                                &related_coordinates,
+                                loading.clone(),
+                            )
+                            .await?;
                         }
-                        Err(err) => {
-                            return Err(ThreadHandleResolutionError::LifecycleLoad(err));
+                        match self.supervisor.load_thread_from_lifecycle(lifecycle).await {
+                            Ok(handle) => return Ok(handle),
+                            Err(CooldisError::ThreadAlreadyExists(_)) => {
+                                self.supervisor
+                                    .wait_for_thread_start_reservation(
+                                        &coordinates.tenant_id,
+                                        coordinates.thread_id,
+                                    )
+                                    .await
+                                    .map_err(ThreadHandleResolutionError::Lookup)?;
+                            }
+                            Err(err) => {
+                                return Err(ThreadHandleResolutionError::LifecycleLoad(err));
+                            }
                         }
                     }
+                    Err(err) => return Err(ThreadHandleResolutionError::Lookup(err)),
                 }
-                Err(err) => return Err(ThreadHandleResolutionError::Lookup(err)),
             }
-        }
+        })
     }
 
     /// EMO-370 seam: reconstruct a lazily loaded thread's lifecycle record
-    /// from its own journal — thread-start provenance (topology, parent,
+    /// from its own journal: thread-start provenance (topology, parent,
     /// metadata) plus the manifest compile/bind receipts recorded at
     /// creation. The stream is the only durable truth; the binding table
     /// stays a coordinates-only read model, and identity is never
@@ -769,16 +849,72 @@ impl CooldisDaemonIoBridge {
     /// Returns `Ok(None)` when the journal predates the identity payload
     /// and cannot supply full identity. The caller then applies the
     /// fabricated-root fallback, and the implementation must witness that
-    /// fallback with a `thread.reload.degraded` event — degradation is
+    /// fallback with a `thread.reload.degraded` event. Degradation is
     /// never silent.
     async fn reconstruct_thread_lifecycle(
         &self,
         coordinates: &ThreadCoordinates,
     ) -> CooldisResult<Option<ThreadLifecycleRecord>> {
-        // EMO-370 implements journal reconstruction here; until then every
-        // lazy load takes the fabricated-root path below, unchanged.
-        let _ = coordinates;
-        Ok(None)
+        let store = self
+            .supervisor
+            .runtime_store(&coordinates.tenant_id)
+            .await?;
+        let stream_id = EventStreamId::for_thread(coordinates);
+        let events = store
+            .read_events(&stream_id, None)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        let Some(start) = events.iter().rev().find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload.get("entry_kind").and_then(Value::as_str) == Some("runtime")
+                && event.payload.get("runtime_kind").and_then(Value::as_str)
+                    == Some("thread_started")
+        }) else {
+            return Ok(None);
+        };
+        let Some(payload) = start
+            .payload
+            .get("runtime_payload")
+            .and_then(Value::as_object)
+        else {
+            return Ok(None);
+        };
+        if !payload.contains_key("parent_thread_id")
+            || !payload.contains_key("topology")
+            || !payload.contains_key("metadata")
+        {
+            return Ok(None);
+        }
+        let parent_thread_id = serde_json::from_value(payload["parent_thread_id"].clone())
+            .map_err(|err| {
+                CooldisError::History(format!("thread-start parent codec failed: {err}"))
+            })?;
+        let topology: ThreadTopology = serde_json::from_value(payload["topology"].clone())
+            .map_err(|err| {
+                CooldisError::History(format!("thread-start topology codec failed: {err}"))
+            })?;
+        let metadata: BTreeMap<String, String> =
+            serde_json::from_value(payload["metadata"].clone()).map_err(|err| {
+                CooldisError::History(format!("thread-start metadata codec failed: {err}"))
+            })?;
+        if parent_thread_id != topology.compatibility_parent_thread_id() {
+            return Err(CooldisError::History(format!(
+                "thread-start parent does not match topology for {}",
+                coordinates.thread_id
+            )));
+        }
+        let created_at_ms = u64::try_from(start.created_at_ms).unwrap_or_default();
+        Ok(Some(ThreadLifecycleRecord {
+            coordinates: coordinates.clone(),
+            parent_thread_id,
+            topology,
+            status: ThreadLifecycleStatus::Idle,
+            latest_signal_id: None,
+            latest_checkpoint_id: None,
+            created_at_ms,
+            updated_at_ms: created_at_ms,
+            metadata,
+        }))
     }
 
     async fn thread_load_lock(&self, thread_id: ThreadId) -> Arc<Mutex<()>> {
