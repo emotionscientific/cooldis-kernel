@@ -19,6 +19,14 @@ mod event_trace_support;
 mod fault_support;
 #[cfg(test)]
 #[allow(dead_code)]
+#[path = "../tests/support/fault_plan.rs"]
+mod fault_plan;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/scenario.rs"]
+mod scenario_support;
+#[cfg(test)]
+#[allow(dead_code)]
 #[path = "../tests/support/scripted_provider.rs"]
 mod scripted_provider_support;
 #[cfg(test)]
@@ -33,7 +41,11 @@ mod transcript;
 pub(crate) mod test_support {
     #[allow(unused_imports)]
     pub(crate) use super::event_trace_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::fault_plan::*;
     pub(crate) use super::fault_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::scenario_support::*;
     #[allow(unused_imports)]
     pub(crate) use super::scripted_provider_support::*;
     #[allow(unused_imports)]
