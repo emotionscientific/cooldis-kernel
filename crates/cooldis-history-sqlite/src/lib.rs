@@ -523,6 +523,9 @@ fn sqlite_rebuild_active_leaves_from_events(
             selected_threads.insert(row.get::<_, String>(0).map_err(storage_error)?);
         }
     }
+    if selected_threads.is_empty() {
+        return tx.commit().map_err(storage_error);
+    }
     for thread_id in &selected_threads {
         tx.execute(
             "DELETE FROM active_leaves WHERE thread_id = ?1",
