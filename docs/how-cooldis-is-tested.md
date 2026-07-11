@@ -58,14 +58,18 @@ test suites were green.
 `scripts/verify.sh` is the single entry point, and it is what CI runs on
 every push:
 
-- format check and workspace-wide clippy across all targets;
+- format check across the workspace (a dedicated lint lane is tracked work,
+  not yet part of the gate; this document does not get to claim it early);
 - the full unit and integration battery (600+ tests as of mid 2026),
   including the daemon I/O battery: delivery, retry, dead-letter, cursor
   recovery, coalescing, dedupe, kill/restart projector coverage;
 - guard rails: repository-level checks that pin invariants no single test
   owns (banned patterns, schema presence, doc/code congruence);
-- live smokes that exercise a real provider loop, real wasm guest execution,
-  and real sandboxed command execution end to end.
+- live smokes that exercise the provider loop, real wasm guest execution,
+  and real sandboxed command execution end to end; the provider lane runs
+  against a real provider binary when one is installed and a
+  protocol-faithful stub otherwise, so bare CI proves the loop's mechanics,
+  not a live model.
 
 A full CI run takes about eight minutes. There is no fast path that skips
 the suite, and environmental excuses are not accepted grounds for a red lane:
@@ -158,9 +162,12 @@ silently shrinks and is not permitted to grow back.
 ## Why event sourcing makes this affordable
 
 None of the above is heroic effort bolted onto an ordinary codebase. The
-runtime is event-sourced: every state change is a typed, provenance-bearing
-record on a stream, appends are fenced, and all state is a fold over
-records. That architecture is why crashes are replayable facts rather than
+runtime is event-sourced: every state change that matters for resume is a
+typed, provenance-bearing record on a stream, appends are fenced, and
+durable state is reconstructible by folding records. The remaining places
+where a mutable table still holds authority on its own are named, tracked,
+and being converted; the claim is a ratchet direction with receipts, not a
+finished fact. That architecture is why crashes are replayable facts rather than
 mysteries, why transcripts can serve as oracles, why two stores can be
 checked for parity, and why a restart is an assertable event rather than an
 operational anxiety. The discipline Cooldis enforces on the agents it runs
@@ -189,6 +196,12 @@ shipped otherwise:
 - **2026-07, guard audit:** a restart-lane guard comparing against a
   misspelled event kind, vacuously passing; fixed and re-proven against the
   lane's falsifiability check.
+- **2026-07, cold review of this document:** an unprimed outside review of a
+  fresh clone caught this document overclaiming its own gate (naming a lint
+  lane the verify script does not run, and calling a stubbed provider lane
+  "real"). Corrected the same day. The falsifiability rule applies to the
+  process's descriptions of itself, and this ledger records the failure
+  rather than hiding it.
 
 ## Where to look
 
