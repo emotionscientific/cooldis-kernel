@@ -4,10 +4,11 @@ use cooldis_history::{
     EventStreamId, HistoryError, HistoryResult, NewEventRecord, NewObservationRecord,
     ObservationId, ObservationRecord, ObservationStore, STREAM_RECORD_SCHEMA_V1, SessionContext,
     SessionContextSourceCut, SessionEntry, SessionEntryId, SessionEntryKind, SessionStore,
-    ThreadBaseRef, ThreadForkReason, append_model_visible_messages, codec_error,
-    coordinates_with_thread_id, decode_entry, parse_event_origin, parse_thread_id, parse_uuid,
-    session_entry_event, session_entry_event_with_provenance, session_entry_is_user_authored,
-    storage_error, validate_entry_coordinates, validate_new_event, validate_thread_base_ref,
+    ThreadBaseRef, ThreadBranchSelectedPayload, ThreadForkReason, append_model_visible_messages,
+    codec_error, coordinates_with_thread_id, decode_entry, parse_event_origin, parse_thread_id,
+    parse_uuid, session_entry_event, session_entry_event_with_provenance,
+    session_entry_is_user_authored, storage_error, strip_thread_start_identity_entries,
+    validate_entry_coordinates, validate_new_event, validate_thread_base_ref,
 };
 use cooldis_runtime_contracts::{ThreadCheckpointId, ThreadCoordinates, ThreadId};
 use rusqlite::{OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -134,6 +135,56 @@ impl SessionStore for SqliteSessionStore {
             .await
     }
 
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let thread_id = coordinates.thread_id.to_string();
+        let existing = tx
+            .query_row(
+                "SELECT entry_json FROM session_entries WHERE thread_id = ?1 AND turn_id = ?2",
+                params![thread_id, turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .map(|json| decode_entry(&json))
+            .transpose()?;
+        if let Some(existing) = existing {
+            validate_entry_coordinates(coordinates, &existing)?;
+            if !cooldis_history::turn_input_kinds_match(&existing.kind, &kind) {
+                return Err(HistoryError::Storage(format!(
+                    "turn {turn_id} input does not match its persisted session entry"
+                )));
+            }
+            tx.commit().map_err(storage_error)?;
+            return Ok(existing);
+        }
+        let parent_entry_id = sqlite_active_leaf_entry(&tx, &thread_id)?
+            .map(|entry| {
+                validate_entry_coordinates(coordinates, &entry)?;
+                Ok(entry.entry_id)
+            })
+            .transpose()?;
+        let entry = SessionEntry::for_turn(coordinates.clone(), parent_entry_id, turn_id, kind);
+        sqlite_insert_entry(&tx, &entry)?;
+        tx.execute(
+            "INSERT INTO active_leaves (thread_id, entry_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
+            params![thread_id, entry.entry_id.to_string()],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(entry)
+    }
+
     async fn active_leaf(
         &self,
         coordinates: &ThreadCoordinates,
@@ -155,23 +206,49 @@ impl SessionStore for SqliteSessionStore {
     ) -> HistoryResult<()> {
         let mut connection = self.lock_connection()?;
         let tx = connection.transaction().map_err(storage_error)?;
-        let Some(leaf_entry_id) = leaf_entry_id else {
-            tx.execute(
-                "DELETE FROM active_leaves WHERE thread_id = ?1",
-                params![coordinates.thread_id.to_string()],
-            )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
-            return Ok(());
-        };
-        sqlite_branch_path(&tx, coordinates, leaf_entry_id)?;
-        tx.execute(
-            "INSERT INTO active_leaves (thread_id, entry_id)
-             VALUES (?1, ?2)
-             ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
-            params![coordinates.thread_id.to_string(), leaf_entry_id.to_string()],
-        )
-        .map_err(storage_error)?;
+        let thread_id = coordinates.thread_id.to_string();
+        let prior_entry_id = sqlite_active_leaf_entry(&tx, &thread_id)?
+            .map(|entry| {
+                validate_entry_coordinates(coordinates, &entry)?;
+                Ok(entry.entry_id)
+            })
+            .transpose()?;
+        if let Some(leaf_entry_id) = leaf_entry_id {
+            sqlite_branch_path(&tx, coordinates, leaf_entry_id)?;
+        }
+        let payload = serde_json::to_value(ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: leaf_entry_id,
+            prior_entry_id,
+        })
+        .map_err(codec_error)?;
+        sqlite_insert_event(
+            &tx,
+            &EventStreamId::for_thread(coordinates),
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ThreadBranchSelected,
+                payload,
+            ),
+        )?;
+        match leaf_entry_id {
+            Some(leaf_entry_id) => {
+                tx.execute(
+                    "INSERT INTO active_leaves (thread_id, entry_id)
+                     VALUES (?1, ?2)
+                     ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
+                    params![thread_id, leaf_entry_id.to_string()],
+                )
+                .map_err(storage_error)?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM active_leaves WHERE thread_id = ?1",
+                    params![thread_id],
+                )
+                .map_err(storage_error)?;
+            }
+        }
         tx.commit().map_err(storage_error)?;
         Ok(())
     }
@@ -395,6 +472,7 @@ fn init_sqlite_schema(connection: &rusqlite::Connection) -> HistoryResult<()> {
             CREATE TABLE IF NOT EXISTS session_entries (
                 entry_id TEXT PRIMARY KEY NOT NULL,
                 parent_entry_id TEXT REFERENCES session_entries(entry_id),
+                turn_id TEXT,
                 thread_id TEXT NOT NULL,
                 tenant_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
@@ -472,7 +550,121 @@ fn init_sqlite_schema(connection: &rusqlite::Connection) -> HistoryResult<()> {
             "#,
         )
         .map_err(storage_error)?;
-    sqlite_migrate_event_records_schema(connection)
+    if !sqlite_table_has_column(connection, "session_entries", "turn_id")? {
+        connection
+            .execute("ALTER TABLE session_entries ADD COLUMN turn_id TEXT", [])
+            .map_err(storage_error)?;
+    }
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_turn
+             ON session_entries(thread_id, turn_id)
+             WHERE turn_id IS NOT NULL",
+            [],
+        )
+        .map_err(storage_error)?;
+    sqlite_migrate_event_records_schema(connection)?;
+    sqlite_rebuild_active_leaves_from_events(connection)
+}
+
+fn sqlite_rebuild_active_leaves_from_events(
+    connection: &rusqlite::Connection,
+) -> HistoryResult<()> {
+    let tx = connection.unchecked_transaction().map_err(storage_error)?;
+    let mut selected_threads = HashSet::new();
+    {
+        let mut statement = tx
+            .prepare(
+                "SELECT DISTINCT thread_id
+                 FROM event_records
+                 WHERE kind = ?1",
+            )
+            .map_err(storage_error)?;
+        let mut rows = statement
+            .query(params![EventKind::ThreadBranchSelected.as_str()])
+            .map_err(storage_error)?;
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            selected_threads.insert(row.get::<_, String>(0).map_err(storage_error)?);
+        }
+    }
+    if selected_threads.is_empty() {
+        return tx.commit().map_err(storage_error);
+    }
+    for thread_id in &selected_threads {
+        tx.execute(
+            "DELETE FROM active_leaves WHERE thread_id = ?1",
+            params![thread_id],
+        )
+        .map_err(storage_error)?;
+    }
+
+    let mut journal_entries = Vec::new();
+    {
+        let mut statement = tx
+            .prepare(
+                "SELECT kind, thread_id, payload_json
+                 FROM event_records
+                 WHERE kind IN (?1, ?2)
+                 ORDER BY rowid",
+            )
+            .map_err(storage_error)?;
+        let mut rows = statement
+            .query(params![
+                EventKind::SessionEntryAppended.as_str(),
+                EventKind::ThreadBranchSelected.as_str(),
+            ])
+            .map_err(storage_error)?;
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            journal_entries.push((
+                row.get::<_, String>(0).map_err(storage_error)?,
+                row.get::<_, String>(1).map_err(storage_error)?,
+                row.get::<_, String>(2).map_err(storage_error)?,
+            ));
+        }
+    }
+
+    for (kind, stored_thread_id, payload_json) in journal_entries {
+        if !selected_threads.contains(&stored_thread_id) {
+            continue;
+        }
+        let selected_entry_id = if kind == EventKind::ThreadBranchSelected.as_str() {
+            let payload: ThreadBranchSelectedPayload =
+                serde_json::from_str(&payload_json).map_err(codec_error)?;
+            if payload.thread_id.to_string() != stored_thread_id {
+                return Err(HistoryError::Codec(format!(
+                    "thread.branch.selected payload thread {} does not match event thread {stored_thread_id}",
+                    payload.thread_id
+                )));
+            }
+            payload.selected_entry_id
+        } else {
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_json).map_err(codec_error)?;
+            serde_json::from_value(payload["entry_id"].clone()).map_err(codec_error)?
+        };
+        match selected_entry_id {
+            Some(entry_id) => {
+                if sqlite_load_entry(&tx, &stored_thread_id, entry_id)?.is_none() {
+                    return Err(HistoryError::EntryNotFound(entry_id));
+                }
+                tx.execute(
+                    "INSERT INTO active_leaves (thread_id, entry_id)
+                         VALUES (?1, ?2)
+                         ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
+                    params![stored_thread_id, entry_id.to_string()],
+                )
+                .map_err(storage_error)?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM active_leaves WHERE thread_id = ?1",
+                    params![stored_thread_id],
+                )
+                .map_err(storage_error)?;
+            }
+        }
+    }
+    tx.commit().map_err(storage_error)
 }
 
 /// Migrates legacy event rows honestly: reconstructed provenance names this
@@ -685,16 +877,18 @@ fn sqlite_insert_entry_with_optional_provenance(
         "INSERT INTO session_entries (
             entry_id,
             parent_entry_id,
+            turn_id,
             thread_id,
             tenant_id,
             user_id,
             session_id,
             created_at_ms,
             entry_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             entry.entry_id.to_string(),
             entry.parent_entry_id.map(|id| id.to_string()),
+            entry.turn_id,
             entry.coordinates.thread_id.to_string(),
             entry.coordinates.tenant_id.as_str(),
             entry.coordinates.user_id.as_str(),
@@ -1072,6 +1266,7 @@ fn sqlite_build_context(
     }
 
     visiting.remove(&coordinates.thread_id);
+    strip_thread_start_identity_entries(&mut entries, &mut source_cuts);
     let mut messages = Vec::new();
     append_model_visible_messages(&entries, &mut messages);
     Ok(SessionContext {

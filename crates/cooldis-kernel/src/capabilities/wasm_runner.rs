@@ -120,6 +120,7 @@ impl AgentRuntime for WasmRuntime {
             RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
+                metadata: context.metadata.clone(),
             },
         );
         let _ = events.send(ThreadEvent::Started { context });
@@ -127,12 +128,14 @@ impl AgentRuntime for WasmRuntime {
         let mut pending_submits = VecDeque::new();
 
         loop {
-            if let Some(ThreadCommand::Submit { input, .. }) = pending_submits.pop_front() {
+            if let Some(ThreadCommand::Submit { turn_id, input, .. }) = pending_submits.pop_front()
+            {
                 if run_wasm_turn(
                     &self,
                     &services,
                     &coordinates,
                     thread_id,
+                    turn_id,
                     input,
                     &events,
                     &status,
@@ -156,7 +159,7 @@ impl AgentRuntime for WasmRuntime {
                         break;
                     };
                     match command {
-                        ThreadCommand::Submit { input, mode, .. } => {
+                        ThreadCommand::Submit { turn_id, input, mode } => {
                             if mode == TurnSubmissionMode::Steer {
                                 emit_runtime_event(
                                     &events,
@@ -173,6 +176,7 @@ impl AgentRuntime for WasmRuntime {
                                 &services,
                                 &coordinates,
                                 thread_id,
+                                turn_id,
                                 input,
                                 &events,
                                 &status,
@@ -260,6 +264,7 @@ async fn run_wasm_turn(
     services: &RuntimeServices,
     coordinates: &crate::ThreadCoordinates,
     thread_id: crate::ThreadId,
+    turn_id: String,
     input: crate::TurnInput,
     events: &broadcast::Sender<ThreadEvent>,
     status: &watch::Sender<ThreadStatus>,
@@ -268,7 +273,10 @@ async fn run_wasm_turn(
     pending_submits: &mut VecDeque<ThreadCommand>,
 ) -> bool {
     let _ = status.send(ThreadStatus::Running);
-    match services.append_user_turn_input(coordinates, &input).await {
+    match services
+        .append_user_turn_input(coordinates, &turn_id, &input)
+        .await
+    {
         Ok(entry) => {
             let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
         }

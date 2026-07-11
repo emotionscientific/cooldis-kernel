@@ -300,6 +300,7 @@ impl AgentRuntime for CanonicalProviderRuntime {
             RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
+                metadata: context.metadata.clone(),
             },
         );
         let _ = events.send(ThreadEvent::Started {
@@ -641,6 +642,7 @@ impl CanonicalProviderRuntime {
             provider_retained_text_bytes = provider_compilation.retained_text_bytes;
         }
         let receipt_payload = context_compile_receipt_payload(
+            &turn_context.turn_id,
             &session_entries,
             &compiled_context,
             &context_receipt_static_segments(&static_context_segments, &skill_context_segments),
@@ -727,6 +729,22 @@ async fn run_idle_provider_command(
             mode,
         } => {
             if mode == TurnSubmissionMode::Steer {
+                match services
+                    .append_user_turn_input(coordinates, &turn_id, &input)
+                    .await
+                {
+                    Ok(entry) => {
+                        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                    }
+                    Err(err) => {
+                        let _ = status.send(ThreadStatus::Failed);
+                        let _ = events.send(ThreadEvent::Failed {
+                            thread_id,
+                            message: err.to_string(),
+                        });
+                        return true;
+                    }
+                }
                 emit_runtime_event(
                     events,
                     coordinates,
@@ -760,7 +778,7 @@ async fn run_idle_provider_command(
                 return true;
             }
             let (turn_source_event_id, turn_anchor_timestamp_ms) = match services
-                .append_user_turn_input(coordinates, &input)
+                .append_user_turn_input(coordinates, &turn_id, &input)
                 .await
             {
                 Ok(entry) => {
@@ -1696,6 +1714,29 @@ async fn run_provider_turn(
                                     });
                                 }
                                 TurnSubmissionMode::Steer => {
+                                    match services
+                                        .append_user_turn_input(coordinates, &turn_id, &input)
+                                        .await
+                                    {
+                                        Ok(entry) => {
+                                            let _ = events.send(ThreadEvent::CanonicalMirror {
+                                                thread_id,
+                                                entry,
+                                            });
+                                        }
+                                        Err(err) => {
+                                            let _ = status.send(ThreadStatus::Failed);
+                                            let _ = events.send(ThreadEvent::Failed {
+                                                thread_id,
+                                                message: err.to_string(),
+                                            });
+                                            turn_cancellation.cancel();
+                                            cancelled_reason = Some(
+                                                "steer input persistence failed".to_string(),
+                                            );
+                                            continue;
+                                        }
+                                    }
                                     let _ = events.send(ThreadEvent::Signal {
                                         thread_id,
                                         signal: ThreadSignal::user_steer(
@@ -2088,6 +2129,7 @@ fn context_receipt_static_segments(
 }
 
 fn context_compile_receipt_payload(
+    turn_id: &str,
     session_entries: &[SessionEntry],
     compiled_context: &CompiledAgentContext,
     static_context_segments: &[AgentManifestStaticContextSegment],
@@ -2118,6 +2160,7 @@ fn context_compile_receipt_payload(
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
+        "turn_id": turn_id,
         "strategy": "naive_assembly",
         "strategy_version": "v1",
         "session_entry_ids": session_entries

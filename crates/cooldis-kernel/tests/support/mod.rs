@@ -218,6 +218,7 @@ impl AgentRuntime for ChildEchoRuntime {
             RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
+                metadata: context.metadata.clone(),
             },
         );
         let _ = events.send(ThreadEvent::Started { context });
@@ -231,9 +232,11 @@ impl AgentRuntime for ChildEchoRuntime {
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { input, .. }) => {
+                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
-                            let _ = services.append_user_turn_input(&coordinates, &input).await;
+                            let _ = services
+                                .append_user_turn_input(&coordinates, &turn_id, &input)
+                                .await;
                             let _ = events.send(ThreadEvent::Output {
                                 thread_id,
                                 text: format!("child:{}", input.text_projection()),
@@ -280,6 +283,13 @@ pub fn fixture_path(relative: &str) -> PathBuf {
 
 pub fn assert_json_fixture(relative: &str, actual: Value) {
     let path = fixture_path(relative);
+    if std::env::var_os("COOLDIS_UPDATE_FIXTURES").is_some() {
+        let mut text = serde_json::to_string_pretty(&actual).unwrap();
+        text.push('\n');
+        std::fs::write(&path, text)
+            .unwrap_or_else(|err| panic!("write fixture {}: {err}", path.display()));
+        return;
+    }
     let expected_text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         let actual_pretty = serde_json::to_string_pretty(&actual).unwrap();
         panic!(

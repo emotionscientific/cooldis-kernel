@@ -102,7 +102,7 @@ async fn select_branch_restores_checkpoint_leaf() {
         )
         .await
         .unwrap();
-    store
+    let after = store
         .append(
             &coordinates,
             None,
@@ -123,6 +123,42 @@ async fn select_branch_restores_checkpoint_leaf() {
     assert_eq!(
         context.entries.last().unwrap().entry_id,
         checkpoint_leaf.entry_id
+    );
+
+    store.select_branch(&coordinates, None).await.unwrap();
+
+    let events = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    let selections = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ThreadBranchSelected)
+        .collect::<Vec<_>>();
+    assert_eq!(selections.len(), 2);
+    assert_eq!(selections[0].origin, EventOrigin::Witnessed);
+    assert!(selections[0].provenance.is_empty());
+    assert_eq!(
+        selections[0].to_stream_record_v1().payload_schema,
+        EventKind::ThreadBranchSelected.payload_schema_id()
+    );
+    assert_eq!(
+        serde_json::from_value::<ThreadBranchSelectedPayload>(selections[0].payload.clone())
+            .unwrap(),
+        ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: Some(checkpoint_leaf.entry_id),
+            prior_entry_id: Some(after.entry_id),
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<ThreadBranchSelectedPayload>(selections[1].payload.clone())
+            .unwrap(),
+        ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: None,
+            prior_entry_id: Some(checkpoint_leaf.entry_id),
+        }
     );
 }
 
@@ -511,16 +547,20 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "thread.spawn.requested",
         "thread.spawned",
         "thread.joined",
+        "thread.branch.selected",
+        "thread.reload.degraded",
         "policy.bound",
         "grant.petitioned",
         "timer.fired",
         "io.ingress.received",
+        "io.ingress.claimed",
+        "io.ingress.settled",
         "io.egress.requested",
         "io.egress.delivered",
         "io.egress.failed",
         "admission.decided",
     ];
-    assert_eq!(EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.2");
+    assert_eq!(EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.3");
     let kinds = EventKind::all();
     assert_eq!(
         kinds.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
@@ -565,6 +605,14 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         "cooldis.event.thread.joined/1"
     );
     assert_eq!(
+        EventKind::ThreadBranchSelected.payload_schema_id(),
+        "cooldis.event.thread.branch.selected/1"
+    );
+    assert_eq!(
+        EventKind::ThreadReloadDegraded.payload_schema_id(),
+        "cooldis.event.thread.reload.degraded/1"
+    );
+    assert_eq!(
         EventKind::PolicyBound.payload_schema_id(),
         "cooldis.event.policy.bound/1"
     );
@@ -579,6 +627,14 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
     assert_eq!(
         EventKind::IoIngressReceived.payload_schema_id(),
         "cooldis.event.io.ingress.received/1"
+    );
+    assert_eq!(
+        EventKind::IoIngressClaimed.payload_schema_id(),
+        "cooldis.event.io.ingress.claimed/1"
+    );
+    assert_eq!(
+        EventKind::IoIngressSettled.payload_schema_id(),
+        "cooldis.event.io.ingress.settled/1"
     );
     assert_eq!(
         EventKind::IoEgressRequested.payload_schema_id(),
@@ -599,7 +655,86 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
 }
 
 #[test]
-fn events_0_2_payload_fixtures_round_trip_and_validate() {
+fn thread_reload_degraded_payload_schema_is_registered() {
+    let thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
+    let payload = serde_json::to_value(ThreadReloadDegradedPayload {
+        thread_id,
+        missing: vec![
+            "topology".to_string(),
+            "parent_thread_id".to_string(),
+            "metadata".to_string(),
+        ],
+        fallback: "fabricated_root".to_string(),
+    })
+    .unwrap();
+
+    stream_schema_registry_v1()
+        .unwrap()
+        .validate(
+            EventKind::ThreadReloadDegraded.payload_schema_id(),
+            &payload,
+        )
+        .unwrap();
+}
+
+#[test]
+fn ingress_outcome_payloads_round_trip_whole_and_validate() {
+    let witness_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000011").unwrap(),
+    );
+    let admission_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000012").unwrap(),
+    );
+    let claim_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000013").unwrap(),
+    );
+    let evidence_event_id = EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000014").unwrap(),
+    );
+    let claim = IoIngressClaimedPayload {
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        ingress_witness_event_ids: vec![witness_event_id],
+        admission_event_id,
+        intent: IngressOutcomeIntent::Turn {
+            turn_id: "turn-1".to_string(),
+            submission_mode: "queue".to_string(),
+            input_digest: "sha256:input".to_string(),
+        },
+    };
+    let settle = IoIngressSettledPayload {
+        claim_event_id,
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        evidence_event_id: Some(evidence_event_id),
+        settled_by: IngressSettledBy::Recovery,
+    };
+    let claim_value = serde_json::to_value(&claim).unwrap();
+    let settle_value = serde_json::to_value(&settle).unwrap();
+    let registry = stream_schema_registry_v1().unwrap();
+
+    registry
+        .validate(
+            EventKind::IoIngressClaimed.payload_schema_id(),
+            &claim_value,
+        )
+        .unwrap();
+    registry
+        .validate(
+            EventKind::IoIngressSettled.payload_schema_id(),
+            &settle_value,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_value::<IoIngressClaimedPayload>(claim_value).unwrap(),
+        claim
+    );
+    assert_eq!(
+        serde_json::from_value::<IoIngressSettledPayload>(settle_value).unwrap(),
+        settle
+    );
+}
+
+#[test]
+fn events_0_3_payload_fixtures_round_trip_and_validate() {
     let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
     let child_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000002").unwrap();
     let spawned_event_id = EventRecordId::from_uuid(
@@ -661,6 +796,7 @@ fn events_0_2_payload_fixtures_round_trip_and_validate() {
                 inputs_hash: "sha256:fork-inputs".to_string(),
                 fork: Some(ThreadSpawnedForkPayload {
                     mode: "clone".to_string(),
+                    claim_event_id: Some(spawned_event_id),
                     source_cut: ThreadSpawnedForkSourceCutPayload {
                         thread_id: parent_thread_id,
                         checkpoint_id,
@@ -679,6 +815,15 @@ fn events_0_2_payload_fixtures_round_trip_and_validate() {
                 spawned_event_id,
                 terminal_state: ThreadTerminalState::Completed,
                 result_digest: Some("sha256:result".to_string()),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::ThreadBranchSelected,
+            serde_json::to_value(ThreadBranchSelectedPayload {
+                thread_id: child_thread_id,
+                selected_entry_id: Some(leaf_entry_id),
+                prior_entry_id: None,
             })
             .unwrap(),
         ),
@@ -821,6 +966,27 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
     assert_eq!(spawned.parent_turn_id, None);
     assert_eq!(spawned.child_policy_hash, None);
     assert_eq!(spawned.fork, None);
+
+    let spawned_fork: ThreadSpawnedPayload = serde_json::from_value(serde_json::json!({
+        "schema": EventKind::ThreadSpawned.payload_schema_id(),
+        "parent_thread_id": parent_thread_id,
+        "child_thread_id": child_thread_id,
+        "child_manifest_hash": "sha256:child-manifest",
+        "granted": [],
+        "inputs_hash": "sha256:inputs",
+        "fork": {
+            "mode": "clone",
+            "sourceCut": {
+                "threadId": parent_thread_id,
+                "checkpointId": "018f0000-0000-7000-8000-000000000015",
+                "leafEntryId": null,
+                "streamId": format!("thread:{parent_thread_id}"),
+                "streamToSequence": null
+            }
+        }
+    }))
+    .unwrap();
+    assert_eq!(spawned_fork.fork.unwrap().claim_event_id, None);
 
     let joined: ThreadJoinedPayload = serde_json::from_value(serde_json::json!({
         "schema": EventKind::ThreadJoined.payload_schema_id(),

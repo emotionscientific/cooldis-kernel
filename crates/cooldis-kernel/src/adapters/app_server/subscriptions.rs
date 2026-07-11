@@ -386,7 +386,7 @@ pub(super) async fn watch_thread(app: CooldisAppServer, handle: RuntimeThreadHan
     }
 }
 
-async fn resynchronize_thread_after_lag(
+pub(super) async fn resynchronize_thread_after_lag(
     app: &CooldisAppServer,
     handle: &RuntimeThreadHandle,
     thread_id: &str,
@@ -397,13 +397,6 @@ async fn resynchronize_thread_after_lag(
     pause_thread_resync_for_test(thread_id).await;
 
     let projection = if let Some(turn_id) = lagged_turn {
-        let context = match handle.session_context().await {
-            Ok(context) => context,
-            Err(err) => {
-                notify_thread_resync_failed(app, thread_id, lagged_events, err.to_string()).await;
-                return false;
-            }
-        };
         let events = match handle.read_thread_events(None).await {
             Ok(events) => events,
             Err(err) => {
@@ -411,25 +404,38 @@ async fn resynchronize_thread_after_lag(
                 return false;
             }
         };
-        let (entry_id, completions) = match resynced_turn_facts(&events, turn_id) {
+        let facts = match resynced_turn_facts(&events, turn_id) {
             Ok(facts) => facts,
             Err(message) => {
                 notify_thread_resync_failed(app, thread_id, lagged_events, message).await;
                 return false;
             }
         };
-        let Some(projection) = resynced_turn_projection(&context.entries, &entry_id, &completions)
-        else {
-            notify_thread_resync_failed(
-                app,
-                thread_id,
-                lagged_events,
-                format!("durable session did not contain active turn {turn_id}"),
-            )
-            .await;
-            return false;
-        };
-        Some(projection)
+        if let Some((entry_id, completions)) = facts {
+            let context = match handle.session_context().await {
+                Ok(context) => context,
+                Err(err) => {
+                    notify_thread_resync_failed(app, thread_id, lagged_events, err.to_string())
+                        .await;
+                    return false;
+                }
+            };
+            let Some(projection) =
+                resynced_turn_projection(&context.entries, &entry_id, &completions)
+            else {
+                notify_thread_resync_failed(
+                    app,
+                    thread_id,
+                    lagged_events,
+                    format!("durable session did not contain active turn {turn_id}"),
+                )
+                .await;
+                return false;
+            };
+            Some(projection)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -608,26 +614,28 @@ fn resynced_turn_projection(
 fn resynced_turn_facts(
     events: &[EventRecord],
     turn_id: &str,
-) -> Result<(String, HashMap<String, ToolCallCompletedPayload>), String> {
-    let mut submitted = None;
+) -> Result<Option<(String, HashMap<String, ToolCallCompletedPayload>)>, String> {
+    let submitted = events
+        .iter()
+        .filter(|event| {
+            event.kind == EventKind::TurnSubmitted
+                && event.payload.get("turn_id").and_then(Value::as_str) == Some(turn_id)
+        })
+        .filter_map(|event| {
+            event
+                .payload
+                .get("entry_id")
+                .and_then(Value::as_str)
+                .map(|entry_id| (event.sequence.get(), entry_id.to_string()))
+        })
+        .max_by_key(|(sequence, _)| *sequence);
+    let Some((_, entry_id)) = submitted else {
+        return Ok(None);
+    };
+
     let mut completions = HashMap::new();
     for event in events {
         match event.kind {
-            EventKind::TurnSubmitted
-                if event.payload.get("turn_id").and_then(Value::as_str) == Some(turn_id) =>
-            {
-                let entry_id = event
-                    .payload
-                    .get("entry_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "turn.submitted payload is missing entry_id".to_string())?;
-                if submitted
-                    .as_ref()
-                    .is_none_or(|(sequence, _)| event.sequence.get() > *sequence)
-                {
-                    submitted = Some((event.sequence.get(), entry_id.to_string()));
-                }
-            }
             EventKind::ToolCallCompleted => {
                 let payload =
                     serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone())
@@ -639,10 +647,7 @@ fn resynced_turn_facts(
             _ => {}
         }
     }
-    let entry_id = submitted
-        .map(|(_, entry_id)| entry_id)
-        .ok_or_else(|| format!("durable event stream did not contain turn {turn_id}"))?;
-    Ok((entry_id, completions))
+    Ok(Some((entry_id, completions)))
 }
 
 fn apply_resynced_turn_projection(

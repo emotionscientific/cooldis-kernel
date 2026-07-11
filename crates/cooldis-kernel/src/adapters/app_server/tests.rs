@@ -8,7 +8,7 @@ use super::threads::{
 use super::*;
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventOrigin, KERNEL_RUNTIME_KIND,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventKind, EventOrigin, KERNEL_RUNTIME_KIND,
     LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
     MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
     PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
@@ -76,6 +76,13 @@ fn manifest_operation_binding_by_name<'a>(payload: &'a Value, name: &str) -> &'a
         .iter()
         .find(|binding| binding["name"].as_str() == Some(name))
         .unwrap_or_else(|| panic!("expected manifest operation binding {name}"))
+}
+
+fn event_by_kind(events: &[crate::EventRecord], kind: crate::EventKind) -> &crate::EventRecord {
+    events
+        .iter()
+        .find(|event| event.kind == kind)
+        .unwrap_or_else(|| panic!("expected {} event", kind.as_str()))
 }
 
 #[test]
@@ -1909,22 +1916,22 @@ async fn ref_less_thread_start_binds_default_manifest() {
     let session_store = SqliteSessionStore::open(session_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].kind, crate::EventKind::ManifestCompileCompleted);
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
-    assert_eq!(events[0].origin, EventOrigin::Discharged);
-    assert_eq!(events[1].origin, EventOrigin::Discharged);
-    assert_eq!(events[0].payload["alias"]["alias"].as_str(), Some("latest"));
+    assert_eq!(events.len(), 3);
+    let compile = event_by_kind(&events, crate::EventKind::ManifestCompileCompleted);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    assert_eq!(compile.origin, EventOrigin::Discharged);
+    assert_eq!(bind.origin, EventOrigin::Discharged);
+    assert_eq!(compile.payload["alias"]["alias"].as_str(), Some("latest"));
     assert_eq!(
-        events[0].payload["alias"]["manifest_hash"].as_str(),
+        compile.payload["alias"]["manifest_hash"].as_str(),
         Some(default_record.manifest_hash.as_str())
     );
     assert_eq!(
-        events[1].payload["manifest_hash"].as_str(),
+        bind.payload["manifest_hash"].as_str(),
         Some(default_record.manifest_hash.as_str())
     );
     assert_eq!(
-        events[1].payload["overridden_keys"].as_array().unwrap(),
+        bind.payload["overridden_keys"].as_array().unwrap(),
         &vec![json!("default_cwd")]
     );
 
@@ -2067,19 +2074,13 @@ allow = ["default_cwd"]
     let session_store = SqliteSessionStore::open(session_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(
-        events[1].payload["ref_uri"].as_str(),
+        bind.payload["ref_uri"].as_str(),
         Some(record.ref_uri.as_str())
     );
-    assert_eq!(
-        events[1].payload["model_profile_id"].as_str(),
-        Some("small")
-    );
-    assert_eq!(
-        events[1].payload["model_id"].as_str(),
-        Some("fixture-small")
-    );
+    assert_eq!(bind.payload["model_profile_id"].as_str(), Some("small"));
+    assert_eq!(bind.payload["model_id"].as_str(), Some("fixture-small"));
 
     let large_start = app
         .dispatch_request(
@@ -2480,12 +2481,11 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
-    let binding = &events[1].payload["operation_bindings"][0];
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let binding = &bind.payload["operation_bindings"][0];
     assert_eq!(binding["name"].as_str(), Some(COOLDIS_THREADS_PACKAGE));
     assert!(
-        events[1]
-            .payload
+        bind.payload
             .get("operation_bindings")
             .and_then(Value::as_array)
             .unwrap()
@@ -3698,31 +3698,31 @@ allow = ["streaming"]
     let session_store = crate::SqliteSessionStore::open(session_path).unwrap();
     let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].kind, crate::EventKind::ManifestCompileCompleted);
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
-    assert_eq!(events[0].origin, crate::EventOrigin::Discharged);
-    assert_eq!(events[1].origin, crate::EventOrigin::Discharged);
+    assert_eq!(events.len(), 3);
+    let compile = event_by_kind(&events, crate::EventKind::ManifestCompileCompleted);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    assert_eq!(compile.origin, crate::EventOrigin::Discharged);
+    assert_eq!(bind.origin, crate::EventOrigin::Discharged);
     assert_eq!(
-        events[0].provenance.discharged_by.as_deref(),
+        compile.provenance.discharged_by.as_deref(),
         Some(crate::MANIFEST_COMPILER_DISCHARGED_BY)
     );
     assert_eq!(
-        events[1].provenance.discharged_by.as_deref(),
+        bind.provenance.discharged_by.as_deref(),
         Some(crate::MANIFEST_BINDER_DISCHARGED_BY)
     );
-    assert_eq!(events[1].provenance.source_event_ids, vec![events[0].id]);
-    assert_eq!(events[0].payload["alias"]["alias"].as_str(), Some("latest"));
+    assert_eq!(bind.provenance.source_event_ids, vec![compile.id]);
+    assert_eq!(compile.payload["alias"]["alias"].as_str(), Some("latest"));
     assert_eq!(
-        events[0].payload["alias"]["manifest_hash"].as_str(),
+        compile.payload["alias"]["manifest_hash"].as_str(),
         Some(record.manifest_hash.as_str())
     );
     assert_eq!(
-        events[1].payload["manifest_hash"].as_str(),
+        bind.payload["manifest_hash"].as_str(),
         Some(record.manifest_hash.as_str())
     );
     assert_eq!(
-        events[1].payload["overridden_keys"].as_array().unwrap(),
+        bind.payload["overridden_keys"].as_array().unwrap(),
         &vec![json!("streaming")]
     );
     let _ = std::fs::remove_dir_all(root);
@@ -3974,7 +3974,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     assert_eq!(first_page["data"].as_array().unwrap().len(), 1);
     assert_eq!(
         first_page["data"][0]["kind"].as_str(),
-        Some("manifest.compile.completed")
+        Some("session.entry.appended")
     );
     assert_eq!(
         first_page["data"][0]["schema"].as_str(),
@@ -3982,7 +3982,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     );
     assert_eq!(
         first_page["data"][0]["payload_schema"].as_str(),
-        Some("cooldis.event.manifest.compile.completed/1")
+        Some("cooldis.event.session.entry.appended/1")
     );
     assert_eq!(first_page["data"][0]["sequence"].as_i64(), Some(1));
     assert_eq!(
@@ -4027,7 +4027,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     assert_eq!(second_page["data"].as_array().unwrap().len(), 1);
     assert_eq!(
         second_page["data"][0]["kind"].as_str(),
-        Some("manifest.bind.completed")
+        Some("manifest.compile.completed")
     );
     assert_eq!(
         second_page["data"][0]["origin"].as_str(),
@@ -4756,13 +4756,17 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .await
         .unwrap();
     let empty_events = empty_page["data"].as_array().unwrap();
-    assert_eq!(empty_events.len(), 2);
+    assert_eq!(empty_events.len(), 3);
     assert_eq!(
         empty_events[0]["kind"].as_str(),
-        Some("manifest.compile.completed")
+        Some("session.entry.appended")
     );
     assert_eq!(
         empty_events[1]["kind"].as_str(),
+        Some("manifest.compile.completed")
+    );
+    assert_eq!(
+        empty_events[2]["kind"].as_str(),
         Some("manifest.bind.completed")
     );
     assert_eq!(empty_page["cursor"], Value::Null);
@@ -5164,12 +5168,13 @@ streaming = false
     let session_store = SqliteSessionStore::open(session_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(
-        events[1].payload["overridden_keys"].as_array().unwrap(),
+        bind.payload["overridden_keys"].as_array().unwrap(),
         &vec![json!("default_cwd")]
     );
     assert_eq!(
-        events[1].payload["effective_runtime"]["default_cwd"].as_str(),
+        bind.payload["effective_runtime"]["default_cwd"].as_str(),
         Some(cwd_string(&workspace.join("outside-manifest")).as_str())
     );
 
@@ -5716,9 +5721,9 @@ streaming = false
     let session_store = SqliteSessionStore::open(session_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(
-        events[1].payload["operation_bindings"][0]["operations"],
+        bind.payload["operation_bindings"][0]["operations"],
         json!(["profile"])
     );
 
@@ -6581,8 +6586,8 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
-    let exa_binding = manifest_operation_binding_by_name(&events[1].payload, "search");
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let exa_binding = manifest_operation_binding_by_name(&bind.payload, "search");
     assert_eq!(exa_binding["name"].as_str(), Some("search"));
     assert_eq!(
         exa_binding["artifact_hash"].as_str(),
@@ -6640,14 +6645,12 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
-    let alpha_binding = manifest_operation_binding_by_name(&events[1].payload, "alpha");
-    let beta_binding = manifest_operation_binding_by_name(&events[1].payload, "beta");
-    let thread_binding =
-        manifest_operation_binding_by_name(&events[1].payload, COOLDIS_THREADS_PACKAGE);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let alpha_binding = manifest_operation_binding_by_name(&bind.payload, "alpha");
+    let beta_binding = manifest_operation_binding_by_name(&bind.payload, "beta");
+    let thread_binding = manifest_operation_binding_by_name(&bind.payload, COOLDIS_THREADS_PACKAGE);
     assert!(
-        events[1]
-            .payload
+        bind.payload
             .get("operation_bindings")
             .and_then(Value::as_array)
             .unwrap()
@@ -6746,16 +6749,15 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events[1].kind, crate::EventKind::ManifestBindCompleted);
-    let bindings = events[1].payload["operation_bindings"].as_array().unwrap();
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bindings = bind.payload["operation_bindings"].as_array().unwrap();
     assert_eq!(bindings.len(), 3);
     assert!(
         bindings
             .iter()
             .all(|binding| binding["name"].as_str() != Some(COOLDIS_PROCESS_PACKAGE))
     );
-    let thread_binding =
-        manifest_operation_binding_by_name(&events[1].payload, COOLDIS_THREADS_PACKAGE);
+    let thread_binding = manifest_operation_binding_by_name(&bind.payload, COOLDIS_THREADS_PACKAGE);
     assert_eq!(
         thread_binding["direct_tools"],
         json!([
@@ -6766,8 +6768,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
             { "operation": THREAD_WAIT_OPERATION, "tool_name": THREAD_WAIT_OPERATION }
         ])
     );
-    let notify_binding =
-        manifest_operation_binding_by_name(&events[1].payload, COOLDIS_NOTIFY_PACKAGE);
+    let notify_binding = manifest_operation_binding_by_name(&bind.payload, COOLDIS_NOTIFY_PACKAGE);
     assert_eq!(
         json_array_string_set(&notify_binding["operations"]),
         BTreeSet::from([
@@ -6776,7 +6777,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
         ])
     );
     let schedule_binding =
-        manifest_operation_binding_by_name(&events[1].payload, COOLDIS_SCHEDULE_PACKAGE);
+        manifest_operation_binding_by_name(&bind.payload, COOLDIS_SCHEDULE_PACKAGE);
     assert_eq!(
         json_array_string_set(&schedule_binding["operations"]),
         BTreeSet::from([
@@ -7398,6 +7399,89 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
+    let app = test_app().await;
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn_id = "turn-ingress-applied".to_string();
+    let handle = app.handle_for_thread(&thread_id).await.unwrap();
+    {
+        let mut state = app.inner.state.write().await;
+        let thread = state.threads.get_mut(&thread_id).unwrap();
+        thread.active_turn_id = Some(turn_id.clone());
+        thread.turns.insert(
+            turn_id.clone(),
+            AppServerTurnState::new(
+                turn_id.clone(),
+                vec![json!({ "type": "text", "text": "ingress", "text_elements": [] })],
+            ),
+        );
+    }
+    handle
+        .append_thread_event_record(crate::NewEventRecord::discharged(
+            handle.context().coordinates.clone(),
+            EventKind::TurnSubmitted,
+            json!({
+                "schema": EventKind::TurnSubmitted.payload_schema_id(),
+                "turn_id": turn_id,
+            }),
+            crate::EventProvenance {
+                source_event_ids: vec![crate::EventRecordId::new()],
+                discharged_by: Some("projector:io-ingress-apply".to_string()),
+                function: Some("ingress_turn_submit/v1".to_string()),
+                ..crate::EventProvenance::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        resynchronize_thread_after_lag(&app, &handle, &thread_id, 1, Some(&turn_id)).await,
+        "missing entry_id should degrade the lag resync instead of failing it",
+    );
+
+    let resynced = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let message = outbound_rx
+                .recv()
+                .await
+                .expect("notification stream closed");
+            let JsonRpcMessage::Notification(notification) = message else {
+                continue;
+            };
+            match notification.method.as_str() {
+                "thread/resynced" => break notification.params.expect("resync params"),
+                "thread/resync/failed" => panic!("degraded lag resync unexpectedly failed"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("degraded lag resync did not complete");
+
+    let resynced_turn = resynced["thread"]["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["id"].as_str() == Some(turn_id.as_str()))
+        .expect("resync snapshot should retain the active turn");
+    assert!(
+        resynced_turn["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"].as_str() != Some("agentMessage")),
+        "degraded resync must not synthesize a mid-turn projection",
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

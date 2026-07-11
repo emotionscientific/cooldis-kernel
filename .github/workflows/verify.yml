@@ -42,6 +42,18 @@ jobs:
           path: verify-output.log
           if-no-files-found: error
 
+  restart-smoke:
+    name: Process restart smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Build daemon
+        run: cargo build --locked --bin cooldis
+      - name: Verify process restart continuity
+        run: cargo run --locked --bin cooldis-restart-smoke
+
   receipts:
     name: Publish witnessed receipt
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

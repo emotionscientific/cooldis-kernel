@@ -31,6 +31,7 @@ use crate::{
     PublishedOperationSource,
     RuntimeExecutionPolicy,
     RuntimeServices,
+    SessionStore,
     StreamCursorV1,
     THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
     TenantRegistration,
@@ -179,6 +180,7 @@ struct ScriptedIngressQueueState {
     completed: bool,
     complete_errors: VecDeque<String>,
     complete_calls: usize,
+    retry_calls: usize,
 }
 
 impl ScriptedIngressQueue {
@@ -196,6 +198,7 @@ impl ScriptedIngressQueue {
                 completed: false,
                 complete_errors: complete_errors.into_iter().map(Into::into).collect(),
                 complete_calls: 0,
+                retry_calls: 0,
             })),
             block_next_complete: Arc::new(AtomicBool::new(false)),
             complete_started: Arc::new(Notify::new()),
@@ -217,6 +220,10 @@ impl ScriptedIngressQueue {
 
     async fn complete_calls(&self) -> usize {
         self.state.lock().await.complete_calls
+    }
+
+    async fn retry_calls(&self) -> usize {
+        self.state.lock().await.retry_calls
     }
 }
 
@@ -283,6 +290,7 @@ impl IngressQueueStore for ScriptedIngressQueue {
     async fn retry_ingress(&self, message_id: &str, _reason: &str) -> IoResult<()> {
         let mut state = self.state.lock().await;
         assert_eq!(message_id, state.message_id);
+        state.retry_calls += 1;
         state.visible_at = tokio::time::Instant::now();
         Ok(())
     }
@@ -510,6 +518,36 @@ async fn test_server_at_root(fixture_root: &Path) -> CooldisAppServer {
     CooldisAppServer::new_local(config).await.unwrap()
 }
 
+async fn test_server_with_provider_at_root(
+    fixture_root: &Path,
+    provider_client: Arc<dyn ProviderClient>,
+) -> CooldisAppServer {
+    let socket_path = fixture_root.join("app-server-provider.sock");
+    let listen = AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = fixture_root.join("runtime");
+    config.state_home = fixture_root.join("state");
+    config.user_state_home = fixture_root.join("user-state");
+    apply_test_identity(&mut config, fixture_root);
+    let runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            // lexicon-allow: capsule - existing app-server config field
+            config.capsule_bindings.clone(),
+            None,
+            &config,
+        );
+    CooldisAppServer::with_runtime_factory(config, runtime_factory)
+        .await
+        .unwrap()
+}
+
 async fn test_server_with_route_provider_at_root(
     fixture_root: &Path,
     workspace: &Path,
@@ -615,6 +653,56 @@ struct RecordingRouteProviderClient {
 impl RecordingRouteProviderClient {
     fn requests(&self) -> Vec<ProviderRequest> {
         self.requests.lock().unwrap().clone()
+    }
+}
+
+#[derive(Default)]
+struct BlockingRouteProviderClient {
+    request_count: AtomicUsize,
+    request_started: Notify,
+    released: AtomicBool,
+    release: Notify,
+}
+
+impl BlockingRouteProviderClient {
+    async fn wait_for_requests(&self, count: usize) {
+        loop {
+            let started = self.request_started.notified();
+            if self.request_count.load(Ordering::SeqCst) >= count {
+                return;
+            }
+            started.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl ProviderClient for BlockingRouteProviderClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.request_count.fetch_add(1, Ordering::SeqCst);
+        self.request_started.notify_waiters();
+        while !self.released.load(Ordering::SeqCst) {
+            let released = self.release.notified();
+            if self.released.load(Ordering::SeqCst) {
+                break;
+            }
+            released.await;
+        }
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text("blocking daemon route ok")],
+            usage: CanonicalUsage {
+                input_tokens: request.messages.len() as u64,
+                output_tokens: 4,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
     }
 }
 
@@ -839,6 +927,146 @@ async fn bridge_with_unresponsive_runtime(
     );
     bridge.session_store_path = Some(session_store_path);
     (bridge, state)
+}
+
+#[derive(Default)]
+struct PersistedInputCutState {
+    input_persisted: Notify,
+}
+
+struct PersistedInputCutRuntimeFactory {
+    state: Arc<PersistedInputCutState>,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for PersistedInputCutRuntimeFactory {
+    async fn build(&self, _context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        Ok(Box::new(PersistedInputCutRuntime {
+            state: Arc::clone(&self.state),
+        }))
+    }
+}
+
+struct PersistedInputCutRuntime {
+    state: Arc<PersistedInputCutState>,
+}
+
+#[async_trait]
+impl AgentRuntime for PersistedInputCutRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        cancellation: CancellationToken,
+    ) {
+        let thread_id = context.coordinates.thread_id;
+        let coordinates = context.coordinates.clone();
+        let _ = events.send(ThreadEvent::Started { context });
+        let _ = status.send(ThreadStatus::Idle);
+        if let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await {
+            let _ = status.send(ThreadStatus::Running);
+            let entry = services
+                .append_user_turn_input(&coordinates, &turn_id, &input)
+                .await
+                .unwrap();
+            let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+            self.state.input_persisted.notify_one();
+            cancellation.cancelled().await;
+        }
+        let _ = status.send(ThreadStatus::Stopped);
+        let _ = events.send(ThreadEvent::Stopped { thread_id });
+    }
+}
+
+#[derive(Default)]
+struct FailOnceRuntimeState {
+    failed: Notify,
+}
+
+struct FailOnceThenProviderRuntimeFactory {
+    builds: AtomicUsize,
+    state: Arc<FailOnceRuntimeState>,
+    provider: CanonicalProviderRuntimeFactory,
+}
+
+#[async_trait]
+impl AgentRuntimeFactory for FailOnceThenProviderRuntimeFactory {
+    async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
+        if self.builds.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(Box::new(FailBeforeEvidenceRuntime {
+                state: Arc::clone(&self.state),
+            }));
+        }
+        self.provider.build(context).await
+    }
+}
+
+struct FailBeforeEvidenceRuntime {
+    state: Arc<FailOnceRuntimeState>,
+}
+
+#[async_trait]
+impl AgentRuntime for FailBeforeEvidenceRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: ThreadContext,
+        _services: RuntimeServices,
+        mut commands: mpsc::Receiver<ThreadCommand>,
+        events: broadcast::Sender<ThreadEvent>,
+        status: watch::Sender<ThreadStatus>,
+        _cancellation: CancellationToken,
+    ) {
+        let thread_id = context.coordinates.thread_id;
+        let _ = events.send(ThreadEvent::Started { context });
+        let _ = status.send(ThreadStatus::Idle);
+        if commands.recv().await.is_some() {
+            let _ = status.send(ThreadStatus::Failed);
+            let _ = events.send(ThreadEvent::Failed {
+                thread_id,
+                message: "injected failure before execution evidence".to_string(),
+            });
+            self.state.failed.notify_one();
+        }
+    }
+}
+
+async fn bridge_with_runtime_factory_at_root(
+    fixture_root: &Path,
+    runtime_factory: Arc<dyn AgentRuntimeFactory>,
+) -> CooldisDaemonIoBridge {
+    let suffix = fixture_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("daemon-io");
+    let tenant_id = format!("app-server-{suffix}");
+    let user_id = format!("local-user-{suffix}");
+    let context = TenantRuntimeContext::local(
+        tenant_id.clone(),
+        fixture_root.join("runtime"),
+        fixture_root.join("state"),
+    );
+    let session_store_path = context.session_history_path();
+    let supervisor = CooldisSupervisor::new();
+    supervisor
+        .register_tenant(TenantRegistration {
+            context,
+            runtime_factory,
+        })
+        .await
+        .unwrap();
+    let mut bridge = CooldisDaemonIoBridge::new(
+        supervisor,
+        tenant_id,
+        user_id,
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+        std::env::current_dir().unwrap(),
+    );
+    bridge.session_store_path = Some(session_store_path);
+    bridge
 }
 
 #[derive(Clone, Default)]
@@ -1341,6 +1569,7 @@ async fn assert_single_durable_ingress_turn(
     coordinates: &ThreadCoordinates,
     message_id: &str,
 ) {
+    let control_events = control_events_for(session_store_path, coordinates).await;
     let mut thread_events = thread_events_for(session_store_path, coordinates).await;
     for _ in 0..100 {
         if thread_events
@@ -1353,12 +1582,13 @@ async fn assert_single_durable_ingress_turn(
         thread_events = thread_events_for(session_store_path, coordinates).await;
     }
     assert_eq!(
-        thread_events
+        control_events
             .iter()
+            .chain(&thread_events)
             .filter(|event| event.kind == EventKind::IoIngressReceived)
             .count(),
         1,
-        "durable ingress redelivery must not apply a second ingress fact"
+        "durable ingress redelivery must leave one receipt across all streams"
     );
     assert_eq!(
         thread_events
@@ -1368,41 +1598,26 @@ async fn assert_single_durable_ingress_turn(
         1,
         "durable ingress redelivery must not submit a second turn"
     );
-    let markers = thread_events
+    let claims = control_events
         .iter()
         .filter(|event| {
-            event.kind == EventKind::IoIngressReceived
-                && event.payload["ingress_message_ids"]
+            event.kind == EventKind::IoIngressClaimed
+                && event.payload["ingress_envelope_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(message_id)))
         })
         .collect::<Vec<_>>();
-    assert_eq!(markers.len(), 1, "expected one durable applied marker");
-    assert!(markers[0].payload["turn_id"].as_str().is_some());
-}
-
-async fn assert_dedupe_hit_diagnostic(
-    session_store_path: &Path,
-    coordinates: &ThreadCoordinates,
-    message_id: &str,
-) {
-    let control_events = control_events_for(session_store_path, coordinates).await;
-    let diagnostic = control_events.iter().find(|event| {
-        event.kind == EventKind::IoIngressReceived
-            && event.payload["dedupe_seen"].as_bool() == Some(true)
-            && event.payload["ingress_message_id"].as_str() == Some(message_id)
-    });
-    let diagnostic = diagnostic.unwrap_or_else(|| {
-        panic!(
-            "redelivery should emit a dedupe-hit diagnostic; control payloads: {:?}",
-            control_events
-                .iter()
-                .filter(|event| event.kind == EventKind::IoIngressReceived)
-                .map(|event| &event.payload)
-                .collect::<Vec<_>>()
-        )
-    });
-    assert!(diagnostic.payload["applied_turn_id"].as_str().is_some());
+    assert_eq!(claims.len(), 1, "expected one durable ingress claim");
+    let settles = control_events
+        .iter()
+        .filter(|event| {
+            event.kind == EventKind::IoIngressSettled
+                && event.payload["claim_event_id"].as_str()
+                    == Some(claims[0].id.to_string().as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(settles.len(), 1, "expected one durable ingress settle");
+    assert!(settles[0].payload["evidence_event_id"].as_str().is_some());
 }
 
 async fn user_texts_for(
@@ -1816,6 +2031,205 @@ async fn route_agent_ref_binds_manifest_prompt_metadata_and_receipts() {
 }
 
 #[tokio::test]
+async fn route_agent_identity_survives_true_runtime_restart() {
+    let root = test_root("route-agent-restart-identity");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation = publish_route_test_operation(&operation_registry_root).await;
+    let agent_registry_root = root.join("agents");
+    publish_route_agent_manifest(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        &operation.active_artifact_hash,
+    );
+    let db = root.join("io.sqlite");
+    let mut route = route_with_egress(Vec::new(), None);
+    route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
+
+    let first_client = Arc::new(RecordingRouteProviderClient::default());
+    let first_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        first_client.clone(),
+    )
+    .await;
+    let first_bridge = CooldisDaemonIoBridge::from_app_server(&first_server);
+    register_route_state(&first_bridge, &route, &db).await;
+    RouteIngressSink::new(first_bridge.direct_sink(), &route)
+        .submit(test_envelope("before restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&first_client, 1).await;
+    let coordinates = only_thread_coordinates(&first_bridge).await;
+    drop(first_bridge);
+    drop(first_server);
+
+    let restarted_client = Arc::new(RecordingRouteProviderClient::default());
+    let restarted_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        restarted_client.clone(),
+    )
+    .await;
+    let restarted = CooldisDaemonIoBridge::from_app_server(&restarted_server);
+    register_route_state(&restarted, &route, &db).await;
+    assert!(matches!(
+        restarted.supervisor.get_thread_at(&coordinates).await,
+        Err(CooldisError::ThreadNotFound(_))
+    ));
+
+    RouteIngressSink::new(restarted.direct_sink(), &route)
+        .submit(test_envelope("after restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&restarted_client, 1).await;
+
+    let requests = restarted_client.requests();
+    assert_eq!(
+        requests[0].system[0].text,
+        "You are the daemon route prompt runner.\n"
+    );
+    assert!(requests[0].tools.iter().any(|tool| tool.name == "lookup"));
+    let reloaded = restarted
+        .supervisor
+        .get_thread_at(&coordinates)
+        .await
+        .unwrap();
+    assert!(
+        reloaded
+            .context()
+            .metadata
+            .contains_key(THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn fork_child_identity_survives_true_runtime_restart() {
+    let root = test_root("route-fork-restart-identity");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation = publish_route_test_operation(&operation_registry_root).await;
+    let agent_registry_root = root.join("agents");
+    publish_route_agent_manifest(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        &operation.active_artifact_hash,
+    );
+    let db = root.join("io.sqlite");
+    let mut route = route_with_egress(Vec::new(), None);
+    route.policy = Some("fork_on_new_dm".to_string());
+    route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
+
+    let first_client = Arc::new(RecordingRouteProviderClient::default());
+    let first_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        first_client.clone(),
+    )
+    .await;
+    let first_bridge = CooldisDaemonIoBridge::from_app_server(&first_server);
+    register_route_state(&first_bridge, &route, &db).await;
+    RouteIngressSink::new(first_bridge.direct_sink(), &route)
+        .submit(test_envelope("before fork restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&first_client, 1).await;
+    let child_coordinates = only_thread_coordinates(&first_bridge).await;
+    let child = first_bridge
+        .supervisor
+        .get_thread_at(&child_coordinates)
+        .await
+        .unwrap();
+    let expected_parent = child.context().parent_thread_id.unwrap();
+    let expected_topology = child.context().topology.clone();
+    drop(first_bridge);
+    drop(first_server);
+
+    let restarted_client = Arc::new(RecordingRouteProviderClient::default());
+    let restarted_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        restarted_client.clone(),
+    )
+    .await;
+    let restarted = CooldisDaemonIoBridge::from_app_server(&restarted_server);
+    register_route_state(&restarted, &route, &db).await;
+    RouteIngressSink::new(restarted.direct_sink(), &route)
+        .submit(test_envelope("after fork restart"))
+        .await
+        .unwrap();
+    wait_for_provider_requests(&restarted_client, 1).await;
+
+    let child = restarted
+        .supervisor
+        .get_thread_at(&child_coordinates)
+        .await
+        .unwrap();
+    assert_eq!(child.context().parent_thread_id, Some(expected_parent));
+    assert_eq!(child.context().topology, expected_topology);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
+    let root = test_root("legacy-reload-degraded");
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = test_envelope("legacy reload");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let coordinates = ThreadCoordinates {
+        tenant_id: target.address.tenant_id,
+        user_id: target.address.user_id,
+        session_id: target.address.session_id,
+        thread_id: ThreadId::new(),
+    };
+
+    for expected_witnesses in 1..=2 {
+        let handle = bridge
+            .get_or_load_thread_handle(&coordinates)
+            .await
+            .unwrap();
+        assert_eq!(handle.context().parent_thread_id, None);
+        assert_eq!(handle.context().topology, ThreadTopology::root());
+        assert!(handle.context().metadata.is_empty());
+        bridge
+            .supervisor
+            .shutdown_thread_at(&coordinates)
+            .await
+            .unwrap();
+
+        let events =
+            thread_events_for(bridge.session_store_path.as_ref().unwrap(), &coordinates).await;
+        let degraded = events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadReloadDegraded)
+            .collect::<Vec<_>>();
+        assert_eq!(degraded.len(), expected_witnesses);
+        let payload: crate::ThreadReloadDegradedPayload =
+            serde_json::from_value(degraded.last().unwrap().payload.clone()).unwrap();
+        assert_eq!(payload.thread_id, coordinates.thread_id);
+        assert_eq!(
+            payload.missing,
+            vec!["topology", "parent_thread_id", "metadata"]
+        );
+        assert_eq!(payload.fallback, "fabricated_root");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn route_without_agent_ref_stays_unbound() {
     let root = test_root("route-without-agent-ref");
     let workspace = root.join("workspace");
@@ -2011,7 +2425,659 @@ async fn queue_worker_redelivery_after_complete_failure_does_not_duplicate_turn(
     assert_eq!(faulting_queue.call_count("complete_ingress"), 2);
     let coordinates = only_thread_coordinates(&bridge).await;
     assert_single_durable_ingress_turn(&session_store_path, &coordinates, &ingress_id).await;
-    assert_dedupe_hit_diagnostic(&session_store_path, &coordinates, &ingress_id).await;
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn racing_fork_applies_create_one_child_behind_one_parent_claim() {
+    let fixture_root = test_root("fork-racing-applies");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    bridge
+        .submit_envelope(test_envelope("seed the shared fork parent"))
+        .await
+        .unwrap();
+    let parent_coordinates = only_thread_coordinates(&bridge).await;
+    wait_for_user_text(&bridge, &parent_coordinates, "seed the shared fork parent").await;
+    let competing_bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    register_route_state(
+        &competing_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let envelope = telegram_queue_envelope("fork once under contention")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+
+    let (first, second) = tokio::join!(
+        bridge.submit_queued_envelope(envelope.clone(), 1),
+        competing_bridge.submit_queued_envelope(envelope.clone(), 1)
+    );
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(
+        bridge.fork_claim_scan_count.load(Ordering::SeqCst)
+            + competing_bridge
+                .fork_claim_scan_count
+                .load(Ordering::SeqCst),
+        0,
+        "fresh fork admission must not scan for recovery evidence under the scope lock"
+    );
+
+    let bindings = route_bindings(&bridge).await;
+    assert_eq!(
+        bindings.len(),
+        2,
+        "the parent should have exactly one child"
+    );
+    let mut control_events = Vec::new();
+    let mut submitted = 0;
+    for binding in &bindings {
+        control_events.extend(control_events_for(&session_store_path, &binding.coordinates).await);
+        submitted += thread_events_for(&session_store_path, &binding.coordinates)
+            .await
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::TurnSubmitted
+                    && event.payload["ingress_envelope_id"].as_str() == Some(&envelope.id)
+            })
+            .count();
+    }
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadSpawned)
+            .count(),
+        1
+    );
+    assert_eq!(submitted, 1);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn durable_ingress_witness_and_admission_are_single_under_racing_applies() {
+    let fixture_root = test_root("durable-ingress-single-preclaim-facts");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let envelope = telegram_queue_envelope("race the pre-claim facts");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let coordinates = start_thread_for_target(&bridge, &target).await;
+    let competing_bridge = CooldisDaemonIoBridge::from_app_server(&server);
+
+    let (first, second) = tokio::join!(
+        bridge.record_ingress_received(&coordinates, &envelope, Some(&envelope.id)),
+        competing_bridge.record_ingress_received(&coordinates, &envelope, Some(&envelope.id)),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(
+        first.id, second.id,
+        "racing applies must share one ingress witness"
+    );
+
+    let decision = AdmissionDecision::queue(
+        "turn-preclaim-race",
+        IoTurnInput::from_envelope(&envelope, &target),
+    );
+    let (first, second) = tokio::join!(
+        bridge.record_admission_decided(
+            &coordinates,
+            &envelope,
+            &decision,
+            "sha256:policy",
+            vec![first.id],
+            false,
+            true,
+        ),
+        competing_bridge.record_admission_decided(
+            &coordinates,
+            &envelope,
+            &decision,
+            "sha256:policy",
+            vec![first.id],
+            false,
+            true,
+        ),
+    );
+    assert_eq!(
+        first.unwrap().id,
+        second.unwrap().id,
+        "racing applies must share one admission decision"
+    );
+
+    let events = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::AdmissionDecided)
+            .count(),
+        1
+    );
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn racing_initial_applies_share_the_durable_conversation_binding() {
+    let fixture_root = test_root("durable-ingress-racing-initial-binding");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let competing_bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    register_route_state(
+        &competing_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let barrier = Arc::new(Barrier::new(2));
+    *bridge.ingress_binding_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+    *competing_bridge.ingress_binding_barrier.lock().unwrap() = Some(barrier);
+    let envelope = telegram_queue_envelope("race the initial binding");
+
+    let (first, second) = tokio::join!(
+        bridge.submit_queued_envelope(envelope.clone(), 1),
+        competing_bridge.submit_queued_envelope(envelope.clone(), 1),
+    );
+    first.unwrap();
+    second.unwrap();
+
+    let bindings = route_bindings(&bridge).await;
+    assert_eq!(
+        bindings.len(),
+        1,
+        "the durable scope must select one root thread"
+    );
+    let coordinates = &bindings[0].coordinates;
+    let events = control_events_for(server.session_store_path(), coordinates).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    let snapshot = bridge.supervisor.snapshot().await;
+    let tenant = snapshot
+        .tenants
+        .iter()
+        .find(|tenant| tenant.tenant_id == bridge.tenant_id)
+        .unwrap();
+    assert_eq!(
+        tenant.runtime.threads.len(),
+        1,
+        "the losing provisional root must be removed"
+    );
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn coalesced_fork_first_attempt_loser_runs_no_recovery_effects() {
+    let fixture_root = test_root("coalesced-fork-first-attempt-loser");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    bridge
+        .submit_envelope(test_envelope("seed the coalesced fork parent"))
+        .await
+        .unwrap();
+    let parent_coordinates = only_thread_coordinates(&bridge).await;
+    let competing_bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    register_route_state(
+        &competing_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let envelope = telegram_queue_envelope("coalesced fork contention")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    bridge
+        .pause_after_ingress_claim
+        .store(true, Ordering::SeqCst);
+    let claim_paused = bridge.ingress_claim_paused.notified();
+    let first_bridge = bridge.clone();
+    let first_envelope = envelope.clone();
+    let first = tokio::spawn(async move {
+        first_bridge
+            .submit_coalesced_queued_envelopes(
+                first_envelope.clone(),
+                &[first_envelope.clone()],
+                &[first_envelope.id.clone()],
+                1,
+            )
+            .await
+    });
+    claim_paused.await;
+
+    competing_bridge
+        .submit_coalesced_queued_envelopes(
+            envelope.clone(),
+            &[envelope.clone()],
+            &[envelope.id.clone()],
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(
+        bridge
+            .supervisor
+            .children_of_at(&parent_coordinates)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a racing first-attempt loser must not recover the claim owner's fork"
+    );
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn settled_fork_redelivery_repeats_no_control_effects() {
+    let fixture_root = test_root("fork-settled-redelivery");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("redeliver a settled fork")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let queue = ScriptedIngressQueue::new(
+        "message-fork-settled-redelivery",
+        envelope,
+        std::iter::empty::<&str>(),
+    );
+    let faulting_queue = Arc::new(FaultingIngressQueue::new(Arc::new(queue.clone())).fail_nth(
+        "complete_ingress",
+        1,
+        "scripted complete failure",
+    ));
+    let worker = CooldisDaemonQueueWorker::new(
+        faulting_queue,
+        bridge.clone(),
+        "worker-fork-settled-redelivery",
+        30,
+    );
+
+    let err = worker.drain_once().await.unwrap_err();
+    assert!(err.to_string().contains("scripted complete failure"));
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    let bindings = route_bindings(&bridge).await;
+    assert_eq!(
+        bindings.len(),
+        2,
+        "redelivery must not create a second child"
+    );
+    let mut control_events = Vec::new();
+    let mut submitted = 0;
+    for binding in &bindings {
+        control_events.extend(control_events_for(&session_store_path, &binding.coordinates).await);
+        submitted += thread_events_for(&session_store_path, &binding.coordinates)
+            .await
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count();
+    }
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressSettled)
+            .count(),
+        1
+    );
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadSpawned)
+            .count(),
+        1
+    );
+    assert_eq!(submitted, 1);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fork_claim_before_fork_recovers_one_child_after_restart() {
+    let fixture_root = test_root("fork-claim-before-fork-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("recover fork after claim")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-fork-claim-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    bridge
+        .pause_after_ingress_claim
+        .store(true, Ordering::SeqCst);
+    let claim_paused = bridge.ingress_claim_paused.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-fork-claim-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    claim_paused.await;
+
+    let parent_coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::ThreadSpawned)
+    );
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::IoIngressSettled)
+    );
+    assert!(
+        bridge
+            .supervisor
+            .children_of_at(&parent_coordinates)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(route_bindings(&bridge).await.len(), 1);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge.clone(),
+        "worker-after-fork-claim-cut",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .unwrap();
+    let spawned = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::ThreadSpawned)
+        .expect("recovery should create and witness one child");
+    let spawned_payload: ThreadSpawnedPayload =
+        serde_json::from_value(spawned.payload.clone()).unwrap();
+    assert_eq!(spawned_payload.fork.unwrap().claim_event_id, Some(claim.id));
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("recovery should settle the fork claim");
+    assert_eq!(settle.payload["settled_by"], "recovery");
+    assert_eq!(
+        settle.payload["evidence_event_id"].as_str(),
+        Some(spawned.id.to_string().as_str())
+    );
+    assert_eq!(route_bindings(&restarted_bridge).await.len(), 2);
+    let child_coordinates = ThreadCoordinates {
+        tenant_id: parent_coordinates.tenant_id.clone(),
+        user_id: parent_coordinates.user_id.clone(),
+        session_id: parent_coordinates.session_id.clone(),
+        thread_id: spawned_payload.child_thread_id,
+    };
+    assert_eq!(
+        thread_events_for(&session_store_path, &child_coordinates)
+            .await
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        1
+    );
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
+    let fixture_root = test_root("fork-spawn-before-settle-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let bridge = bridge_with_runtime_factory_at_root(
+        &fixture_root,
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            runtime_config.clone(),
+            Arc::new(RecordingRouteProviderClient::default()),
+        )),
+    )
+    .await;
+    let session_store_path = bridge.session_store_path.clone().unwrap();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("recover spawned fork")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-fork-spawn-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    bridge.pause_after_fork_spawn.store(true, Ordering::SeqCst);
+    let spawn_paused = bridge.fork_spawn_paused.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-fork-spawn-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    spawn_paused.await;
+
+    let parent_coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("claim should exist before the fork effects");
+    let spawned = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::ThreadSpawned)
+        .expect("the cut should land after thread.spawned");
+    let spawned_payload: ThreadSpawnedPayload =
+        serde_json::from_value(spawned.payload.clone()).unwrap();
+    assert_eq!(
+        spawned_payload.fork.as_ref().unwrap().claim_event_id,
+        Some(claim.id)
+    );
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::IoIngressSettled)
+    );
+    let children = bridge
+        .supervisor
+        .children_of_at(&parent_coordinates)
+        .await
+        .unwrap();
+    assert_eq!(children.len(), 1);
+    let child_coordinates = children[0].context().coordinates.clone();
+    assert_eq!(child_coordinates.thread_id, spawned_payload.child_thread_id);
+    assert!(
+        !thread_events_for(&session_store_path, &child_coordinates)
+            .await
+            .iter()
+            .any(|event| event.kind == EventKind::TurnSubmitted)
+    );
+    assert_eq!(route_bindings(&bridge).await.len(), 1);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let restarted_bridge = bridge_with_runtime_factory_at_root(
+        &fixture_root,
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            runtime_config,
+            Arc::new(RecordingRouteProviderClient::default()),
+        )),
+    )
+    .await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge.clone(),
+        "worker-after-fork-spawn-cut",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadSpawned)
+            .count(),
+        1,
+        "recovery must reuse the child named by thread.spawned"
+    );
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("recovery should settle the existing spawned child");
+    assert_eq!(settle.payload["settled_by"], "recovery");
+    assert_eq!(
+        settle.payload["evidence_event_id"].as_str(),
+        Some(spawned.id.to_string().as_str())
+    );
+    assert_eq!(route_bindings(&restarted_bridge).await.len(), 2);
+    let resolved = restarted_bridge
+        .resolve_target(&telegram_queue_envelope("binding probe"))
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted_bridge
+            .resolved_target_coordinates(&resolved)
+            .await
+            .unwrap()
+            .unwrap()
+            .thread_id,
+        child_coordinates.thread_id
+    );
+    assert_eq!(
+        thread_events_for(&session_store_path, &child_coordinates)
+            .await
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        1
+    );
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn queued_interrupt_claims_before_cancel_and_settles_replacement() {
+    let fixture_root = test_root("queue-interrupt-outcome");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let egress_db = fixture_root.join("io.sqlite");
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("interrupt with replacement")
+        .with_metadata("cooldis_route_policy", "interrupt_on_new_dm");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-interrupt-outcome",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-interrupt-outcome",
+        30,
+    );
+
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(queue.completed().await);
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .unwrap();
+    let claim_payload =
+        serde_json::from_value::<IoIngressClaimedPayload>(claim.payload.clone()).unwrap();
+    let replacement_turn_id = match claim_payload.intent {
+        IngressOutcomeIntent::Interrupt {
+            replacement_turn_id: Some(turn_id),
+            ..
+        } => turn_id,
+        other => panic!("unexpected interrupt claim intent: {other:?}"),
+    };
+    assert_eq!(claim_payload.ingress_envelope_ids, vec![ingress_id]);
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .unwrap();
+    let settle_payload =
+        serde_json::from_value::<IoIngressSettledPayload>(settle.payload.clone()).unwrap();
+    assert_eq!(settle_payload.claim_event_id, claim.id);
+    assert!(settle_payload.evidence_event_id.is_some());
+    assert!(
+        thread_events_for(&session_store_path, &coordinates)
+            .await
+            .iter()
+            .any(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["turn_id"].as_str() == Some(&replacement_turn_id)
+            })
+    );
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -2038,14 +3104,15 @@ async fn queue_worker_rejection_before_submission_does_not_mark_ingress_applied(
 
     let first = worker.drain_once().await.unwrap_err();
     assert!(first.to_string().contains("max pending input count is 0"));
+    assert_eq!(queue.retry_calls().await, 1);
     let coordinates = only_thread_coordinates(&bridge).await;
     assert!(
-        !thread_events_for(&session_store_path, &coordinates)
+        !control_events_for(&session_store_path, &coordinates)
             .await
             .iter()
             .any(|event| {
-                event.kind == EventKind::IoIngressReceived
-                    && event.payload[INGRESS_MESSAGE_IDS_FIELD]
+                event.kind == EventKind::IoIngressClaimed
+                    && event.payload["ingress_envelope_ids"]
                         .as_array()
                         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
             })
@@ -2058,13 +3125,14 @@ async fn queue_worker_rejection_before_submission_does_not_mark_ingress_applied(
     tokio::time::advance(Duration::from_secs(30)).await;
     let second = worker.drain_once().await.unwrap_err();
     assert!(second.to_string().contains("max pending input count is 0"));
+    assert_eq!(queue.retry_calls().await, 2);
     assert!(!queue.completed().await);
     assert_eq!(queue.complete_calls().await, 0);
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
 #[tokio::test]
-async fn fork_worker_rejection_deduplicates_retry_without_spawning_another_child() {
+async fn fork_worker_rejection_keeps_one_claimed_child_for_recovery() {
     let fixture_root = test_root("fork-submit-rejection");
     let bridge = bridge_with_execution_policy(
         &fixture_root,
@@ -2093,26 +3161,48 @@ async fn fork_worker_rejection_deduplicates_retry_without_spawning_another_child
             .await
             .iter()
             .any(|event| {
-                event.kind == EventKind::IoIngressReceived
-                    && event.payload[INGRESS_MESSAGE_IDS_FIELD]
-                        .as_array()
-                        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
+                event.kind == EventKind::TurnSubmitted
+                    && event.payload["ingress_envelope_id"].as_str() == Some(&ingress_id)
             })
     );
-    let bindings_after_first = route_bindings(&bridge).await;
-    assert_eq!(bindings_after_first.len(), 2);
+    assert_eq!(route_bindings(&bridge).await.len(), 2);
+    let child = bridge
+        .supervisor
+        .get_thread_at(&child_coordinates)
+        .await
+        .unwrap();
+    let parent_coordinates = ThreadCoordinates {
+        tenant_id: child_coordinates.tenant_id.clone(),
+        user_id: child_coordinates.user_id.clone(),
+        session_id: child_coordinates.session_id.clone(),
+        thread_id: child.context().parent_thread_id.unwrap(),
+    };
+    let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadSpawned)
+            .count(),
+        1
+    );
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::IoIngressSettled)
+    );
     assert!(
         bridge.active_turns.lock().unwrap().is_empty(),
         "a rejected fork turn must not remain active in bridge state"
     );
-
-    assert_eq!(worker.drain_once().await.unwrap(), 1);
-    assert!(queue.completed().await);
-    assert_eq!(only_thread_coordinates(&bridge).await, child_coordinates);
-    assert_eq!(
-        route_bindings(&bridge).await.len(),
-        bindings_after_first.len()
-    );
+    assert!(!queue.completed().await);
+    assert_eq!(queue.complete_calls().await, 0);
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -2154,11 +3244,8 @@ async fn interrupt_cancel_wait_does_not_hold_active_turn_state_lock() {
         .resolve_target(&test_envelope("state probe"))
         .await
         .unwrap();
-    let state_read = tokio::time::timeout(
-        Duration::from_secs(1),
-        bridge.ingress_state(&target, &handle, &[]),
-    )
-    .await;
+    let state_read =
+        tokio::time::timeout(Duration::from_secs(1), bridge.ingress_state(&target)).await;
     assert!(
         state_read.is_ok(),
         "an interrupt waiting for cancellation grace must not block unrelated active-turn reads"
@@ -2169,85 +3256,503 @@ async fn interrupt_cancel_wait_does_not_hold_active_turn_state_lock() {
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
-#[tokio::test]
-async fn applied_ingress_lookup_rejects_conflicting_turn_and_thread_mappings() {
-    let fixture_root = test_root("conflicting-applied-ingress");
-    let (_server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
-    let store = SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap()).unwrap();
-    let first_coordinates = ThreadCoordinates::new(
-        bridge.tenant_id.clone(),
-        bridge.user_id.clone(),
-        "first-session",
-    );
-    let second_coordinates = ThreadCoordinates::new(
-        bridge.tenant_id.clone(),
-        bridge.user_id.clone(),
-        "second-session",
-    );
-    let envelope = telegram_queue_envelope("conflicting applied ingress");
-
-    let marker = |coordinates: &ThreadCoordinates, turn_id: &str, message_ids: &[&str]| {
-        let mut record =
-            ingress_received_control_record(coordinates, &envelope, None, None).unwrap();
-        let payload = record.payload.as_object_mut().unwrap();
-        payload.insert("turn_id".to_string(), json!(turn_id));
-        payload.insert(INGRESS_MESSAGE_IDS_FIELD.to_string(), json!(message_ids));
-        record
-    };
-    store
-        .append_events(
-            &EventStreamId::for_thread(&first_coordinates),
-            vec![marker(
-                &first_coordinates,
-                "turn-first",
-                &["message-a", "duplicate"],
-            )],
-        )
-        .await
-        .unwrap();
-    store
-        .append_events(
-            &EventStreamId::for_thread(&second_coordinates),
-            vec![marker(
-                &second_coordinates,
-                "turn-second",
-                &["message-b", "duplicate"],
-            )],
-        )
-        .await
-        .unwrap();
-
-    let Err(different_markers) =
-        bridge.applied_ingress_marker(&["message-a".to_string(), "message-b".to_string()])
-    else {
-        panic!("different applied markers must fail closed");
-    };
-    assert!(different_markers.to_string().contains("inconsistent"));
-    let Err(duplicate_marker) = bridge.applied_ingress_marker(&["duplicate".to_string()]) else {
-        panic!("conflicting duplicate markers must fail closed");
-    };
-    assert!(duplicate_marker.to_string().contains("inconsistent"));
-
-    let same_stream_events = vec![
+#[test]
+fn ingress_outcome_fold_rejects_conflicting_claims() {
+    let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+    let stream_id = control_stream_id(&coordinates);
+    let admission_event_id = EventRecordId::new();
+    let claim = |sequence: i64, turn_id: &str, envelope_ids: &[&str]| {
         EventRecord::from_new(
-            EventStreamId::for_thread(&first_coordinates),
-            EventSequence::new(1),
-            marker(&first_coordinates, "turn-first", &["message-a"]),
-        ),
-        EventRecord::from_new(
-            EventStreamId::for_thread(&first_coordinates),
-            EventSequence::new(2),
-            marker(&first_coordinates, "turn-second", &["message-b"]),
-        ),
+            stream_id.clone(),
+            EventSequence::new(sequence),
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::IoIngressClaimed,
+                serde_json::to_value(IoIngressClaimedPayload {
+                    ingress_envelope_ids: envelope_ids.iter().map(|id| id.to_string()).collect(),
+                    ingress_witness_event_ids: vec![EventRecordId::new()],
+                    admission_event_id,
+                    intent: IngressOutcomeIntent::Turn {
+                        turn_id: turn_id.to_string(),
+                        submission_mode: "queue".to_string(),
+                        input_digest: "sha256:input".to_string(),
+                    },
+                })
+                .unwrap(),
+            ),
+        )
+    };
+    let claims = vec![
+        claim(1, "turn-first", &["duplicate", "message-a"]),
+        claim(2, "turn-second", &["duplicate", "message-b"]),
     ];
-    assert!(matches!(
-        applied_ingress_lookup(
-            &same_stream_events,
-            &["message-a".to_string(), "message-b".to_string()]
-        ),
-        AppliedIngressLookup::Partial
-    ));
 
+    let err = ingress_outcome_fold(&claims, &["duplicate".to_string()]).unwrap_err();
+    assert!(err.to_string().contains("more than one claim"));
+    let err = ingress_outcome_fold(
+        &claims[..1],
+        &["message-a".to_string(), "message-missing".to_string()],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("partially overlaps"));
+}
+
+#[tokio::test]
+async fn lone_effect_free_claims_fail_closed_during_recovery() {
+    let root = test_root("effect-free-claim-corruption");
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = observe_only_envelope("seed effect-free recovery target");
+    bridge.submit_envelope(envelope.clone()).await.unwrap();
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let stream_id = control_stream_id(&coordinates);
+
+    for (index, intent) in [
+        IngressOutcomeIntent::Observe {
+            reason: "observe corruption".to_string(),
+        },
+        IngressOutcomeIntent::Reject {
+            reason: "reject corruption".to_string(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let payload = IoIngressClaimedPayload {
+            ingress_envelope_ids: vec![envelope.id.clone()],
+            ingress_witness_event_ids: vec![EventRecordId::new()],
+            admission_event_id: EventRecordId::new(),
+            intent,
+        };
+        let claim = EventRecord::from_new(
+            stream_id.clone(),
+            EventSequence::new(index as i64 + 1),
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::IoIngressClaimed,
+                serde_json::to_value(&payload).unwrap(),
+            ),
+        );
+        let err = bridge
+            .recover_ingress_outcome(
+                &envelope,
+                &target,
+                IngressOutcomeState::Claimed { claim, payload },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("effect-free ingress claim is missing its atomic settle")
+        );
+    }
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn claim_committed_before_submit_recovers_original_turn_once_after_restart() {
+    let fixture_root = test_root("queue-claim-submit-crash-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("recover claimed turn");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-claim-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    bridge
+        .pause_after_ingress_claim
+        .store(true, Ordering::SeqCst);
+    let claim_paused = bridge.ingress_claim_paused.notified();
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-before-claim-cut", 30);
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    claim_paused.await;
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("claim should commit before the injected process-death cut");
+    let claimed_turn_id = claim.payload["intent"]["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::IoIngressSettled)
+    );
+    assert!(
+        !thread_events_for(&session_store_path, &coordinates)
+            .await
+            .iter()
+            .any(|event| event.kind == EventKind::TurnSubmitted)
+    );
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge.clone(),
+        "worker-after-claim-cut",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("redelivery should settle the claim");
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    let submitted = thread_events
+        .iter()
+        .filter(|event| event.kind == EventKind::TurnSubmitted)
+        .collect::<Vec<_>>();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(
+        submitted[0].payload["turn_id"].as_str(),
+        Some(claimed_turn_id.as_str())
+    );
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["turn_id"].as_str() == Some(claimed_turn_id.as_str())
+            })
+            .count(),
+        1,
+        "recovered execution must adopt the turn input entry"
+    );
+    assert_single_durable_ingress_turn(&session_store_path, &coordinates, &ingress_id).await;
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn input_persisted_before_compile_recovery_resubmits_and_adopts_entry() {
+    let fixture_root = test_root("queue-input-compile-crash-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let state = Arc::new(PersistedInputCutState::default());
+    let bridge = bridge_with_runtime_factory_at_root(
+        &fixture_root,
+        Arc::new(PersistedInputCutRuntimeFactory {
+            state: Arc::clone(&state),
+        }),
+    )
+    .await;
+    let session_store_path = bridge.session_store_path.clone().unwrap();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("recover after persisted input");
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-input-compile-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let input_persisted = state.input_persisted.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-input-compile-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    tokio::time::timeout(Duration::from_secs(3), input_persisted)
+        .await
+        .expect("executing side should reach the input-persisted cut");
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("claim should precede input persistence");
+    let claimed_turn_id = claim.payload["intent"]["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    let input_event = thread_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
+        })
+        .expect("executing side should persist the claimed input");
+    let input_event_id = input_event.id;
+    assert!(
+        !thread_events
+            .iter()
+            .any(|event| event.kind == EventKind::ContextCompileCompleted)
+    );
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::IoIngressSettled)
+    );
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    queue
+        .retry_ingress("message-input-compile-cut", "injected process death")
+        .await
+        .unwrap();
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge,
+        "worker-after-input-compile-cut",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
+            })
+            .count(),
+        1,
+        "recovery must adopt the persisted turn input"
+    );
+    assert!(thread_events.iter().any(|event| {
+        event.kind == EventKind::ContextCompileCompleted
+            && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
+    }));
+    assert!(thread_events.iter().any(|event| {
+        event.kind == EventKind::TurnCompleted
+            && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
+    }));
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("recovery should settle after turn-trace evidence");
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
+    let evidence_id = settle.payload["evidence_event_id"].as_str().unwrap();
+    assert_ne!(evidence_id, input_event_id.to_string());
+    assert!(thread_events.iter().any(|event| {
+        event.id.to_string() == evidence_id && event.kind == EventKind::ContextCompileCompleted
+    }));
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
+    let fixture_root = test_root("queue-runtime-failure-reservation");
+    let egress_db = fixture_root.join("io.sqlite");
+    let state = Arc::new(FailOnceRuntimeState::default());
+    let runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let provider_client: Arc<dyn ProviderClient> =
+        Arc::new(RecordingRouteProviderClient::default());
+    let bridge = bridge_with_runtime_factory_at_root(
+        &fixture_root,
+        Arc::new(FailOnceThenProviderRuntimeFactory {
+            builds: AtomicUsize::new(0),
+            state: Arc::clone(&state),
+            provider: CanonicalProviderRuntimeFactory::new(runtime_config, provider_client),
+        }),
+    )
+    .await;
+    let session_store_path = bridge.session_store_path.clone().unwrap();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-runtime-failure",
+        telegram_queue_envelope("recover after runtime failure"),
+        std::iter::empty::<&str>(),
+    ));
+    let failed = state.failed.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-runtime-restart",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    tokio::time::timeout(Duration::from_secs(3), failed)
+        .await
+        .expect("runtime should reach the injected failure");
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .unwrap();
+    let claimed_turn_id = claim.payload["intent"]["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !control_events
+            .iter()
+            .any(|event| event.kind == EventKind::IoIngressSettled)
+    );
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        bridge
+            .supervisor
+            .get_thread_at(&coordinates)
+            .await
+            .unwrap()
+            .status(),
+        ThreadStatus::Failed,
+        "the failed runtime must still be resident at redelivery"
+    );
+    queue
+        .retry_ingress("message-runtime-failure", "runtime redelivery")
+        .await
+        .unwrap();
+
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-after-runtime-restart",
+        30,
+    );
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("replacement runtime should settle the claim");
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
+    assert!(
+        thread_events_for(&session_store_path, &coordinates)
+            .await
+            .iter()
+            .any(|event| {
+                event.kind == EventKind::ContextCompileCompleted
+                    && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
+            })
+    );
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn concurrent_lazy_load_of_cyclic_topology_fails_closed_without_lock_deadlock() {
+    let fixture_root = test_root("lazy-load-cyclic-topology");
+    let bridge = bridge_with_runtime_factory_at_root(
+        &fixture_root,
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            CanonicalProviderRuntimeConfig::new(
+                ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+                APP_SERVER_LOCAL_PROVIDER,
+                APP_SERVER_LOCAL_MODEL,
+            ),
+            Arc::new(RecordingRouteProviderClient::default()),
+        )),
+    )
+    .await;
+    let store = SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap()).unwrap();
+    let first = ThreadCoordinates {
+        tenant_id: bridge.tenant_id.clone(),
+        user_id: bridge.user_id.clone(),
+        session_id: "cyclic-session".to_string(),
+        thread_id: ThreadId::new(),
+    };
+    let second = ThreadCoordinates {
+        thread_id: ThreadId::new(),
+        ..first.clone()
+    };
+    for (coordinates, parent_thread_id) in [(&first, second.thread_id), (&second, first.thread_id)]
+    {
+        store
+            .append(
+                coordinates,
+                None,
+                SessionEntryKind::Runtime {
+                    kind: "thread_started".to_string(),
+                    payload: json!({
+                        "parent_thread_id": parent_thread_id,
+                        "topology": ThreadTopology::branch_from(parent_thread_id, None),
+                        "metadata": {},
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    *bridge.thread_load_root_barrier.lock().unwrap() = Some(barrier);
+    let first_bridge = bridge.clone();
+    let first_coordinates = first.clone();
+    let first_load = tokio::spawn(async move {
+        first_bridge
+            .get_or_load_thread_handle(&first_coordinates)
+            .await
+    });
+    let second_bridge = bridge.clone();
+    let second_coordinates = second.clone();
+    let second_load = tokio::spawn(async move {
+        second_bridge
+            .get_or_load_thread_handle(&second_coordinates)
+            .await
+    });
+
+    let (first_error, second_error) = tokio::time::timeout(Duration::from_secs(1), async {
+        (
+            match first_load.await.unwrap() {
+                Ok(_) => panic!("first cyclic load unexpectedly succeeded"),
+                Err(err) => err,
+            },
+            match second_load.await.unwrap() {
+                Ok(_) => panic!("second cyclic load unexpectedly succeeded"),
+                Err(err) => err,
+            },
+        )
+    })
+    .await
+    .expect("cyclic concurrent loads must fail instead of deadlocking");
+    for error in [first_error, second_error] {
+        assert!(error.into_inner().to_string().contains("topology cycle"));
+    }
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -2277,7 +3782,7 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
     drop(server);
 
     tokio::time::advance(Duration::from_secs(30)).await;
-    let (restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    let (_restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
     register_route_state(
         &restarted_bridge,
         &route_with_egress(Vec::new(), None),
@@ -2329,12 +3834,191 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
     );
     assert_single_durable_ingress_turn(&session_store_path, &original_coordinates, &ingress_id)
         .await;
-    assert_dedupe_hit_diagnostic(
-        restarted_server.session_store_path(),
-        &original_coordinates,
-        &ingress_id,
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn observe_settled_before_complete_redelivery_appends_nothing() {
+    let fixture_root = test_root("observe-apply-complete-crash-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = observe_only_envelope("observe exactly once");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-observe-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    queue.block_next_complete();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-observe-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    queue.wait_for_complete_started().await;
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let before = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1,
+        "the ingress witness must exist before the process-death cut"
+    );
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::AdmissionDecided)
+            .count(),
+        1,
+        "the observe decision must exist before the process-death cut"
+    );
+    let claim = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("the observe claim must exist before the process-death cut");
+    assert_eq!(claim.payload["intent"]["outcome"].as_str(), Some("observe"));
+    let settle = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("the observe settle must exist before the process-death cut");
+    assert_eq!(
+        settle.payload["claim_event_id"].as_str(),
+        Some(claim.id.to_string()).as_deref()
+    );
+    assert!(settle.payload["evidence_event_id"].is_null());
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("execution"));
+    assert_eq!(
+        thread_events_for(&session_store_path, &coordinates)
+            .await
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        0
+    );
+    assert!(!queue.completed().await);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
     )
     .await;
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge,
+        "worker-after-observe-cut",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+    let after = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(after, before, "redelivery must append no control event");
+    assert!(matches!(
+        ingress_outcome_fold(&after, &[ingress_id]).unwrap(),
+        IngressOutcomeState::Settled { .. }
+    ));
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reject_settled_before_complete_redelivery_dedupes_and_completes() {
+    let fixture_root = test_root("reject-apply-complete-crash-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("reject exactly once")
+        .with_metadata("cooldis_route_policy", "reject");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-reject-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    queue.block_next_complete();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-reject-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    queue.wait_for_complete_started().await;
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let before = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1
+    );
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::AdmissionDecided)
+            .count(),
+        1
+    );
+    let claim = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("the reject claim must exist before the process-death cut");
+    assert_eq!(claim.payload["intent"]["outcome"].as_str(), Some("reject"));
+    let settle = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("the reject settle must exist before the process-death cut");
+    assert!(settle.payload["evidence_event_id"].is_null());
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("execution"));
+    assert!(!queue.completed().await);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge,
+        "worker-after-reject-cut",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+    let after = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(after, before, "redelivery must not re-decide a reject");
+    assert!(matches!(
+        ingress_outcome_fold(&after, &[ingress_id]).unwrap(),
+        IngressOutcomeState::Settled { .. }
+    ));
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -2796,7 +4480,7 @@ async fn queue_worker_coalesces_window_expired_batch_into_one_turn_and_source_li
             .iter()
             .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
             .count(),
-        1
+        0
     );
     assert_eq!(
         thread_events
@@ -2853,6 +4537,93 @@ async fn queue_worker_flushes_coalesce_batch_when_max_batch_is_reached() {
             .await
             .contains(&"first\nsecond".to_string())
     );
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn queue_worker_admits_cross_drain_burst_as_separate_recovery_batches() {
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let db = std::env::temp_dir()
+        .join("cooldis-daemon-io-tests")
+        .join(format!(
+            "queue-coalesce-cross-drain-{}.sqlite",
+            uuid::Uuid::now_v7()
+        ));
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    queue
+        .submit(coalesce_envelope("first drain", "2501", 60_000, 2))
+        .await
+        .unwrap();
+
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-coalesce-cross-drain-hold",
+        30,
+    )
+    .with_max_messages(1);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(bridge.threads.lock().await.is_empty());
+
+    queue
+        .submit(coalesce_envelope("second drain", "2502", 60_000, 2))
+        .await
+        .unwrap();
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(
+        bridge.threads.lock().await.is_empty(),
+        "a later drain must not silently complete the earlier held batch"
+    );
+
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let released = connection
+        .execute(
+            "UPDATE pgqrs_messages
+             SET vt = datetime('now', '-1 second')
+             WHERE archived_at IS NULL",
+            [],
+        )
+        .unwrap();
+    assert_eq!(released, 2, "both held messages should become visible");
+    drop(connection);
+    drop(worker);
+    drop(queue);
+
+    let reopened = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&db, "ingress"))
+            .await
+            .unwrap(),
+    );
+    let restarted_worker = CooldisDaemonQueueWorker::new(
+        reopened,
+        bridge.clone(),
+        "worker-coalesce-cross-drain-restart",
+        30,
+    )
+    .with_max_messages(1);
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+    assert_eq!(restarted_worker.drain_once().await.unwrap(), 1);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let admissions = control_events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .collect::<Vec<_>>();
+    assert_eq!(admissions.len(), 2);
+    assert!(admissions.iter().all(|admission| {
+        admission.payload["decision"].as_str() == Some("coalesce")
+            && admission_source_ids(admission).len() == 1
+    }));
+
+    let user_texts = user_texts_for(&bridge, &coordinates).await;
+    assert!(user_texts.contains(&"first drain".to_string()));
+    assert!(user_texts.contains(&"second drain".to_string()));
+    assert!(!user_texts.contains(&"first drain\nsecond drain".to_string()));
     let _ = std::fs::remove_file(db);
 }
 
@@ -3017,13 +4788,13 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
             .count(),
         2
     );
     let latest_ingress_context = thread_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
         .next_back()
         .unwrap();
     assert_eq!(
@@ -3031,7 +4802,186 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
         Some("2")
     );
     assert_eq!(admission_source_ids(latest_admission).len(), 2);
+    let claim = control_events
+        .iter()
+        .filter(|event| event.kind == EventKind::IoIngressClaimed)
+        .next_back()
+        .unwrap();
+    let claim_payload =
+        serde_json::from_value::<IoIngressClaimedPayload>(claim.payload.clone()).unwrap();
+    let steer_turn_id = match &claim_payload.intent {
+        IngressOutcomeIntent::Turn {
+            turn_id,
+            submission_mode,
+            ..
+        } if submission_mode == "steer" => turn_id,
+        other => panic!("unexpected steer claim intent: {other:?}"),
+    };
+    let settle_payload = control_events
+        .iter()
+        .filter(|event| event.kind == EventKind::IoIngressSettled)
+        .next_back()
+        .map(|event| {
+            serde_json::from_value::<IoIngressSettledPayload>(event.payload.clone()).unwrap()
+        })
+        .unwrap();
+    assert_eq!(settle_payload.claim_event_id, claim.id);
+    let steer_input = thread_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["turn_id"].as_str() == Some(steer_turn_id)
+        })
+        .expect("steer consumption should persist its input");
+    assert_eq!(settle_payload.evidence_event_id, Some(steer_input.id));
     let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn active_steer_settles_on_persisted_input_evidence() {
+    let fixture_root = test_root("active-steer-evidence");
+    let egress_db = fixture_root.join("io.sqlite");
+    let client = Arc::new(BlockingRouteProviderClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let server = test_server_with_provider_at_root(&fixture_root, provider_client).await;
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+
+    bridge
+        .submit_envelope(telegram_queue_envelope("active turn"))
+        .await
+        .unwrap();
+    client.wait_for_requests(1).await;
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let handle = bridge.supervisor.get_thread_at(&coordinates).await.unwrap();
+    assert_eq!(handle.status(), ThreadStatus::Running);
+
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-active-steer",
+        telegram_queue_envelope("steer accepted")
+            .with_metadata("cooldis_route_policy", "steer_when_active"),
+        std::iter::empty::<&str>(),
+    ));
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-active-steer", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .unwrap();
+    let steer_turn_id = claim.payload["intent"]["turn_id"].as_str().unwrap();
+    assert_eq!(claim.payload["intent"]["submission_mode"], "steer");
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    let steer_input = thread_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["turn_id"].as_str() == Some(steer_turn_id)
+        })
+        .unwrap();
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .unwrap();
+    assert_eq!(
+        settle.payload["evidence_event_id"].as_str(),
+        Some(steer_input.id.to_string().as_str())
+    );
+    assert!(queue.completed().await);
+
+    client.release();
+    bridge.supervisor.shutdown_all().await.unwrap();
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn idle_rejected_steer_persists_input_and_settles_on_it() {
+    let fixture_root = test_root("idle-steer-evidence");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+
+    bridge
+        .submit_envelope(telegram_queue_envelope("finished turn"))
+        .await
+        .unwrap();
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let handle = bridge.supervisor.get_thread_at(&coordinates).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = thread_events_for(&session_store_path, &coordinates).await;
+        if handle.status() == ThreadStatus::Idle
+            && events
+                .iter()
+                .any(|event| event.kind == EventKind::TurnCompleted)
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut runtime_events = handle.subscribe_events();
+
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-idle-steer",
+        telegram_queue_envelope("steer while idle")
+            .with_metadata("cooldis_route_policy", "steer_when_active"),
+        std::iter::empty::<&str>(),
+    ));
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-idle-steer", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(ThreadEvent::Runtime { event, .. }) = runtime_events.recv().await
+                && matches!(
+                    event.kind,
+                    crate::RuntimeEventKind::PolicyRejected { ref code, .. }
+                        if code == "no_active_turn"
+                )
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("idle steer should emit its policy rejection");
+
+    let control_events = control_events_for(&session_store_path, &coordinates).await;
+    let claim = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .unwrap();
+    let steer_turn_id = claim.payload["intent"]["turn_id"].as_str().unwrap();
+    assert_eq!(claim.payload["intent"]["submission_mode"], "steer");
+    let thread_events = thread_events_for(&session_store_path, &coordinates).await;
+    let steer_input = thread_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["turn_id"].as_str() == Some(steer_turn_id)
+        })
+        .unwrap();
+    let settle = control_events
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .unwrap();
+    assert_eq!(
+        settle.payload["evidence_event_id"].as_str(),
+        Some(steer_input.id.to_string().as_str())
+    );
+    assert!(
+        user_texts_for(&bridge, &coordinates)
+            .await
+            .contains(&"steer while idle".to_string())
+    );
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
 }
 
 #[tokio::test]
@@ -3059,7 +5009,7 @@ async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
     assert_eq!(
         child_thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
             .count(),
         1
     );
@@ -3104,6 +5054,7 @@ async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
         .fork
         .expect("thread.spawned fork provenance should be typed");
     assert_eq!(fork.mode, "clone");
+    assert_eq!(fork.claim_event_id, None);
     assert_eq!(fork.source_cut.thread_id, spawned_payload.parent_thread_id);
     assert_eq!(spawned.payload["fork"]["mode"].as_str(), Some("clone"));
     assert_eq!(
@@ -3235,6 +5186,19 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
         .count();
     assert_eq!(turn_submitted_count, 1);
+    let submitted = thread_events
+        .iter()
+        .find(|event| event.kind == crate::EventKind::TurnSubmitted)
+        .unwrap();
+    assert_eq!(submitted.origin, crate::EventOrigin::Discharged);
+    assert_eq!(
+        submitted.provenance.source_streams,
+        vec![control_stream.clone()]
+    );
+    assert_eq!(
+        submitted.provenance.source_event_ids,
+        vec![control_events[ingress_pos].id]
+    );
 
     let observe_source = IoSource::new("telegram.bot", "main");
     reopened
@@ -3384,6 +5348,59 @@ async fn clock_route_duplicate_enqueue_before_ack_does_not_double_fire() {
     assert_eq!(fired[0].mandate_event_id, mandate.event.id);
     assert_eq!(fired[0].occurrence_index, 0);
     let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test(start_paused = true)]
+async fn clock_tick_apply_before_complete_redelivery_does_not_double_fire() {
+    let root = test_root("clock-apply-complete-crash-cut");
+    let server = test_server_at_root(&root).await;
+    let (store, coordinates, mandate) =
+        start_clock_thread_with_mandate(&server, MandateCatchUpPolicy::CoalesceMissed).await;
+    let after_due = event_time(mandate.event.created_at_ms, 90_000);
+    let clock = Arc::new(FakeClock::new(after_due));
+    let placeholder = telegram_queue_envelope("clock placeholder");
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-clock-cut",
+        placeholder,
+        std::iter::empty::<&str>(),
+    ));
+    let route = CooldisDaemonClockRoute::new("clock-main", store.clone(), queue.clone(), clock);
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
+
+    queue.block_next_complete();
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "clock-worker-before-cut", 30);
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    queue.wait_for_complete_started().await;
+    let fired_before = timer_payloads(&store, &coordinates).await;
+    assert_eq!(
+        fired_before.len(),
+        1,
+        "timer.fired must exist before the cut"
+    );
+    assert_eq!(fired_before[0].mandate_event_id, mandate.event.id);
+    assert_eq!(fired_before[0].occurrence_index, 0);
+    assert!(!queue.completed().await);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&root).await;
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge,
+        "clock-worker-after-cut",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+    assert_eq!(timer_payloads(&store, &coordinates).await, fired_before);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -3806,6 +5823,22 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
     assert_eq!(first_handle.context().coordinates, coordinates);
     assert_eq!(second_handle.context().coordinates, coordinates);
     assert_eq!(gate.matching_builds(), 1);
+    let store = bridge
+        .supervisor
+        .runtime_store(&coordinates.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .read_events(&EventStreamId::for_thread(&coordinates), None)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadReloadDegraded)
+            .count(),
+        1,
+        "racing lazy loads must share one degraded-reload witness"
+    );
     bridge
         .supervisor
         .shutdown_thread_at(&coordinates)
@@ -3912,6 +5945,71 @@ async fn duplicate_ingress_bindings_seed_the_latest_thread() {
 }
 
 #[tokio::test]
+async fn equal_timestamp_ingress_bindings_seed_the_last_committed_thread() {
+    let root = test_root("ingress-binding-equal-timestamp");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = test_envelope("latest equal-time binding");
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let older = ThreadCoordinates {
+        tenant_id: target.address.tenant_id.clone(),
+        user_id: target.address.user_id.clone(),
+        session_id: target.address.session_id.clone(),
+        thread_id: ThreadId::parse_str("ffffffff-ffff-7fff-bfff-ffffffffffff").unwrap(),
+    };
+    let latest = ThreadCoordinates {
+        thread_id: ThreadId::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
+        ..older.clone()
+    };
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    insert_route_binding(&state, &target.address.scope_key(), &older, 1);
+    insert_route_binding(&state, &target.address.scope_key(), &latest, 1);
+    drop(state);
+
+    register_route_state(&bridge, &route, &db).await;
+    assert_eq!(
+        bridge.threads.lock().await.get(&target.address.scope_key()),
+        Some(&latest),
+        "row commit order must break equal-timestamp binding ties"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn egress_refresh_does_not_roll_back_the_active_ingress_rebind() {
+    let root = test_root("egress-refresh-keeps-ingress-rebind");
+    let db = root.join("io.sqlite");
+    let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
+    let scope_key = "test.protocol:main:conversation:123";
+    let parent = ThreadCoordinates::new("tenant", "user", "session");
+    let child = ThreadCoordinates {
+        thread_id: ThreadId::new(),
+        ..parent.clone()
+    };
+    assert_eq!(
+        state
+            .claim_ingress_thread_binding("main", "test.protocol:main", scope_key, &parent)
+            .unwrap(),
+        parent
+    );
+    state
+        .bind_thread("main", "test.protocol:main", scope_key, &child)
+        .unwrap();
+    state
+        .rebind_ingress_thread("main", "test.protocol:main", scope_key, &child)
+        .unwrap();
+    state
+        .bind_thread("main", "test.protocol:main", scope_key, &parent)
+        .unwrap();
+
+    let active = state.active_ingress_threads("main").unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].coordinates, child);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn egress_projector_delivers_requested_platform_action_after_bridge_restart() {
     let root = test_root("egress-requested-action-restart");
     let db = root.join("io.sqlite");
@@ -3956,10 +6054,9 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
         .unwrap()
         .into_iter()
         .find(|event| {
-            event.kind == EventKind::IoIngressReceived
-                && event.payload["turn_id"].as_str().is_some()
+            event.kind == EventKind::TurnSubmitted && event.payload["turn_id"].as_str().is_some()
         })
-        .expect("thread ingress event");
+        .expect("ingress turn submission");
     let ingress_context = ingress_context_from_event(&ingress_event).unwrap();
     let mut target = ingress_context.target.clone();
     target.metadata = ingress_context.metadata.clone();
@@ -4097,10 +6194,9 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
         .unwrap()
         .into_iter()
         .find(|event| {
-            event.kind == EventKind::IoIngressReceived
-                && event.payload["turn_id"].as_str().is_some()
+            event.kind == EventKind::TurnSubmitted && event.payload["turn_id"].as_str().is_some()
         })
-        .expect("thread ingress event");
+        .expect("ingress turn submission");
     let ingress_context = ingress_context_from_event(&ingress_event).unwrap();
     let mut target = ingress_context.target.clone();
     target.metadata = ingress_context.metadata.clone();

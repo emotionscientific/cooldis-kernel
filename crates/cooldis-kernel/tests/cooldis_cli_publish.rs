@@ -265,6 +265,13 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(!root.contains("cooldis [PROMPT]"));
 
     let commands = run_cooldis(["commands"]);
+    assert!(commands.contains("cooldis agent"));
+    assert!(commands.contains("cooldis tool"));
+    assert!(commands.contains("cooldis skill"));
+    assert!(commands.contains("cooldis auth"));
+    assert!(commands.contains("cooldis secret"));
+    assert!(commands.contains("cooldis rpc"));
+    assert!(commands.contains("cooldis console"));
     assert!(commands.contains("cooldis chat [PROMPT]"));
     assert!(commands.contains("cooldis debug rpc call"));
     assert!(commands.contains("cooldis tool manual"));

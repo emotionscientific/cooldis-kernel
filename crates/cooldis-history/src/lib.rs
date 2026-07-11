@@ -1,3 +1,15 @@
+//! Canonical history stores treat the journal as authority and mutable tables
+//! such as SQLite `active_leaves` as derived read models. On open, branch
+//! selection events rebuild that cache with the last selection per thread
+//! winning.
+//!
+//! Legacy databases are the migration exception. A thread with no
+//! `thread.branch.selected` event retains its pre-event `active_leaves` row so
+//! an upgrade does not erase the only surviving branch choice. One-time schema
+//! migrations may also update legacy event rows to add frozen schema identity
+//! and honest migration provenance. These retrofits are migration work only;
+//! runtime branch selection must append witnessed journal authority.
+
 use async_trait::async_trait;
 use cooldis_runtime_contracts::{
     JsonSchemaValidationError, SchemaRegistry, ThreadCheckpointId, ThreadCoordinates, ThreadId,
@@ -20,7 +32,7 @@ pub const STREAM_APPEND_ACK_SCHEMA_V1: &str = "cooldis.stream.append_ack/1";
 pub const STREAM_ROUTING_DECISION_SCHEMA_V1: &str = "cooldis.stream.routing_decision/1";
 pub const CONTEXT_READ_PLAN_SCHEMA_V1: &str = "cooldis.context.read_plan/1";
 pub const DEBUG_THREAD_EXPORT_SCHEMA_V1: &str = "cooldis.debug.thread_export/1";
-pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.2";
+pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.3";
 
 pub const COMPACTION_SUMMARY_PREFIX: &str = "Compacted conversation summary:";
 
@@ -185,7 +197,7 @@ impl std::fmt::Display for EventRecordId {
     }
 }
 
-/// Frozen event-kind vocabulary, version `cooldis.events/0.2`.
+/// Frozen event-kind vocabulary, version `cooldis.events/0.3`.
 ///
 /// Laws:
 /// - The vocabulary is append-only: kinds may be added in later versions,
@@ -276,6 +288,15 @@ pub enum EventKind {
     /// A spawned child thread reached a terminal state and joined back to its
     /// parent lineage.
     ThreadJoined,
+    /// A thread's live branch selection changed; appended in the same
+    /// transaction as the `active_leaves` cache update. Selecting no branch
+    /// (clearing) is itself a witnessed selection. Added in
+    /// `cooldis.events/0.3`.
+    ThreadBranchSelected,
+    /// A lazily reloaded thread's journal could not reconstruct full
+    /// lifecycle identity and the loader fell back to a fabricated root
+    /// record. Added in `cooldis.events/0.3`.
+    ThreadReloadDegraded,
     /// A policy identity became active. The binding is valid until the next
     /// `policy.bound` with the same `policy_id`.
     PolicyBound,
@@ -286,6 +307,16 @@ pub enum EventKind {
     TimerFired,
     /// An external IO route received an ingress envelope.
     IoIngressReceived,
+    /// The runtime accepted sole responsibility for an admitted ingress
+    /// envelope's outcome, fenced onto the resolved thread's control stream
+    /// before any non-idempotent effect (ADR 0003). `io.ingress` names the
+    /// ingress-envelope outcome lifecycle, not the producing component or
+    /// stream. Added in `cooldis.events/0.3`.
+    IoIngressClaimed,
+    /// A claimed ingress outcome reached its terminal state, with provenance
+    /// to the claim and its execution evidence. A settled claim is terminal:
+    /// redelivery dedupes against it. Added in `cooldis.events/0.3`.
+    IoIngressSettled,
     /// A tool path requested an IO egress action for later projection.
     IoEgressRequested,
     /// An IO egress attempt was delivered to the external route.
@@ -332,10 +363,14 @@ impl EventKind {
             Self::ThreadSpawnRequested,
             Self::ThreadSpawned,
             Self::ThreadJoined,
+            Self::ThreadBranchSelected,
+            Self::ThreadReloadDegraded,
             Self::PolicyBound,
             Self::GrantPetitioned,
             Self::TimerFired,
             Self::IoIngressReceived,
+            Self::IoIngressClaimed,
+            Self::IoIngressSettled,
             Self::IoEgressRequested,
             Self::IoEgressDelivered,
             Self::IoEgressFailed,
@@ -378,10 +413,14 @@ impl EventKind {
             Self::ThreadSpawnRequested => "thread.spawn.requested",
             Self::ThreadSpawned => "thread.spawned",
             Self::ThreadJoined => "thread.joined",
+            Self::ThreadBranchSelected => "thread.branch.selected",
+            Self::ThreadReloadDegraded => "thread.reload.degraded",
             Self::PolicyBound => "policy.bound",
             Self::GrantPetitioned => "grant.petitioned",
             Self::TimerFired => "timer.fired",
             Self::IoIngressReceived => "io.ingress.received",
+            Self::IoIngressClaimed => "io.ingress.claimed",
+            Self::IoIngressSettled => "io.ingress.settled",
             Self::IoEgressRequested => "io.egress.requested",
             Self::IoEgressDelivered => "io.egress.delivered",
             Self::IoEgressFailed => "io.egress.failed",
@@ -426,10 +465,14 @@ impl EventKind {
             Self::ThreadSpawnRequested => "cooldis.event.thread.spawn.requested/1",
             Self::ThreadSpawned => "cooldis.event.thread.spawned/1",
             Self::ThreadJoined => "cooldis.event.thread.joined/1",
+            Self::ThreadBranchSelected => "cooldis.event.thread.branch.selected/1",
+            Self::ThreadReloadDegraded => "cooldis.event.thread.reload.degraded/1",
             Self::PolicyBound => "cooldis.event.policy.bound/1",
             Self::GrantPetitioned => "cooldis.event.grant.petitioned/1",
             Self::TimerFired => "cooldis.event.timer.fired/1",
             Self::IoIngressReceived => "cooldis.event.io.ingress.received/1",
+            Self::IoIngressClaimed => "cooldis.event.io.ingress.claimed/1",
+            Self::IoIngressSettled => "cooldis.event.io.ingress.settled/1",
             Self::IoEgressRequested => "cooldis.event.io.egress.requested/1",
             Self::IoEgressDelivered => "cooldis.event.io.egress.delivered/1",
             Self::IoEgressFailed => "cooldis.event.io.egress.failed/1",
@@ -476,10 +519,14 @@ impl std::str::FromStr for EventKind {
             "thread.spawn.requested" => Ok(Self::ThreadSpawnRequested),
             "thread.spawned" => Ok(Self::ThreadSpawned),
             "thread.joined" => Ok(Self::ThreadJoined),
+            "thread.branch.selected" => Ok(Self::ThreadBranchSelected),
+            "thread.reload.degraded" => Ok(Self::ThreadReloadDegraded),
             "policy.bound" => Ok(Self::PolicyBound),
             "grant.petitioned" => Ok(Self::GrantPetitioned),
             "timer.fired" => Ok(Self::TimerFired),
             "io.ingress.received" => Ok(Self::IoIngressReceived),
+            "io.ingress.claimed" => Ok(Self::IoIngressClaimed),
+            "io.ingress.settled" => Ok(Self::IoIngressSettled),
             "io.egress.requested" => Ok(Self::IoEgressRequested),
             "io.egress.delivered" => Ok(Self::IoEgressDelivered),
             "io.egress.failed" => Ok(Self::IoEgressFailed),
@@ -584,6 +631,8 @@ pub struct ThreadSpawnedPayload {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSpawnedForkPayload {
     pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_event_id: Option<EventRecordId>,
     #[serde(rename = "sourceCut")]
     pub source_cut: ThreadSpawnedForkSourceCutPayload,
 }
@@ -648,6 +697,73 @@ pub struct IoIngressReceivedPayload {
     pub envelope_digest: String,
 }
 
+/// Intended outcome carried by an `io.ingress.claimed` event. Exactly one
+/// intent exists per claim; the variants mirror the admission outcomes
+/// (ADR 0003).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum IngressOutcomeIntent {
+    Turn {
+        turn_id: String,
+        submission_mode: String,
+        input_digest: String,
+    },
+    Fork {
+        child_key: String,
+        input_digest: String,
+    },
+    Interrupt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replacement_turn_id: Option<String>,
+        cancel_reason: String,
+        input_digest: String,
+    },
+    Observe {
+        reason: String,
+    },
+    Reject {
+        reason: String,
+    },
+}
+
+/// Payload for `io.ingress.claimed`. Laws (ADR 0003): at most one claim
+/// exists per ingress envelope id; the claim precedes every non-idempotent
+/// effect; every claim settles exactly once.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IoIngressClaimedPayload {
+    /// Envelope set the claim covers (multiple when coalesced).
+    pub ingress_envelope_ids: Vec<String>,
+    /// Control-stream `io.ingress.received` witness event ids for those
+    /// envelopes.
+    pub ingress_witness_event_ids: Vec<EventRecordId>,
+    /// The `admission.decided` event this claim executes.
+    pub admission_event_id: EventRecordId,
+    pub intent: IngressOutcomeIntent,
+}
+
+/// How a claim reached its settle (ADR 0003 recovery law).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressSettledBy {
+    Execution,
+    Recovery,
+}
+
+/// Payload for `io.ingress.settled`. A settled claim is terminal:
+/// redelivery dedupes against it and repeats no control effects.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IoIngressSettledPayload {
+    /// The claim this settle terminates.
+    pub claim_event_id: EventRecordId,
+    pub ingress_envelope_ids: Vec<String>,
+    /// Earliest executing-side evidence for the claimed outcome; absent for
+    /// effect-free outcomes (observe, reject). `turn.submitted` is NOT
+    /// evidence: it is the submitting side's apply-time record (EMO-364).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_event_id: Option<EventRecordId>,
+    pub settled_by: IngressSettledBy,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IoEgressRequestedPayload {
     pub egress_kind: Value,
@@ -686,6 +802,36 @@ pub struct AdmissionDecidedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admissible: Option<Vec<AdmissionDecision>>,
     pub source_ingress_event_ids: Vec<EventRecordId>,
+}
+
+/// Payload for `thread.branch.selected`. Appended in the same transaction
+/// as the `active_leaves` cache update; the cache is thereby a derived read
+/// model, rebuildable by folding these events (last selection per thread
+/// wins).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThreadBranchSelectedPayload {
+    pub thread_id: ThreadId,
+    /// The selected leaf entry. `None` clears the selection and is itself a
+    /// witnessed selection of "no branch".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_entry_id: Option<SessionEntryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_entry_id: Option<SessionEntryId>,
+}
+
+/// Payload for `thread.reload.degraded`. The witnessed fallback fact when a
+/// pre-payload thread's journal cannot reconstruct full lifecycle identity
+/// on lazy reload and the loader applies a fabricated root record
+/// (EMO-370). Degradation is never silent: this event accompanies every
+/// fallback.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThreadReloadDegradedPayload {
+    pub thread_id: ThreadId,
+    /// Identity fields the journal could not supply (for example
+    /// "topology", "parent_thread_id", "metadata").
+    pub missing: Vec<String>,
+    /// The fallback identity applied; today always "fabricated_root".
+    pub fallback: String,
 }
 
 /// Where an event came from, relative to the system boundary.
@@ -1192,6 +1338,14 @@ pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidatio
         thread_joined_payload_schema_v1(),
     )?;
     registry.register(
+        EventKind::ThreadBranchSelected.payload_schema_id(),
+        thread_branch_selected_payload_schema_v1(),
+    )?;
+    registry.register(
+        EventKind::ThreadReloadDegraded.payload_schema_id(),
+        thread_reload_degraded_payload_schema_v1(),
+    )?;
+    registry.register(
         EventKind::PolicyBound.payload_schema_id(),
         policy_bound_payload_schema_v1(),
     )?;
@@ -1206,6 +1360,14 @@ pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidatio
     registry.register(
         EventKind::IoIngressReceived.payload_schema_id(),
         io_ingress_received_payload_schema_v1(),
+    )?;
+    registry.register(
+        EventKind::IoIngressClaimed.payload_schema_id(),
+        io_ingress_claimed_payload_schema_v1(),
+    )?;
+    registry.register(
+        EventKind::IoIngressSettled.payload_schema_id(),
+        io_ingress_settled_payload_schema_v1(),
     )?;
     registry.register(
         EventKind::IoEgressRequested.payload_schema_id(),
@@ -1266,10 +1428,14 @@ fn event_kind_routes_to_runtime_trace(kind: EventKind) -> bool {
             | EventKind::PlacementDecision
             | EventKind::ThreadSpawned
             | EventKind::ThreadJoined
+            | EventKind::ThreadBranchSelected
+            | EventKind::ThreadReloadDegraded
             | EventKind::PolicyBound
             | EventKind::GrantPetitioned
             | EventKind::TimerFired
             | EventKind::IoIngressReceived
+            | EventKind::IoIngressClaimed
+            | EventKind::IoIngressSettled
             | EventKind::IoEgressRequested
             | EventKind::IoEgressDelivered
             | EventKind::IoEgressFailed
@@ -1636,6 +1802,7 @@ fn thread_spawned_payload_schema_v1() -> Value {
                 "additionalProperties": true,
                 "properties": {
                     "mode": {"type": "string"},
+                    "claim_event_id": {"type": "string"},
                     "sourceCut": {
                         "type": "object",
                         "required": [
@@ -1693,6 +1860,19 @@ fn thread_joined_payload_schema_v1() -> Value {
                 "enum": ["completed", "failed", "cancelled", "budget_exhausted"]
             },
             "result_digest": {"type": "string"}
+        }
+    })
+}
+
+fn thread_branch_selected_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["thread_id"],
+        "additionalProperties": true,
+        "properties": {
+            "thread_id": {"type": "string"},
+            "selected_entry_id": {"type": ["string", "null"]},
+            "prior_entry_id": {"type": ["string", "null"]}
         }
     })
 }
@@ -1755,6 +1935,69 @@ fn io_ingress_received_payload_schema_v1() -> Value {
             "external_message_id": {"type": "string"},
             "envelope_digest": {"type": "string"}
         }
+    })
+}
+
+fn thread_reload_degraded_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["thread_id", "missing", "fallback"],
+        "additionalProperties": false,
+        "properties": {
+            "thread_id": {"type": "string"},
+            "missing": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "fallback": {"enum": ["fabricated_root"]}
+        }
+    })
+}
+
+fn io_ingress_claimed_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": [
+            "ingress_envelope_ids",
+            "ingress_witness_event_ids",
+            "admission_event_id",
+            "intent"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "ingress_envelope_ids": string_array_schema_v1(),
+            "ingress_witness_event_ids": string_array_schema_v1(),
+            "admission_event_id": {"type": "string"},
+            "intent": {
+                "type": "object",
+                "required": ["outcome"],
+                "additionalProperties": true,
+                "properties": {
+                    "outcome": {"enum": ["turn", "fork", "interrupt", "observe", "reject"]}
+                }
+            }
+        }
+    })
+}
+
+fn io_ingress_settled_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["claim_event_id", "ingress_envelope_ids", "settled_by"],
+        "additionalProperties": false,
+        "properties": {
+            "claim_event_id": {"type": "string"},
+            "ingress_envelope_ids": string_array_schema_v1(),
+            "evidence_event_id": {"type": "string"},
+            "settled_by": {"enum": ["execution", "recovery"]}
+        }
+    })
+}
+
+fn string_array_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {"type": "string"}
     })
 }
 
@@ -2430,6 +2673,8 @@ pub struct SessionEntry {
     pub entry_id: SessionEntryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_entry_id: Option<SessionEntryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     pub coordinates: ThreadCoordinates,
     pub created_at_ms: i64,
     pub kind: SessionEntryKind,
@@ -2444,10 +2689,22 @@ impl SessionEntry {
         Self {
             entry_id: SessionEntryId::new(),
             parent_entry_id,
+            turn_id: None,
             coordinates,
             created_at_ms: now_ms(),
             kind,
         }
+    }
+
+    pub fn for_turn(
+        coordinates: ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        turn_id: impl Into<String>,
+        kind: SessionEntryKind,
+    ) -> Self {
+        let mut entry = Self::new(coordinates, parent_entry_id, kind);
+        entry.turn_id = Some(turn_id.into());
+        entry
     }
 }
 
@@ -2517,6 +2774,16 @@ pub trait SessionStore: Send + Sync {
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
         provenance: EventProvenance,
+    ) -> HistoryResult<SessionEntry>;
+
+    /// Persist a turn's input exactly once. Replaying the same `turn_id`
+    /// adopts the original entry; a different payload for that id fails
+    /// closed.
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry>;
 
     async fn active_leaf(
@@ -2680,6 +2947,43 @@ impl SessionStore for InMemorySessionStore {
             .await
     }
 
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        let mut inner = self.inner.write().await;
+        let thread_id = coordinates.thread_id;
+        if let Some(existing) = inner.entries.get(&thread_id).and_then(|entries| {
+            entries
+                .values()
+                .find(|entry| entry.turn_id.as_deref() == Some(turn_id))
+        }) {
+            validate_entry_coordinates(coordinates, existing)?;
+            if !turn_input_kinds_match(&existing.kind, &kind) {
+                return Err(HistoryError::Storage(format!(
+                    "turn {turn_id} input does not match its persisted session entry"
+                )));
+            }
+            return Ok(existing.clone());
+        }
+        let parent_entry_id = inner.active_leaf.get(&thread_id).copied();
+        let entry = SessionEntry::for_turn(coordinates.clone(), parent_entry_id, turn_id, kind);
+        inner
+            .entries
+            .entry(thread_id)
+            .or_default()
+            .insert(entry.entry_id, entry.clone());
+        inner.active_leaf.insert(thread_id, entry.entry_id);
+        append_in_memory_event(
+            &mut inner,
+            &EventStreamId::for_thread(coordinates),
+            session_entry_event(&entry),
+        )?;
+        Ok(entry)
+    }
+
     async fn active_leaf(
         &self,
         coordinates: &ThreadCoordinates,
@@ -2703,18 +3007,39 @@ impl SessionStore for InMemorySessionStore {
         leaf_entry_id: Option<SessionEntryId>,
     ) -> HistoryResult<()> {
         let mut inner = self.inner.write().await;
-        let Some(leaf_entry_id) = leaf_entry_id else {
-            inner.active_leaf.remove(&coordinates.thread_id);
-            return Ok(());
-        };
-        let entries_by_id = inner
-            .entries
-            .get(&coordinates.thread_id)
-            .ok_or(HistoryError::EntryNotFound(leaf_entry_id))?;
-        branch_path(entries_by_id, leaf_entry_id, coordinates)?;
-        inner
-            .active_leaf
-            .insert(coordinates.thread_id, leaf_entry_id);
+        let prior_entry_id = inner.active_leaf.get(&coordinates.thread_id).copied();
+        if let Some(leaf_entry_id) = leaf_entry_id {
+            let entries_by_id = inner
+                .entries
+                .get(&coordinates.thread_id)
+                .ok_or(HistoryError::EntryNotFound(leaf_entry_id))?;
+            branch_path(entries_by_id, leaf_entry_id, coordinates)?;
+        }
+        let payload = serde_json::to_value(ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: leaf_entry_id,
+            prior_entry_id,
+        })
+        .map_err(codec_error)?;
+        append_in_memory_event(
+            &mut inner,
+            &EventStreamId::for_thread(coordinates),
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ThreadBranchSelected,
+                payload,
+            ),
+        )?;
+        match leaf_entry_id {
+            Some(leaf_entry_id) => {
+                inner
+                    .active_leaf
+                    .insert(coordinates.thread_id, leaf_entry_id);
+            }
+            None => {
+                inner.active_leaf.remove(&coordinates.thread_id);
+            }
+        }
         Ok(())
     }
 
@@ -3041,6 +3366,7 @@ fn build_in_memory_context(
     }
 
     visiting.remove(&coordinates.thread_id);
+    strip_thread_start_identity_entries(&mut entries, &mut source_cuts);
     let mut messages = Vec::new();
     append_model_visible_messages(&entries, &mut messages);
     Ok(SessionContext {
@@ -3142,6 +3468,33 @@ pub fn append_model_visible_messages(
     }
 }
 
+pub fn session_entry_is_thread_start_identity(entry: &SessionEntry) -> bool {
+    matches!(
+        &entry.kind,
+        SessionEntryKind::Runtime { kind, .. } if kind == "thread_started"
+    )
+}
+
+pub fn strip_thread_start_identity_entries(
+    entries: &mut Vec<SessionEntry>,
+    source_cuts: &mut Vec<SessionContextSourceCut>,
+) {
+    let identity_entry_ids = entries
+        .iter()
+        .filter(|entry| session_entry_is_thread_start_identity(entry))
+        .map(|entry| entry.entry_id)
+        .collect::<HashSet<_>>();
+    if identity_entry_ids.is_empty() {
+        return;
+    }
+    entries.retain(|entry| !identity_entry_ids.contains(&entry.entry_id));
+    for cut in source_cuts.iter_mut() {
+        cut.entry_ids
+            .retain(|entry_id| !identity_entry_ids.contains(entry_id));
+    }
+    source_cuts.retain(|cut| !cut.entry_ids.is_empty());
+}
+
 fn append_in_memory_event(
     inner: &mut InMemorySessionStoreInner,
     stream_id: &EventStreamId,
@@ -3190,6 +3543,20 @@ fn session_entry_event_with_optional_provenance(
         "parent_entry_id": entry.parent_entry_id.map(|id| id.to_string()),
         "entry_kind": session_entry_kind_name(&entry.kind),
     });
+    if let Some(turn_id) = &entry.turn_id
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("turn_id".to_string(), Value::String(turn_id.clone()));
+    }
+    if let SessionEntryKind::Runtime {
+        kind,
+        payload: runtime_payload,
+    } = &entry.kind
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("runtime_kind".to_string(), serde_json::json!(kind));
+        object.insert("runtime_payload".to_string(), runtime_payload.clone());
+    }
     if let SessionEntryKind::Message {
         message: CanonicalMessage::Assistant { usage, .. },
     }
@@ -3228,6 +3595,20 @@ pub fn session_entry_is_user_authored(kind: &SessionEntryKind) -> bool {
             message: CanonicalMessage::User { .. },
         }
     )
+}
+
+pub fn turn_input_kinds_match(left: &SessionEntryKind, right: &SessionEntryKind) -> bool {
+    match (left, right) {
+        (
+            SessionEntryKind::Message {
+                message: CanonicalMessage::User { content: left, .. },
+            },
+            SessionEntryKind::Message {
+                message: CanonicalMessage::User { content: right, .. },
+            },
+        ) => left == right,
+        _ => left == right,
+    }
 }
 
 fn session_entry_kind_name(kind: &SessionEntryKind) -> &'static str {

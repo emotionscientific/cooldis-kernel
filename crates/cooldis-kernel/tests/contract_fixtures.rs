@@ -1,5 +1,6 @@
 mod support;
 
+use cooldis::kernel::history::ThreadBranchSelectedPayload;
 use cooldis::{
     AgentContextCompilationDiagnostics, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
     AgentProcessSubmitReceipt, AnthropicMessagesAdapter, BoundCoupling, BoundCouplingFunction,
@@ -11,6 +12,7 @@ use cooldis::{
     CouplingTemplateMaturity, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventKind, EventOrigin,
     EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId, FileDeltaKind,
     HookEventName, HookHandlerOutput, HookRequest, HookRunRecord, HookRunStatus,
+    IngressOutcomeIntent, IngressSettledBy, IoIngressClaimedPayload, IoIngressSettledPayload,
     ObservationSourceRange, OpenAIChatCompletionsAdapter, OpenAIResponsesAdapter, OperationEvent,
     OperationExitStatus, OperationId, OperationLogLevel, OperationProjectionSet, ProviderApi,
     ProviderRequest, ProviderWireAdapter, RegisteredOperation, RuntimeApprovalDecision,
@@ -44,6 +46,14 @@ fn runtime_event_kind_contract_matches_fixture() {
     let child_thread_id = thread_id(2);
     let checkpoint_id = checkpoint_id(1);
     let cases = vec![
+        RuntimeEventKind::ThreadStarted {
+            parent_thread_id: None,
+            topology: ThreadTopology::root(),
+            metadata: BTreeMap::from([(
+                "cooldis.agent.manifest_hash".to_string(),
+                "sha256:manifest".to_string(),
+            )]),
+        },
         RuntimeEventKind::ThreadInteraction {
             interaction_id: runtime_event_id(1),
             kind: ThreadInteractionKind::PromptSubmitted,
@@ -238,6 +248,61 @@ fn runtime_event_kind_contract_matches_fixture() {
     ];
     let actual = serde_json::to_value(cases).unwrap();
     support::assert_json_fixture("contracts/runtime_event_kinds.json", actual);
+}
+
+#[test]
+fn ingress_outcome_protocol_contract_matches_fixture() {
+    let witness_event_id = event_record_id(40);
+    let admission_event_id = event_record_id(41);
+    let claim_event_id = event_record_id(42);
+    let evidence_event_id = event_record_id(43);
+    let claim = IoIngressClaimedPayload {
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        ingress_witness_event_ids: vec![witness_event_id],
+        admission_event_id,
+        intent: IngressOutcomeIntent::Turn {
+            turn_id: "turn-1".to_string(),
+            submission_mode: "queue".to_string(),
+            input_digest: "sha256:input".to_string(),
+        },
+    };
+    let settle = IoIngressSettledPayload {
+        claim_event_id,
+        ingress_envelope_ids: vec!["ingress-1".to_string()],
+        evidence_event_id: Some(evidence_event_id),
+        settled_by: IngressSettledBy::Recovery,
+    };
+    let claim_value = serde_json::to_value(&claim).unwrap();
+    let settle_value = serde_json::to_value(&settle).unwrap();
+    let registry = stream_schema_registry_v1().unwrap();
+    registry
+        .validate(
+            EventKind::IoIngressClaimed.payload_schema_id(),
+            &claim_value,
+        )
+        .unwrap();
+    registry
+        .validate(
+            EventKind::IoIngressSettled.payload_schema_id(),
+            &settle_value,
+        )
+        .unwrap();
+
+    support::assert_json_fixture(
+        "contracts/ingress_outcome_protocol_v1.json",
+        json!({
+            "claim": {
+                "kind": EventKind::IoIngressClaimed.as_str(),
+                "payload_schema": EventKind::IoIngressClaimed.payload_schema_id(),
+                "payload": claim_value,
+            },
+            "settle": {
+                "kind": EventKind::IoIngressSettled.as_str(),
+                "payload_schema": EventKind::IoIngressSettled.payload_schema_id(),
+                "payload": settle_value,
+            }
+        }),
+    );
 }
 
 #[test]
@@ -441,8 +506,46 @@ fn stream_schema_v1_contract_matches_fixture() {
             }
         }),
     };
+    let branch_selection = EventRecord {
+        id: event_record_id(5),
+        stream_id: stream_id.clone(),
+        sequence: EventSequence::new(8),
+        coordinates: coordinates.clone(),
+        created_at_ms: 1_771_718_400_400,
+        kind: EventKind::ThreadBranchSelected,
+        origin: EventOrigin::Witnessed,
+        provenance: EventProvenance::default(),
+        payload: serde_json::to_value(ThreadBranchSelectedPayload {
+            thread_id: coordinates.thread_id,
+            selected_entry_id: Some(session_entry_id(2)),
+            prior_entry_id: Some(session_entry_id(3)),
+        })
+        .unwrap(),
+    };
+    let reload_degraded = EventRecord {
+        id: event_record_id(6),
+        stream_id: stream_id.clone(),
+        sequence: EventSequence::new(9),
+        coordinates: coordinates.clone(),
+        created_at_ms: 1_771_718_400_500,
+        kind: EventKind::ThreadReloadDegraded,
+        origin: EventOrigin::Witnessed,
+        provenance: EventProvenance::default(),
+        payload: json!({
+            "thread_id": coordinates.thread_id.to_string(),
+            "missing": ["topology", "parent_thread_id", "metadata"],
+            "fallback": "fabricated_root"
+        }),
+    };
 
-    let records = vec![compile, summary, read_plan_set, compile_after_policy];
+    let records = vec![
+        compile,
+        summary,
+        read_plan_set,
+        compile_after_policy,
+        branch_selection.clone(),
+        reload_degraded,
+    ];
     let schema_registry = stream_schema_registry_v1().unwrap();
     for record in &records {
         record.validate_stream_record_v1().unwrap();
@@ -515,6 +618,7 @@ fn stream_schema_v1_contract_matches_fixture() {
         json!({
             "append_acks": append_acks,
             "backend_capabilities": backend_capabilities,
+            "branch_selection": branch_selection.to_stream_record_v1(),
             "cursors": cursors,
             "records": records
                 .iter()

@@ -112,6 +112,7 @@ impl AgentRuntime for CodexCliRuntime {
             RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
+                metadata: context.metadata.clone(),
             },
         );
         let _ = events.send(ThreadEvent::Started { context });
@@ -119,9 +120,13 @@ impl AgentRuntime for CodexCliRuntime {
         let mut pending_submits = VecDeque::new();
 
         loop {
-            if let Some(ThreadCommand::Submit { input, .. }) = pending_submits.pop_front() {
+            if let Some(ThreadCommand::Submit { turn_id, input, .. }) = pending_submits.pop_front()
+            {
                 let _ = status.send(ThreadStatus::Running);
-                match services.append_user_turn_input(&coordinates, &input).await {
+                match services
+                    .append_user_turn_input(&coordinates, &turn_id, &input)
+                    .await
+                {
                     Ok(entry) => {
                         let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
                     }
@@ -170,7 +175,7 @@ impl AgentRuntime for CodexCliRuntime {
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { input, mode, .. }) => {
+                        Some(ThreadCommand::Submit { turn_id, input, mode }) => {
                             if mode == TurnSubmissionMode::Steer {
                                 emit_runtime_event(
                                     &events,
@@ -183,7 +188,7 @@ impl AgentRuntime for CodexCliRuntime {
                                 continue;
                             }
                             let _ = status.send(ThreadStatus::Running);
-                            match services.append_user_turn_input(&coordinates, &input).await {
+                            match services.append_user_turn_input(&coordinates, &turn_id, &input).await {
                                 Ok(entry) => {
                                     let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
                                 }

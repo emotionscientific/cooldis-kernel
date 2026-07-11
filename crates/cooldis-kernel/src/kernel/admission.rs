@@ -70,8 +70,15 @@ pub(crate) async fn append_admission_decided(
     handle: &RuntimeThreadHandle,
     context: AdmissionGateContext,
 ) -> CooldisResult<EventRecord> {
+    let record = admission_decided_record(handle.context().coordinates.clone(), context)?;
+    handle.append_control_event(record).await
+}
+
+pub(crate) fn admission_decided_record(
+    coordinates: crate::ThreadCoordinates,
+    context: AdmissionGateContext,
+) -> CooldisResult<NewEventRecord> {
     let kind = EventKind::AdmissionDecided;
-    let coordinates = handle.context().coordinates.clone();
     let payload = AdmissionDecidedPayload {
         route_id: context.route_id.clone(),
         policy_hash: context.policy_hash.clone(),
@@ -85,24 +92,22 @@ pub(crate) async fn append_admission_decided(
     if let Some(object) = value.as_object_mut() {
         object.insert("schema".to_string(), json!(kind.payload_schema_id()));
     }
-    handle
-        .append_control_event(NewEventRecord::discharged(
-            coordinates.clone(),
-            kind,
-            value,
-            EventProvenance {
-                source_streams: vec![EventStreamId::new(format!(
-                    "control:{}",
-                    coordinates.thread_id
-                ))],
-                source_event_ids: context.source_ingress_event_ids,
-                discharged_by: Some(context.discharged_by),
-                function: Some(context.function),
-                config_hash: Some(context.policy_hash),
-                ..EventProvenance::default()
-            },
-        ))
-        .await
+    Ok(NewEventRecord::discharged(
+        coordinates.clone(),
+        kind,
+        value,
+        EventProvenance {
+            source_streams: vec![EventStreamId::new(format!(
+                "control:{}",
+                coordinates.thread_id
+            ))],
+            source_event_ids: context.source_ingress_event_ids,
+            discharged_by: Some(context.discharged_by),
+            function: Some(context.function),
+            config_hash: Some(context.policy_hash),
+            ..EventProvenance::default()
+        },
+    ))
 }
 
 fn surface_default_policy(route_id: &str) -> Value {
@@ -125,7 +130,11 @@ pub(crate) fn assert_admission_precedes_turn_records<'a>(
         .expect("control stream missing admission.decided");
     let turn_events = thread_events
         .iter()
-        .filter(|event| event.kind.as_str() == "session.entry.appended")
+        .filter(|event| {
+            event.kind.as_str() == "session.entry.appended"
+                && event.payload.get("runtime_kind").and_then(Value::as_str)
+                    != Some("thread_started")
+        })
         .collect::<Vec<_>>();
     assert!(
         !turn_events.is_empty(),
@@ -162,7 +171,14 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
     let admission_key = value_order_key(admission);
     let turn_events = thread_events
         .iter()
-        .filter(|event| event.get("kind").and_then(Value::as_str) == Some("session.entry.appended"))
+        .filter(|event| {
+            event.get("kind").and_then(Value::as_str) == Some("session.entry.appended")
+                && event
+                    .get("payload")
+                    .and_then(|payload| payload.get("runtime_kind"))
+                    .and_then(Value::as_str)
+                    != Some("thread_started")
+        })
         .collect::<Vec<_>>();
     assert!(
         !turn_events.is_empty(),

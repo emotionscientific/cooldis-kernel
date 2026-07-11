@@ -177,7 +177,6 @@ fn public_docs_pin_repo_positioning_and_workflow() {
     let blind_test = read(repo_root().join("scripts/ax-blind-test.sh"));
 
     for required in [
-        "Cool Declarative Intelligence Substrate",
         "open serverless agent platform",
         "declarative unit",
         "agent manifests",

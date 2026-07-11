@@ -201,12 +201,37 @@ cooldis.event.context.summary.completed/1
 cooldis.event.context.read_plan.set/1
 cooldis.event.coupling.run.completed/1
 cooldis.event.activation.suspended/1
+cooldis.event.thread.branch.selected/1
 ```
 
 Payload schemas are versioned, validated by the shared schema engine, and
 fixture-backed. A new optional field may be added to a payload schema version
 only when older readers can ignore it without changing receipt meaning.
 Otherwise a new payload schema version is required.
+
+`thread.reload.degraded` uses
+`cooldis.event.thread.reload.degraded/1`. It witnesses a lazy reload that
+could not recover full lifecycle identity from a pre-payload thread journal.
+Its payload records the thread id, the missing identity fields, and the
+`fabricated_root` fallback applied by the loader. Every fallback appends this
+event, so topology or agent-context loss is never silent.
+
+### Branch Selection Authority
+
+`thread.branch.selected` is a witnessed authority event emitted whenever the
+runtime selects a thread branch. Its payload records `thread_id`, nullable
+`selected_entry_id`, and nullable `prior_entry_id`. A null selection witnesses
+an explicit clear rather than the absence of a decision.
+
+SQLite appends the event in the same transaction as its `active_leaves` cache
+update. The in-memory store appends the event and updates the cache under one
+write lock. The cache is a derived read model: rebuilding folds selection
+events in journal order, with the last event for each thread winning.
+
+Legacy SQLite databases may contain an `active_leaves` row for a thread with
+no selection event because older runtimes stored that choice only in the
+mutable table. Schema migration preserves that row as a one-time compatibility
+exception. After a thread has a selection event, journal authority always wins.
 
 ## Authority, Telemetry, And Projection Streams
 
@@ -702,6 +727,12 @@ Current V1 RC implementation status:
   schemas.
 - `EventKind::payload_schema_id` freezes payload schema ids for the current
   event vocabulary.
+- The ratified `io.ingress.claimed` and `io.ingress.settled` runtime-trace kinds
+  use `cooldis.event.io.ingress.claimed/1` and
+  `cooldis.event.io.ingress.settled/1`. Their typed payloads and schemas are
+  frozen by `contracts/ingress_outcome_protocol_v1.json`. In these names,
+  `io.ingress` identifies the ingress-envelope outcome lifecycle rather than a
+  producing component or stream.
 - SQLite event rows persist the V1 stream `schema` and `payload_schema`
   identity columns, migrate legacy rows forward, and fail closed if a stored
   payload schema no longer matches the event kind. `config_hash` is a

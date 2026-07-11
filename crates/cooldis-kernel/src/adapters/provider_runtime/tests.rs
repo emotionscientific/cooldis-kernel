@@ -473,6 +473,7 @@ impl AgentRuntime for ChildEchoRuntime {
             RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
+                metadata: context.metadata.clone(),
             },
         );
         let _ = events.send(ThreadEvent::Started { context });
@@ -488,7 +489,7 @@ impl AgentRuntime for ChildEchoRuntime {
                     match command {
                         Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
-                            let _ = services.append_user_turn_input(&coordinates, &input).await;
+                            let _ = services.append_user_turn_input(&coordinates, &turn_id, &input).await;
                             let _ = events.send(ThreadEvent::Output {
                                 thread_id,
                                 text: format!("child:{}", input.text_projection()),
@@ -3494,7 +3495,11 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     let session_events = events
         .iter()
-        .filter(|event| event.kind == EventKind::SessionEntryAppended)
+        .filter(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload.get("runtime_kind").and_then(Value::as_str)
+                    != Some("thread_started")
+        })
         .collect::<Vec<_>>();
     let compile_events = events
         .iter()
@@ -3502,6 +3507,7 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
         .collect::<Vec<_>>();
     assert_eq!(session_events.len(), 2, "{events:?}");
     assert_eq!(compile_events.len(), 1, "{events:?}");
+    assert_eq!(compile_events[0].payload["turn_id"], "turn-1");
 
     let observations = reopened
         .list_observations(&coordinates, Some("compiled_context_receipt"))
@@ -3509,6 +3515,7 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
         .unwrap();
     assert_eq!(observations.len(), 1);
     let receipt = &observations[0];
+    assert_eq!(receipt.payload["turn_id"], "turn-1");
     assert_eq!(receipt.payload["strategy"], "naive_assembly");
     assert_eq!(receipt.payload["message_count"], 1);
     assert_eq!(
