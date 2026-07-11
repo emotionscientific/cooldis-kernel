@@ -179,6 +179,7 @@ struct ScriptedIngressQueueState {
     completed: bool,
     complete_errors: VecDeque<String>,
     complete_calls: usize,
+    retry_calls: usize,
 }
 
 impl ScriptedIngressQueue {
@@ -196,6 +197,7 @@ impl ScriptedIngressQueue {
                 completed: false,
                 complete_errors: complete_errors.into_iter().map(Into::into).collect(),
                 complete_calls: 0,
+                retry_calls: 0,
             })),
             block_next_complete: Arc::new(AtomicBool::new(false)),
             complete_started: Arc::new(Notify::new()),
@@ -217,6 +219,10 @@ impl ScriptedIngressQueue {
 
     async fn complete_calls(&self) -> usize {
         self.state.lock().await.complete_calls
+    }
+
+    async fn retry_calls(&self) -> usize {
+        self.state.lock().await.retry_calls
     }
 }
 
@@ -283,6 +289,7 @@ impl IngressQueueStore for ScriptedIngressQueue {
     async fn retry_ingress(&self, message_id: &str, _reason: &str) -> IoResult<()> {
         let mut state = self.state.lock().await;
         assert_eq!(message_id, state.message_id);
+        state.retry_calls += 1;
         state.visible_at = tokio::time::Instant::now();
         Ok(())
     }
@@ -2503,6 +2510,7 @@ async fn queue_worker_rejection_before_submission_does_not_mark_ingress_applied(
 
     let first = worker.drain_once().await.unwrap_err();
     assert!(first.to_string().contains("max pending input count is 0"));
+    assert_eq!(queue.retry_calls().await, 1);
     let coordinates = only_thread_coordinates(&bridge).await;
     assert!(
         !control_events_for(&session_store_path, &coordinates)
@@ -2523,6 +2531,7 @@ async fn queue_worker_rejection_before_submission_does_not_mark_ingress_applied(
     tokio::time::advance(Duration::from_secs(30)).await;
     let second = worker.drain_once().await.unwrap_err();
     assert!(second.to_string().contains("max pending input count is 0"));
+    assert_eq!(queue.retry_calls().await, 2);
     assert!(!queue.completed().await);
     assert_eq!(queue.complete_calls().await, 0);
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -2661,6 +2670,60 @@ fn ingress_outcome_fold_rejects_conflicting_claims() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("partially overlaps"));
+}
+
+#[tokio::test]
+async fn lone_effect_free_claims_fail_closed_during_recovery() {
+    let root = test_root("effect-free-claim-corruption");
+    let (server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let envelope = observe_only_envelope("seed effect-free recovery target");
+    bridge.submit_envelope(envelope.clone()).await.unwrap();
+    let target = bridge.resolve_target(&envelope).await.unwrap();
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let stream_id = control_stream_id(&coordinates);
+
+    for (index, intent) in [
+        IngressOutcomeIntent::Observe {
+            reason: "observe corruption".to_string(),
+        },
+        IngressOutcomeIntent::Reject {
+            reason: "reject corruption".to_string(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let payload = IoIngressClaimedPayload {
+            ingress_envelope_ids: vec![envelope.id.clone()],
+            ingress_witness_event_ids: vec![EventRecordId::new()],
+            admission_event_id: EventRecordId::new(),
+            intent,
+        };
+        let claim = EventRecord::from_new(
+            stream_id.clone(),
+            EventSequence::new(index as i64 + 1),
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::IoIngressClaimed,
+                serde_json::to_value(&payload).unwrap(),
+            ),
+        );
+        let err = bridge
+            .recover_ingress_outcome(
+                &envelope,
+                &target,
+                IngressOutcomeState::Claimed { claim, payload },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("effect-free ingress claim is missing its atomic settle")
+        );
+    }
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test(start_paused = true)]
@@ -3060,6 +3123,191 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
     );
     assert_single_durable_ingress_turn(&session_store_path, &original_coordinates, &ingress_id)
         .await;
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn observe_settled_before_complete_redelivery_appends_nothing() {
+    let fixture_root = test_root("observe-apply-complete-crash-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = observe_only_envelope("observe exactly once");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-observe-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    queue.block_next_complete();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-observe-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    queue.wait_for_complete_started().await;
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let before = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1,
+        "the ingress witness must exist before the process-death cut"
+    );
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::AdmissionDecided)
+            .count(),
+        1,
+        "the observe decision must exist before the process-death cut"
+    );
+    let claim = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("the observe claim must exist before the process-death cut");
+    assert_eq!(claim.payload["intent"]["outcome"].as_str(), Some("observe"));
+    let settle = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("the observe settle must exist before the process-death cut");
+    assert_eq!(
+        settle.payload["claim_event_id"].as_str(),
+        Some(claim.id.to_string()).as_deref()
+    );
+    assert!(settle.payload["evidence_event_id"].is_null());
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("execution"));
+    assert_eq!(
+        thread_events_for(&session_store_path, &coordinates)
+            .await
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        0
+    );
+    assert!(!queue.completed().await);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge,
+        "worker-after-observe-cut",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+    let after = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(after, before, "redelivery must append no control event");
+    assert!(matches!(
+        ingress_outcome_fold(&after, &[ingress_id]).unwrap(),
+        IngressOutcomeState::Settled { .. }
+    ));
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reject_settled_before_complete_redelivery_dedupes_and_completes() {
+    let fixture_root = test_root("reject-apply-complete-crash-cut");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let envelope = telegram_queue_envelope("reject exactly once")
+        .with_metadata("cooldis_route_policy", "reject");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-reject-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    queue.block_next_complete();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-reject-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    queue.wait_for_complete_started().await;
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let before = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1
+    );
+    assert_eq!(
+        before
+            .iter()
+            .filter(|event| event.kind == EventKind::AdmissionDecided)
+            .count(),
+        1
+    );
+    let claim = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .expect("the reject claim must exist before the process-death cut");
+    assert_eq!(claim.payload["intent"]["outcome"].as_str(), Some("reject"));
+    let settle = before
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressSettled)
+        .expect("the reject settle must exist before the process-death cut");
+    assert!(settle.payload["evidence_event_id"].is_null());
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("execution"));
+    assert!(!queue.completed().await);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(
+        &restarted_bridge,
+        &route_with_egress(Vec::new(), None),
+        &egress_db,
+    )
+    .await;
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge,
+        "worker-after-reject-cut",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+    let after = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(after, before, "redelivery must not re-decide a reject");
+    assert!(matches!(
+        ingress_outcome_fold(&after, &[ingress_id]).unwrap(),
+        IngressOutcomeState::Settled { .. }
+    ));
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
@@ -4388,6 +4636,59 @@ async fn clock_route_duplicate_enqueue_before_ack_does_not_double_fire() {
     assert_eq!(fired[0].mandate_event_id, mandate.event.id);
     assert_eq!(fired[0].occurrence_index, 0);
     let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test(start_paused = true)]
+async fn clock_tick_apply_before_complete_redelivery_does_not_double_fire() {
+    let root = test_root("clock-apply-complete-crash-cut");
+    let server = test_server_at_root(&root).await;
+    let (store, coordinates, mandate) =
+        start_clock_thread_with_mandate(&server, MandateCatchUpPolicy::CoalesceMissed).await;
+    let after_due = event_time(mandate.event.created_at_ms, 90_000);
+    let clock = Arc::new(FakeClock::new(after_due));
+    let placeholder = telegram_queue_envelope("clock placeholder");
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-clock-cut",
+        placeholder,
+        std::iter::empty::<&str>(),
+    ));
+    let route = CooldisDaemonClockRoute::new("clock-main", store.clone(), queue.clone(), clock);
+    assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
+
+    queue.block_next_complete();
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "clock-worker-before-cut", 30);
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    queue.wait_for_complete_started().await;
+    let fired_before = timer_payloads(&store, &coordinates).await;
+    assert_eq!(
+        fired_before.len(),
+        1,
+        "timer.fired must exist before the cut"
+    );
+    assert_eq!(fired_before[0].mandate_event_id, mandate.event.id);
+    assert_eq!(fired_before[0].occurrence_index, 0);
+    assert!(!queue.completed().await);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    drop(bridge);
+    drop(server);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let (_server, restarted_bridge, _rx) = restarted_bridge_at_root(&root).await;
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted_bridge,
+        "clock-worker-after-cut",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+    assert_eq!(timer_payloads(&store, &coordinates).await, fired_before);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

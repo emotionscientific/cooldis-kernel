@@ -176,8 +176,12 @@ Supervisor reservation is idempotent on turn ID, turn input persistence adopts
 the existing entry for a replayed turn ID, and cancellation of an absent or
 finished turn is a witnessed no-op. Interrupt recovery re-runs cancellation and
 then applies the same rule to its replacement turn. Observe and reject claims
-are appended with their settle in one fenced batch because they have no control
-effect to recover.
+are appended with their settle in one fenced batch. Their settles have no
+execution evidence and record `settled_by = execution`, so both outcomes are
+terminal at claim time. A redelivered observe or reject dedupes without another
+ingress witness or admission decision, and the queue worker completes its lease.
+A lone observe or reject claim cannot result from a valid append and is reported
+as corrupt history instead of being recovered.
 
 This claim/settle protocol closes the process-death window between durable
 intent and volatile submission without changing the outbound send/receipt
