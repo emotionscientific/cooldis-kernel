@@ -173,16 +173,32 @@ witnesses, but it no longer owns ingress idempotency. A fork settles against its
 parent control-stream `thread.spawned` evidence, whose typed fork payload carries
 the claim event ID.
 
-Redelivery folds claim and settle state through the `EventStore` on the
-resolved thread's control stream, with one exception: because a fork rebinds
-the conversation to its child, a redelivered fork envelope resolves to the
-child, so the fold also walks parent ancestry and honors fork-intent outcomes
-found there. The daemon keeps one durable active binding per conversation
-scope, claimed atomically at first contact, so racing first deliveries share
-a single control stream. A settled claim is terminal and dedupes without repeating a
-receipt, admission decision, cancellation, or submission. An unsettled turn
-claim checks the thread journal for executing-side evidence. Evidence settles
-the claim as recovery; no evidence re-submits the same turn ID and then settles.
+Before appending a claim, the daemon commits an ownership record keyed by the
+envelope's protocol dedupe key to the shared ingress SQLite state (ADR 0004,
+Decision 3). The record names the control stream selected by that attempt and
+is written in the transaction that admits the attempt to claim. Overlapping
+attempts may stage candidate ownership rows, but claim admission serializes a
+global fold across every recorded owner stream and retains only the winning
+owner, so workers that resolved different routes cannot each append a claim.
+An ownership record with no claim is a tombstone: the next attempt may
+supersede it and claim on the then-current route. Settle does not clear
+ownership. The ownership row is deleted only when its `cooldis_ingress_dedupe`
+row ages out, so late redelivery still finds a settled claim.
+
+Redelivery resolves its fold target ownership-first and current-route second.
+When ownership names a stream, the daemon folds that stream even if the active
+conversation route now points at a fork child. If the ownership fold contains
+no claim, fresh apply continues on the current route and supersedes the
+tombstone before claiming. The ADR 0003 fork exception remains narrower and
+unchanged: only when no owned outcome exists does a redelivered fork envelope
+walk parent ancestry and honor fork-intent outcomes found there; non-fork
+claims remain per-stream scoped. The daemon keeps one durable active binding
+per conversation scope, claimed atomically at first contact, so racing first
+deliveries share a single control stream. A settled claim is terminal and
+dedupes without repeating a receipt, admission decision, cancellation, or
+submission. An unsettled turn claim checks the thread journal for
+executing-side evidence. Evidence settles the claim as recovery; no evidence
+re-submits the same turn ID and then settles.
 Supervisor reservation is idempotent on turn ID, turn input persistence adopts
 the existing entry for a replayed turn ID, and cancellation of an absent or
 finished turn is a witnessed no-op. Interrupt recovery re-runs cancellation and

@@ -3352,6 +3352,230 @@ async fn lone_effect_free_claims_fail_closed_during_recovery() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn non_fork_claim_owner_survives_fork_rebind_before_redelivery() {
+    let fixture_root = test_root("non-fork-claim-owner-rebind");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    bridge
+        .submit_envelope(test_envelope("seed the owning parent"))
+        .await
+        .unwrap();
+    let parent = only_thread_coordinates(&bridge).await;
+
+    let envelope = telegram_queue_envelope_with_update("recover on the owner", "40101");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-owner-rebind",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    bridge
+        .pause_after_ingress_claim
+        .store(true, Ordering::SeqCst);
+    let claim_paused = bridge.ingress_claim_paused.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-owner-rebind",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    claim_paused.await;
+
+    let parent_events = control_events_for(&session_store_path, &parent).await;
+    let claim = parent_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::IoIngressClaimed
+                && event.payload["ingress_envelope_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
+        })
+        .expect("the parent must own the claim before the process-death cut")
+        .clone();
+    assert!(!parent_events.iter().any(|event| {
+        event.kind == EventKind::IoIngressSettled
+            && event.payload["claim_event_id"].as_str() == Some(claim.id.to_string().as_str())
+    }));
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    queue
+        .retry_ingress("message-owner-rebind", "injected process death")
+        .await
+        .unwrap();
+    drop(bridge);
+    drop(server);
+
+    let (_server, restarted, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(&restarted, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let fork = telegram_queue_envelope_with_update("rebind to a child", "40102")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    restarted.submit_queued_envelope(fork, 1).await.unwrap();
+    let child = only_thread_coordinates(&restarted).await;
+    assert_ne!(child.thread_id, parent.thread_id);
+
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted.clone(),
+        "worker-after-owner-rebind",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    let parent_events = control_events_for(&session_store_path, &parent).await;
+    let settle = parent_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::IoIngressSettled
+                && event.payload["claim_event_id"].as_str() == Some(claim.id.to_string().as_str())
+        })
+        .expect("redelivery must settle the claim on its owning parent stream");
+    assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
+    let child_control = control_events_for(&session_store_path, &child).await;
+    assert!(!child_control.iter().any(|event| {
+        event.kind == EventKind::IoIngressClaimed
+            && event.payload["ingress_envelope_ids"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
+    }));
+    assert!(
+        !thread_events_for(&session_store_path, &child)
+            .await
+            .iter()
+            .any(|event| {
+                event.kind == EventKind::TurnSubmitted
+                    && event.payload["ingress_envelope_id"].as_str() == Some(&ingress_id)
+            })
+    );
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ownership_tombstone_is_superseded_after_rebind_before_any_claim() {
+    let fixture_root = test_root("ownership-tombstone-rebind");
+    let egress_db = fixture_root.join("io.sqlite");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
+    bridge
+        .submit_envelope(test_envelope("seed the tombstone parent"))
+        .await
+        .unwrap();
+    let parent = only_thread_coordinates(&bridge).await;
+
+    let envelope = telegram_queue_envelope_with_update("survive the ownership cut", "40103");
+    let ingress_id = envelope.id.clone();
+    let dedupe_key = envelope.dedupe_key.as_ref().unwrap().stable_key();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-ownership-cut",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    bridge
+        .pause_after_ingress_ownership
+        .store(true, Ordering::SeqCst);
+    let ownership_paused = bridge.ingress_ownership_paused.notified();
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "worker-before-ownership-cut",
+        30,
+    );
+    let drain = tokio::spawn(async move { worker.drain_once().await });
+    ownership_paused.await;
+
+    assert!(
+        !control_events_for(&session_store_path, &parent)
+            .await
+            .iter()
+            .any(|event| {
+                event.kind == EventKind::IoIngressClaimed
+                    && event.payload["ingress_envelope_ids"]
+                        .as_array()
+                        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
+            })
+    );
+    let connection = rusqlite::Connection::open(&egress_db).unwrap();
+    let owner_stream: String = connection
+        .query_row(
+            "SELECT stream_id FROM cooldis_daemon_ingress_ownership WHERE dedupe_key = ?1",
+            params![dedupe_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner_stream, control_stream_id(&parent).to_string());
+    drop(connection);
+
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    queue
+        .retry_ingress("message-ownership-cut", "injected process death")
+        .await
+        .unwrap();
+    drop(bridge);
+    drop(server);
+
+    let (_server, restarted, _rx) = restarted_bridge_at_root(&fixture_root).await;
+    register_route_state(&restarted, &route_with_egress(Vec::new(), None), &egress_db).await;
+    let fork = telegram_queue_envelope_with_update("move past the tombstone", "40104")
+        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    restarted.submit_queued_envelope(fork, 1).await.unwrap();
+    let child = only_thread_coordinates(&restarted).await;
+    assert_ne!(child.thread_id, parent.thread_id);
+
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        restarted.clone(),
+        "worker-after-ownership-cut",
+        30,
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+
+    let bindings = route_bindings(&restarted).await;
+    let mut claims = Vec::new();
+    for binding in &bindings {
+        claims.extend(
+            control_events_for(&session_store_path, &binding.coordinates)
+                .await
+                .into_iter()
+                .filter(|event| {
+                    event.kind == EventKind::IoIngressClaimed
+                        && event.payload["ingress_envelope_ids"]
+                            .as_array()
+                            .is_some_and(|ids| {
+                                ids.iter().any(|id| id.as_str() == Some(&ingress_id))
+                            })
+                }),
+        );
+    }
+    assert_eq!(
+        claims.len(),
+        1,
+        "the tombstone cut must produce exactly one later claim"
+    );
+    assert_eq!(claims[0].coordinates.thread_id, child.thread_id);
+    let connection = rusqlite::Connection::open(&egress_db).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT stream_id FROM cooldis_daemon_ingress_ownership
+             WHERE dedupe_key = ?1 ORDER BY ownership_id",
+        )
+        .unwrap();
+    let owners = statement
+        .query_map(params![dedupe_key], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(owners, vec![control_stream_id(&child).to_string()]);
+    assert!(queue.completed().await);
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test(start_paused = true)]
 async fn claim_committed_before_submit_recovers_original_turn_once_after_restart() {
     let fixture_root = test_root("queue-claim-submit-crash-cut");
     let egress_db = fixture_root.join("io.sqlite");
@@ -5941,6 +6165,122 @@ async fn duplicate_ingress_bindings_seed_the_latest_thread() {
         Some(latest.thread_id.to_string().as_str())
     );
     assert_eq!(route_bindings(&bridge).await.len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingress_ownership_migration_preserves_existing_dedupe_rows_deterministically() {
+    let root = test_root("ingress-ownership-migration");
+    let db = root.join("io.sqlite");
+    std::fs::create_dir_all(&root).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE cooldis_ingress_dedupe (
+                queue_name TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                envelope_id TEXT NOT NULL,
+                inserted_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (queue_name, dedupe_key)
+             );
+             INSERT INTO cooldis_ingress_dedupe
+                (queue_name, dedupe_key, envelope_id, inserted_at_ms)
+             VALUES
+                ('ingress', 'telegram.bot:main:update:before', 'envelope-before', 11),
+                ('ingress', 'telegram.bot:main:update:after', 'envelope-after', 12);",
+        )
+        .unwrap();
+    drop(connection);
+
+    drop(DaemonEgressState::connect(sqlite_dsn(&db)).unwrap());
+    drop(DaemonEgressState::connect(sqlite_dsn(&db)).unwrap());
+
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let dedupe_rows = connection
+        .prepare(
+            "SELECT queue_name, dedupe_key, envelope_id, inserted_at_ms
+             FROM cooldis_ingress_dedupe ORDER BY dedupe_key",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        dedupe_rows,
+        vec![
+            (
+                "ingress".to_string(),
+                "telegram.bot:main:update:after".to_string(),
+                "envelope-after".to_string(),
+                12,
+            ),
+            (
+                "ingress".to_string(),
+                "telegram.bot:main:update:before".to_string(),
+                "envelope-before".to_string(),
+                11,
+            ),
+        ]
+    );
+    let ownership_columns = connection
+        .prepare("PRAGMA table_info(cooldis_daemon_ingress_ownership)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        ownership_columns,
+        vec![
+            "dedupe_key",
+            "ownership_id",
+            "ingress_envelope_id",
+            "stream_id",
+            "attempt",
+            "created_at_ms",
+        ]
+    );
+    let trigger_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'cooldis_ingress_dedupe_delete_ownership'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(trigger_count, 1);
+    connection
+        .execute(
+            "INSERT INTO cooldis_daemon_ingress_ownership
+                (dedupe_key, ownership_id, ingress_envelope_id, stream_id, attempt, created_at_ms)
+             VALUES (?1, 'ownership-before', 'envelope-before', 'control:parent', 1, 13)",
+            params!["telegram.bot:main:update:before"],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM cooldis_ingress_dedupe
+             WHERE queue_name = 'ingress' AND dedupe_key = ?1",
+            params!["telegram.bot:main:update:before"],
+        )
+        .unwrap();
+    let aged_ownership: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM cooldis_daemon_ingress_ownership
+             WHERE dedupe_key = ?1",
+            params!["telegram.bot:main:update:before"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(aged_ownership, 0, "ownership must age with its dedupe row");
     let _ = std::fs::remove_dir_all(root);
 }
 
