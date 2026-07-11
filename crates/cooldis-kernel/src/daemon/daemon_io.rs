@@ -2817,8 +2817,18 @@ impl CooldisDaemonIoBridge {
                 .map_err(|err| IoError::Bridge(format!("decode appended ingress claim: {err}")))?;
         let reserved_child_thread_id = match &claim_payload.intent {
             IngressOutcomeIntent::Fork {
-                child_thread_id, ..
+                child_thread_id: Some(child_thread_id),
+                ..
             } => *child_thread_id,
+            IngressOutcomeIntent::Fork {
+                child_thread_id: None,
+                ..
+            } => {
+                return Err(IoError::Bridge(format!(
+                    "newly appended fork claim {} is missing its reserved child thread id",
+                    claim.id
+                )));
+            }
             _ => {
                 return Err(IoError::Bridge(
                     "appended fork claim carried a non-fork intent".to_string(),
@@ -3767,7 +3777,7 @@ impl CooldisDaemonIoBridge {
                 })?;
                 Ok(IngressOutcomeIntent::Fork {
                     child_key: child_key.clone(),
-                    child_thread_id,
+                    child_thread_id: Some(child_thread_id),
                     input_digest: input_digest(input)?,
                 })
             }
@@ -3879,6 +3889,12 @@ impl CooldisDaemonIoBridge {
             return Err(IoError::Bridge(
                 "fork recovery received a non-fork claim".to_string(),
             ));
+        };
+        let Some(child_thread_id) = child_thread_id else {
+            return Err(IoError::Bridge(format!(
+                "legacy fork claim {} predates reservation-before-creation and cannot be recovered; settle requires operator action",
+                claim.id
+            )));
         };
         let input = IoTurnInput::from_envelope(envelope, target);
         let actual_digest = canonical_json_hash(

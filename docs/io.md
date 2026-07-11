@@ -153,13 +153,13 @@ submission. The typed claim names every covered envelope, its ingress witnesses,
 the admission event, and exactly one intended outcome. Queue and steer claims
 carry the reserved `turn_id`, submission mode, and input digest. Interrupt claims
 carry the replacement turn ID when present, cancellation reason, and input
-digest. Fork claims carry the child turn key, a preallocated child thread id,
-and the input digest. The claim is the durable child reservation required by
-ADR 0004 Decision 4. Only after the parent control stream accepts that claim
-does the daemon checkpoint the parent, find-or-create that exact child, append
-`thread.spawned`, bind egress to the child, and submit the child turn. Racing
-applies fold the same parent claim, so the loser performs no fork effects and
-cannot allocate a second child.
+digest. Fork claims written by this version carry the child turn key, a
+preallocated child thread id, and the input digest. The claim is the durable
+child reservation required by ADR 0004 Decision 4. Only after the parent
+control stream accepts that claim does the daemon checkpoint the parent,
+find-or-create that exact child, append `thread.spawned`, bind egress to the
+child, and submit the child turn. Racing applies fold the same parent claim, so
+the loser performs no fork effects and cannot allocate a second child.
 
 After the reserved submission is sent, the daemon waits for execution evidence
 and then appends `io.ingress.settled`. Evidence is per intent. A queue or
