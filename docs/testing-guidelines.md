@@ -92,6 +92,45 @@ remain as a virtual-time negative assertion. Process-backed, socket, live
 provider, and SQLite platform-timing smokes keep real time because their
 contract is the platform interaction itself.
 
+## Seeded Fault Plans
+
+`tests/support/fault_plan.rs` expands a `(seed, fault vocabulary version,
+intensity)` tuple into a deterministic list of one-based fault directives. The
+in-repo SplitMix64 implementation is pinned, and each component derives through
+its own `store`, `queue`, `provider`, or `process` split lane. A vocabulary or
+derivation change in one component must not shift another component's schedule
+under the same seed. The exact v1 probability shape is documented beside the
+implementation and pinned by the sparse, moderate, and hostile JSON fixtures in
+`tests/fixtures/fault_plans/`.
+
+To reproduce a reported schedule, derive the reported seed with its recorded
+intensity and `FAULT_VOCABULARY_VERSION`; do not substitute the current version
+for an older receipt. To inspect or deliberately regenerate the pinned v1
+fixtures, run:
+
+```bash
+COOLDIS_UPDATE_FIXTURES=1 scripts/cargo-lane.sh test -p cooldis derivation_is_fixture_pinned
+```
+
+Review the fixture diff before keeping it. A normal test run compares the
+serialized directives with those fixtures and fails on drift.
+
+Apply wrapper directives with `FaultPlan::apply`, which configures the existing
+`FaultingRuntimeStore`, `FaultingIngressQueue`, and `FaultingProviderClient`.
+`Before` prevents the wrapped effect. `After` lets a successful wrapped effect
+finish and then reports the scripted component error; use it for ambiguous
+commit windows such as store appends and `complete_ingress`. Process directives
+go through the named crash-cut registry and the in-process
+run-to-cut/teardown/rebuild/recover helper.
+
+Adding, removing, renaming, or reordering an operation or cut is a vocabulary
+change. Bump `FAULT_VOCABULARY_VERSION`, retain the old fixtures when old
+receipts still need replay support, document the new derivation contract, and
+add fixtures for every intensity. Changing probabilities, occurrence bounds,
+timing eligibility, action selection, lane seeding, or collision handling also
+changes seed meaning and therefore requires the same version bump. Never update
+fixtures merely to make unexplained drift green.
+
 ## Process Smoke Rules
 
 Process smoke should prove wiring, not exhaust every edge case:

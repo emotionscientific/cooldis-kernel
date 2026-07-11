@@ -15,13 +15,12 @@ pub(crate) use crate as kernel_test;
 #[path = "../tests/support/event_trace.rs"]
 mod event_trace_support;
 #[cfg(test)]
-#[rustfmt::skip]
-#[path = "../tests/support/fault.rs"]
-mod fault_support;
-#[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/fault_plan.rs"]
 mod fault_plan;
+#[cfg(test)]
+#[path = "../tests/support/fault.rs"]
+mod fault_support;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/invariants.rs"]
