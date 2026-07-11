@@ -5,6 +5,7 @@ pub(crate) use cooldis as kernel_test;
 mod event_trace;
 mod fault;
 mod fault_plan;
+mod invariant_claims;
 mod scenario;
 mod scripted_provider;
 mod store_parity;
@@ -16,6 +17,8 @@ pub use event_trace::*;
 pub use fault::*;
 #[allow(unused_imports)]
 pub use fault_plan::*;
+#[allow(unused_imports)]
+pub use invariant_claims::*;
 #[allow(unused_imports)]
 pub use scenario::*;
 #[allow(unused_imports)]

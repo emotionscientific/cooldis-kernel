@@ -244,14 +244,17 @@ impl ThreadHandleResolutionError {
 #[derive(Clone)]
 struct DaemonEgressState {
     connection: Arc<StdMutex<rusqlite::Connection>>,
+    dsn: Arc<str>,
 }
 
 impl DaemonEgressState {
     fn connect(dsn: impl AsRef<str>) -> IoResult<Self> {
-        let connection = open_egress_state_connection(dsn.as_ref())?;
+        let dsn: Arc<str> = Arc::from(dsn.as_ref());
+        let connection = open_egress_state_connection(&dsn)?;
         init_egress_state_schema(&connection)?;
         Ok(Self {
             connection: Arc::new(StdMutex::new(connection)),
+            dsn,
         })
     }
 
@@ -644,11 +647,214 @@ impl DaemonEgressState {
         Ok(count.max(0) as usize)
     }
 
+    fn record_ingress_ownership(
+        &self,
+        keys: &[IngressOwnershipKey],
+        stream_id: &EventStreamId,
+        attempt: u32,
+    ) -> IoResult<String> {
+        let ownership_id = uuid::Uuid::now_v7().to_string();
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(egress_state_error)?;
+        for key in keys {
+            tx.execute(
+                "INSERT INTO cooldis_daemon_ingress_ownership (
+                    dedupe_key, ownership_id, ingress_envelope_id, stream_id, attempt, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    key.dedupe_key,
+                    ownership_id,
+                    key.ingress_envelope_id,
+                    stream_id.to_string(),
+                    i64::from(attempt),
+                    now_ms() as i64,
+                ],
+            )
+            .map_err(egress_state_error)?;
+        }
+        tx.commit().map_err(egress_state_error)?;
+        Ok(ownership_id)
+    }
+
+    fn ingress_ownership_streams(
+        &self,
+        keys: &[IngressOwnershipKey],
+    ) -> IoResult<Vec<EventStreamId>> {
+        let connection = self.lock_connection()?;
+        ingress_ownership_streams_from(&connection, keys)
+    }
+
+    fn lock_ingress_claim_admission(&self) -> IoResult<IngressClaimAdmissionLock> {
+        if sqlite_path_from_dsn(&self.dsn)? == Path::new(":memory:") {
+            return Err(IoError::Queue(
+                "durable ingress ownership requires a file-backed sqlite state store".to_string(),
+            ));
+        }
+        let connection = open_egress_state_connection(&self.dsn)?;
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(egress_state_error)?;
+        Ok(IngressClaimAdmissionLock {
+            connection: Some(connection),
+        })
+    }
+
     fn lock_connection(&self) -> IoResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
         self.connection
             .lock()
             .map_err(|err| IoError::Queue(format!("egress state lock poisoned: {err}")))
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IngressOwnershipKey {
+    dedupe_key: String,
+    ingress_envelope_id: String,
+}
+
+#[derive(Clone)]
+struct IngressOwnershipReservation {
+    state: Arc<DaemonEgressState>,
+    ownership_id: String,
+    keys: Vec<IngressOwnershipKey>,
+    stream_id: EventStreamId,
+}
+
+struct IngressClaimAdmissionLock {
+    connection: Option<rusqlite::Connection>,
+}
+
+impl IngressClaimAdmissionLock {
+    fn ownership_streams(&self, keys: &[IngressOwnershipKey]) -> IoResult<Vec<EventStreamId>> {
+        ingress_ownership_streams_from(
+            self.connection
+                .as_ref()
+                .expect("claim admission lock connection"),
+            keys,
+        )
+    }
+
+    fn reservation_is_current(&self, reservation: &IngressOwnershipReservation) -> IoResult<bool> {
+        let connection = self
+            .connection
+            .as_ref()
+            .expect("claim admission lock connection");
+        for key in &reservation.keys {
+            let current = connection
+                .query_row(
+                    "SELECT ownership_id, stream_id
+                     FROM cooldis_daemon_ingress_ownership
+                     WHERE dedupe_key = ?1
+                     ORDER BY attempt DESC, created_at_ms DESC, ownership_id DESC
+                     LIMIT 1",
+                    params![key.dedupe_key],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(egress_state_error)?;
+            if current.as_ref()
+                != Some(&(
+                    reservation.ownership_id.clone(),
+                    reservation.stream_id.to_string(),
+                ))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn prune_to_reservation(&self, reservation: &IngressOwnershipReservation) -> IoResult<()> {
+        let connection = self
+            .connection
+            .as_ref()
+            .expect("claim admission lock connection");
+        for key in &reservation.keys {
+            connection
+                .execute(
+                    "DELETE FROM cooldis_daemon_ingress_ownership
+                     WHERE dedupe_key = ?1 AND ownership_id <> ?2",
+                    params![key.dedupe_key, reservation.ownership_id],
+                )
+                .map_err(egress_state_error)?;
+        }
+        Ok(())
+    }
+
+    fn prune_to_stream(
+        &self,
+        keys: &[IngressOwnershipKey],
+        stream_id: &EventStreamId,
+    ) -> IoResult<()> {
+        let connection = self
+            .connection
+            .as_ref()
+            .expect("claim admission lock connection");
+        for key in keys {
+            connection
+                .execute(
+                    "DELETE FROM cooldis_daemon_ingress_ownership
+                     WHERE dedupe_key = ?1
+                       AND ownership_id <> (
+                           SELECT ownership_id
+                           FROM cooldis_daemon_ingress_ownership
+                           WHERE dedupe_key = ?1 AND stream_id = ?2
+                           ORDER BY attempt ASC, created_at_ms ASC, ownership_id ASC
+                           LIMIT 1
+                       )",
+                    params![key.dedupe_key, stream_id.to_string()],
+                )
+                .map_err(egress_state_error)?;
+        }
+        Ok(())
+    }
+
+    fn commit(mut self) -> IoResult<()> {
+        self.connection
+            .as_ref()
+            .expect("claim admission lock connection")
+            .execute_batch("COMMIT")
+            .map_err(egress_state_error)?;
+        self.connection.take();
+        Ok(())
+    }
+}
+
+impl Drop for IngressClaimAdmissionLock {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            let _ = connection.execute_batch("ROLLBACK");
+        }
+    }
+}
+
+fn ingress_ownership_streams_from(
+    connection: &rusqlite::Connection,
+    keys: &[IngressOwnershipKey],
+) -> IoResult<Vec<EventStreamId>> {
+    let mut streams = Vec::new();
+    let mut seen = HashSet::new();
+    for key in keys {
+        let mut statement = connection
+            .prepare(
+                "SELECT stream_id FROM cooldis_daemon_ingress_ownership
+                 WHERE dedupe_key = ?1
+                 ORDER BY attempt DESC, created_at_ms DESC, ownership_id DESC",
+            )
+            .map_err(egress_state_error)?;
+        let rows = statement
+            .query_map(params![key.dedupe_key], |row| row.get::<_, String>(0))
+            .map_err(egress_state_error)?;
+        for row in rows {
+            let stream = row.map_err(egress_state_error)?;
+            if seen.insert(stream.clone()) {
+                streams.push(EventStreamId::new(stream));
+            }
+        }
+    }
+    Ok(streams)
 }
 
 #[derive(Clone, Debug)]
@@ -712,6 +918,10 @@ pub struct CooldisDaemonIoBridge {
     #[cfg(test)]
     ingress_claim_paused: Arc<tokio::sync::Notify>,
     #[cfg(test)]
+    pause_after_ingress_ownership: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    ingress_ownership_paused: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
     pause_after_fork_spawn: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     fork_spawn_paused: Arc<tokio::sync::Notify>,
@@ -752,6 +962,10 @@ impl CooldisDaemonIoBridge {
             pause_after_ingress_claim: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             ingress_claim_paused: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            pause_after_ingress_ownership: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            ingress_ownership_paused: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             pause_after_fork_spawn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -1241,7 +1455,12 @@ impl CooldisDaemonIoBridge {
         let ingress_message_ids = [message.envelope.id.clone()];
         let target = self.resolve_target(&message.envelope).await?;
         Ok(matches!(
-            self.ingress_outcome(&target, &ingress_message_ids).await?,
+            self.ingress_outcome(
+                &target,
+                std::slice::from_ref(&message.envelope),
+                &ingress_message_ids
+            )
+            .await?,
             IngressOutcomeState::Settled { .. }
         ))
     }
@@ -1307,7 +1526,10 @@ impl CooldisDaemonIoBridge {
         }
         let mut target = self.resolve_target(&envelope).await?;
         if !ingress_message_ids.is_empty() {
-            match self.ingress_outcome(&target, ingress_message_ids).await? {
+            match self
+                .ingress_outcome(&target, source_envelopes, ingress_message_ids)
+                .await?
+            {
                 IngressOutcomeState::Missing => {}
                 state @ IngressOutcomeState::Claimed { .. } => {
                     if ingress_attempt == Some(1) && ingress_outcome_is_fork(&state) {
@@ -1352,6 +1574,26 @@ impl CooldisDaemonIoBridge {
                 !ingress_message_ids.is_empty(),
             )
             .await?;
+        let ingress_ownership = if ingress_message_ids.is_empty() {
+            None
+        } else {
+            self.record_ingress_ownership(
+                &envelope,
+                source_envelopes,
+                &ingress_source_stream,
+                ingress_attempt.unwrap_or(1),
+            )
+            .await?
+        };
+        #[cfg(test)]
+        if ingress_ownership.is_some()
+            && self
+                .pause_after_ingress_ownership
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.ingress_ownership_paused.notify_waiters();
+            std::future::pending::<()>().await;
+        }
         let (receipt, _) = self
             .apply_with_ingress_outcomes(
                 &envelope,
@@ -1361,6 +1603,7 @@ impl CooldisDaemonIoBridge {
                 Some(&ingress_source_stream),
                 &ingress_event_ids,
                 Some(admission_event.id),
+                ingress_ownership.as_ref(),
             )
             .await?;
         Ok(receipt)
@@ -1514,10 +1757,23 @@ impl CooldisDaemonIoBridge {
     async fn ingress_outcome(
         &self,
         target: &ResolvedIoTarget,
+        source_envelopes: &[IngressEnvelope],
         ingress_envelope_ids: &[String],
     ) -> IoResult<IngressOutcomeState> {
         if ingress_envelope_ids.is_empty() {
             return Ok(IngressOutcomeState::Missing);
+        }
+        let ownership_keys = ingress_ownership_keys(source_envelopes)?;
+        if !ownership_keys.is_empty()
+            && let Some(state) = self.ingress_route_state(&source_envelopes[0]).await
+        {
+            let ownership_streams = state.ingress_ownership_streams(&ownership_keys)?;
+            let owned = self
+                .ingress_outcome_on_streams(&ownership_streams, ingress_envelope_ids)
+                .await?;
+            if !matches!(owned, IngressOutcomeState::Missing) {
+                return Ok(owned);
+            }
         }
         let Some(mut coordinates) = self.resolved_target_coordinates(target).await? else {
             return Ok(IngressOutcomeState::Missing);
@@ -1548,6 +1804,72 @@ impl CooldisDaemonIoBridge {
         }
     }
 
+    async fn ingress_outcome_on_streams(
+        &self,
+        streams: &[EventStreamId],
+        ingress_envelope_ids: &[String],
+    ) -> IoResult<IngressOutcomeState> {
+        if streams.is_empty() {
+            return Ok(IngressOutcomeState::Missing);
+        }
+        let store = self.ingress_event_store()?;
+        let mut events = Vec::new();
+        for stream in streams {
+            events.extend(
+                store
+                    .read_events(stream, None)
+                    .await
+                    .map_err(cooldis_history_error)?,
+            );
+        }
+        ingress_outcome_fold(&events, ingress_envelope_ids)
+    }
+
+    async fn ingress_route_state(
+        &self,
+        envelope: &IngressEnvelope,
+    ) -> Option<Arc<DaemonEgressState>> {
+        let route_id = route_id_for_ingress(envelope);
+        let key = source_scope(&envelope.source.protocol, &route_id);
+        self.egress_states.read().await.get(&key).cloned()
+    }
+
+    async fn record_ingress_ownership(
+        &self,
+        envelope: &IngressEnvelope,
+        source_envelopes: &[IngressEnvelope],
+        stream_id: &EventStreamId,
+        attempt: u32,
+    ) -> IoResult<Option<IngressOwnershipReservation>> {
+        let keys = ingress_ownership_keys(source_envelopes)?;
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        let Some(state) = self.ingress_route_state(envelope).await else {
+            let route_id = route_id_for_ingress(envelope);
+            let source_scope = source_scope(&envelope.source.protocol, &route_id);
+            if self
+                .egress_route_configs
+                .read()
+                .await
+                .contains_key(&source_scope)
+            {
+                return Err(IoError::Bridge(
+                    "durable ingress ownership requires its route state before claim admission"
+                        .to_string(),
+                ));
+            }
+            return Ok(None);
+        };
+        let ownership_id = state.record_ingress_ownership(&keys, stream_id, attempt)?;
+        Ok(Some(IngressOwnershipReservation {
+            state,
+            ownership_id,
+            keys,
+            stream_id: stream_id.clone(),
+        }))
+    }
+
     async fn append_ingress_claim(
         &self,
         coordinates: &ThreadCoordinates,
@@ -1555,9 +1877,36 @@ impl CooldisDaemonIoBridge {
         ingress_witness_event_ids: &[EventRecordId],
         admission_event_id: EventRecordId,
         intent: IngressOutcomeIntent,
+        ownership: Option<&IngressOwnershipReservation>,
     ) -> IoResult<IngressClaimAppend> {
         let store = self.ingress_event_store()?;
         let stream_id = control_stream_id(coordinates);
+        let mut ownership_lock = match ownership {
+            Some(ownership) => {
+                let lock = ownership.state.lock_ingress_claim_admission()?;
+                let streams = lock.ownership_streams(&ownership.keys)?;
+                match self
+                    .ingress_outcome_on_streams(&streams, ingress_envelope_ids)
+                    .await?
+                {
+                    IngressOutcomeState::Missing => {}
+                    state => {
+                        lock.prune_to_stream(&ownership.keys, &ingress_outcome_stream_id(&state))?;
+                        lock.commit()?;
+                        return Ok(IngressClaimAppend::Existing(state));
+                    }
+                }
+                if !lock.reservation_is_current(ownership)? {
+                    lock.commit()?;
+                    return Err(IoError::Bridge(
+                        "durable ingress ownership attempt was superseded before claim".to_string(),
+                    ));
+                }
+                lock.prune_to_reservation(ownership)?;
+                Some(lock)
+            }
+            None => None,
+        };
         loop {
             let events = store
                 .read_events(&stream_id, None)
@@ -1565,7 +1914,12 @@ impl CooldisDaemonIoBridge {
                 .map_err(cooldis_history_error)?;
             match ingress_outcome_fold(&events, ingress_envelope_ids)? {
                 IngressOutcomeState::Missing => {}
-                state => return Ok(IngressClaimAppend::Existing(state)),
+                state => {
+                    if let Some(lock) = ownership_lock.take() {
+                        lock.commit()?;
+                    }
+                    return Ok(IngressClaimAppend::Existing(state));
+                }
             }
             let expected_next_sequence = events
                 .last()
@@ -1593,6 +1947,9 @@ impl CooldisDaemonIoBridge {
                     let claim = appended.pop().ok_or_else(|| {
                         IoError::Bridge("ingress claim append returned no record".to_string())
                     })?;
+                    if let Some(lock) = ownership_lock.take() {
+                        lock.commit()?;
+                    }
                     #[cfg(test)]
                     if self
                         .pause_after_ingress_claim
@@ -1616,9 +1973,36 @@ impl CooldisDaemonIoBridge {
         ingress_witness_event_ids: &[EventRecordId],
         admission_event_id: EventRecordId,
         intent: IngressOutcomeIntent,
+        ownership: Option<&IngressOwnershipReservation>,
     ) -> IoResult<IngressClaimAppend> {
         let store = self.ingress_event_store()?;
         let stream_id = control_stream_id(coordinates);
+        let mut ownership_lock = match ownership {
+            Some(ownership) => {
+                let lock = ownership.state.lock_ingress_claim_admission()?;
+                let streams = lock.ownership_streams(&ownership.keys)?;
+                match self
+                    .ingress_outcome_on_streams(&streams, ingress_envelope_ids)
+                    .await?
+                {
+                    IngressOutcomeState::Missing => {}
+                    state => {
+                        lock.prune_to_stream(&ownership.keys, &ingress_outcome_stream_id(&state))?;
+                        lock.commit()?;
+                        return Ok(IngressClaimAppend::Existing(state));
+                    }
+                }
+                if !lock.reservation_is_current(ownership)? {
+                    lock.commit()?;
+                    return Err(IoError::Bridge(
+                        "durable ingress ownership attempt was superseded before claim".to_string(),
+                    ));
+                }
+                lock.prune_to_reservation(ownership)?;
+                Some(lock)
+            }
+            None => None,
+        };
         loop {
             let events = store
                 .read_events(&stream_id, None)
@@ -1626,7 +2010,12 @@ impl CooldisDaemonIoBridge {
                 .map_err(cooldis_history_error)?;
             match ingress_outcome_fold(&events, ingress_envelope_ids)? {
                 IngressOutcomeState::Missing => {}
-                state => return Ok(IngressClaimAppend::Existing(state)),
+                state => {
+                    if let Some(lock) = ownership_lock.take() {
+                        lock.commit()?;
+                    }
+                    return Ok(IngressClaimAppend::Existing(state));
+                }
             }
             let expected_next_sequence = events
                 .last()
@@ -1670,6 +2059,9 @@ impl CooldisDaemonIoBridge {
                             "effect-free ingress outcome append returned an incomplete batch"
                                 .to_string(),
                         ));
+                    }
+                    if let Some(lock) = ownership_lock.take() {
+                        lock.commit()?;
                     }
                     return Ok(IngressClaimAppend::Appended(appended.remove(0)));
                 }
@@ -2267,6 +2659,7 @@ impl CooldisDaemonIoBridge {
         ingress_source_stream: Option<&EventStreamId>,
         source_ingress_event_ids: &[EventRecordId],
         admission_event_id: Option<EventRecordId>,
+        ingress_ownership: Option<&IngressOwnershipReservation>,
     ) -> IoResult<(KernelIoReceipt, Option<String>)> {
         let (parent_coordinates, parent_handle) = self.ensure_thread(target, envelope).await?;
         let scope_key = target.address.scope_key();
@@ -2305,6 +2698,7 @@ impl CooldisDaemonIoBridge {
                     child_key: child_key.to_string(),
                     input: input.clone(),
                 })?,
+                ingress_ownership,
             )
             .await?;
         let claim = match claim {
@@ -3339,14 +3733,7 @@ impl CooldisDaemonIoBridge {
                 &state,
             ));
         };
-        let coordinates = self
-            .resolved_target_coordinates(target)
-            .await?
-            .ok_or_else(|| {
-                IoError::Bridge(
-                    "claimed ingress outcome has no resolved control stream".to_string(),
-                )
-            })?;
+        let coordinates = claim.coordinates.clone();
         let mut handle = self
             .get_or_load_thread_handle(&coordinates)
             .await
@@ -3561,6 +3948,7 @@ impl CooldisDaemonIoBridge {
         ingress_source_stream: Option<&EventStreamId>,
         source_ingress_event_ids: &[EventRecordId],
         admission_event_id: Option<EventRecordId>,
+        ingress_ownership: Option<&IngressOwnershipReservation>,
     ) -> IoResult<(KernelIoReceipt, Option<String>)> {
         match decision {
             AdmissionDecision::Queue { turn_id, input } => {
@@ -3608,6 +3996,7 @@ impl CooldisDaemonIoBridge {
                         source_ingress_event_ids,
                         admission_event_id,
                         Self::ingress_claim_intent(decision)?,
+                        ingress_ownership,
                     )
                     .await?;
                 let IngressClaimAppend::Appended(claim) = claim else {
@@ -3692,6 +4081,7 @@ impl CooldisDaemonIoBridge {
                         source_ingress_event_ids,
                         admission_event_id,
                         Self::ingress_claim_intent(decision)?,
+                        ingress_ownership,
                     )
                     .await?;
                 let IngressClaimAppend::Appended(claim) = claim else {
@@ -3792,6 +4182,7 @@ impl CooldisDaemonIoBridge {
                         source_ingress_event_ids,
                         admission_event_id,
                         Self::ingress_claim_intent(decision)?,
+                        ingress_ownership,
                     )
                     .await?;
                 let IngressClaimAppend::Appended(claim) = claim else {
@@ -3863,6 +4254,7 @@ impl CooldisDaemonIoBridge {
                         source_ingress_event_ids,
                         admission_event_id,
                         Self::ingress_claim_intent(decision)?,
+                        ingress_ownership,
                     )
                     .await?;
                 let receipt = match outcome {
@@ -3898,6 +4290,7 @@ impl CooldisDaemonIoBridge {
                     ingress_source_stream,
                     source_ingress_event_ids,
                     admission_event_id,
+                    ingress_ownership,
                 )
                 .await
             }
@@ -3914,7 +4307,7 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
         decision: &AdmissionDecision,
     ) -> IoResult<KernelIoReceipt> {
         let (receipt, _) = self
-            .apply_with_ingress_outcomes(envelope, target, decision, &[], None, &[], None)
+            .apply_with_ingress_outcomes(envelope, target, decision, &[], None, &[], None, None)
             .await?;
         Ok(receipt)
     }
@@ -5028,6 +5421,15 @@ fn ingress_outcome_turn_id(state: &IngressOutcomeState) -> Option<&str> {
     }
 }
 
+fn ingress_outcome_stream_id(state: &IngressOutcomeState) -> EventStreamId {
+    let coordinates = match state {
+        IngressOutcomeState::Claimed { claim, .. } => &claim.coordinates,
+        IngressOutcomeState::Settled { settle, .. } => &settle.coordinates,
+        IngressOutcomeState::Missing => unreachable!("missing ingress outcome has no stream"),
+    };
+    control_stream_id(coordinates)
+}
+
 fn ingress_outcome_is_fork(state: &IngressOutcomeState) -> bool {
     let intent = match state {
         IngressOutcomeState::Missing => return false,
@@ -5156,6 +5558,34 @@ fn route_id_for_ingress(envelope: &IngressEnvelope) -> String {
         .get("cooldis_route_id")
         .cloned()
         .unwrap_or_else(|| envelope.source.instance_id.clone())
+}
+
+fn ingress_ownership_keys(
+    source_envelopes: &[IngressEnvelope],
+) -> IoResult<Vec<IngressOwnershipKey>> {
+    let mut keys = BTreeMap::<String, String>::new();
+    for envelope in source_envelopes {
+        let Some(dedupe_key) = envelope.dedupe_key.as_ref() else {
+            // Queue envelopes without a protocol dedupe key retain the ADR
+            // 0003 envelope-id fold. There is no dedupe row to own or age.
+            return Ok(Vec::new());
+        };
+        let dedupe_key = dedupe_key.stable_key();
+        if let Some(existing) = keys.insert(dedupe_key.clone(), envelope.id.clone())
+            && existing != envelope.id
+        {
+            return Err(IoError::Bridge(format!(
+                "durable ingress batch reuses dedupe key {dedupe_key:?} for different envelopes"
+            )));
+        }
+    }
+    Ok(keys
+        .into_iter()
+        .map(|(dedupe_key, ingress_envelope_id)| IngressOwnershipKey {
+            dedupe_key,
+            ingress_envelope_id,
+        })
+        .collect())
 }
 
 fn ingress_envelope_digest(envelope: &IngressEnvelope) -> IoResult<String> {
@@ -5625,6 +6055,13 @@ fn init_egress_state_schema(connection: &rusqlite::Connection) -> IoResult<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_cooldis_daemon_egress_threads_route
                 ON cooldis_daemon_egress_threads (route_id, updated_at_ms);
+            CREATE TABLE IF NOT EXISTS cooldis_ingress_dedupe (
+                queue_name TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                envelope_id TEXT NOT NULL,
+                inserted_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (queue_name, dedupe_key)
+            );
             CREATE TABLE IF NOT EXISTS cooldis_daemon_ingress_bindings (
                 route_id TEXT NOT NULL,
                 source_scope TEXT NOT NULL,
@@ -5650,6 +6087,24 @@ fn init_egress_state_schema(connection: &rusqlite::Connection) -> IoResult<()> {
                 ORDER BY latest.updated_at_ms DESC, latest.rowid DESC
                 LIMIT 1
             );
+            CREATE TABLE IF NOT EXISTS cooldis_daemon_ingress_ownership (
+                dedupe_key TEXT NOT NULL,
+                ownership_id TEXT NOT NULL,
+                ingress_envelope_id TEXT NOT NULL,
+                stream_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (dedupe_key, ownership_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cooldis_daemon_ingress_ownership_key
+                ON cooldis_daemon_ingress_ownership
+                    (dedupe_key, attempt DESC, created_at_ms DESC, ownership_id DESC);
+            CREATE TRIGGER IF NOT EXISTS cooldis_ingress_dedupe_delete_ownership
+            AFTER DELETE ON cooldis_ingress_dedupe
+            BEGIN
+                DELETE FROM cooldis_daemon_ingress_ownership
+                WHERE dedupe_key = OLD.dedupe_key;
+            END;
             CREATE TABLE IF NOT EXISTS cooldis_daemon_egress_cursors (
                 route_id TEXT NOT NULL,
                 thread_id TEXT NOT NULL,
