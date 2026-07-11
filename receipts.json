@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "commit": "f0373242aef2b2adb06f98dc33a081562d46a1d8",
+  "counted_at": "2026-07-11T17:49:01Z",
+  "loc_rust": 165566,
+  "crates": 18,
+  "tests_passed": 1019,
+  "source": "ci"
+}
