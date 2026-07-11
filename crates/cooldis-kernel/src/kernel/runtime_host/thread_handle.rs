@@ -155,6 +155,18 @@ impl RuntimeThreadHandle {
         Ok((compile, bind))
     }
 
+    pub async fn record_thread_start_identity(&self) -> CooldisResult<SessionEntry> {
+        self.append_runtime_session_entry(
+            "thread_started",
+            serde_json::json!({
+                "parent_thread_id": self.thread.context.parent_thread_id,
+                "topology": self.thread.context.topology,
+                "metadata": self.thread.context.metadata,
+            }),
+        )
+        .await
+    }
+
     pub async fn record_tool_universe_discovery_receipts(
         &self,
         payloads: Vec<serde_json::Value>,

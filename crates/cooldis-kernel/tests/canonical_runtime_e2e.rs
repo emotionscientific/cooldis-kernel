@@ -967,6 +967,12 @@ fn sqlite_entry_payloads(path: &Path) -> Vec<String> {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
+        .into_iter()
+        .filter(|entry| {
+            let value: serde_json::Value = serde_json::from_str(entry).unwrap();
+            value["kind"]["kind"].as_str() != Some("thread_started")
+        })
+        .collect()
 }
 
 fn temp_db_path(prefix: &str) -> std::path::PathBuf {

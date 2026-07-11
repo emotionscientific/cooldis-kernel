@@ -473,6 +473,7 @@ impl AgentRuntime for ChildEchoRuntime {
             RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
+                metadata: context.metadata.clone(),
             },
         );
         let _ = events.send(ThreadEvent::Started { context });
@@ -3494,7 +3495,11 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     let session_events = events
         .iter()
-        .filter(|event| event.kind == EventKind::SessionEntryAppended)
+        .filter(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload.get("runtime_kind").and_then(Value::as_str)
+                    != Some("thread_started")
+        })
         .collect::<Vec<_>>();
     let compile_events = events
         .iter()

@@ -1324,6 +1324,10 @@ pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidatio
         thread_joined_payload_schema_v1(),
     )?;
     registry.register(
+        EventKind::ThreadReloadDegraded.payload_schema_id(),
+        thread_reload_degraded_payload_schema_v1(),
+    )?;
+    registry.register(
         EventKind::PolicyBound.payload_schema_id(),
         policy_bound_payload_schema_v1(),
     )?;
@@ -1890,6 +1894,22 @@ fn io_ingress_received_payload_schema_v1() -> Value {
             "external_actor_id": {"type": "string"},
             "external_message_id": {"type": "string"},
             "envelope_digest": {"type": "string"}
+        }
+    })
+}
+
+fn thread_reload_degraded_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["thread_id", "missing", "fallback"],
+        "additionalProperties": false,
+        "properties": {
+            "thread_id": {"type": "string"},
+            "missing": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "fallback": {"enum": ["fabricated_root"]}
         }
     })
 }
@@ -3177,6 +3197,7 @@ fn build_in_memory_context(
     }
 
     visiting.remove(&coordinates.thread_id);
+    strip_thread_start_identity_entries(&mut entries, &mut source_cuts);
     let mut messages = Vec::new();
     append_model_visible_messages(&entries, &mut messages);
     Ok(SessionContext {
@@ -3278,6 +3299,33 @@ pub fn append_model_visible_messages(
     }
 }
 
+pub fn session_entry_is_thread_start_identity(entry: &SessionEntry) -> bool {
+    matches!(
+        &entry.kind,
+        SessionEntryKind::Runtime { kind, .. } if kind == "thread_started"
+    )
+}
+
+pub fn strip_thread_start_identity_entries(
+    entries: &mut Vec<SessionEntry>,
+    source_cuts: &mut Vec<SessionContextSourceCut>,
+) {
+    let identity_entry_ids = entries
+        .iter()
+        .filter(|entry| session_entry_is_thread_start_identity(entry))
+        .map(|entry| entry.entry_id)
+        .collect::<HashSet<_>>();
+    if identity_entry_ids.is_empty() {
+        return;
+    }
+    entries.retain(|entry| !identity_entry_ids.contains(&entry.entry_id));
+    for cut in source_cuts.iter_mut() {
+        cut.entry_ids
+            .retain(|entry_id| !identity_entry_ids.contains(entry_id));
+    }
+    source_cuts.retain(|cut| !cut.entry_ids.is_empty());
+}
+
 fn append_in_memory_event(
     inner: &mut InMemorySessionStoreInner,
     stream_id: &EventStreamId,
@@ -3326,6 +3374,15 @@ fn session_entry_event_with_optional_provenance(
         "parent_entry_id": entry.parent_entry_id.map(|id| id.to_string()),
         "entry_kind": session_entry_kind_name(&entry.kind),
     });
+    if let SessionEntryKind::Runtime {
+        kind,
+        payload: runtime_payload,
+    } = &entry.kind
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("runtime_kind".to_string(), serde_json::json!(kind));
+        object.insert("runtime_payload".to_string(), runtime_payload.clone());
+    }
     if let SessionEntryKind::Message {
         message: CanonicalMessage::Assistant { usage, .. },
     }

@@ -44,6 +44,14 @@ fn runtime_event_kind_contract_matches_fixture() {
     let child_thread_id = thread_id(2);
     let checkpoint_id = checkpoint_id(1);
     let cases = vec![
+        RuntimeEventKind::ThreadStarted {
+            parent_thread_id: None,
+            topology: ThreadTopology::root(),
+            metadata: BTreeMap::from([(
+                "cooldis.agent.manifest_hash".to_string(),
+                "sha256:manifest".to_string(),
+            )]),
+        },
         RuntimeEventKind::ThreadInteraction {
             interaction_id: runtime_event_id(1),
             kind: ThreadInteractionKind::PromptSubmitted,
@@ -441,8 +449,29 @@ fn stream_schema_v1_contract_matches_fixture() {
             }
         }),
     };
+    let reload_degraded = EventRecord {
+        id: event_record_id(5),
+        stream_id: stream_id.clone(),
+        sequence: EventSequence::new(8),
+        coordinates: coordinates.clone(),
+        created_at_ms: 1_771_718_400_400,
+        kind: EventKind::ThreadReloadDegraded,
+        origin: EventOrigin::Witnessed,
+        provenance: EventProvenance::default(),
+        payload: json!({
+            "thread_id": coordinates.thread_id.to_string(),
+            "missing": ["topology", "parent_thread_id", "metadata"],
+            "fallback": "fabricated_root"
+        }),
+    };
 
-    let records = vec![compile, summary, read_plan_set, compile_after_policy];
+    let records = vec![
+        compile,
+        summary,
+        read_plan_set,
+        compile_after_policy,
+        reload_degraded,
+    ];
     let schema_registry = stream_schema_registry_v1().unwrap();
     for record in &records {
         record.validate_stream_record_v1().unwrap();

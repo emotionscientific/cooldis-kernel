@@ -5,12 +5,12 @@
         "local_committed",
         "query_projected"
       ],
-      "end_sequence": 7,
+      "end_sequence": 8,
       "schema": "cooldis.stream.append_ack/1",
       "start_sequence": 4,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
-      "tail_event_id": "018f0000-0000-7000-8000-000000000004",
-      "tail_sequence": 7
+      "tail_event_id": "018f0000-0000-7000-8000-000000000005",
+      "tail_sequence": 8
     }
   ],
   "backend_capabilities": [
@@ -56,6 +56,12 @@
       "event_id": "018f0000-0000-7000-8000-000000000004",
       "schema": "cooldis.stream.cursor/1",
       "sequence": 7,
+      "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+    },
+    {
+      "event_id": "018f0000-0000-7000-8000-000000000005",
+      "schema": "cooldis.stream.cursor/1",
+      "sequence": 8,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
     }
   ],
@@ -324,6 +330,32 @@
       "schema": "cooldis.stream.record/1",
       "sequence": 7,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+    },
+    {
+      "coordinates": {
+        "session_id": "session_1",
+        "tenant_id": "tenant_a",
+        "thread_id": "018f0000-0000-7000-8000-000000000001",
+        "user_id": "user_1"
+      },
+      "created_at_ms": 1771718400400,
+      "event_id": "018f0000-0000-7000-8000-000000000005",
+      "kind": "thread.reload.degraded",
+      "origin": "witnessed",
+      "payload": {
+        "fallback": "fabricated_root",
+        "missing": [
+          "topology",
+          "parent_thread_id",
+          "metadata"
+        ],
+        "thread_id": "018f0000-0000-7000-8000-000000000001"
+      },
+      "payload_schema": "cooldis.event.thread.reload.degraded/1",
+      "provenance": {},
+      "schema": "cooldis.stream.record/1",
+      "sequence": 8,
+      "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
     }
   ],
   "routing": [
@@ -425,6 +457,30 @@
       ],
       "schema": "cooldis.stream.routing_decision/1",
       "sequence": 7,
+      "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
+    },
+    {
+      "event_id": "018f0000-0000-7000-8000-000000000005",
+      "keys": {
+        "kind": "thread.reload.degraded",
+        "origin": "witnessed",
+        "payload_schema": "cooldis.event.thread.reload.degraded/1",
+        "schema": "cooldis.stream.record/1",
+        "session_id": "session_1",
+        "stream_id": "thread:018f0000-0000-7000-8000-000000000001",
+        "tenant_id": "tenant_a",
+        "thread_id": "018f0000-0000-7000-8000-000000000001",
+        "user_id": "user_1"
+      },
+      "kind": "thread.reload.degraded",
+      "routes": [
+        "authority_store",
+        "export_bundle",
+        "runtime_trace",
+        "browser_safe_projection"
+      ],
+      "schema": "cooldis.stream.routing_decision/1",
+      "sequence": 8,
       "stream_id": "thread:018f0000-0000-7000-8000-000000000001"
     }
   ]

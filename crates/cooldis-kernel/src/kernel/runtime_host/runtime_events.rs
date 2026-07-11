@@ -40,6 +40,8 @@ pub enum RuntimeEventKind {
         parent_thread_id: Option<ThreadId>,
         #[serde(default)]
         topology: ThreadTopology,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        metadata: BTreeMap<String, String>,
     },
     ThreadInteraction {
         interaction_id: RuntimeEventId,
