@@ -173,8 +173,13 @@ witnesses, but it no longer owns ingress idempotency. A fork settles against its
 parent control-stream `thread.spawned` evidence, whose typed fork payload carries
 the claim event ID.
 
-Redelivery folds claim and settle state through the `EventStore` on that one
-control stream. A settled claim is terminal and dedupes without repeating a
+Redelivery folds claim and settle state through the `EventStore` on the
+resolved thread's control stream, with one exception: because a fork rebinds
+the conversation to its child, a redelivered fork envelope resolves to the
+child, so the fold also walks parent ancestry and honors fork-intent outcomes
+found there. The daemon keeps one durable active binding per conversation
+scope, claimed atomically at first contact, so racing first deliveries share
+a single control stream. A settled claim is terminal and dedupes without repeating a
 receipt, admission decision, cancellation, or submission. An unsettled turn
 claim checks the thread journal for executing-side evidence. Evidence settles
 the claim as recovery; no evidence re-submits the same turn ID and then settles.
