@@ -33,4 +33,35 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2.9.1
       - name: Verify workspace
-        run: scripts/verify.sh
+        shell: bash
+        run: scripts/verify.sh 2>&1 | tee verify-output.log
+      - name: Upload witnessed verify output
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-output
+          path: verify-output.log
+          if-no-files-found: error
+
+  receipts:
+    name: Publish witnessed receipt
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: receipts-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Download witnessed verify output
+        uses: actions/download-artifact@v4
+        with:
+          name: verify-output
+      - name: Publish receipt
+        shell: bash
+        run: scripts/ci-receipts.sh verify-output.log
