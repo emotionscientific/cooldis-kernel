@@ -722,9 +722,11 @@ impl CooldisDaemonIoBridge {
             match self.supervisor.get_thread_at(coordinates).await {
                 Ok(handle) => return Ok(handle),
                 Err(CooldisError::ThreadNotFound(_)) => {
-                    match self
-                        .supervisor
-                        .load_thread_from_lifecycle(ThreadLifecycleRecord {
+                    let lifecycle = self
+                        .reconstruct_thread_lifecycle(coordinates)
+                        .await
+                        .map_err(ThreadHandleResolutionError::LifecycleLoad)?
+                        .unwrap_or_else(|| ThreadLifecycleRecord {
                             coordinates: coordinates.clone(),
                             parent_thread_id: None,
                             topology: ThreadTopology::root(),
@@ -734,9 +736,8 @@ impl CooldisDaemonIoBridge {
                             created_at_ms: now_ms(),
                             updated_at_ms: now_ms(),
                             metadata: BTreeMap::new(),
-                        })
-                        .await
-                    {
+                        });
+                    match self.supervisor.load_thread_from_lifecycle(lifecycle).await {
                         Ok(handle) => return Ok(handle),
                         Err(CooldisError::ThreadAlreadyExists(_)) => {
                             self.supervisor
@@ -755,6 +756,29 @@ impl CooldisDaemonIoBridge {
                 Err(err) => return Err(ThreadHandleResolutionError::Lookup(err)),
             }
         }
+    }
+
+    /// EMO-370 seam: reconstruct a lazily loaded thread's lifecycle record
+    /// from its own journal — thread-start provenance (topology, parent,
+    /// metadata) plus the manifest compile/bind receipts recorded at
+    /// creation. The stream is the only durable truth; the binding table
+    /// stays a coordinates-only read model, and identity is never
+    /// re-resolved from the route's current agent alias (an `@latest` alias
+    /// may have moved).
+    ///
+    /// Returns `Ok(None)` when the journal predates the identity payload
+    /// and cannot supply full identity. The caller then applies the
+    /// fabricated-root fallback, and the implementation must witness that
+    /// fallback with a `thread.reload.degraded` event — degradation is
+    /// never silent.
+    async fn reconstruct_thread_lifecycle(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> CooldisResult<Option<ThreadLifecycleRecord>> {
+        // EMO-370 implements journal reconstruction here; until then every
+        // lazy load takes the fabricated-root path below, unchanged.
+        let _ = coordinates;
+        Ok(None)
     }
 
     async fn thread_load_lock(&self, thread_id: ThreadId) -> Arc<Mutex<()>> {

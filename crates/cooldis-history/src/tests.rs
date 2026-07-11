@@ -511,16 +511,20 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "thread.spawn.requested",
         "thread.spawned",
         "thread.joined",
+        "thread.branch.selected",
+        "thread.reload.degraded",
         "policy.bound",
         "grant.petitioned",
         "timer.fired",
         "io.ingress.received",
+        "io.ingress.claimed",
+        "io.ingress.settled",
         "io.egress.requested",
         "io.egress.delivered",
         "io.egress.failed",
         "admission.decided",
     ];
-    assert_eq!(EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.2");
+    assert_eq!(EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.3");
     let kinds = EventKind::all();
     assert_eq!(
         kinds.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),

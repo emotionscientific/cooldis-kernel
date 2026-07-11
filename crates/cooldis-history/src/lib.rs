@@ -20,7 +20,7 @@ pub const STREAM_APPEND_ACK_SCHEMA_V1: &str = "cooldis.stream.append_ack/1";
 pub const STREAM_ROUTING_DECISION_SCHEMA_V1: &str = "cooldis.stream.routing_decision/1";
 pub const CONTEXT_READ_PLAN_SCHEMA_V1: &str = "cooldis.context.read_plan/1";
 pub const DEBUG_THREAD_EXPORT_SCHEMA_V1: &str = "cooldis.debug.thread_export/1";
-pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.2";
+pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.3";
 
 pub const COMPACTION_SUMMARY_PREFIX: &str = "Compacted conversation summary:";
 
@@ -185,7 +185,7 @@ impl std::fmt::Display for EventRecordId {
     }
 }
 
-/// Frozen event-kind vocabulary, version `cooldis.events/0.2`.
+/// Frozen event-kind vocabulary, version `cooldis.events/0.3`.
 ///
 /// Laws:
 /// - The vocabulary is append-only: kinds may be added in later versions,
@@ -276,6 +276,15 @@ pub enum EventKind {
     /// A spawned child thread reached a terminal state and joined back to its
     /// parent lineage.
     ThreadJoined,
+    /// A thread's live branch selection changed; appended in the same
+    /// transaction as the `active_leaves` cache update. Selecting no branch
+    /// (clearing) is itself a witnessed selection. Added in
+    /// `cooldis.events/0.3`.
+    ThreadBranchSelected,
+    /// A lazily reloaded thread's journal could not reconstruct full
+    /// lifecycle identity and the loader fell back to a fabricated root
+    /// record. Added in `cooldis.events/0.3`.
+    ThreadReloadDegraded,
     /// A policy identity became active. The binding is valid until the next
     /// `policy.bound` with the same `policy_id`.
     PolicyBound,
@@ -286,6 +295,16 @@ pub enum EventKind {
     TimerFired,
     /// An external IO route received an ingress envelope.
     IoIngressReceived,
+    /// The runtime accepted sole responsibility for an admitted ingress
+    /// envelope's outcome, fenced onto the resolved thread's control stream
+    /// before any non-idempotent effect (ADR 0003). `io.ingress` names the
+    /// ingress-envelope outcome lifecycle, not the producing component or
+    /// stream. Added in `cooldis.events/0.3`.
+    IoIngressClaimed,
+    /// A claimed ingress outcome reached its terminal state, with provenance
+    /// to the claim and its execution evidence. A settled claim is terminal:
+    /// redelivery dedupes against it. Added in `cooldis.events/0.3`.
+    IoIngressSettled,
     /// A tool path requested an IO egress action for later projection.
     IoEgressRequested,
     /// An IO egress attempt was delivered to the external route.
@@ -332,10 +351,14 @@ impl EventKind {
             Self::ThreadSpawnRequested,
             Self::ThreadSpawned,
             Self::ThreadJoined,
+            Self::ThreadBranchSelected,
+            Self::ThreadReloadDegraded,
             Self::PolicyBound,
             Self::GrantPetitioned,
             Self::TimerFired,
             Self::IoIngressReceived,
+            Self::IoIngressClaimed,
+            Self::IoIngressSettled,
             Self::IoEgressRequested,
             Self::IoEgressDelivered,
             Self::IoEgressFailed,
@@ -378,10 +401,14 @@ impl EventKind {
             Self::ThreadSpawnRequested => "thread.spawn.requested",
             Self::ThreadSpawned => "thread.spawned",
             Self::ThreadJoined => "thread.joined",
+            Self::ThreadBranchSelected => "thread.branch.selected",
+            Self::ThreadReloadDegraded => "thread.reload.degraded",
             Self::PolicyBound => "policy.bound",
             Self::GrantPetitioned => "grant.petitioned",
             Self::TimerFired => "timer.fired",
             Self::IoIngressReceived => "io.ingress.received",
+            Self::IoIngressClaimed => "io.ingress.claimed",
+            Self::IoIngressSettled => "io.ingress.settled",
             Self::IoEgressRequested => "io.egress.requested",
             Self::IoEgressDelivered => "io.egress.delivered",
             Self::IoEgressFailed => "io.egress.failed",
@@ -426,10 +453,14 @@ impl EventKind {
             Self::ThreadSpawnRequested => "cooldis.event.thread.spawn.requested/1",
             Self::ThreadSpawned => "cooldis.event.thread.spawned/1",
             Self::ThreadJoined => "cooldis.event.thread.joined/1",
+            Self::ThreadBranchSelected => "cooldis.event.thread.branch.selected/1",
+            Self::ThreadReloadDegraded => "cooldis.event.thread.reload.degraded/1",
             Self::PolicyBound => "cooldis.event.policy.bound/1",
             Self::GrantPetitioned => "cooldis.event.grant.petitioned/1",
             Self::TimerFired => "cooldis.event.timer.fired/1",
             Self::IoIngressReceived => "cooldis.event.io.ingress.received/1",
+            Self::IoIngressClaimed => "cooldis.event.io.ingress.claimed/1",
+            Self::IoIngressSettled => "cooldis.event.io.ingress.settled/1",
             Self::IoEgressRequested => "cooldis.event.io.egress.requested/1",
             Self::IoEgressDelivered => "cooldis.event.io.egress.delivered/1",
             Self::IoEgressFailed => "cooldis.event.io.egress.failed/1",
@@ -476,10 +507,14 @@ impl std::str::FromStr for EventKind {
             "thread.spawn.requested" => Ok(Self::ThreadSpawnRequested),
             "thread.spawned" => Ok(Self::ThreadSpawned),
             "thread.joined" => Ok(Self::ThreadJoined),
+            "thread.branch.selected" => Ok(Self::ThreadBranchSelected),
+            "thread.reload.degraded" => Ok(Self::ThreadReloadDegraded),
             "policy.bound" => Ok(Self::PolicyBound),
             "grant.petitioned" => Ok(Self::GrantPetitioned),
             "timer.fired" => Ok(Self::TimerFired),
             "io.ingress.received" => Ok(Self::IoIngressReceived),
+            "io.ingress.claimed" => Ok(Self::IoIngressClaimed),
+            "io.ingress.settled" => Ok(Self::IoIngressSettled),
             "io.egress.requested" => Ok(Self::IoEgressRequested),
             "io.egress.delivered" => Ok(Self::IoEgressDelivered),
             "io.egress.failed" => Ok(Self::IoEgressFailed),
@@ -648,6 +683,73 @@ pub struct IoIngressReceivedPayload {
     pub envelope_digest: String,
 }
 
+/// Intended outcome carried by an `io.ingress.claimed` event. Exactly one
+/// intent exists per claim; the variants mirror the admission outcomes
+/// (ADR 0003).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum IngressOutcomeIntent {
+    Turn {
+        turn_id: String,
+        submission_mode: String,
+        input_digest: String,
+    },
+    Fork {
+        child_key: String,
+        input_digest: String,
+    },
+    Interrupt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replacement_turn_id: Option<String>,
+        cancel_reason: String,
+        input_digest: String,
+    },
+    Observe {
+        reason: String,
+    },
+    Reject {
+        reason: String,
+    },
+}
+
+/// Payload for `io.ingress.claimed`. Laws (ADR 0003): at most one claim
+/// exists per ingress envelope id; the claim precedes every non-idempotent
+/// effect; every claim settles exactly once.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IoIngressClaimedPayload {
+    /// Envelope set the claim covers (multiple when coalesced).
+    pub ingress_envelope_ids: Vec<String>,
+    /// Control-stream `io.ingress.received` witness event ids for those
+    /// envelopes.
+    pub ingress_witness_event_ids: Vec<EventRecordId>,
+    /// The `admission.decided` event this claim executes.
+    pub admission_event_id: EventRecordId,
+    pub intent: IngressOutcomeIntent,
+}
+
+/// How a claim reached its settle (ADR 0003 recovery law).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressSettledBy {
+    Execution,
+    Recovery,
+}
+
+/// Payload for `io.ingress.settled`. A settled claim is terminal:
+/// redelivery dedupes against it and repeats no control effects.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IoIngressSettledPayload {
+    /// The claim this settle terminates.
+    pub claim_event_id: EventRecordId,
+    pub ingress_envelope_ids: Vec<String>,
+    /// Earliest executing-side evidence for the claimed outcome; absent for
+    /// effect-free outcomes (observe, reject). `turn.submitted` is NOT
+    /// evidence: it is the submitting side's apply-time record (EMO-364).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_event_id: Option<EventRecordId>,
+    pub settled_by: IngressSettledBy,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IoEgressRequestedPayload {
     pub egress_kind: Value,
@@ -686,6 +788,36 @@ pub struct AdmissionDecidedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admissible: Option<Vec<AdmissionDecision>>,
     pub source_ingress_event_ids: Vec<EventRecordId>,
+}
+
+/// Payload for `thread.branch.selected`. Appended in the same transaction
+/// as the `active_leaves` cache update; the cache is thereby a derived read
+/// model, rebuildable by folding these events (last selection per thread
+/// wins).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThreadBranchSelectedPayload {
+    pub thread_id: ThreadId,
+    /// The selected leaf entry. `None` clears the selection and is itself a
+    /// witnessed selection of "no branch".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_entry_id: Option<SessionEntryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_entry_id: Option<SessionEntryId>,
+}
+
+/// Payload for `thread.reload.degraded`. The witnessed fallback fact when a
+/// pre-payload thread's journal cannot reconstruct full lifecycle identity
+/// on lazy reload and the loader applies a fabricated root record
+/// (EMO-370). Degradation is never silent: this event accompanies every
+/// fallback.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThreadReloadDegradedPayload {
+    pub thread_id: ThreadId,
+    /// Identity fields the journal could not supply (for example
+    /// "topology", "parent_thread_id", "metadata").
+    pub missing: Vec<String>,
+    /// The fallback identity applied; today always "fabricated_root".
+    pub fallback: String,
 }
 
 /// Where an event came from, relative to the system boundary.
@@ -1266,10 +1398,14 @@ fn event_kind_routes_to_runtime_trace(kind: EventKind) -> bool {
             | EventKind::PlacementDecision
             | EventKind::ThreadSpawned
             | EventKind::ThreadJoined
+            | EventKind::ThreadBranchSelected
+            | EventKind::ThreadReloadDegraded
             | EventKind::PolicyBound
             | EventKind::GrantPetitioned
             | EventKind::TimerFired
             | EventKind::IoIngressReceived
+            | EventKind::IoIngressClaimed
+            | EventKind::IoIngressSettled
             | EventKind::IoEgressRequested
             | EventKind::IoEgressDelivered
             | EventKind::IoEgressFailed
