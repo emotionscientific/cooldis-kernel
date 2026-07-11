@@ -687,9 +687,13 @@ impl AgentRuntime for VirtualBashRuntime {
         let mut pending_submits = VecDeque::new();
 
         loop {
-            if let Some(ThreadCommand::Submit { input, .. }) = pending_submits.pop_front() {
+            if let Some(ThreadCommand::Submit { turn_id, input, .. }) = pending_submits.pop_front()
+            {
                 let _ = status.send(ThreadStatus::Running);
-                match services.append_user_turn_input(&coordinates, &input).await {
+                match services
+                    .append_user_turn_input(&coordinates, &turn_id, &input)
+                    .await
+                {
                     Ok(entry) => {
                         let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
                     }
@@ -735,7 +739,7 @@ impl AgentRuntime for VirtualBashRuntime {
                         break;
                     };
                     match command {
-                        ThreadCommand::Submit { input, mode, .. } => {
+                        ThreadCommand::Submit { turn_id, input, mode } => {
                             if mode == TurnSubmissionMode::Steer {
                                 emit_runtime_event(
                                     &events,
@@ -748,7 +752,7 @@ impl AgentRuntime for VirtualBashRuntime {
                                 continue;
                             }
                             let _ = status.send(ThreadStatus::Running);
-                            match services.append_user_turn_input(&coordinates, &input).await {
+                            match services.append_user_turn_input(&coordinates, &turn_id, &input).await {
                                 Ok(entry) => {
                                     let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
                                 }

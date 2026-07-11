@@ -199,20 +199,23 @@ impl RuntimeServices {
     pub async fn append_user_turn_input(
         &self,
         coordinates: &ThreadCoordinates,
+        turn_id: &str,
         input: &TurnInput,
     ) -> CooldisResult<SessionEntry> {
         input.start_turn_watchdog();
-        self.append_session_entry(
-            coordinates,
-            None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::User {
-                    content: input.canonical_content(),
-                    timestamp_ms: unix_timestamp_ms() as i64,
+        self.runtime_store
+            .append_turn_input(
+                coordinates,
+                turn_id,
+                SessionEntryKind::Message {
+                    message: CanonicalMessage::User {
+                        content: input.canonical_content(),
+                        timestamp_ms: unix_timestamp_ms() as i64,
+                    },
                 },
-            },
-        )
-        .await
+            )
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))
     }
 
     pub async fn append_thread_event(

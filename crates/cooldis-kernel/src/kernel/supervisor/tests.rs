@@ -46,7 +46,7 @@ impl AgentRuntime for EchoRuntime {
                     match command {
                         Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
-                            if let Ok(entry) = services.append_user_turn_input(&coordinates, &input).await {
+                            if let Ok(entry) = services.append_user_turn_input(&coordinates, &turn_id, &input).await {
                                 let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
                             }
                             let _ = events.send(ThreadEvent::Output {
@@ -178,6 +178,119 @@ async fn supervisor_routes_threads_by_tenant() {
 }
 
 #[tokio::test]
+async fn supervisor_turn_submission_is_idempotent_on_turn_id() {
+    let supervisor = supervisor().await;
+    let thread = supervisor
+        .start_thread(start_request("tenant_a"))
+        .await
+        .unwrap();
+    let mut status = thread.subscribe_status();
+    while *status.borrow() != ThreadStatus::Idle {
+        status.changed().await.unwrap();
+    }
+    let mut events = thread.subscribe_events();
+
+    supervisor
+        .submit_to(&thread.context().coordinates, "turn-same", "hello")
+        .await
+        .unwrap();
+    supervisor
+        .submit_to(&thread.context().coordinates, "turn-same", "hello")
+        .await
+        .unwrap();
+
+    assert_output(&mut events, "turn-same:hello").await;
+    assert!(
+        timeout(Duration::from_millis(50), async {
+            loop {
+                if matches!(events.recv().await, Ok(ThreadEvent::Output { .. })) {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "duplicate turn reservation submitted a second control effect"
+    );
+    assert_eq!(
+        text_messages(&thread.session_context().await.unwrap()),
+        vec!["hello"]
+    );
+}
+
+#[tokio::test]
+async fn dropped_turn_reservation_releases_turn_id() {
+    let supervisor = supervisor().await;
+    let thread = supervisor
+        .start_thread(start_request("tenant_a"))
+        .await
+        .unwrap();
+    let mut status = thread.subscribe_status();
+    while *status.borrow() != ThreadStatus::Idle {
+        status.changed().await.unwrap();
+    }
+    let mut events = thread.subscribe_events();
+    let coordinates = &thread.context().coordinates;
+
+    drop(
+        supervisor
+            .reserve_turn_to_with_admission(
+                coordinates,
+                "turn-retry",
+                TurnInput::text("first"),
+                TurnSubmissionMode::Queue,
+                None,
+            )
+            .await
+            .unwrap(),
+    );
+    supervisor
+        .submit_to(coordinates, "turn-retry", "second")
+        .await
+        .unwrap();
+
+    assert_output(&mut events, "turn-retry:second").await;
+}
+
+#[tokio::test]
+async fn cancelling_idle_thread_is_a_witnessed_no_op() {
+    let supervisor = supervisor().await;
+    let thread = supervisor
+        .start_thread(start_request("tenant_a"))
+        .await
+        .unwrap();
+    let mut status = thread.subscribe_status();
+    while *status.borrow() != ThreadStatus::Idle {
+        status.changed().await.unwrap();
+    }
+    let mut events = thread.subscribe_events();
+    let prior_signal = thread.lifecycle_record().await.latest_signal_id;
+
+    supervisor
+        .cancel_at(&thread.context().coordinates, "already finished")
+        .await
+        .unwrap();
+
+    assert_ne!(
+        thread.lifecycle_record().await.latest_signal_id,
+        prior_signal
+    );
+    assert_eq!(thread.status(), ThreadStatus::Idle);
+    assert!(
+        timeout(Duration::from_millis(50), async {
+            loop {
+                if matches!(events.recv().await, Ok(ThreadEvent::Cancelled { .. })) {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "idle cancellation reached the runtime instead of remaining a witnessed no-op"
+    );
+}
+
+#[tokio::test]
 async fn supervisor_runtime_contexts_keep_tenant_homes_and_stores_isolated() {
     let root = unique_temp_dir("cooldis-tenant-context");
     let runtime_a = root.join("tenant-a/runtime");
@@ -287,11 +400,16 @@ async fn supervisor_supports_coordinate_addressed_submit_and_cancel() {
         .unwrap();
     assert_output(&mut events, "turn:addressed").await;
 
+    let prior_signal = thread.lifecycle_record().await.latest_signal_id;
     supervisor
         .cancel_at(&coordinates, "addressed cancel")
         .await
         .unwrap();
-    assert_cancelled(&mut events, "addressed cancel").await;
+    assert_ne!(
+        thread.lifecycle_record().await.latest_signal_id,
+        prior_signal
+    );
+    assert_eq!(thread.status(), ThreadStatus::Idle);
 }
 
 #[tokio::test]
@@ -567,19 +685,6 @@ async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: 
             .expect("event channel closed");
         if let ThreadEvent::Output { text, .. } = event {
             assert_eq!(text, expected);
-            return;
-        }
-    }
-}
-
-async fn assert_cancelled(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
-    loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
-            .await
-            .expect("event timed out")
-            .expect("event channel closed");
-        if let ThreadEvent::Cancelled { reason, .. } = event {
-            assert_eq!(reason, expected);
             return;
         }
     }

@@ -727,6 +727,22 @@ async fn run_idle_provider_command(
             mode,
         } => {
             if mode == TurnSubmissionMode::Steer {
+                match services
+                    .append_user_turn_input(coordinates, &turn_id, &input)
+                    .await
+                {
+                    Ok(entry) => {
+                        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                    }
+                    Err(err) => {
+                        let _ = status.send(ThreadStatus::Failed);
+                        let _ = events.send(ThreadEvent::Failed {
+                            thread_id,
+                            message: err.to_string(),
+                        });
+                        return true;
+                    }
+                }
                 emit_runtime_event(
                     events,
                     coordinates,
@@ -760,7 +776,7 @@ async fn run_idle_provider_command(
                 return true;
             }
             let (turn_source_event_id, turn_anchor_timestamp_ms) = match services
-                .append_user_turn_input(coordinates, &input)
+                .append_user_turn_input(coordinates, &turn_id, &input)
                 .await
             {
                 Ok(entry) => {
@@ -1696,6 +1712,29 @@ async fn run_provider_turn(
                                     });
                                 }
                                 TurnSubmissionMode::Steer => {
+                                    match services
+                                        .append_user_turn_input(coordinates, &turn_id, &input)
+                                        .await
+                                    {
+                                        Ok(entry) => {
+                                            let _ = events.send(ThreadEvent::CanonicalMirror {
+                                                thread_id,
+                                                entry,
+                                            });
+                                        }
+                                        Err(err) => {
+                                            let _ = status.send(ThreadStatus::Failed);
+                                            let _ = events.send(ThreadEvent::Failed {
+                                                thread_id,
+                                                message: err.to_string(),
+                                            });
+                                            turn_cancellation.cancel();
+                                            cancelled_reason = Some(
+                                                "steer input persistence failed".to_string(),
+                                            );
+                                            continue;
+                                        }
+                                    }
                                     let _ = events.send(ThreadEvent::Signal {
                                         thread_id,
                                         signal: ThreadSignal::user_steer(

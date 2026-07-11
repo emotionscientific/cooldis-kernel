@@ -1,6 +1,6 @@
 # ADR 0003: Durable Ingress Outcome Protocol
 
-Status: proposed (event kinds pending ratification; implementation gated on it)
+Status: accepted (event kinds ratified by docket D-10 on 2026-07-10)
 Date: 2026-07-10
 
 ## Context
@@ -49,8 +49,9 @@ io.ingress.settled     the claimed outcome reached its terminal state,
                        with evidence
 ```
 
-Both kinds are additions to the frozen event-kind vocabulary and are therefore
-ratification-gated; this ADR is not implementable until they are ratified.
+Both kinds were ratified as additions to the frozen event-kind vocabulary by
+docket D-10 on 2026-07-10. `io.ingress` names the ingress-envelope outcome
+lifecycle, not the producing component or stream.
 
 ### The outcome model
 
@@ -197,7 +198,7 @@ executing side's own `turn.submitted` append used to make moot.
 
 ## Consequences
 
-- Two new event kinds enter the frozen vocabulary (ratification-gated).
+- Two ratified event kinds enter the frozen vocabulary.
 - The global applied-marker lookup (payload scan over thread streams) is
   replaced by a claim/settle fold over control streams; a rebuildable index
   keyed by envelope id may cache it as a view.

@@ -1340,6 +1340,14 @@ pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidatio
         io_ingress_received_payload_schema_v1(),
     )?;
     registry.register(
+        EventKind::IoIngressClaimed.payload_schema_id(),
+        io_ingress_claimed_payload_schema_v1(),
+    )?;
+    registry.register(
+        EventKind::IoIngressSettled.payload_schema_id(),
+        io_ingress_settled_payload_schema_v1(),
+    )?;
+    registry.register(
         EventKind::IoEgressRequested.payload_schema_id(),
         io_egress_requested_payload_schema_v1(),
     )?;
@@ -1891,6 +1899,53 @@ fn io_ingress_received_payload_schema_v1() -> Value {
             "external_message_id": {"type": "string"},
             "envelope_digest": {"type": "string"}
         }
+    })
+}
+
+fn io_ingress_claimed_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": [
+            "ingress_envelope_ids",
+            "ingress_witness_event_ids",
+            "admission_event_id",
+            "intent"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "ingress_envelope_ids": string_array_schema_v1(),
+            "ingress_witness_event_ids": string_array_schema_v1(),
+            "admission_event_id": {"type": "string"},
+            "intent": {
+                "type": "object",
+                "required": ["outcome"],
+                "additionalProperties": true,
+                "properties": {
+                    "outcome": {"enum": ["turn", "fork", "interrupt", "observe", "reject"]}
+                }
+            }
+        }
+    })
+}
+
+fn io_ingress_settled_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["claim_event_id", "ingress_envelope_ids", "settled_by"],
+        "additionalProperties": false,
+        "properties": {
+            "claim_event_id": {"type": "string"},
+            "ingress_envelope_ids": string_array_schema_v1(),
+            "evidence_event_id": {"type": "string"},
+            "settled_by": {"enum": ["execution", "recovery"]}
+        }
+    })
+}
+
+fn string_array_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {"type": "string"}
     })
 }
 
@@ -2566,6 +2621,8 @@ pub struct SessionEntry {
     pub entry_id: SessionEntryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_entry_id: Option<SessionEntryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     pub coordinates: ThreadCoordinates,
     pub created_at_ms: i64,
     pub kind: SessionEntryKind,
@@ -2580,10 +2637,22 @@ impl SessionEntry {
         Self {
             entry_id: SessionEntryId::new(),
             parent_entry_id,
+            turn_id: None,
             coordinates,
             created_at_ms: now_ms(),
             kind,
         }
+    }
+
+    pub fn for_turn(
+        coordinates: ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        turn_id: impl Into<String>,
+        kind: SessionEntryKind,
+    ) -> Self {
+        let mut entry = Self::new(coordinates, parent_entry_id, kind);
+        entry.turn_id = Some(turn_id.into());
+        entry
     }
 }
 
@@ -2653,6 +2722,16 @@ pub trait SessionStore: Send + Sync {
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
         provenance: EventProvenance,
+    ) -> HistoryResult<SessionEntry>;
+
+    /// Persist a turn's input exactly once. Replaying the same `turn_id`
+    /// adopts the original entry; a different payload for that id fails
+    /// closed.
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry>;
 
     async fn active_leaf(
@@ -2814,6 +2893,43 @@ impl SessionStore for InMemorySessionStore {
     ) -> HistoryResult<SessionEntry> {
         self.append_inner(coordinates, parent_entry_id, kind, Some(provenance))
             .await
+    }
+
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        let mut inner = self.inner.write().await;
+        let thread_id = coordinates.thread_id;
+        if let Some(existing) = inner.entries.get(&thread_id).and_then(|entries| {
+            entries
+                .values()
+                .find(|entry| entry.turn_id.as_deref() == Some(turn_id))
+        }) {
+            validate_entry_coordinates(coordinates, existing)?;
+            if !turn_input_kinds_match(&existing.kind, &kind) {
+                return Err(HistoryError::Storage(format!(
+                    "turn {turn_id} input does not match its persisted session entry"
+                )));
+            }
+            return Ok(existing.clone());
+        }
+        let parent_entry_id = inner.active_leaf.get(&thread_id).copied();
+        let entry = SessionEntry::for_turn(coordinates.clone(), parent_entry_id, turn_id, kind);
+        inner
+            .entries
+            .entry(thread_id)
+            .or_default()
+            .insert(entry.entry_id, entry.clone());
+        inner.active_leaf.insert(thread_id, entry.entry_id);
+        append_in_memory_event(
+            &mut inner,
+            &EventStreamId::for_thread(coordinates),
+            session_entry_event(&entry),
+        )?;
+        Ok(entry)
     }
 
     async fn active_leaf(
@@ -3326,6 +3442,11 @@ fn session_entry_event_with_optional_provenance(
         "parent_entry_id": entry.parent_entry_id.map(|id| id.to_string()),
         "entry_kind": session_entry_kind_name(&entry.kind),
     });
+    if let Some(turn_id) = &entry.turn_id
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("turn_id".to_string(), Value::String(turn_id.clone()));
+    }
     if let SessionEntryKind::Message {
         message: CanonicalMessage::Assistant { usage, .. },
     }
@@ -3364,6 +3485,20 @@ pub fn session_entry_is_user_authored(kind: &SessionEntryKind) -> bool {
             message: CanonicalMessage::User { .. },
         }
     )
+}
+
+pub fn turn_input_kinds_match(left: &SessionEntryKind, right: &SessionEntryKind) -> bool {
+    match (left, right) {
+        (
+            SessionEntryKind::Message {
+                message: CanonicalMessage::User { content: left, .. },
+            },
+            SessionEntryKind::Message {
+                message: CanonicalMessage::User { content: right, .. },
+            },
+        ) => left == right,
+        _ => left == right,
+    }
 }
 
 fn session_entry_kind_name(kind: &SessionEntryKind) -> &'static str {

@@ -530,7 +530,7 @@ impl AgentRuntime for EchoRuntime {
                     match command {
                         Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
-                            if let Ok(entry) = services.append_user_turn_input(&coordinates, &input).await {
+                            if let Ok(entry) = services.append_user_turn_input(&coordinates, &turn_id, &input).await {
                                 let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
                             }
                             let _ = events.send(ThreadEvent::Output {
@@ -616,6 +616,17 @@ impl SessionStore for AdmissionTestStore {
     ) -> HistoryResult<SessionEntry> {
         self.inner
             .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
+            .await
+    }
+
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        self.inner
+            .append_turn_input(coordinates, turn_id, kind)
             .await
     }
 
@@ -781,7 +792,7 @@ impl AgentRuntime for AssistantHistoryRuntime {
                     match command {
                         Some(ThreadCommand::Submit { turn_id, input, .. }) => {
                             let _ = status.send(ThreadStatus::Running);
-                            if let Ok(entry) = services.append_user_turn_input(&coordinates, &input).await {
+                            if let Ok(entry) = services.append_user_turn_input(&coordinates, &turn_id, &input).await {
                                 let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
                             }
                             let output = format!("{turn_id}:{}", input.text_projection());
@@ -949,9 +960,12 @@ impl AgentRuntime for StuckRuntime {
         let coordinates = context.coordinates.clone();
         let _ = events.send(ThreadEvent::Started { context });
         let _ = status.send(ThreadStatus::Idle);
-        if let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await {
+        if let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await {
             let _ = status.send(ThreadStatus::Running);
-            if let Ok(entry) = services.append_user_turn_input(&coordinates, &input).await {
+            if let Ok(entry) = services
+                .append_user_turn_input(&coordinates, &turn_id, &input)
+                .await
+            {
                 let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
             }
             std::future::pending::<()>().await;
@@ -1017,7 +1031,10 @@ impl AgentRuntime for GatedTurnRuntime {
             };
             assert_eq!(turn_id, expected_turn_id);
             let _ = status.send(ThreadStatus::Running);
-            if let Ok(entry) = services.append_user_turn_input(&coordinates, &input).await {
+            if let Ok(entry) = services
+                .append_user_turn_input(&coordinates, &turn_id, &input)
+                .await
+            {
                 let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
             }
             started.notify_one();
@@ -1078,21 +1095,25 @@ impl AgentRuntime for WatchdogHandoffRuntime {
         _cancellation: CancellationToken,
     ) {
         let coordinates = context.coordinates;
-        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+        let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
             return;
         };
         let _ = status.send(ThreadStatus::Running);
-        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        let _ = services
+            .append_user_turn_input(&coordinates, &turn_id, &input)
+            .await;
         self.state.first_started.notify_one();
         self.state.release_first.notified().await;
         drop(input);
         let _ = status.send(ThreadStatus::Idle);
 
-        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+        let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
             return;
         };
         let _ = status.send(ThreadStatus::Running);
-        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        let _ = services
+            .append_user_turn_input(&coordinates, &turn_id, &input)
+            .await;
         self.state.second_started.notify_one();
 
         if let Some(ThreadCommand::Cancel { .. }) = commands.recv().await {
@@ -1140,11 +1161,13 @@ impl AgentRuntime for DrainedPendingInputRuntime {
         _cancellation: CancellationToken,
     ) {
         let coordinates = context.coordinates;
-        let Some(ThreadCommand::Submit { input, .. }) = commands.recv().await else {
+        let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
             return;
         };
         let _ = status.send(ThreadStatus::Running);
-        let _ = services.append_user_turn_input(&coordinates, &input).await;
+        let _ = services
+            .append_user_turn_input(&coordinates, &turn_id, &input)
+            .await;
         self.state.first_started.notify_one();
 
         let queued_input = match commands.recv().await {
@@ -2793,6 +2816,31 @@ async fn execution_policy_rejects_submit_when_command_queue_is_full() {
     thread.abort().await;
 }
 
+#[tokio::test]
+async fn user_turn_input_persistence_adopts_existing_entry_by_turn_id() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let coordinates = coords("tenant_a", "user_1", "turn-input-idempotency");
+    let first_services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let recovered_services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let input = TurnInput::text("persist exactly once");
+
+    let first = first_services
+        .append_user_turn_input(&coordinates, "turn-stable", &input)
+        .await
+        .unwrap();
+    let recovered = recovered_services
+        .append_user_turn_input(&coordinates, "turn-stable", &input)
+        .await
+        .unwrap();
+
+    assert_eq!(recovered.entry_id, first.entry_id);
+    let context = store.build_context(&coordinates).await.unwrap();
+    assert_eq!(
+        canonical_user_content(&context),
+        vec![vec![CanonicalContent::text("persist exactly once")]]
+    );
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
     let state = Arc::new(GatedTurnRuntimeState::default());
@@ -3632,11 +3680,14 @@ async fn cancelling_one_thread_does_not_cancel_siblings() {
         .await
         .unwrap();
 
-    let mut parent_events = parent.subscribe_events();
     let mut child_events = child.subscribe_events();
+    let prior_signal = parent.lifecycle_record().await.latest_signal_id;
 
     host.cancel(parent_id, "test cancel").await.unwrap();
-    assert_cancelled(&mut parent_events, "test cancel").await;
+    assert_ne!(
+        parent.lifecycle_record().await.latest_signal_id,
+        prior_signal
+    );
 
     host.submit(
         child.context().coordinates.thread_id,
@@ -3956,19 +4007,6 @@ async fn policy_bound_content_hash_for_config(config: serde_json::Value) -> Stri
     assert_eq!(policy.payload["policy_kind"], "coupling_set");
     assert_eq!(policy.payload["policy_id"], "coupling_set:snapshot-a");
     policy.payload["content_hash"].as_str().unwrap().to_string()
-}
-
-async fn assert_cancelled(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
-    loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
-            .await
-            .expect("event timed out")
-            .expect("event channel closed");
-        if let ThreadEvent::Cancelled { reason, .. } = event {
-            assert_eq!(reason, expected);
-            return;
-        }
-    }
 }
 
 async fn assert_runtime_kind(

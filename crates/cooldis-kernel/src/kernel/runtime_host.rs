@@ -10,7 +10,7 @@ use cooldis_operations::CooldisOperationsError;
 use cooldis_process::CooldisProcessError;
 use cooldis_vbash::CooldisVirtualBashError;
 use cooldis_wasm::CooldisWasmError;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::Duration;
@@ -237,6 +237,7 @@ struct RuntimeThread {
     lifecycle: Mutex<ThreadLifecycleRecord>,
     checkpoints: Mutex<Vec<ThreadCheckpoint>>,
     pending_input_slots: Option<Arc<Semaphore>>,
+    turn_reservations: StdMutex<HashSet<String>>,
 }
 
 struct ThreadStartReservationState {
@@ -249,6 +250,20 @@ struct ThreadStartReservation<'a> {
     thread_id: ThreadId,
     settled: watch::Sender<bool>,
     committed: bool,
+}
+
+struct TurnIdReservation {
+    thread: Arc<RuntimeThread>,
+    turn_id: String,
+    committed: bool,
+}
+
+impl Drop for TurnIdReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            lock_unpoisoned(&self.thread.turn_reservations).remove(&self.turn_id);
+        }
+    }
 }
 
 impl ThreadStartReservation<'_> {
@@ -279,9 +294,10 @@ pub struct RuntimeThreadHandle {
 pub(crate) struct ReservedTurnSubmission {
     host: RuntimeHost,
     thread: RuntimeThreadHandle,
-    command_permit: mpsc::OwnedPermit<ThreadCommand>,
+    reservation: Option<TurnIdReservation>,
+    command_permit: Option<mpsc::OwnedPermit<ThreadCommand>>,
     turn_id: String,
-    input: TurnInput,
+    input: Option<TurnInput>,
     mode: TurnSubmissionMode,
     turn_watchdog: Option<TurnWatchdogHandle>,
 }
@@ -327,21 +343,28 @@ impl Drop for PublishedThreadStartGuard {
 
 impl ReservedTurnSubmission {
     /// Publishes a submission after all fallible admission work has completed.
-    pub(crate) async fn submit(self) {
+    pub(crate) async fn submit(self) -> bool {
         let Self {
             host,
             thread,
+            mut reservation,
             command_permit,
             turn_id,
             input,
             mode,
             turn_watchdog,
         } = self;
+        let (Some(command_permit), Some(input)) = (command_permit, input) else {
+            return false;
+        };
         let _ = command_permit.send(ThreadCommand::Submit {
             turn_id: turn_id.clone(),
             input,
             mode,
         });
+        if let Some(reservation) = reservation.as_mut() {
+            reservation.committed = true;
+        }
         if let Some(turn_watchdog) = turn_watchdog {
             host.spawn_turn_timeout_watchdog(thread.clone(), turn_watchdog);
         }
@@ -352,6 +375,7 @@ impl ReservedTurnSubmission {
                 mode,
             ))
             .await;
+        true
     }
 }
 
@@ -617,6 +641,7 @@ impl RuntimeHost {
             lifecycle: Mutex::new(lifecycle),
             checkpoints: Mutex::new(Vec::new()),
             pending_input_slots,
+            turn_reservations: StdMutex::new(HashSet::new()),
         });
 
         {
@@ -931,6 +956,27 @@ impl RuntimeHost {
     ) -> CooldisResult<ReservedTurnSubmission> {
         let turn_id = turn_id.into();
         let thread = self.get_thread(thread_id).await?;
+        let duplicate = {
+            let mut reservations = lock_unpoisoned(&thread.thread.turn_reservations);
+            !reservations.insert(turn_id.clone())
+        };
+        if duplicate {
+            return Ok(ReservedTurnSubmission {
+                host: self.clone(),
+                thread,
+                reservation: None,
+                command_permit: None,
+                turn_id,
+                input: None,
+                mode,
+                turn_watchdog: None,
+            });
+        }
+        let reservation = TurnIdReservation {
+            thread: Arc::clone(&thread.thread),
+            turn_id: turn_id.clone(),
+            committed: false,
+        };
         if mode == TurnSubmissionMode::Queue
             && let Some(max_pending_inputs) = self.inner.execution_policy.max_pending_inputs
         {
@@ -983,9 +1029,10 @@ impl RuntimeHost {
         Ok(ReservedTurnSubmission {
             host: self.clone(),
             thread,
-            command_permit,
+            reservation: Some(reservation),
+            command_permit: Some(command_permit),
             turn_id,
-            input,
+            input: Some(input),
             mode,
             turn_watchdog,
         })
@@ -1020,16 +1067,26 @@ impl RuntimeHost {
             reason: reason.clone(),
         });
         thread
+            .record_signal(ThreadSignal::interrupt_cancel(
+                &thread.context().coordinates,
+                reason.clone(),
+            ))
+            .await;
+        if matches!(
+            thread.status(),
+            ThreadStatus::Starting
+                | ThreadStatus::Idle
+                | ThreadStatus::Stopped
+                | ThreadStatus::Failed
+        ) && thread.queued_command_count() == 0
+        {
+            return Ok(());
+        }
+        thread
             .send(ThreadCommand::Cancel {
                 reason: reason.clone(),
             })
             .await?;
-        thread
-            .record_signal(ThreadSignal::interrupt_cancel(
-                &thread.context().coordinates,
-                reason,
-            ))
-            .await;
         self.wait_for_cancel_grace(&thread).await?;
         Ok(())
     }
