@@ -150,7 +150,11 @@ submission. The typed claim names every covered envelope, its ingress witnesses,
 the admission event, and exactly one intended outcome. Queue and steer claims
 carry the reserved `turn_id`, submission mode, and input digest. Interrupt claims
 carry the replacement turn ID when present, cancellation reason, and input
-digest.
+digest. Fork claims carry the child turn key and input digest. Only after the
+parent control stream accepts that claim does the daemon checkpoint the parent,
+fork one child, append `thread.spawned`, bind egress to the child, and submit the
+child turn. Racing applies fold the same parent claim, so the loser performs no
+fork effects.
 
 After the reserved submission is sent, the daemon waits for execution evidence
 and then appends `io.ingress.settled`. Evidence is per intent. A queue or
@@ -165,7 +169,9 @@ apply-time record. A settle cites its claim and evidence and records whether
 execution or recovery settled it. Only then does the queue worker complete the
 lease. The derived thread-stream `turn.submitted` record still carries target
 context for the egress projector and cites the control stream ingress
-witnesses, but it no longer owns ingress idempotency.
+witnesses, but it no longer owns ingress idempotency. A fork settles against its
+parent control-stream `thread.spawned` evidence, whose typed fork payload carries
+the claim event ID.
 
 Redelivery folds claim and settle state through the `EventStore` on that one
 control stream. A settled claim is terminal and dedupes without repeating a
@@ -178,6 +184,10 @@ finished turn is a witnessed no-op. Interrupt recovery re-runs cancellation and
 then applies the same rule to its replacement turn. Observe and reject claims
 are appended with their settle in one fenced batch because they have no control
 effect to recover.
+
+Fork recovery reuses the child named by a matching `thread.spawned`, completes
+binding and child submit, and settles. If no matching spawn exists, recovery
+checkpoints the parent at recovery time and runs the fork effects once.
 
 This claim/settle protocol closes the process-death window between durable
 intent and volatile submission without changing the outbound send/receipt
@@ -462,9 +472,12 @@ envelope again.
 - `interrupt_on_new_dm`: new direct messages cancel the active turn and replace
   it.
 - `fork_on_new_dm`: new direct messages fork the resolved source thread through
-  `thread/fork`, then submit the incoming text to the child thread. The parent
-  control stream witnesses lineage with `thread.spawned` and the existing
-  `fork.sourceCut` shape.
+  `thread/fork`, then submit the incoming text to the child thread. Durable queue
+  admission first claims the envelope on the parent's control stream. The
+  checkpoint, child creation, lineage witness, egress binding, and child submit
+  all follow that claim. The parent control stream witnesses lineage with
+  `thread.spawned`, the existing `fork.sourceCut` shape, and the optional
+  `fork.claim_event_id` recovery join.
 - `coalesce_bursts`: durable queue workers batch inbound messages from the same
   route/source/external conversation before admission. Configure it per route
   with `coalesce_bursts = { window_ms = 750, max_batch = 8 }`. The first

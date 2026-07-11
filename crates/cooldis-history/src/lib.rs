@@ -631,6 +631,8 @@ pub struct ThreadSpawnedPayload {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSpawnedForkPayload {
     pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_event_id: Option<EventRecordId>,
     #[serde(rename = "sourceCut")]
     pub source_cut: ThreadSpawnedForkSourceCutPayload,
 }
@@ -1800,6 +1802,7 @@ fn thread_spawned_payload_schema_v1() -> Value {
                 "additionalProperties": true,
                 "properties": {
                     "mode": {"type": "string"},
+                    "claim_event_id": {"type": "string"},
                     "sourceCut": {
                         "type": "object",
                         "required": [

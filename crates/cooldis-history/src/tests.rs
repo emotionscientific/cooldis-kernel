@@ -796,6 +796,7 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
                 inputs_hash: "sha256:fork-inputs".to_string(),
                 fork: Some(ThreadSpawnedForkPayload {
                     mode: "clone".to_string(),
+                    claim_event_id: Some(spawned_event_id),
                     source_cut: ThreadSpawnedForkSourceCutPayload {
                         thread_id: parent_thread_id,
                         checkpoint_id,
@@ -965,6 +966,27 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
     assert_eq!(spawned.parent_turn_id, None);
     assert_eq!(spawned.child_policy_hash, None);
     assert_eq!(spawned.fork, None);
+
+    let spawned_fork: ThreadSpawnedPayload = serde_json::from_value(serde_json::json!({
+        "schema": EventKind::ThreadSpawned.payload_schema_id(),
+        "parent_thread_id": parent_thread_id,
+        "child_thread_id": child_thread_id,
+        "child_manifest_hash": "sha256:child-manifest",
+        "granted": [],
+        "inputs_hash": "sha256:inputs",
+        "fork": {
+            "mode": "clone",
+            "sourceCut": {
+                "threadId": parent_thread_id,
+                "checkpointId": "018f0000-0000-7000-8000-000000000015",
+                "leafEntryId": null,
+                "streamId": format!("thread:{parent_thread_id}"),
+                "streamToSequence": null
+            }
+        }
+    }))
+    .unwrap();
+    assert_eq!(spawned_fork.fork.unwrap().claim_event_id, None);
 
     let joined: ThreadJoinedPayload = serde_json::from_value(serde_json::json!({
         "schema": EventKind::ThreadJoined.payload_schema_id(),

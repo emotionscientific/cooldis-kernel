@@ -507,6 +507,10 @@ pub struct CooldisDaemonIoBridge {
     pause_after_ingress_claim: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     ingress_claim_paused: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pause_after_fork_spawn: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    fork_spawn_paused: Arc<tokio::sync::Notify>,
 }
 
 impl CooldisDaemonIoBridge {
@@ -538,6 +542,10 @@ impl CooldisDaemonIoBridge {
             pause_after_ingress_claim: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             ingress_claim_paused: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            pause_after_fork_spawn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            fork_spawn_paused: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -966,18 +974,28 @@ impl CooldisDaemonIoBridge {
             return self.submit_clock_tick_envelope(&envelope).await;
         }
         let source_envelopes = [envelope.clone()];
-        self.submit_envelope_with_sources(envelope, &source_envelopes, &[], false)
+        self.submit_envelope_with_sources(envelope, &source_envelopes, &[], false, None)
             .await
     }
 
-    async fn submit_queued_envelope(&self, envelope: IngressEnvelope) -> IoResult<KernelIoReceipt> {
+    async fn submit_queued_envelope(
+        &self,
+        envelope: IngressEnvelope,
+        attempt: u32,
+    ) -> IoResult<KernelIoReceipt> {
         if is_clock_tick_envelope(&envelope) {
             return self.submit_clock_tick_envelope(&envelope).await;
         }
         let source_envelopes = [envelope.clone()];
         let ingress_message_ids = [envelope.id.clone()];
-        self.submit_envelope_with_sources(envelope, &source_envelopes, &ingress_message_ids, false)
-            .await
+        self.submit_envelope_with_sources(
+            envelope,
+            &source_envelopes,
+            &ingress_message_ids,
+            false,
+            Some(attempt),
+        )
+        .await
     }
 
     async fn queued_message_was_applied(&self, message: &LeasedIngressEnvelope) -> IoResult<bool> {
@@ -1004,7 +1022,7 @@ impl CooldisDaemonIoBridge {
                 "clock.tick envelopes cannot be coalesced".to_string(),
             ));
         }
-        self.submit_envelope_with_sources(envelope, source_envelopes, &[], true)
+        self.submit_envelope_with_sources(envelope, source_envelopes, &[], true, None)
             .await
     }
 
@@ -1024,8 +1042,14 @@ impl CooldisDaemonIoBridge {
                 "clock.tick envelopes cannot be coalesced".to_string(),
             ));
         }
-        self.submit_envelope_with_sources(envelope, source_envelopes, ingress_message_ids, true)
-            .await
+        self.submit_envelope_with_sources(
+            envelope,
+            source_envelopes,
+            ingress_message_ids,
+            true,
+            None,
+        )
+        .await
     }
 
     async fn submit_envelope_with_sources(
@@ -1034,6 +1058,7 @@ impl CooldisDaemonIoBridge {
         source_envelopes: &[IngressEnvelope],
         ingress_message_ids: &[String],
         coalesced: bool,
+        ingress_attempt: Option<u32>,
     ) -> IoResult<KernelIoReceipt> {
         if !ingress_message_ids.is_empty() && source_envelopes.len() != ingress_message_ids.len() {
             return Err(IoError::Bridge(
@@ -1045,6 +1070,9 @@ impl CooldisDaemonIoBridge {
             match self.ingress_outcome(&target, ingress_message_ids).await? {
                 IngressOutcomeState::Missing => {}
                 state @ IngressOutcomeState::Claimed { .. } => {
+                    if ingress_attempt == Some(1) && ingress_outcome_is_fork(&state) {
+                        return Ok(fork_claim_loser_receipt(&envelope, target, &state));
+                    }
                     return self
                         .recover_ingress_outcome(&envelope, &target, state)
                         .await;
@@ -1250,15 +1278,33 @@ impl CooldisDaemonIoBridge {
         if ingress_envelope_ids.is_empty() {
             return Ok(IngressOutcomeState::Missing);
         }
-        let Some(coordinates) = self.resolved_target_coordinates(target).await? else {
+        let Some(mut coordinates) = self.resolved_target_coordinates(target).await? else {
             return Ok(IngressOutcomeState::Missing);
         };
         let store = self.ingress_event_store()?;
-        let events = store
-            .read_events(&control_stream_id(&coordinates), None)
-            .await
-            .map_err(cooldis_history_error)?;
-        ingress_outcome_fold(&events, ingress_envelope_ids)
+        let mut resolved_thread = true;
+        loop {
+            let events = store
+                .read_events(&control_stream_id(&coordinates), None)
+                .await
+                .map_err(cooldis_history_error)?;
+            let state = ingress_outcome_fold(&events, ingress_envelope_ids)?;
+            if !matches!(state, IngressOutcomeState::Missing) {
+                if resolved_thread || ingress_outcome_is_fork(&state) {
+                    return Ok(state);
+                }
+                return Ok(IngressOutcomeState::Missing);
+            }
+            let handle = self
+                .get_or_load_thread_handle(&coordinates)
+                .await
+                .map_err(|err| cooldis_bridge_error(err.into_inner()))?;
+            let Some(parent_thread_id) = handle.context().parent_thread_id else {
+                return Ok(IngressOutcomeState::Missing);
+            };
+            coordinates.thread_id = parent_thread_id;
+            resolved_thread = false;
+        }
     }
 
     async fn append_ingress_claim(
@@ -1787,76 +1833,209 @@ impl CooldisDaemonIoBridge {
         target: &ResolvedIoTarget,
         child_key: &str,
         input: &IoTurnInput,
-        _ingress_message_ids: &[String],
+        ingress_message_ids: &[String],
         ingress_source_stream: Option<&EventStreamId>,
         source_ingress_event_ids: &[EventRecordId],
+        admission_event_id: Option<EventRecordId>,
     ) -> IoResult<(KernelIoReceipt, Option<String>)> {
         let (parent_coordinates, parent_handle) = self.ensure_thread(target, envelope).await?;
-        let checkpoint = self
-            .supervisor
-            .create_checkpoint_at(
-                &parent_coordinates,
-                None,
-                Some("daemon-io-fork".to_string()),
-                parent_handle.context().metadata.clone(),
-            )
-            .await
-            .map_err(cooldis_bridge_error)?;
-        let source_cut = fork_source_cut_payload(&parent_coordinates, &checkpoint, None);
-        let child_handle = self
-            .supervisor
-            .fork_thread_from_checkpoint_at(checkpoint)
-            .await
-            .map_err(cooldis_bridge_error)?;
-        let child_coordinates = child_handle.context().coordinates.clone();
-        self.append_fork_thread_spawned_event(
-            &parent_handle,
-            &parent_coordinates,
-            &child_handle,
-            &source_cut,
-        )
-        .await?;
-
         let scope_key = target.address.scope_key();
         let scope_lock = self.thread_scope_lock(&scope_key).await;
-        let scope_guard = scope_lock.lock().await;
-        if let Err(err) = self
-            .bind_egress_thread(envelope, target, &child_coordinates)
-            .await
-        {
-            drop(scope_guard);
-            let _ = self.supervisor.shutdown_thread_at(&child_coordinates).await;
-            return Err(err);
+        let _scope_guard = scope_lock.lock().await;
+        if ingress_message_ids.is_empty() {
+            let (receipt, _) = self
+                .run_fork_effects(
+                    envelope,
+                    target,
+                    &parent_coordinates,
+                    &parent_handle,
+                    child_key,
+                    input,
+                    ingress_source_stream,
+                    source_ingress_event_ids,
+                    None,
+                )
+                .await?;
+            return Ok((receipt, None));
         }
+        let admission_event_id = admission_event_id.ok_or_else(|| {
+            IoError::Bridge("durable ingress claim requires admission evidence".to_string())
+        })?;
+        let source_stream = ingress_source_stream.ok_or_else(|| {
+            IoError::Bridge("durable ingress claim requires its control stream".to_string())
+        })?;
+        let claim = self
+            .append_ingress_claim(
+                &parent_coordinates,
+                ingress_message_ids,
+                source_ingress_event_ids,
+                admission_event_id,
+                Self::ingress_claim_intent(&AdmissionDecision::Fork {
+                    child_key: child_key.to_string(),
+                    input: input.clone(),
+                })?,
+            )
+            .await?;
+        let claim = match claim {
+            IngressClaimAppend::Appended(claim) => claim,
+            IngressClaimAppend::Existing(state @ IngressOutcomeState::Claimed { .. }) => {
+                let receipt = fork_claim_loser_receipt(envelope, target.clone(), &state);
+                return Ok((
+                    receipt,
+                    ingress_outcome_turn_id(&state).map(ToOwned::to_owned),
+                ));
+            }
+            IngressClaimAppend::Existing(state) => {
+                let receipt = deduplicated_ingress_receipt(envelope, target.clone(), &state);
+                return Ok((receipt, Some(child_key.to_string())));
+            }
+        };
+        let claim_payload =
+            serde_json::from_value::<IoIngressClaimedPayload>(claim.payload.clone())
+                .map_err(|err| IoError::Bridge(format!("decode appended ingress claim: {err}")))?;
+        let (receipt, spawned) = self
+            .run_fork_effects(
+                envelope,
+                target,
+                &parent_coordinates,
+                &parent_handle,
+                child_key,
+                input,
+                Some(source_stream),
+                &claim_payload.ingress_witness_event_ids,
+                Some(claim.id),
+            )
+            .await?;
+        self.append_ingress_settle(
+            &parent_coordinates,
+            &claim,
+            &claim_payload,
+            Some(spawned.id),
+            IngressSettledBy::Execution,
+        )
+        .await?;
+        Ok((receipt, None))
+    }
+
+    async fn run_fork_effects(
+        &self,
+        envelope: &IngressEnvelope,
+        target: &ResolvedIoTarget,
+        parent_coordinates: &ThreadCoordinates,
+        parent_handle: &RuntimeThreadHandle,
+        child_key: &str,
+        input: &IoTurnInput,
+        ingress_source_stream: Option<&EventStreamId>,
+        source_ingress_event_ids: &[EventRecordId],
+        claim_event_id: Option<EventRecordId>,
+    ) -> IoResult<(KernelIoReceipt, EventRecord)> {
+        let existing_spawn = match claim_event_id {
+            Some(claim_event_id) => {
+                self.fork_spawned_for_claim(parent_coordinates, claim_event_id)
+                    .await?
+            }
+            None => None,
+        };
+        let (child_handle, spawned, recovering_spawned_child) = match existing_spawn {
+            Some((spawned, payload)) => {
+                let child_coordinates = ThreadCoordinates {
+                    tenant_id: parent_coordinates.tenant_id.clone(),
+                    user_id: parent_coordinates.user_id.clone(),
+                    session_id: parent_coordinates.session_id.clone(),
+                    thread_id: payload.child_thread_id,
+                };
+                let child_handle = self
+                    .get_or_load_thread_handle(&child_coordinates)
+                    .await
+                    .map_err(|err| cooldis_bridge_error(err.into_inner()))?;
+                (child_handle, spawned, true)
+            }
+            None => {
+                let checkpoint = self
+                    .supervisor
+                    .create_checkpoint_at(
+                        parent_coordinates,
+                        None,
+                        Some("daemon-io-fork".to_string()),
+                        parent_handle.context().metadata.clone(),
+                    )
+                    .await
+                    .map_err(cooldis_bridge_error)?;
+                let source_cut = fork_source_cut_payload(parent_coordinates, &checkpoint, None);
+                let child_handle = self
+                    .supervisor
+                    .fork_thread_from_checkpoint_at(checkpoint)
+                    .await
+                    .map_err(cooldis_bridge_error)?;
+                let spawned = self
+                    .append_fork_thread_spawned_event(
+                        parent_handle,
+                        parent_coordinates,
+                        &child_handle,
+                        &source_cut,
+                        claim_event_id,
+                    )
+                    .await?;
+                #[cfg(test)]
+                if self
+                    .pause_after_fork_spawn
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.fork_spawn_paused.notify_waiters();
+                    std::future::pending::<()>().await;
+                }
+                (child_handle, spawned, false)
+            }
+        };
+        let child_coordinates = child_handle.context().coordinates.clone();
+        self.bind_egress_thread(envelope, target, &child_coordinates)
+            .await?;
         self.threads
             .lock()
             .await
-            .insert(scope_key, child_coordinates.clone());
-        drop(scope_guard);
-        self.append_ingress_turn_submitted_event(
-            &child_handle,
-            envelope,
-            target,
-            child_key,
-            ingress_source_stream,
-            source_ingress_event_ids,
-        )
-        .await?;
-        self.lock_active_turns()
-            .insert(target.address.scope_key(), child_key.to_string());
-        if let Err(err) = self
-            .supervisor
-            .submit_turn_to_with_admission(
-                &child_coordinates,
-                child_key.to_string(),
-                self.runtime_input(input),
-                TurnSubmissionMode::Queue,
-                None,
-            )
+            .insert(target.address.scope_key(), child_coordinates.clone());
+        let child_events = child_handle
+            .read_thread_events(None)
             .await
+            .map_err(cooldis_bridge_error)?;
+        if !child_events.iter().any(|event| {
+            event.kind == EventKind::TurnSubmitted
+                && event.payload.get("turn_id").and_then(Value::as_str) == Some(child_key)
+        }) {
+            self.append_ingress_turn_submitted_event(
+                &child_handle,
+                envelope,
+                target,
+                child_key,
+                ingress_source_stream,
+                source_ingress_event_ids,
+            )
+            .await?;
+        }
+        if !recovering_spawned_child
+            || turn_execution_evidence(&child_events, child_key, TurnSubmissionMode::Queue)
+                .is_none()
         {
-            self.clear_active_turn_if_matches(&target.address.scope_key(), child_key);
-            return Err(cooldis_bridge_error(err));
+            self.lock_active_turns()
+                .insert(target.address.scope_key(), child_key.to_string());
+            let reserved = match self
+                .supervisor
+                .reserve_turn_to_with_admission(
+                    &child_coordinates,
+                    child_key.to_string(),
+                    self.runtime_input(input),
+                    TurnSubmissionMode::Queue,
+                    None,
+                )
+                .await
+            {
+                Ok(reserved) => reserved,
+                Err(err) => {
+                    self.clear_active_turn_if_matches(&target.address.scope_key(), child_key);
+                    return Err(cooldis_bridge_error(err));
+                }
+            };
+            reserved.submit().await;
         }
 
         let mut receipt_target = target.clone();
@@ -1870,7 +2049,30 @@ impl CooldisDaemonIoBridge {
             },
         );
         receipt.thread_id = Some(child_coordinates.thread_id.to_string());
-        Ok((receipt, None))
+        Ok((receipt, spawned))
+    }
+
+    async fn fork_spawned_for_claim(
+        &self,
+        parent_coordinates: &ThreadCoordinates,
+        claim_event_id: EventRecordId,
+    ) -> IoResult<Option<(EventRecord, ThreadSpawnedPayload)>> {
+        let store = self.ingress_event_store()?;
+        let events = store
+            .read_events(&control_stream_id(parent_coordinates), None)
+            .await
+            .map_err(cooldis_history_error)?;
+        for event in events {
+            if event.kind != EventKind::ThreadSpawned {
+                continue;
+            }
+            let payload = serde_json::from_value::<ThreadSpawnedPayload>(event.payload.clone())
+                .map_err(|err| IoError::Bridge(format!("invalid thread.spawned payload: {err}")))?;
+            if payload.fork.as_ref().and_then(|fork| fork.claim_event_id) == Some(claim_event_id) {
+                return Ok(Some((event, payload)));
+            }
+        }
+        Ok(None)
     }
 
     async fn append_fork_thread_spawned_event(
@@ -1879,6 +2081,7 @@ impl CooldisDaemonIoBridge {
         parent_coordinates: &ThreadCoordinates,
         child_handle: &RuntimeThreadHandle,
         source_cut: &ThreadSpawnedForkSourceCutPayload,
+        claim_event_id: Option<EventRecordId>,
     ) -> IoResult<EventRecord> {
         let child_context = child_handle.context();
         let metadata = &child_context.metadata;
@@ -1897,6 +2100,7 @@ impl CooldisDaemonIoBridge {
             .unwrap_or_default();
         let fork = ThreadSpawnedForkPayload {
             mode: "clone".to_string(),
+            claim_event_id,
             source_cut: source_cut.clone(),
         };
         let inputs_context = json!({
@@ -2608,6 +2812,63 @@ impl CooldisDaemonIoBridge {
         Ok(receipt)
     }
 
+    async fn recover_claimed_fork(
+        &self,
+        envelope: &IngressEnvelope,
+        target: &ResolvedIoTarget,
+        claim: &EventRecord,
+        claim_payload: &IoIngressClaimedPayload,
+        ingress_source_stream: &EventStreamId,
+    ) -> IoResult<KernelIoReceipt> {
+        let IngressOutcomeIntent::Fork {
+            child_key,
+            input_digest,
+        } = &claim_payload.intent
+        else {
+            return Err(IoError::Bridge(
+                "fork recovery received a non-fork claim".to_string(),
+            ));
+        };
+        let input = IoTurnInput::from_envelope(envelope, target);
+        let actual_digest = canonical_json_hash(
+            &serde_json::to_value(&input)
+                .map_err(|err| IoError::Bridge(format!("encode recovered fork input: {err}")))?,
+        )
+        .map_err(cooldis_bridge_error)?;
+        if &actual_digest != input_digest {
+            return Err(IoError::Bridge(
+                "recovered fork input does not match the claimed digest".to_string(),
+            ));
+        }
+        let parent_coordinates = &claim.coordinates;
+        let parent_handle = self
+            .get_or_load_thread_handle(parent_coordinates)
+            .await
+            .map_err(|err| cooldis_bridge_error(err.into_inner()))?;
+        let (receipt, spawned) = self
+            .run_fork_effects(
+                envelope,
+                target,
+                parent_coordinates,
+                &parent_handle,
+                child_key,
+                &input,
+                Some(ingress_source_stream),
+                &claim_payload.ingress_witness_event_ids,
+                Some(claim.id),
+            )
+            .await?;
+        self.append_ingress_settle(
+            parent_coordinates,
+            claim,
+            claim_payload,
+            Some(spawned.id),
+            IngressSettledBy::Recovery,
+        )
+        .await?;
+        Ok(receipt)
+    }
+
     async fn recover_ingress_outcome(
         &self,
         envelope: &IngressEnvelope,
@@ -2789,9 +3050,38 @@ impl CooldisDaemonIoBridge {
                     "effect-free ingress claim is missing its atomic settle".to_string(),
                 ))
             }
-            IngressOutcomeIntent::Fork { .. } => Err(IoError::Bridge(
-                "fork ingress claim recovery belongs to EMO-384".to_string(),
-            )),
+            IngressOutcomeIntent::Fork { .. } => {
+                let scope_lock = self.thread_scope_lock(&target.address.scope_key()).await;
+                let _scope_guard = scope_lock.lock().await;
+                let store = self.ingress_event_store()?;
+                let events = store
+                    .read_events(&control_stream_id(&claim.coordinates), None)
+                    .await
+                    .map_err(cooldis_history_error)?;
+                match ingress_outcome_fold(&events, &payload.ingress_envelope_ids)? {
+                    IngressOutcomeState::Claimed {
+                        claim: active_claim,
+                        payload: active_payload,
+                    } if active_claim.id == claim.id => {
+                        self.recover_claimed_fork(
+                            envelope,
+                            target,
+                            &active_claim,
+                            &active_payload,
+                            &control_stream_id(&claim.coordinates),
+                        )
+                        .await
+                    }
+                    state @ IngressOutcomeState::Settled { .. } => Ok(
+                        deduplicated_ingress_receipt(envelope, target.clone(), &state),
+                    ),
+                    IngressOutcomeState::Claimed { .. } | IngressOutcomeState::Missing => {
+                        Err(IoError::Bridge(
+                            "fork recovery no longer matches the active claim".to_string(),
+                        ))
+                    }
+                }
+            }
         }
     }
 
@@ -3108,6 +3398,7 @@ impl CooldisDaemonIoBridge {
                     ingress_message_ids,
                     ingress_source_stream,
                     source_ingress_event_ids,
+                    admission_event_id,
                 )
                 .await
             }
@@ -3320,7 +3611,11 @@ impl CooldisDaemonQueueWorker {
     }
 
     async fn submit_leased_message(&self, message: LeasedIngressEnvelope) -> IoResult<()> {
-        match self.bridge.submit_queued_envelope(message.envelope).await {
+        match self
+            .bridge
+            .submit_queued_envelope(message.envelope, message.attempt)
+            .await
+        {
             Ok(_) => self.queue.complete_ingress(&message.message_id).await,
             Err(err) => {
                 let reason = err.to_string();
@@ -4188,6 +4483,25 @@ fn deduplicated_ingress_receipt(
     receipt
 }
 
+fn fork_claim_loser_receipt(
+    envelope: &IngressEnvelope,
+    target: ResolvedIoTarget,
+    state: &IngressOutcomeState,
+) -> KernelIoReceipt {
+    eprintln!(
+        "cooldis daemon ingress {} deduplicated: durable fork claim is owned by another first apply",
+        envelope.id
+    );
+    let decision = AdmissionDecision::ObserveOnly {
+        reason: "durable fork claim is owned by another first apply".to_string(),
+    };
+    let mut receipt = KernelIoReceipt::new(envelope, target, &decision);
+    if let IngressOutcomeState::Claimed { claim, .. } = state {
+        receipt.thread_id = Some(claim.coordinates.thread_id.to_string());
+    }
+    receipt
+}
+
 fn ingress_outcome_turn_id(state: &IngressOutcomeState) -> Option<&str> {
     let intent = match state {
         IngressOutcomeState::Missing => return None,
@@ -4203,6 +4517,15 @@ fn ingress_outcome_turn_id(state: &IngressOutcomeState) -> Option<&str> {
         IngressOutcomeIntent::Fork { child_key, .. } => Some(child_key),
         IngressOutcomeIntent::Observe { .. } | IngressOutcomeIntent::Reject { .. } => None,
     }
+}
+
+fn ingress_outcome_is_fork(state: &IngressOutcomeState) -> bool {
+    let intent = match state {
+        IngressOutcomeState::Missing => return false,
+        IngressOutcomeState::Claimed { payload, .. } => &payload.intent,
+        IngressOutcomeState::Settled { claim_payload, .. } => &claim_payload.intent,
+    };
+    matches!(intent, IngressOutcomeIntent::Fork { .. })
 }
 
 fn turn_execution_evidence(
