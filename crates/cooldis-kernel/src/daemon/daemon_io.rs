@@ -1322,6 +1322,76 @@ impl CooldisDaemonIoBridge {
         }
     }
 
+    async fn append_effect_free_ingress_outcome(
+        &self,
+        coordinates: &ThreadCoordinates,
+        ingress_envelope_ids: &[String],
+        ingress_witness_event_ids: &[EventRecordId],
+        admission_event_id: EventRecordId,
+        intent: IngressOutcomeIntent,
+    ) -> IoResult<IngressClaimAppend> {
+        let store = self.ingress_event_store()?;
+        let stream_id = control_stream_id(coordinates);
+        loop {
+            let events = store
+                .read_events(&stream_id, None)
+                .await
+                .map_err(cooldis_history_error)?;
+            match ingress_outcome_fold(&events, ingress_envelope_ids)? {
+                IngressOutcomeState::Missing => {}
+                state => return Ok(IngressClaimAppend::Existing(state)),
+            }
+            let expected_next_sequence = events
+                .last()
+                .map(|event| EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| EventSequence::new(1));
+            let claim_payload = IoIngressClaimedPayload {
+                ingress_envelope_ids: ingress_envelope_ids.to_vec(),
+                ingress_witness_event_ids: ingress_witness_event_ids.to_vec(),
+                admission_event_id,
+                intent: intent.clone(),
+            };
+            let claim = NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::IoIngressClaimed,
+                serde_json::to_value(claim_payload).map_err(|err| {
+                    IoError::Bridge(format!("encode io.ingress.claimed payload: {err}"))
+                })?,
+                ingress_claim_provenance(&stream_id, ingress_witness_event_ids, admission_event_id),
+            );
+            let settle_payload = IoIngressSettledPayload {
+                claim_event_id: claim.id,
+                ingress_envelope_ids: ingress_envelope_ids.to_vec(),
+                evidence_event_id: None,
+                settled_by: IngressSettledBy::Execution,
+            };
+            let settle = NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::IoIngressSettled,
+                serde_json::to_value(settle_payload).map_err(|err| {
+                    IoError::Bridge(format!("encode io.ingress.settled payload: {err}"))
+                })?,
+                ingress_settle_provenance(&stream_id, coordinates, claim.id, None),
+            );
+            match store
+                .append_events_fenced(&stream_id, expected_next_sequence, vec![claim, settle])
+                .await
+            {
+                Ok(mut appended) => {
+                    if appended.len() != 2 {
+                        return Err(IoError::Bridge(
+                            "effect-free ingress outcome append returned an incomplete batch"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(IngressClaimAppend::Appended(appended.remove(0)));
+                }
+                Err(HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(err) => return Err(cooldis_history_error(err)),
+            }
+        }
+    }
+
     async fn append_ingress_settle(
         &self,
         coordinates: &ThreadCoordinates,
@@ -3091,6 +3161,38 @@ impl CooldisDaemonIoBridge {
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
                     Ok((receipt, None))
                 }
+            }
+            AdmissionDecision::ObserveOnly { .. } | AdmissionDecision::Reject { .. }
+                if !ingress_message_ids.is_empty() =>
+            {
+                let (coordinates, _handle) = self.ensure_thread(target, envelope).await?;
+                let admission_event_id = admission_event_id.ok_or_else(|| {
+                    IoError::Bridge("durable ingress claim requires admission evidence".to_string())
+                })?;
+                let outcome = self
+                    .append_effect_free_ingress_outcome(
+                        &coordinates,
+                        ingress_message_ids,
+                        source_ingress_event_ids,
+                        admission_event_id,
+                        Self::ingress_claim_intent(decision)?,
+                    )
+                    .await?;
+                let receipt = match outcome {
+                    IngressClaimAppend::Appended(_) => {
+                        let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
+                        receipt.thread_id = Some(coordinates.thread_id.to_string());
+                        receipt
+                    }
+                    IngressClaimAppend::Existing(state @ IngressOutcomeState::Claimed { .. }) => {
+                        self.recover_ingress_outcome(envelope, target, state)
+                            .await?
+                    }
+                    IngressClaimAppend::Existing(state) => {
+                        deduplicated_ingress_receipt(envelope, target.clone(), &state)
+                    }
+                };
+                Ok((receipt, None))
             }
             AdmissionDecision::ObserveOnly { .. } => Ok((
                 KernelIoReceipt::new(envelope, target.clone(), decision),
