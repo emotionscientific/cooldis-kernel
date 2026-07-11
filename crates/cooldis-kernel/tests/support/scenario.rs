@@ -41,7 +41,7 @@ use cooldis_io_pgqrs::sqlite_dsn;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 static SCENARIO_RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1906,10 +1906,125 @@ pub struct CorpusEntry {
     pub pins: String,
 }
 
+fn corpus_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scenarios/corpus.json")
+}
+
+fn corpus_intensity(entry: &CorpusEntry, index: usize) -> Result<Intensity, String> {
+    match entry.intensity.as_str() {
+        "sparse" => Ok(Intensity::Sparse),
+        "moderate" => Ok(Intensity::Moderate),
+        "hostile" => Ok(Intensity::Hostile),
+        intensity => Err(format!(
+            "corpus entry {index} (seed {}) has unknown intensity {intensity:?}",
+            entry.seed
+        )),
+    }
+}
+
+fn load_corpus(path: &Path) -> Result<Vec<(CorpusEntry, Intensity)>, String> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        format!(
+            "corpus entry source {} could not be read: {error}",
+            path.display()
+        )
+    })?;
+    let entries: Vec<CorpusEntry> = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "corpus entry in {} could not be parsed: {error}",
+            path.display()
+        )
+    })?;
+    if entries.is_empty() {
+        return Err(format!(
+            "corpus entry list in {} must not be empty",
+            path.display()
+        ));
+    }
+
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            if entry.vocabulary_version != FAULT_VOCABULARY_VERSION {
+                return Err(format!(
+                    "corpus entry {index} (seed {}) has vocabulary_version {}, expected {}",
+                    entry.seed, entry.vocabulary_version, FAULT_VOCABULARY_VERSION
+                ));
+            }
+            let intensity = corpus_intensity(&entry, index)?;
+            Ok((entry, intensity))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::fault_plan::{CUTS_V1, FaultDirective, FaultTiming, PlannedAction};
     use super::*;
+
+    #[derive(Debug, Serialize)]
+    struct SweepFailure {
+        seed: u64,
+        kind: &'static str,
+        detail: String,
+    }
+
+    #[derive(Serialize)]
+    struct SweepReceipt {
+        base_seed: u64,
+        count: usize,
+        max_ops: usize,
+        per_intensity_tallies: BTreeMap<&'static str, usize>,
+        failures: Vec<SweepFailure>,
+        corpus_size: usize,
+        commit_sha: String,
+        status: &'static str,
+    }
+
+    fn parse_sweep_env(name: &str, default: Option<&str>) -> u64 {
+        let value = std::env::var(name)
+            .ok()
+            .or_else(|| default.map(str::to_owned))
+            .unwrap_or_else(|| panic!("{name} is required for scenario_nightly_sweep"));
+        value
+            .parse::<u64>()
+            .unwrap_or_else(|error| panic!("{name} must be a u64, got {value:?}: {error}"))
+    }
+
+    fn first_transcript_mismatch(
+        first: &NormalizedTranscript,
+        second: &NormalizedTranscript,
+    ) -> Option<usize> {
+        first
+            .items
+            .iter()
+            .zip(&second.items)
+            .position(|(left, right)| left != right)
+            .or_else(|| {
+                (first.items.len() != second.items.len())
+                    .then_some(first.items.len().min(second.items.len()))
+            })
+    }
+
+    fn outcome_transcript(
+        outcome: &Result<NormalizedTranscript, ScenarioFailure>,
+    ) -> &NormalizedTranscript {
+        match outcome {
+            Ok(transcript) => transcript,
+            Err(failure) => &failure.transcript,
+        }
+    }
+
+    fn write_sweep_receipt(receipt: &SweepReceipt) {
+        let json = serde_json::to_string_pretty(receipt).expect("serialize nightly sweep receipt");
+        if let Ok(path) = std::env::var("COOLDIS_SCENARIO_SWEEP_RECEIPT_PATH") {
+            std::fs::write(&path, format!("{json}\n"))
+                .unwrap_or_else(|error| panic!("write nightly sweep receipt to {path}: {error}"));
+        } else {
+            eprintln!("scenario nightly receipt:\n{json}");
+        }
+    }
 
     fn no_fault_scenario(seed: u64, ops: Vec<ScenarioOp>) -> Scenario {
         Scenario {
@@ -2056,6 +2171,148 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Runs every fail-closed fixed-corpus entry through the normal minimized
+    /// scenario runner. Missing, empty, malformed, stale, or unknown-intensity
+    /// entries are test failures and never skips.
+    #[tokio::test(start_paused = true)]
+    async fn scenario_corpus_holds() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let corpus = load_corpus(&corpus_path()).unwrap_or_else(|error| panic!("{error}"));
+        let corpus_size = corpus.len();
+        for (entry, intensity) in corpus {
+            let scenario = Scenario::derive(
+                entry.seed,
+                ScenarioBounds {
+                    max_ops: entry.max_ops,
+                    intensity,
+                },
+            );
+            if let Err(failure) = run_scenario(scenario, &[]).await {
+                panic!("corpus entry seed {} failed: {failure:?}", entry.seed);
+            }
+        }
+        eprintln!(
+            "scenario corpus: {corpus_size} entries passed in {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn corpus_loader_fails_closed_when_path_is_wired_wrong() {
+        let error = load_corpus(Path::new("definitely-missing-scenario-corpus.json")).unwrap_err();
+        assert!(error.contains("definitely-missing-scenario-corpus.json"));
+        assert!(error.contains("could not be read"));
+    }
+
+    #[test]
+    fn corpus_loader_fails_closed_on_vocabulary_version_mismatch() {
+        let path = std::env::temp_dir().join(format!(
+            "cooldis-scenario-corpus-version-mismatch-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"[{"seed":404,"vocabulary_version":999,"max_ops":4,"intensity":"sparse","pins":"test"}]"#,
+        )
+        .expect("write temporary corpus");
+        let error = load_corpus(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+        assert!(error.contains("entry 0 (seed 404)"));
+        assert!(error.contains("vocabulary_version 999"));
+    }
+
+    /// Runs the rotating nightly lane. `COOLDIS_SCENARIO_SWEEP_BASE_SEED` is
+    /// required and must be a u64. `COOLDIS_SCENARIO_SWEEP_COUNT` defaults to
+    /// 24 and `COOLDIS_SCENARIO_SWEEP_MAX_OPS` defaults to 8. The optional
+    /// receipt path and commit SHA variables are workflow witnesses. The test
+    /// is excluded from normal suites only by `#[ignore]`. Missing or invalid
+    /// required env and an invalid fixed corpus fail closed.
+    #[tokio::test(start_paused = true)]
+    #[ignore = "rotating nightly scenario sweep"]
+    async fn scenario_nightly_sweep() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let base_seed = parse_sweep_env("COOLDIS_SCENARIO_SWEEP_BASE_SEED", None);
+        let count = parse_sweep_env("COOLDIS_SCENARIO_SWEEP_COUNT", Some("24")) as usize;
+        let max_ops = parse_sweep_env("COOLDIS_SCENARIO_SWEEP_MAX_OPS", Some("8")) as usize;
+        let corpus_size = load_corpus(&corpus_path())
+            .unwrap_or_else(|error| panic!("{error}"))
+            .len();
+        let commit_sha = std::env::var("COOLDIS_SCENARIO_SWEEP_COMMIT_SHA")
+            .unwrap_or_else(|_| "local".to_string());
+        let mut root = SplitMix64::new(base_seed);
+        let mut lane = root.split("scenario-nightly-v1");
+        let mut tallies = BTreeMap::from([("sparse", 0), ("moderate", 0), ("hostile", 0)]);
+        let mut failures = Vec::new();
+
+        for index in 0..count {
+            let seed = lane.next_u64();
+            let (intensity_name, intensity) = match index % 3 {
+                0 => ("sparse", Intensity::Sparse),
+                1 => ("moderate", Intensity::Moderate),
+                _ => ("hostile", Intensity::Hostile),
+            };
+            *tallies.get_mut(intensity_name).unwrap() += 1;
+            let derive = || Scenario::derive(seed, ScenarioBounds { max_ops, intensity });
+            let first = run_scenario_once(&derive(), &[]).await;
+            let second = run_scenario_once(&derive(), &[]).await;
+            let first_transcript = outcome_transcript(&first);
+            let second_transcript = outcome_transcript(&second);
+
+            if first_transcript != second_transcript {
+                let mismatch = first_transcript_mismatch(first_transcript, second_transcript);
+                failures.push(SweepFailure {
+                    seed,
+                    kind: "same-seed-drift",
+                    detail: format!(
+                        "same-seed transcript mismatch at {mismatch:?}: left={:?} right={:?}",
+                        mismatch.and_then(|item| first_transcript.items.get(item)),
+                        mismatch.and_then(|item| second_transcript.items.get(item)),
+                    ),
+                });
+            }
+            if let Err(failure) = first {
+                eprintln!("nightly scenario failure for seed {seed}: {failure:?}");
+                let minimized = run_scenario(derive(), &[])
+                    .await
+                    .expect_err("a deterministic nightly failure must reproduce for minimization");
+                failures.push(SweepFailure {
+                    seed,
+                    kind: "scenario-failure",
+                    detail: format!(
+                        "vocabulary {} failed at step {} with {:?}",
+                        minimized.vocabulary_version, minimized.failing_step, minimized.violations
+                    ),
+                });
+            }
+        }
+
+        let receipt = SweepReceipt {
+            base_seed,
+            count,
+            max_ops,
+            per_intensity_tallies: tallies,
+            status: if failures.is_empty() {
+                "passed"
+            } else {
+                "failed"
+            },
+            failures,
+            corpus_size,
+            commit_sha,
+        };
+        write_sweep_receipt(&receipt);
+        assert!(
+            receipt.failures.is_empty(),
+            "nightly scenario sweep failures: {:?}",
+            receipt.failures
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -1,0 +1,62 @@
+name: Scenario nightly
+
+on:
+  schedule:
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scenario-sweep:
+    name: Rotating scenario sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Run rotating sweep
+        id: sweep
+        continue-on-error: true
+        env:
+          COOLDIS_SCENARIO_SWEEP_BASE_SEED: ${{ github.run_id }}
+          COOLDIS_SCENARIO_SWEEP_COUNT: "24"
+          COOLDIS_SCENARIO_SWEEP_MAX_OPS: "8"
+          COOLDIS_SCENARIO_SWEEP_COMMIT_SHA: ${{ github.sha }}
+          COOLDIS_SCENARIO_SWEEP_RECEIPT_PATH: ${{ runner.temp }}/scenario-nightly-receipt.json
+        run: cargo test -p cooldis --lib scenario_nightly_sweep -- --ignored
+      - name: Witness scenario receipt
+        if: always()
+        env:
+          RECEIPT: ${{ runner.temp }}/scenario-nightly-receipt.json
+          SWEEP_OUTCOME: ${{ steps.sweep.outcome }}
+          BASE_SEED: ${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          if [[ ! -s "$RECEIPT" ]]; then
+            jq -n \
+              --argjson base_seed "$BASE_SEED" \
+              --arg commit_sha "$COMMIT_SHA" \
+              --arg outcome "$SWEEP_OUTCOME" \
+              --argjson corpus_size "$(jq length crates/cooldis-kernel/tests/fixtures/scenarios/corpus.json)" \
+              '{base_seed: $base_seed, count: 24, max_ops: 8, per_intensity_tallies: {sparse: 0, moderate: 0, hostile: 0}, failures: [{seed: null, kind: "sweep-process-failure", detail: $outcome}], corpus_size: $corpus_size, commit_sha: $commit_sha, status: "failed"}' \
+              > "$RECEIPT"
+          fi
+          {
+            echo '## Scenario nightly receipt'
+            echo '```json'
+            cat "$RECEIPT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scenario receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-nightly-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/scenario-nightly-receipt.json
+          if-no-files-found: error
+      - name: Enforce sweep result
+        if: steps.sweep.outcome != 'success'
+        run: exit 1

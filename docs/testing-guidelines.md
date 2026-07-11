@@ -198,6 +198,17 @@ Each new composed-review gate finding lands as a numbered invariant and carries
 a deterministic corpus seed that reproduces the finding. The seed joins the
 fixed corpus with a provenance line naming the defect or gate finding it pins.
 
+### Nightly Failure Promotion
+
+A minimized nightly scenario failure joins
+`crates/cooldis-kernel/tests/fixtures/scenarios/corpus.json` in the same pull
+request as its fix. Its `pins` line names the issue that owns the failure, so
+the regression remains attributable and reproducible.
+
+Corpus entries are never removed except by an explicit vocabulary-version bump
+ticket. A vocabulary bump must account for the old seed meaning rather than
+silently reinterpreting or pruning the entry.
+
 Before claiming a runtime change is complete, run the required test command
 through the lane wrapper. For the full workspace suite:
 
