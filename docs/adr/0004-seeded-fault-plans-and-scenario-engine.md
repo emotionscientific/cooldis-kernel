@@ -128,11 +128,14 @@ stream, the outcome fold runs against that stream regardless of where the
 conversation is currently bound.
 
 **Mechanism.** Ownership is recorded in the ingress state store, keyed by
-the envelope's dedupe key, in the same transaction that admits the attempt
-to claim — written before the claim is appended to the control stream.
-Write ordering makes the failure modes benign: an ownership record without
-a claim (death between record and append) is a tombstone superseded by the
-next attempt; a claim always has its ownership record. Settle clears
+the envelope's dedupe key. Each attempt stages its candidate ownership row
+in its own transaction before admission; claim admission then runs a single
+serialized transaction that folds every recorded owner stream, validates
+that the staging attempt is still current, prunes losing candidates, and
+appends the fenced claim before committing. Write ordering makes the
+failure modes benign: an ownership record without a claim (death between
+staging and admission commit) is a tombstone superseded by the next
+attempt; a claim always has its ownership record. Settle clears
 nothing — the record ages out with the dedupe row, so late redeliveries
 still resolve to the settled claim and dedupe correctly.
 

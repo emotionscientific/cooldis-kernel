@@ -109,6 +109,14 @@ pub enum PlannedAction {
 
 /// One planned fault: the nth occurrence (one-based, matching the
 /// `fault.rs` rule format) of a named operation on a component.
+///
+/// Lane semantics differ in vocabulary v1: wrapper components (store,
+/// queue, provider) match `nth` against live operation occurrences, while
+/// the scenario runner consumes `Process` directives in derivation order,
+/// one per abstract restart, so `nth` on a process directive is derivation
+/// provenance rather than a matching key. Unifying the lanes is a
+/// vocabulary-v2 decision (EMO-410); changing it under v1 would silently
+/// re-key every recorded seed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FaultDirective {
     pub component: FaultComponent,

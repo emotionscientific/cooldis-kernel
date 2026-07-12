@@ -181,8 +181,9 @@ the claim event ID.
 Before appending a claim, the daemon commits an ownership record keyed by the
 envelope's protocol dedupe key to the shared ingress SQLite state (ADR 0004,
 Decision 3). The record names the control stream selected by that attempt and
-is written in the transaction that admits the attempt to claim. Overlapping
-attempts may stage candidate ownership rows, but claim admission serializes a
+is staged in its own transaction before the attempt is admitted to claim.
+Overlapping attempts may stage candidate ownership rows, but claim admission
+serializes a
 global fold across every recorded owner stream and retains only the winning
 owner, so workers that resolved different routes cannot each append a claim.
 An ownership record with no claim is a tombstone: the next attempt may
