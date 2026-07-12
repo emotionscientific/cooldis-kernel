@@ -22,12 +22,15 @@ use super::kernel_test::{
     CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CooldisAppServer,
     CooldisAppServerConfig, CooldisDaemonIoBridge, CooldisDaemonQueueWorker,
     CooldisEgressRetryConfig, CooldisIoRouteConfig, EventKind, EventProvenance, EventRecord,
-    EventSequence, EventStore, EventStreamId, HistoryResult, LocalOfflineProviderClient,
-    NewEventRecord, NewObservationRecord, ObservationRecord, ObservationStore, ProviderApi,
-    ProviderCapabilityRecord, ProviderClient, ProviderRequest, ProviderResponse, ProviderResult,
-    RuntimeHost, RuntimeStore, SessionContext, SessionEntry, SessionEntryId, SessionEntryKind,
-    SessionStore, StreamCursorV1, ThreadBaseRef, ThreadCoordinates, ThreadId, ThreadStatus,
-    TurnSubmissionMode,
+    EventRecordId, EventSequence, EventStore, EventStreamId, HistoryResult,
+    LocalOfflineProviderClient, NewEventRecord, NewObservationRecord, ObservationRecord,
+    ObservationStore, ProviderApi, ProviderCapabilityRecord, ProviderClient, ProviderRequest,
+    ProviderResponse, ProviderResult, RuntimeHost, RuntimeStore, SessionContext, SessionEntry,
+    SessionEntryId, SessionEntryKind, SessionStore, StreamCursorV1, ThreadBaseRef,
+    ThreadCoordinates, ThreadId, ThreadStatus, TurnSubmissionMode,
+};
+use super::simulated_io::{
+    CrashSurvival, IO_SYNC, IO_WRITE, IoFaultPlan, IoTranscriptEntry, SimulatedIo,
 };
 use super::transcript::{NormalizedTranscript, NormalizedTranscriptItem, TypedTranscript};
 use super::{Inv6ClaimsSettle, fork_invariants_v1, invariant_set_v1};
@@ -1413,6 +1416,220 @@ impl ScenarioHarness {
             }
         }
     }
+}
+
+/// Receipt for the storage-engine scenario lane introduced by EMO-415.
+/// Unlike the runtime operation alphabet, this lane drives the stream store
+/// directly so the cut occurs below `cancellation_safe`, in Turso IO.
+#[derive(Debug)]
+pub struct StreamIoCrashReceipt {
+    pub io_transcript: Vec<IoTranscriptEntry>,
+    pub integrity_check: Vec<String>,
+    pub event_ids: Vec<EventRecordId>,
+    pub expected_event_ids: Vec<EventRecordId>,
+    pub sequences: Vec<i64>,
+}
+
+/// Execute the fixed seeded IO crash scenario: commit a prefix, arm a crash
+/// on the first engine write of an append burst, discard unsynced bytes,
+/// reopen through a fresh `Db::open_with_io`, and replay the burst iff none of
+/// it survived. A partial burst is an invariant violation, not repair input.
+pub async fn run_stream_io_crash_scenario(seed: u64) -> Result<StreamIoCrashReceipt, String> {
+    use cooldis_history_sqlite::SqliteSessionStore;
+    use cooldis_sqlite::{Db, DbConfig, io::IO};
+
+    fn record(seed: u64, index: usize, coordinates: &ThreadCoordinates) -> NewEventRecord {
+        NewEventRecord {
+            id: EventRecordId::from_uuid(uuid::Uuid::from_u128(
+                (u128::from(seed) << 64) | 0x4150_0000u128 | index as u128,
+            )),
+            coordinates: coordinates.clone(),
+            created_at_ms: seed as i64 + index as i64,
+            kind: EventKind::TurnSubmitted,
+            origin: super::kernel_test::EventOrigin::Witnessed,
+            provenance: EventProvenance::default(),
+            payload: json!({"turn_id": format!("io-crash-{index}")}),
+        }
+    }
+
+    let path = PathBuf::from(format!("/simulated/emo-415-history-{seed:016x}.sqlite3"));
+    let coordinates = ThreadCoordinates {
+        tenant_id: "emo-415-tenant".to_string(),
+        user_id: "emo-415-user".to_string(),
+        session_id: "emo-415-session".to_string(),
+        thread_id: ThreadId::parse_str(
+            &uuid::Uuid::from_u128((u128::from(seed) << 64) | 0x415u128).to_string(),
+        )
+        .map_err(|error| error.to_string())?,
+    };
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let prefix = (0..3)
+        .map(|index| record(seed, index, &coordinates))
+        .collect::<Vec<_>>();
+    let burst = (3..11)
+        .map(|index| record(seed, index, &coordinates))
+        .collect::<Vec<_>>();
+    let expected_event_ids = prefix
+        .iter()
+        .chain(&burst)
+        .map(|record| record.id)
+        .collect::<Vec<_>>();
+
+    let simulated = Arc::new(SimulatedIo::new(seed));
+    let injected: Arc<dyn IO> = simulated.clone();
+    let db = Db::open_with_io(&path, DbConfig::default(), injected)
+        .await
+        .map_err(|error| error.to_string())?;
+    let store = SqliteSessionStore::from_db(db.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    store
+        .append_events(&stream_id, prefix.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let checkpoint_io_start = simulated.transcript().len();
+    let checkpoint = db.connect().await.map_err(|error| error.to_string())?;
+    let mut checkpoint_rows = checkpoint
+        .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+        .await
+        .map_err(|error| error.to_string())?;
+    let checkpoint_row = checkpoint_rows
+        .next()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "wal_checkpoint(TRUNCATE) returned no status row".to_string())?;
+    let checkpoint_status = [
+        checkpoint_row
+            .get::<i64>(0)
+            .map_err(|error| error.to_string())?,
+        checkpoint_row
+            .get::<i64>(1)
+            .map_err(|error| error.to_string())?,
+        checkpoint_row
+            .get::<i64>(2)
+            .map_err(|error| error.to_string())?,
+    ];
+    if checkpoint_rows
+        .next()
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err("wal_checkpoint(TRUNCATE) returned multiple status rows".to_string());
+    }
+    if checkpoint_status[0] != 0 || checkpoint_status[1] != checkpoint_status[2] {
+        return Err(format!(
+            "wal_checkpoint(TRUNCATE) did not fully backfill the prefix: busy/log/checkpointed={checkpoint_status:?}"
+        ));
+    }
+    drop(checkpoint_rows);
+    drop(checkpoint);
+    let checkpoint_transcript = simulated.transcript();
+    let main_path = path
+        .to_str()
+        .ok_or_else(|| "simulated database path is not UTF-8".to_string())?;
+    if !checkpoint_transcript[checkpoint_io_start..]
+        .iter()
+        .any(|entry| entry.operation == IO_SYNC && entry.path == main_path && entry.outcome == "ok")
+    {
+        return Err(
+            "wal_checkpoint(TRUNCATE) did not truthfully sync the main database image".to_string(),
+        );
+    }
+
+    simulated.arm(IoFaultPlan::crash_after_write(
+        seed,
+        1,
+        CrashSurvival::DiscardUnsynced,
+    ))?;
+    let armed_io_start = simulated.transcript().len();
+    let crashed_append = store.append_events(&stream_id, burst.clone()).await;
+    if crashed_append.is_ok() || !simulated.crashed() {
+        return Err(format!(
+            "seeded IO cut did not interrupt the append: {crashed_append:?}"
+        ));
+    }
+    let crash_transcript = simulated.transcript();
+    let first_armed_write = crash_transcript[armed_io_start..]
+        .iter()
+        .find(|entry| entry.operation == IO_WRITE)
+        .ok_or_else(|| "armed burst append issued no engine write".to_string())?;
+    if !first_armed_write.outcome.starts_with("crash:") {
+        return Err(format!(
+            "the first armed write was not the crash cut: {first_armed_write:?}"
+        ));
+    }
+    drop(store);
+    drop(db);
+
+    let recovered = simulated.recover()?;
+    let injected: Arc<dyn IO> = Arc::new(recovered.clone());
+    let db = Db::open_with_io(&path, DbConfig::default(), injected)
+        .await
+        .map_err(|error| error.to_string())?;
+    let store = SqliteSessionStore::from_db(db.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let after_crash = store
+        .read_events(&stream_id, None)
+        .await
+        .map_err(|error| error.to_string())?;
+    let survived_prefix = after_crash
+        .iter()
+        .take(prefix.len())
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    let expected_prefix = prefix.iter().map(|record| record.id).collect::<Vec<_>>();
+    if survived_prefix != expected_prefix {
+        return Err(format!(
+            "checkpointed prefix did not survive crash: expected {expected_prefix:?}, got {survived_prefix:?}"
+        ));
+    }
+    let survived_burst = after_crash
+        .iter()
+        .filter(|event| burst.iter().any(|record| record.id == event.id))
+        .count();
+    match survived_burst {
+        0 => {
+            store
+                .append_events(&stream_id, burst)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        count if count == burst.len() => {}
+        count => {
+            return Err(format!(
+                "atomic append burst was torn across crash: {count}/{} events survived",
+                burst.len()
+            ));
+        }
+    }
+
+    let events = store
+        .read_events(&stream_id, None)
+        .await
+        .map_err(|error| error.to_string())?;
+    let connection = db.connect().await.map_err(|error| error.to_string())?;
+    let mut rows = connection
+        .query("PRAGMA integrity_check", ())
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut integrity_check = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|error| error.to_string())? {
+        integrity_check.push(row.get::<String>(0).map_err(|error| error.to_string())?);
+    }
+    drop(rows);
+    drop(connection);
+    drop(store);
+    drop(db);
+
+    Ok(StreamIoCrashReceipt {
+        io_transcript: recovered.transcript(),
+        integrity_check,
+        event_ids: events.iter().map(|event| event.id).collect(),
+        expected_event_ids,
+        sequences: events.iter().map(|event| event.sequence.get()).collect(),
+    })
 }
 
 struct ScenarioStoreState {
@@ -2987,5 +3204,41 @@ mod tests {
         .await
         .expect("scenario runs were serialized by process-global test state");
         assert_eq!(overlapping.0.unwrap(), overlapping.1.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn simulated_io_same_seed_runs_have_identical_transcripts() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        const SEED: u64 = 0x4150_0005_D15E_A5E6;
+
+        let first = run_stream_io_crash_scenario(SEED)
+            .await
+            .expect("seeded IO crash scenario should recover");
+        let second = run_stream_io_crash_scenario(SEED)
+            .await
+            .expect("same seeded IO crash scenario should recover");
+
+        assert_eq!(first.io_transcript, second.io_transcript);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn seeded_io_crash_cut_reopens_with_exactly_once_uncorrupted_stream() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        const SEED: u64 = 0x4150_0005_D15E_A5E5;
+
+        let first = run_stream_io_crash_scenario(SEED)
+            .await
+            .expect("seeded IO crash scenario should recover");
+
+        assert_eq!(first.integrity_check, vec!["ok"]);
+        assert_eq!(first.event_ids, first.expected_event_ids);
+        assert_eq!(
+            first.sequences,
+            (1..=first.event_ids.len() as i64).collect::<Vec<_>>()
+        );
     }
 }

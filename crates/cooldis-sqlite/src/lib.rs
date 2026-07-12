@@ -28,6 +28,17 @@ pub use turso::{
     params, transaction::TransactionBehavior, Connection, IntoParams, Row, Rows, Statement, Value,
 };
 
+/// Turso IO contracts re-exported by the engine owner for deterministic test
+/// harnesses. Callers of [`Db::open_with_io`] should not need a second direct
+/// engine dependency merely to implement the seam it exposes.
+pub mod io {
+    pub use turso_core::io::{FileId, FileSyncType};
+    pub use turso_core::{
+        Buffer, Clock, Completion, CompletionError, File, LimboError, MemoryIO, MonotonicInstant,
+        OpenFlags, WallClockInstant, IO,
+    };
+}
+
 /// Errors surfaced by the engine-owner layer.
 ///
 /// Store crates map this into their own error vocabulary at the trait
@@ -157,7 +168,7 @@ impl Db {
     pub async fn open_with_io(
         path: impl AsRef<Path>,
         config: DbConfig,
-        io: Arc<dyn turso_core::IO>,
+        io: Arc<dyn io::IO>,
     ) -> SqliteResult<Self> {
         let path = path.as_ref();
         let path_str = sqlite_path(path)?;

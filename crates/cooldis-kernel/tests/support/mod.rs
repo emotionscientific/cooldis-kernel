@@ -10,6 +10,7 @@ mod invariant_forks;
 mod invariants;
 mod scenario;
 mod scripted_provider;
+mod simulated_io;
 mod store_parity;
 mod transcript;
 
@@ -29,6 +30,8 @@ pub use invariants::*;
 pub use scenario::*;
 #[allow(unused_imports)]
 pub use scripted_provider::*;
+#[allow(unused_imports)]
+pub use simulated_io::*;
 #[allow(unused_imports)]
 pub use store_parity::*;
 #[allow(unused_imports)]

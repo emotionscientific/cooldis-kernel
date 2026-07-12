@@ -44,6 +44,10 @@ pub(crate) use invariants_support::*;
 #[path = "../tests/support/scenario.rs"]
 mod scenario_support;
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/simulated_io.rs"]
+mod simulated_io;
+#[cfg(test)]
 pub(crate) use scenario_support::{InvariantViolation, ScenarioInvariant, ScenarioWorld};
 #[cfg(test)]
 #[allow(dead_code)]
@@ -74,6 +78,8 @@ pub(crate) mod test_support {
     pub(crate) use super::scenario_support::*;
     #[allow(unused_imports)]
     pub(crate) use super::scripted_provider_support::*;
+    #[allow(unused_imports)]
+    pub(crate) use super::simulated_io::*;
     #[allow(unused_imports)]
     pub(crate) use super::store_parity_support::*;
     #[allow(unused_imports)]

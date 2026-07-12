@@ -62,7 +62,12 @@ impl SqliteSessionStore {
         Self::from_db(inner).await
     }
 
-    async fn from_db(inner: Db) -> HistoryResult<Self> {
+    /// Build the store over an engine-owner handle supplied by the caller.
+    ///
+    /// The DST scenario lane uses this with a [`Db`] opened through
+    /// `Db::open_with_io`; the store remains unaware of the concrete engine IO
+    /// trait and applies the same schema initialization as [`Self::open`].
+    pub async fn from_db(inner: Db) -> HistoryResult<Self> {
         cancellation_safe(async move {
             let store = Self { inner };
             let mut connection = store.connect().await?;
