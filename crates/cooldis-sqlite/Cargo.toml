@@ -11,5 +11,5 @@ turso_core = "=0.6.1"
 thiserror = "2"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tempfile = "3"

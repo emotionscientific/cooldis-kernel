@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use turso::{Connection, Row, Rows, Statement, Value};
+pub use turso::{params, Connection, Row, Rows, Statement, Value};
 
 /// Errors surfaced by the engine-owner layer.
 ///
@@ -61,8 +61,12 @@ pub struct DbConfig {
     pub journal_mode: JournalMode,
     pub foreign_keys: bool,
     pub busy_timeout: Duration,
-    /// Enforced per connection with `PRAGMA query_only`; replaces
-    /// rusqlite's `SQLITE_OPEN_READ_ONLY` open flag.
+    /// Applied per connection with `PRAGMA query_only`. ADVISORY, not
+    /// enforced: Turso 0.6.1 has no read-only open flag, and a caller can
+    /// flip the pragma back on a connection it holds. This catches
+    /// accidental writes (they error), which is the contract our read-only
+    /// paths need today; true enforcement is re-evaluated at the wave-2
+    /// engine upgrade (EMO-413).
     pub read_only: bool,
 }
 
@@ -91,47 +95,131 @@ impl Db {
     /// Open the database at `path`, creating parent directories, and apply
     /// `config`. The file is created if missing (unless `read_only`).
     pub async fn open(path: impl AsRef<Path>, config: DbConfig) -> SqliteResult<Self> {
-        let _ = (path.as_ref(), &config);
-        todo!("EMO-411 wave 1: Builder::new_local + journal/foreign_keys setup")
+        let path = path.as_ref();
+        let path_str = sqlite_path(path)?;
+        prepare_path(path, config.read_only)?;
+        let inner = turso::Builder::new_local(path_str).build().await?;
+        Self::from_database(inner, config).await
     }
 
     /// Open with a caller-supplied IO implementation. This is the DST seam:
     /// scenario harnesses pass simulated IO here so fault plans can act on
     /// the engine's reads, writes, and syncs — below the store traits that
-    /// `FaultingRuntimeStore` wraps.
+    /// `FaultingRuntimeStore` wraps. Path creation and existence checks are
+    /// delegated to that IO implementation rather than the host filesystem.
     pub async fn open_with_io(
         path: impl AsRef<Path>,
         config: DbConfig,
         io: Arc<dyn turso_core::IO>,
     ) -> SqliteResult<Self> {
-        let _ = (path.as_ref(), &config, &io);
-        todo!("EMO-411 wave 1: Builder::new_local + with_io_impl")
+        let path = path.as_ref();
+        let path_str = sqlite_path(path)?;
+        let inner = turso::Builder::new_local(path_str)
+            .with_io_impl(io)
+            .build()
+            .await?;
+        Self::from_database(inner, config).await
     }
 
     /// In-memory database for tests; same pragma treatment as [`Db::open`].
     pub async fn in_memory(config: DbConfig) -> SqliteResult<Self> {
-        let _ = &config;
-        todo!("EMO-411 wave 1: Builder::new_local(\":memory:\")")
+        let inner = turso::Builder::new_local(":memory:").build().await?;
+        Self::from_database(inner, config).await
     }
 
     /// A new connection with this database's pragmas applied
     /// (`busy_timeout`, `foreign_keys`, `query_only` when read-only).
     pub async fn connect(&self) -> SqliteResult<Connection> {
-        todo!("EMO-411 wave 1: connect + per-connection pragmas")
+        let conn = self.inner.connect()?;
+        apply_connection_config(&conn, &self.config).await?;
+        Ok(conn)
     }
 
     /// The configuration this handle was opened with.
     pub fn config(&self) -> &DbConfig {
         &self.config
     }
+
+    /// Construct a handle and apply file-level journal policy once before
+    /// handing out independently configured connections.
+    async fn from_database(inner: turso::Database, config: DbConfig) -> SqliteResult<Self> {
+        let db = Self { inner, config };
+        let conn = db.connect().await?;
+        if !db.config.read_only {
+            let journal_mode = match db.config.journal_mode {
+                JournalMode::Wal => "'wal'",
+                JournalMode::Mvcc => "'mvcc'",
+            };
+            conn.pragma_update("journal_mode", journal_mode).await?;
+        }
+        Ok(db)
+    }
+}
+
+fn sqlite_path(path: &Path) -> SqliteResult<&str> {
+    path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sqlite database path is not valid UTF-8",
+        )
+        .into()
+    })
+}
+
+/// Create a writable database's parent directory, or reject a missing
+/// read-only database before Turso can create it as a side effect of open.
+fn prepare_path(path: &Path, read_only: bool) -> SqliteResult<()> {
+    if read_only {
+        if !path.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "read-only sqlite database does not exist: {}",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+    } else if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+/// Apply connection-local policy to a newly acquired Turso connection.
+async fn apply_connection_config(conn: &Connection, config: &DbConfig) -> SqliteResult<()> {
+    conn.busy_timeout(config.busy_timeout)?;
+    conn.pragma_update(
+        "foreign_keys",
+        if config.foreign_keys { "ON" } else { "OFF" },
+    )
+    .await?;
+    if config.read_only {
+        conn.pragma_update("query_only", 1).await?;
+    }
+    Ok(())
+}
+
+/// Quote a SQLite identifier by doubling embedded quote characters.
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 /// Column names of `table` via `PRAGMA table_info`, in declaration order.
 /// Empty when the table does not exist. Replaces the hand-rolled
 /// `table_info` probes in the current stores' migration paths.
 pub async fn table_columns(conn: &Connection, table: &str) -> SqliteResult<Vec<String>> {
-    let _ = (conn, table);
-    todo!("EMO-411 wave 1: PRAGMA table_info projection")
+    let mut rows = conn
+        .query(
+            format!("PRAGMA table_info({})", quote_identifier(table)),
+            (),
+        )
+        .await?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await? {
+        columns.push(row.get(1)?);
+    }
+    Ok(columns)
 }
 
 /// Add `column` (full `ALTER TABLE ... ADD COLUMN` tail in `ddl`) when it
@@ -142,6 +230,294 @@ pub async fn ensure_column(
     column: &str,
     ddl: &str,
 ) -> SqliteResult<()> {
-    let _ = (conn, table, column, ddl);
-    todo!("EMO-411 wave 1: table_columns + conditional ALTER TABLE")
+    let result = conn
+        .execute(
+            format!("ALTER TABLE {} ADD COLUMN {ddl}", quote_identifier(table)),
+            (),
+        )
+        .await;
+    if let Err(error) = result {
+        if table_columns(conn, table)
+            .await?
+            .iter()
+            .any(|existing| existing == column)
+        {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pragma_value(conn: &Connection, name: &str) -> Value {
+        let mut value = None;
+        conn.pragma_query(name, |row| {
+            value = Some(row.get_value(0).expect("pragma value"));
+            Ok(())
+        })
+        .await
+        .expect("pragma query");
+        value.expect("pragma returned one row")
+    }
+
+    #[tokio::test]
+    async fn tempfile_open_creates_parents_and_applies_connection_pragmas() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested/state/metadata.sqlite3");
+        let config = DbConfig {
+            busy_timeout: Duration::from_millis(1_234),
+            ..DbConfig::default()
+        };
+
+        let db = Db::open(&path, config).await.unwrap();
+        assert!(path.exists());
+        let conn = db.connect().await.unwrap();
+
+        assert_eq!(
+            pragma_value(&conn, "journal_mode").await,
+            Value::Text("wal".into())
+        );
+        assert_eq!(pragma_value(&conn, "foreign_keys").await, Value::Integer(1));
+        assert_eq!(
+            pragma_value(&conn, "busy_timeout").await,
+            Value::Integer(1_234)
+        );
+        assert_eq!(pragma_value(&conn, "query_only").await, Value::Integer(0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_utf8_path_is_rejected_without_creating_parents() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("must-not-exist");
+        let path = parent.join(std::ffi::OsString::from_vec(vec![0xff]));
+
+        assert!(Db::open(path, DbConfig::default()).await.is_err());
+        assert!(!parent.exists());
+    }
+
+    #[tokio::test]
+    async fn custom_io_open_does_not_touch_the_host_filesystem() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("owned-by-custom-io");
+        let path = parent.join("store.sqlite3");
+        let io: Arc<dyn turso_core::IO> = Arc::new(turso_core::MemoryIO::new());
+
+        let db = Db::open_with_io(&path, DbConfig::default(), io)
+            .await
+            .unwrap();
+        db.connect()
+            .await
+            .unwrap()
+            .execute("CREATE TABLE records (value TEXT)", ())
+            .await
+            .unwrap();
+
+        assert!(!parent.exists());
+    }
+
+    #[tokio::test]
+    async fn in_memory_applies_pragmas_and_migrates_columns_idempotently() {
+        let db = Db::in_memory(DbConfig::default()).await.unwrap();
+        let conn = db.connect().await.unwrap();
+        assert_eq!(pragma_value(&conn, "foreign_keys").await, Value::Integer(1));
+        assert_eq!(
+            pragma_value(&conn, "busy_timeout").await,
+            Value::Integer(5_000)
+        );
+
+        conn.execute("CREATE TABLE widgets (id INTEGER PRIMARY KEY)", ())
+            .await
+            .unwrap();
+        assert_eq!(table_columns(&conn, "widgets").await.unwrap(), vec!["id"]);
+        assert!(table_columns(&conn, "missing_table")
+            .await
+            .unwrap()
+            .is_empty());
+
+        ensure_column(&conn, "widgets", "label", "label TEXT NOT NULL DEFAULT ''")
+            .await
+            .unwrap();
+        ensure_column(&conn, "widgets", "label", "label TEXT NOT NULL DEFAULT ''")
+            .await
+            .unwrap();
+        assert_eq!(
+            table_columns(&conn, "widgets").await.unwrap(),
+            vec!["id", "label"]
+        );
+    }
+
+    #[tokio::test]
+    async fn tempfile_table_columns_and_ensure_column_survive_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("store.sqlite3");
+        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        let conn = db.connect().await.unwrap();
+        conn.execute("CREATE TABLE records (key TEXT PRIMARY KEY)", ())
+            .await
+            .unwrap();
+        ensure_column(&conn, "records", "payload", "payload BLOB")
+            .await
+            .unwrap();
+        drop(conn);
+        drop(db);
+
+        let reopened = Db::open(&path, DbConfig::default()).await.unwrap();
+        let conn = reopened.connect().await.unwrap();
+        assert_eq!(
+            table_columns(&conn, "records").await.unwrap(),
+            vec!["key", "payload"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_ensure_column_calls_are_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("store.sqlite3");
+        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        db.connect()
+            .await
+            .unwrap()
+            .execute("CREATE TABLE records (key TEXT PRIMARY KEY)", ())
+            .await
+            .unwrap();
+
+        let workers = 8;
+        let barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let mut handles = Vec::new();
+        for _ in 0..workers {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let conn = db.connect().await.unwrap();
+                barrier.wait().await;
+                ensure_column(&conn, "records", "payload", "payload BLOB").await
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            table_columns(&db.connect().await.unwrap(), "records")
+                .await
+                .unwrap(),
+            vec!["key", "payload"]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_connections_can_read_and_reject_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("store.sqlite3");
+        let writable = Db::open(&path, DbConfig::default()).await.unwrap();
+        let conn = writable.connect().await.unwrap();
+        conn.execute_batch(
+            "CREATE TABLE records (value TEXT); INSERT INTO records VALUES ('seed');",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        drop(writable);
+
+        let read_only = Db::open(
+            &path,
+            DbConfig {
+                read_only: true,
+                ..DbConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let conn = read_only.connect().await.unwrap();
+        assert_eq!(pragma_value(&conn, "query_only").await, Value::Integer(1));
+        let mut rows = conn.query("SELECT value FROM records", ()).await.unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "seed"
+        );
+        assert!(conn
+            .execute("INSERT INTO records VALUES ('denied')", ())
+            .await
+            .is_err());
+    }
+
+    #[ignore = "pins a Turso 0.6.1 transaction failure that gates EMO-413"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn turso_061_concurrent_transaction_commit_repro() {
+        // Turso 0.6.1 was observed returning `cannot commit - no transaction is active`
+        // from Transaction::commit under concurrent read-then-upsert traffic. Wave 2
+        // (EMO-413) is gated on resolving this via an engine upgrade or ADR 0005 §6's
+        // `[patch.crates-io]` fork lane.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("transaction-repro.sqlite3");
+        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "CREATE TABLE records (
+                id INTEGER PRIMARY KEY,
+                record_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO records VALUES (1, '{\"created_at_ms\":1}', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let workers = 2;
+        let barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let mut handles = Vec::new();
+        for worker in 0..workers {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let mut conn = db.connect().await.unwrap();
+                let tx = conn.transaction().await.unwrap();
+                let mut rows = tx
+                    .query("SELECT created_at_ms FROM records WHERE id = 1", ())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                    1
+                );
+                drop(rows);
+                tx.execute(
+                    "INSERT INTO records VALUES (1, ?1, ?2)
+                     ON CONFLICT(id) DO UPDATE SET record_json = excluded.record_json",
+                    params![format!("{{\"worker\":{worker}}}"), worker as i64 + 2],
+                )
+                .await
+                .unwrap();
+                let commit = tx.commit().await;
+                assert!(
+                    commit.is_ok(),
+                    "Turso 0.6.1 concurrent transaction commit failed: {commit:?}"
+                );
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+    }
 }

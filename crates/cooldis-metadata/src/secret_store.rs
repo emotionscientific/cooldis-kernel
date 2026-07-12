@@ -1,10 +1,10 @@
+use crate::provider_store::block_on;
 use cooldis_abi::WasmOperationManifest;
 use cooldis_history::now_ms;
-use rusqlite::{OptionalExtension, params};
+use cooldis_sqlite::{Connection, Db, DbConfig, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 pub type SecretStoreResult<T> = Result<T, SecretStoreError>;
@@ -99,7 +99,7 @@ pub trait SecretResolver: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct SqliteSecretStore {
-    inner: Arc<Mutex<rusqlite::Connection>>,
+    inner: Db,
 }
 
 impl SqliteSecretStore {
@@ -111,21 +111,23 @@ impl SqliteSecretStore {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
             restrict_dir_permissions(parent)?;
         }
-        let connection = rusqlite::Connection::open(path).map_err(storage_error)?;
+        let inner = block_on(Db::open(path, DbConfig::default())).map_err(storage_error)?;
         restrict_file_permissions(path)?;
-        Self::from_connection(connection)
+        Self::from_db(inner)
     }
 
     pub fn in_memory() -> SecretStoreResult<Self> {
-        let connection = rusqlite::Connection::open_in_memory().map_err(storage_error)?;
-        Self::from_connection(connection)
+        let inner = block_on(Db::in_memory(DbConfig::default())).map_err(storage_error)?;
+        Self::from_db(inner)
     }
 
-    fn from_connection(connection: rusqlite::Connection) -> SecretStoreResult<Self> {
-        init_secret_store_schema(&connection)?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(connection)),
-        })
+    fn from_db(inner: Db) -> SecretStoreResult<Self> {
+        let store = Self { inner };
+        block_on(async {
+            let connection = store.inner.connect().await.map_err(storage_error)?;
+            init_secret_store_schema(&connection).await
+        })?;
+        Ok(store)
     }
 
     pub fn set_secret(
@@ -141,46 +143,35 @@ impl SqliteSecretStore {
             return Err(SecretStoreError::EmptyValue(name));
         }
         let now = now_ms();
-        let connection = self.lock_connection()?;
-        let existing_created_at_ms = connection
-            .query_row(
-                "SELECT created_at_ms FROM cooldis_secret_records WHERE name = ?1",
-                params![name],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(storage_error)?;
-        let created_at_ms = existing_created_at_ms.unwrap_or(now);
-        connection
-            .execute(
-                r#"
-                INSERT INTO cooldis_secret_records (
-                    name,
-                    value,
-                    source_kind,
-                    source_label,
-                    created_at_ms,
-                    updated_at_ms
+        block_on(async {
+            let connection = self.inner.connect().await.map_err(storage_error)?;
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO cooldis_secret_records (
+                        name, value, source_kind, source_label, created_at_ms, updated_at_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT(name) DO UPDATE SET
+                        value = excluded.value,
+                        source_kind = excluded.source_kind,
+                        source_label = excluded.source_label,
+                        updated_at_ms = excluded.updated_at_ms
+                    "#,
+                    params![
+                        name.as_str(),
+                        value,
+                        source_kind.as_str(),
+                        source_label,
+                        now,
+                        now
+                    ],
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(name) DO UPDATE SET
-                    value = excluded.value,
-                    source_kind = excluded.source_kind,
-                    source_label = excluded.source_label,
-                    updated_at_ms = excluded.updated_at_ms
-                "#,
-                params![
-                    name,
-                    value,
-                    source_kind.as_str(),
-                    source_label,
-                    created_at_ms,
-                    now
-                ],
-            )
-            .map_err(storage_error)?;
-        sqlite_secret_status_by_name(&connection, &name)?
-            .ok_or_else(|| SecretStoreError::Storage(format!("secret {name:?} was not stored")))
+                .await
+                .map_err(storage_error)?;
+            sqlite_secret_status_by_name(&connection, &name)
+                .await?
+                .ok_or_else(|| SecretStoreError::Storage(format!("secret {name:?} was not stored")))
+        })
     }
 
     pub fn import_secret_from_env(
@@ -202,44 +193,46 @@ impl SqliteSecretStore {
 
     pub fn status(&self, name: impl AsRef<str>) -> SecretStoreResult<Option<SecretStatus>> {
         let name = validate_secret_name(name.as_ref())?;
-        let connection = self.lock_connection()?;
-        sqlite_secret_status_by_name(&connection, &name)
+        block_on(async {
+            let connection = self.inner.connect().await.map_err(storage_error)?;
+            sqlite_secret_status_by_name(&connection, &name).await
+        })
     }
 
     pub fn list(&self) -> SecretStoreResult<Vec<SecretStatus>> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare(
-                r#"
+        block_on(async {
+            let connection = self.inner.connect().await.map_err(storage_error)?;
+            let mut rows = connection
+                .query(
+                    r#"
                 SELECT name, source_kind, source_label, created_at_ms, updated_at_ms
                 FROM cooldis_secret_records
                 ORDER BY name
                 "#,
-            )
-            .map_err(storage_error)?;
-        let rows = statement
-            .query_map([], sqlite_secret_status_from_row)
-            .map_err(storage_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+                    (),
+                )
+                .await
+                .map_err(storage_error)?;
+            let mut statuses = Vec::new();
+            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                statuses.push(sqlite_secret_status_from_row(&row)?);
+            }
+            Ok(statuses)
+        })
     }
 
     pub fn delete_secret(&self, name: impl AsRef<str>) -> SecretStoreResult<bool> {
         let name = validate_secret_name(name.as_ref())?;
-        let connection = self.lock_connection()?;
-        let deleted = connection
-            .execute(
-                "DELETE FROM cooldis_secret_records WHERE name = ?1",
-                params![name],
-            )
-            .map_err(storage_error)?;
-        Ok(deleted > 0)
-    }
-
-    fn lock_connection(
-        &self,
-    ) -> SecretStoreResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
-        self.inner.lock().map_err(|err| {
-            SecretStoreError::Storage(format!("sqlite connection lock poisoned: {err}"))
+        block_on(async {
+            let connection = self.inner.connect().await.map_err(storage_error)?;
+            let deleted = connection
+                .execute(
+                    "DELETE FROM cooldis_secret_records WHERE name = ?1",
+                    params![name],
+                )
+                .await
+                .map_err(storage_error)?;
+            Ok(deleted > 0)
         })
     }
 }
@@ -247,34 +240,34 @@ impl SqliteSecretStore {
 impl SecretResolver for SqliteSecretStore {
     fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
         let name = validate_secret_name(name)?;
-        let connection = self.lock_connection()?;
-        connection
-            .query_row(
-                r#"
+        block_on(async {
+            let connection = self.inner.connect().await.map_err(storage_error)?;
+            let mut rows = connection
+                .query(
+                    r#"
                 SELECT name, value, source_kind, source_label, updated_at_ms
                 FROM cooldis_secret_records
                 WHERE name = ?1
                 "#,
-                params![name],
-                |row| {
-                    let source_kind: String = row.get(2)?;
+                    params![name],
+                )
+                .await
+                .map_err(storage_error)?;
+            rows.next()
+                .await
+                .map_err(storage_error)?
+                .map(|row| {
+                    let source_kind = row.get::<String>(2).map_err(storage_error)?;
                     Ok(ResolvedSecret {
-                        name: row.get(0)?,
-                        value: row.get(1)?,
-                        source_kind: SecretSourceKind::from_str(&source_kind).map_err(|err| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Text,
-                                Box::new(err),
-                            )
-                        })?,
-                        source_label: row.get(3)?,
-                        updated_at_ms: row.get(4)?,
+                        name: row.get(0).map_err(storage_error)?,
+                        value: row.get(1).map_err(storage_error)?,
+                        source_kind: SecretSourceKind::from_str(&source_kind)?,
+                        source_label: row.get(3).map_err(storage_error)?,
+                        updated_at_ms: row.get(4).map_err(storage_error)?,
                     })
-                },
-            )
-            .optional()
-            .map_err(storage_error)
+                })
+                .transpose()
+        })
     }
 }
 
@@ -335,13 +328,10 @@ pub fn validate_secret_name(name: &str) -> SecretStoreResult<String> {
     Ok(name.to_string())
 }
 
-fn init_secret_store_schema(connection: &rusqlite::Connection) -> SecretStoreResult<()> {
+async fn init_secret_store_schema(connection: &Connection) -> SecretStoreResult<()> {
     connection
         .execute_batch(
             r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-
             CREATE TABLE IF NOT EXISTS cooldis_secret_records (
                 name TEXT PRIMARY KEY NOT NULL,
                 value TEXT NOT NULL,
@@ -352,37 +342,40 @@ fn init_secret_store_schema(connection: &rusqlite::Connection) -> SecretStoreRes
             );
             "#,
         )
+        .await
         .map_err(storage_error)
 }
 
-fn sqlite_secret_status_by_name(
-    connection: &rusqlite::Connection,
+async fn sqlite_secret_status_by_name(
+    connection: &Connection,
     name: &str,
 ) -> SecretStoreResult<Option<SecretStatus>> {
-    connection
-        .query_row(
+    let mut rows = connection
+        .query(
             r#"
             SELECT name, source_kind, source_label, created_at_ms, updated_at_ms
             FROM cooldis_secret_records
             WHERE name = ?1
             "#,
             params![name],
-            sqlite_secret_status_from_row,
         )
-        .optional()
-        .map_err(storage_error)
+        .await
+        .map_err(storage_error)?;
+    rows.next()
+        .await
+        .map_err(storage_error)?
+        .map(|row| sqlite_secret_status_from_row(&row))
+        .transpose()
 }
 
-fn sqlite_secret_status_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecretStatus> {
-    let source_kind: String = row.get(1)?;
+fn sqlite_secret_status_from_row(row: &cooldis_sqlite::Row) -> SecretStoreResult<SecretStatus> {
+    let source_kind: String = row.get(1).map_err(storage_error)?;
     Ok(SecretStatus {
-        name: row.get(0)?,
-        source_kind: SecretSourceKind::from_str(&source_kind).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(err))
-        })?,
-        source_label: row.get(2)?,
-        created_at_ms: row.get(3)?,
-        updated_at_ms: row.get(4)?,
+        name: row.get(0).map_err(storage_error)?,
+        source_kind: SecretSourceKind::from_str(&source_kind)?,
+        source_label: row.get(2).map_err(storage_error)?,
+        created_at_ms: row.get(3).map_err(storage_error)?,
+        updated_at_ms: row.get(4).map_err(storage_error)?,
         value: RedactedSecretValue { redacted: true },
     })
 }

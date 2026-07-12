@@ -2,12 +2,35 @@ use cooldis_history::{ProviderApi, now_ms};
 use cooldis_runtime_contracts::{
     ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadScope,
 };
-use rusqlite::{OptionalExtension, params};
+use cooldis_sqlite::{Connection, Db, DbConfig, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 use thiserror::Error;
+
+/// Drive a Turso future at the store's synchronous trait boundary without an
+/// executor-specific nesting guard.
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker(std::thread::Thread);
+
+    impl Wake for ThreadWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = std::pin::pin!(future);
+    let waker = Waker::from(std::sync::Arc::new(ThreadWaker(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
 
 pub const OPENAI_COMPATIBLE_PROVIDER_ID: &str = "openai_compatible";
 pub const OPENAI_COMPATIBLE_BASE_URL: &str = "https://api.example.invalid/v1";
@@ -420,7 +443,7 @@ pub fn seed_default_llm_providers(
 
 #[derive(Clone)]
 pub struct SqliteLlmProviderStore {
-    inner: Arc<Mutex<rusqlite::Connection>>,
+    inner: Db,
 }
 
 impl SqliteLlmProviderStore {
@@ -432,29 +455,27 @@ impl SqliteLlmProviderStore {
                 restrict_dir_permissions(parent)?;
             }
         }
-        let connection = rusqlite::Connection::open(path).map_err(storage_error)?;
+        let inner = block_on(Db::open(path, DbConfig::default())).map_err(storage_error)?;
         restrict_file_permissions(path)?;
-        Self::from_connection(connection)
+        Self::from_db(inner)
     }
 
     pub fn in_memory() -> LlmProviderStoreResult<Self> {
-        let connection = rusqlite::Connection::open_in_memory().map_err(storage_error)?;
-        Self::from_connection(connection)
+        let inner = block_on(Db::in_memory(DbConfig::default())).map_err(storage_error)?;
+        Self::from_db(inner)
     }
 
-    fn from_connection(connection: rusqlite::Connection) -> LlmProviderStoreResult<Self> {
-        init_provider_store_schema(&connection)?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(connection)),
-        })
+    fn from_db(inner: Db) -> LlmProviderStoreResult<Self> {
+        let store = Self { inner };
+        block_on(async {
+            let connection = store.inner.connect().await.map_err(storage_error)?;
+            init_provider_store_schema(&connection).await
+        })?;
+        Ok(store)
     }
 
-    fn lock_connection(
-        &self,
-    ) -> LlmProviderStoreResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
-        self.inner.lock().map_err(|err| {
-            LlmProviderStoreError::Storage(format!("sqlite connection lock poisoned: {err}"))
-        })
+    async fn connect(&self) -> LlmProviderStoreResult<Connection> {
+        self.inner.connect().await.map_err(storage_error)
     }
 }
 
@@ -485,16 +506,14 @@ impl SqliteMetadataStore {
     }
 
     fn init_metadata_schema(&self) -> MetadataStoreResult<()> {
-        let connection = self.lock_connection()?;
-        init_thread_metadata_schema(&connection)
-    }
-
-    fn lock_connection(
-        &self,
-    ) -> MetadataStoreResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
-        self.provider_store
-            .lock_connection()
-            .map_err(MetadataStoreError::from)
+        block_on(async {
+            let connection = self
+                .provider_store
+                .connect()
+                .await
+                .map_err(MetadataStoreError::from)?;
+            init_thread_metadata_schema(&connection).await
+        })
     }
 }
 
@@ -542,71 +561,82 @@ impl ThreadMetadataStore for SqliteMetadataStore {
         &self,
         mut record: ThreadLifecycleRecord,
     ) -> MetadataStoreResult<()> {
-        let mut connection = self.lock_connection()?;
-        let tx = connection.transaction().map_err(metadata_storage_error)?;
-        let thread_id = record.coordinates.thread_id.to_string();
-        let existing = sqlite_get_thread_lifecycle(&tx, record.coordinates.thread_id)?;
-        if let Some(existing) = existing {
-            record.created_at_ms = existing.created_at_ms;
-        }
-        record.updated_at_ms = now_ms_u64()?;
-        let tenant_id = record.coordinates.tenant_id.clone();
-        let user_id = record.coordinates.user_id.clone();
-        let session_id = record.coordinates.session_id.clone();
-        let parent_thread_id = record.parent_thread_id.map(|id| id.to_string());
-        let status = thread_lifecycle_status_string(record.status);
-        let record_json = serde_json::to_string(&record).map_err(metadata_codec_error)?;
-        tx.execute(
-            "INSERT INTO thread_lifecycle_records (
-                thread_id,
-                tenant_id,
-                user_id,
-                session_id,
-                parent_thread_id,
-                status,
-                record_json,
-                created_at_ms,
-                updated_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            ON CONFLICT(thread_id) DO UPDATE SET
-                tenant_id = excluded.tenant_id,
-                user_id = excluded.user_id,
-                session_id = excluded.session_id,
-                parent_thread_id = excluded.parent_thread_id,
-                status = excluded.status,
-                record_json = excluded.record_json,
-                updated_at_ms = excluded.updated_at_ms",
-            params![
-                thread_id,
-                tenant_id,
-                user_id,
-                session_id,
-                parent_thread_id,
-                status,
-                record_json,
-                sqlite_timestamp(record.created_at_ms)?,
-                sqlite_timestamp(record.updated_at_ms)?,
-            ],
-        )
-        .map_err(metadata_storage_error)?;
-        tx.commit().map_err(metadata_storage_error)?;
-        Ok(())
+        block_on(async {
+            let connection = self
+                .provider_store
+                .connect()
+                .await
+                .map_err(MetadataStoreError::from)?;
+            let thread_id = record.coordinates.thread_id.to_string();
+            record.updated_at_ms = now_ms_u64()?;
+            let tenant_id = record.coordinates.tenant_id.clone();
+            let user_id = record.coordinates.user_id.clone();
+            let session_id = record.coordinates.session_id.clone();
+            let parent_thread_id = record.parent_thread_id.map(|id| id.to_string());
+            let status = thread_lifecycle_status_string(record.status);
+            let record_json = serde_json::to_string(&record).map_err(metadata_codec_error)?;
+            connection
+                .execute(
+                    "INSERT INTO thread_lifecycle_records (
+                    thread_id, tenant_id, user_id, session_id, parent_thread_id,
+                    status, record_json, created_at_ms, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    tenant_id = excluded.tenant_id,
+                    user_id = excluded.user_id,
+                    session_id = excluded.session_id,
+                    parent_thread_id = excluded.parent_thread_id,
+                    status = excluded.status,
+                    record_json = json_set(
+                        excluded.record_json,
+                        '$.created_at_ms',
+                        thread_lifecycle_records.created_at_ms
+                    ),
+                    updated_at_ms = excluded.updated_at_ms",
+                    params![
+                        thread_id,
+                        tenant_id,
+                        user_id,
+                        session_id,
+                        parent_thread_id,
+                        status,
+                        record_json,
+                        sqlite_timestamp(record.created_at_ms)?,
+                        sqlite_timestamp(record.updated_at_ms)?,
+                    ],
+                )
+                .await
+                .map_err(metadata_storage_error)?;
+            Ok(())
+        })
     }
 
     fn get_thread_lifecycle(
         &self,
         thread_id: ThreadId,
     ) -> MetadataStoreResult<Option<ThreadLifecycleRecord>> {
-        let connection = self.lock_connection()?;
-        sqlite_get_thread_lifecycle(&connection, thread_id)
+        block_on(async {
+            let connection = self
+                .provider_store
+                .connect()
+                .await
+                .map_err(MetadataStoreError::from)?;
+            sqlite_get_thread_lifecycle(&connection, thread_id).await
+        })
     }
 
     fn list_thread_lifecycle(
         &self,
         scope: &ThreadScope,
     ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
-        let connection = self.lock_connection()?;
-        sqlite_list_thread_lifecycle(&connection, scope)
+        block_on(async {
+            let connection = self
+                .provider_store
+                .connect()
+                .await
+                .map_err(MetadataStoreError::from)?;
+            sqlite_list_thread_lifecycle(&connection, scope).await
+        })
     }
 
     fn list_thread_lifecycle_for_user(
@@ -614,76 +644,90 @@ impl ThreadMetadataStore for SqliteMetadataStore {
         tenant_id: &str,
         user_id: &str,
     ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
-        let connection = self.lock_connection()?;
-        sqlite_list_thread_lifecycle_for_user(&connection, tenant_id, user_id)
+        block_on(async {
+            let connection = self
+                .provider_store
+                .connect()
+                .await
+                .map_err(MetadataStoreError::from)?;
+            sqlite_list_thread_lifecycle_for_user(&connection, tenant_id, user_id).await
+        })
     }
 }
 
 impl LlmProviderCatalogStore for SqliteLlmProviderStore {
     fn upsert_provider(&self, mut record: LlmProviderRecord) -> LlmProviderStoreResult<()> {
         record.validate()?;
-        let mut connection = self.lock_connection()?;
-        let tx = connection.transaction().map_err(storage_error)?;
-        let existing = sqlite_get_provider(&tx, &record.provider_id)?;
-        if let Some(existing) = existing {
-            record.created_at_ms = existing.created_at_ms;
-        }
-        record.updated_at_ms = now_ms();
-        let record_json = serde_json::to_string(&record).map_err(codec_error)?;
-        tx.execute(
-            "INSERT INTO llm_provider_records (
-                provider_id,
-                record_json,
-                created_at_ms,
-                updated_at_ms
-            ) VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(provider_id) DO UPDATE SET
-                record_json = excluded.record_json,
-                updated_at_ms = excluded.updated_at_ms",
-            params![
-                record.provider_id,
-                record_json,
-                record.created_at_ms,
-                record.updated_at_ms,
-            ],
-        )
-        .map_err(storage_error)?;
-        tx.commit().map_err(storage_error)?;
-        Ok(())
+        block_on(async {
+            let connection = self.connect().await?;
+            record.updated_at_ms = now_ms();
+            let record_json = serde_json::to_string(&record).map_err(codec_error)?;
+            connection
+                .execute(
+                    "INSERT INTO llm_provider_records (
+                    provider_id, record_json, created_at_ms, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(provider_id) DO UPDATE SET
+                    record_json = json_set(
+                        excluded.record_json,
+                        '$.created_at_ms',
+                        llm_provider_records.created_at_ms
+                    ),
+                    updated_at_ms = excluded.updated_at_ms",
+                    params![
+                        record.provider_id,
+                        record_json,
+                        record.created_at_ms,
+                        record.updated_at_ms,
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            Ok(())
+        })
     }
 
     fn get_provider(&self, provider_id: &str) -> LlmProviderStoreResult<Option<LlmProviderRecord>> {
         validate_provider_id(provider_id)?;
-        let connection = self.lock_connection()?;
-        sqlite_get_provider(&connection, provider_id)
+        block_on(async {
+            let connection = self.connect().await?;
+            sqlite_get_provider(&connection, provider_id).await
+        })
     }
 
     fn list_providers(&self) -> LlmProviderStoreResult<Vec<LlmProviderRecord>> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare("SELECT record_json FROM llm_provider_records ORDER BY provider_id")
-            .map_err(storage_error)?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(storage_error)?;
-        let mut records = Vec::new();
-        for row in rows {
-            let json = row.map_err(storage_error)?;
-            records.push(decode_provider_record(&json)?);
-        }
-        Ok(records)
+        block_on(async {
+            let connection = self.connect().await?;
+            let mut rows = connection
+                .query(
+                    "SELECT record_json FROM llm_provider_records ORDER BY provider_id",
+                    (),
+                )
+                .await
+                .map_err(storage_error)?;
+            let mut records = Vec::new();
+            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                records.push(decode_provider_record(
+                    &row.get::<String>(0).map_err(storage_error)?,
+                )?);
+            }
+            Ok(records)
+        })
     }
 
     fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
         validate_provider_id(provider_id)?;
-        let connection = self.lock_connection()?;
-        connection
-            .execute(
-                "DELETE FROM llm_provider_records WHERE provider_id = ?1",
-                params![provider_id],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        block_on(async {
+            let connection = self.connect().await?;
+            connection
+                .execute(
+                    "DELETE FROM llm_provider_records WHERE provider_id = ?1",
+                    params![provider_id],
+                )
+                .await
+                .map_err(storage_error)?;
+            Ok(())
+        })
     }
 }
 
@@ -694,23 +738,24 @@ impl LlmProviderAuthStore for SqliteLlmProviderStore {
         credential: LlmProviderCredential,
     ) -> LlmProviderStoreResult<()> {
         validate_provider_id(provider_id)?;
-        let connection = self.lock_connection()?;
         let credential_json = serde_json::to_string(&credential).map_err(codec_error)?;
         let now = now_ms();
-        connection
-            .execute(
-                "INSERT INTO llm_provider_credentials (
-                    provider_id,
-                    credential_json,
-                    updated_at_ms
-                ) VALUES (?1, ?2, ?3)
-                ON CONFLICT(provider_id) DO UPDATE SET
-                    credential_json = excluded.credential_json,
-                    updated_at_ms = excluded.updated_at_ms",
-                params![provider_id, credential_json, now],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        block_on(async {
+            let connection = self.connect().await?;
+            connection
+                .execute(
+                    "INSERT INTO llm_provider_credentials (
+                        provider_id, credential_json, updated_at_ms
+                    ) VALUES (?1, ?2, ?3)
+                    ON CONFLICT(provider_id) DO UPDATE SET
+                        credential_json = excluded.credential_json,
+                        updated_at_ms = excluded.updated_at_ms",
+                    params![provider_id, credential_json, now],
+                )
+                .await
+                .map_err(storage_error)?;
+            Ok(())
+        })
     }
 
     fn get_credential(
@@ -718,20 +763,25 @@ impl LlmProviderAuthStore for SqliteLlmProviderStore {
         provider_id: &str,
     ) -> LlmProviderStoreResult<Option<LlmProviderCredential>> {
         validate_provider_id(provider_id)?;
-        let connection = self.lock_connection()?;
-        sqlite_get_credential(&connection, provider_id)
+        block_on(async {
+            let connection = self.connect().await?;
+            sqlite_get_credential(&connection, provider_id).await
+        })
     }
 
     fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
         validate_provider_id(provider_id)?;
-        let connection = self.lock_connection()?;
-        connection
-            .execute(
-                "DELETE FROM llm_provider_credentials WHERE provider_id = ?1",
-                params![provider_id],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        block_on(async {
+            let connection = self.connect().await?;
+            connection
+                .execute(
+                    "DELETE FROM llm_provider_credentials WHERE provider_id = ?1",
+                    params![provider_id],
+                )
+                .await
+                .map_err(storage_error)?;
+            Ok(())
+        })
     }
 }
 
@@ -918,13 +968,10 @@ fn env_prefix(value: &str) -> String {
         .collect()
 }
 
-fn init_provider_store_schema(connection: &rusqlite::Connection) -> LlmProviderStoreResult<()> {
+async fn init_provider_store_schema(connection: &Connection) -> LlmProviderStoreResult<()> {
     connection
         .execute_batch(
             r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-
             CREATE TABLE IF NOT EXISTS llm_provider_records (
                 provider_id TEXT PRIMARY KEY NOT NULL,
                 record_json TEXT NOT NULL,
@@ -939,10 +986,11 @@ fn init_provider_store_schema(connection: &rusqlite::Connection) -> LlmProviderS
             );
             "#,
         )
+        .await
         .map_err(storage_error)
 }
 
-fn init_thread_metadata_schema(connection: &rusqlite::Connection) -> MetadataStoreResult<()> {
+async fn init_thread_metadata_schema(connection: &Connection) -> MetadataStoreResult<()> {
     connection
         .execute_batch(
             r#"
@@ -965,103 +1013,118 @@ fn init_thread_metadata_schema(connection: &rusqlite::Connection) -> MetadataSto
                 ON thread_lifecycle_records(parent_thread_id);
             "#,
         )
+        .await
         .map_err(metadata_storage_error)
 }
 
-fn sqlite_get_provider(
-    connection: &rusqlite::Connection,
+async fn sqlite_get_provider(
+    connection: &Connection,
     provider_id: &str,
 ) -> LlmProviderStoreResult<Option<LlmProviderRecord>> {
-    let record_json = connection
-        .query_row(
+    let mut rows = connection
+        .query(
             "SELECT record_json FROM llm_provider_records WHERE provider_id = ?1",
             params![provider_id],
-            |row| row.get::<_, String>(0),
         )
-        .optional()
+        .await
         .map_err(storage_error)?;
+    let record_json = rows
+        .next()
+        .await
+        .map_err(storage_error)?
+        .map(|row| row.get::<String>(0).map_err(storage_error))
+        .transpose()?;
     record_json
         .map(|json| decode_provider_record(&json))
         .transpose()
 }
 
-fn sqlite_get_credential(
-    connection: &rusqlite::Connection,
+async fn sqlite_get_credential(
+    connection: &Connection,
     provider_id: &str,
 ) -> LlmProviderStoreResult<Option<LlmProviderCredential>> {
-    let credential_json = connection
-        .query_row(
+    let mut rows = connection
+        .query(
             "SELECT credential_json FROM llm_provider_credentials WHERE provider_id = ?1",
             params![provider_id],
-            |row| row.get::<_, String>(0),
         )
-        .optional()
+        .await
         .map_err(storage_error)?;
+    let credential_json = rows
+        .next()
+        .await
+        .map_err(storage_error)?
+        .map(|row| row.get::<String>(0).map_err(storage_error))
+        .transpose()?;
     credential_json
         .map(|json| serde_json::from_str(&json).map_err(codec_error))
         .transpose()
 }
 
-fn sqlite_get_thread_lifecycle(
-    connection: &rusqlite::Connection,
+async fn sqlite_get_thread_lifecycle(
+    connection: &Connection,
     thread_id: ThreadId,
 ) -> MetadataStoreResult<Option<ThreadLifecycleRecord>> {
-    let record_json = connection
-        .query_row(
+    let mut rows = connection
+        .query(
             "SELECT record_json FROM thread_lifecycle_records WHERE thread_id = ?1",
             params![thread_id.to_string()],
-            |row| row.get::<_, String>(0),
         )
-        .optional()
+        .await
         .map_err(metadata_storage_error)?;
+    let record_json = rows
+        .next()
+        .await
+        .map_err(metadata_storage_error)?
+        .map(|row| row.get::<String>(0).map_err(metadata_storage_error))
+        .transpose()?;
     record_json
         .map(|json| decode_thread_lifecycle_record(&json))
         .transpose()
 }
 
-fn sqlite_list_thread_lifecycle(
-    connection: &rusqlite::Connection,
+async fn sqlite_list_thread_lifecycle(
+    connection: &Connection,
     scope: &ThreadScope,
 ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
-    let mut statement = connection
-        .prepare(
+    let mut rows = connection
+        .query(
             "SELECT record_json FROM thread_lifecycle_records
             WHERE tenant_id = ?1 AND user_id = ?2 AND session_id = ?3
             ORDER BY created_at_ms, thread_id",
+            params![
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str(),
+                scope.session_id.as_str()
+            ],
         )
-        .map_err(metadata_storage_error)?;
-    let rows = statement
-        .query_map(
-            params![&scope.tenant_id, &scope.user_id, &scope.session_id],
-            |row| row.get::<_, String>(0),
-        )
+        .await
         .map_err(metadata_storage_error)?;
     let mut records = Vec::new();
-    for row in rows {
-        let json = row.map_err(metadata_storage_error)?;
+    while let Some(row) = rows.next().await.map_err(metadata_storage_error)? {
+        let json = row.get::<String>(0).map_err(metadata_storage_error)?;
         records.push(decode_thread_lifecycle_record(&json)?);
     }
     Ok(records)
 }
 
-fn sqlite_list_thread_lifecycle_for_user(
-    connection: &rusqlite::Connection,
+async fn sqlite_list_thread_lifecycle_for_user(
+    connection: &Connection,
     tenant_id: &str,
     user_id: &str,
 ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
-    let mut statement = connection
-        .prepare(
+    let mut rows = connection
+        .query(
             "SELECT record_json FROM thread_lifecycle_records
             WHERE tenant_id = ?1 AND user_id = ?2
             ORDER BY created_at_ms, session_id, thread_id",
+            params![tenant_id, user_id],
         )
-        .map_err(metadata_storage_error)?;
-    let rows = statement
-        .query_map(params![tenant_id, user_id], |row| row.get::<_, String>(0))
+        .await
         .map_err(metadata_storage_error)?;
     let mut records = Vec::new();
-    for row in rows {
-        let json = row.map_err(metadata_storage_error)?;
+    while let Some(row) = rows.next().await.map_err(metadata_storage_error)? {
+        let json = row.get::<String>(0).map_err(metadata_storage_error)?;
         records.push(decode_thread_lifecycle_record(&json)?);
     }
     Ok(records)

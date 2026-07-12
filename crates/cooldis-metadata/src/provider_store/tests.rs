@@ -1,8 +1,156 @@
 use super::*;
+use crate::SecretResolver;
 use cooldis_runtime_contracts::{
     ThreadContext, ThreadCoordinates, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadTopology,
 };
 use uuid::Uuid;
+
+const RUSQLITE_METADATA_V1: &[u8] =
+    include_bytes!("../../tests/fixtures/rusqlite-metadata-v1.sqlite3");
+
+#[test]
+fn synchronous_store_boundary_is_reentrant_from_futures_executor() {
+    futures_executor::block_on(async {
+        let store = SqliteLlmProviderStore::in_memory().unwrap();
+        store
+            .upsert_provider(LlmProviderRecord::new(
+                "nested-executor",
+                ProviderApi::OpenAIChatCompletions,
+                "https://nested.example.invalid/v1",
+            ))
+            .unwrap();
+        assert!(store.get_provider("nested-executor").unwrap().is_some());
+    });
+}
+
+#[test]
+fn upserts_restore_record_json_created_at_from_the_atomic_column() {
+    let db_path = temp_db_path("cooldis-created-at-atomicity");
+    remove_sqlite_files(&db_path);
+
+    let store = SqliteMetadataStore::open(&db_path).unwrap();
+    let mut provider = LlmProviderRecord::new(
+        "atomic-provider",
+        ProviderApi::OpenAIChatCompletions,
+        "https://atomic.example.invalid/v1",
+    );
+    provider.created_at_ms = 1_700_000_000_100;
+    store.upsert_provider(provider.clone()).unwrap();
+
+    let coordinates = ThreadCoordinates::new("tenant-atomic", "user-atomic", "session-atomic");
+    let context = ThreadContext::root(coordinates.clone());
+    let mut lifecycle =
+        ThreadLifecycleRecord::new(&context, ThreadLifecycleStatus::Idle, BTreeMap::new());
+    lifecycle.created_at_ms = 1_700_000_000_200;
+    store.upsert_thread_lifecycle(lifecycle.clone()).unwrap();
+    drop(store);
+
+    futures_executor::block_on(async {
+        let db = cooldis_sqlite::Db::open(&db_path, cooldis_sqlite::DbConfig::default())
+            .await
+            .unwrap();
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "UPDATE llm_provider_records
+             SET record_json = json_set(record_json, '$.created_at_ms', 1700000000998)
+             WHERE provider_id = 'atomic-provider'",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "UPDATE thread_lifecycle_records
+             SET record_json = json_set(record_json, '$.created_at_ms', 1700000000999)
+             WHERE thread_id = ?1",
+            cooldis_sqlite::params![coordinates.thread_id.to_string()],
+        )
+        .await
+        .unwrap();
+    });
+
+    provider.created_at_ms = 1_700_000_000_300;
+    lifecycle.created_at_ms = 1_700_000_000_400;
+    let store = SqliteMetadataStore::open(&db_path).unwrap();
+    store.upsert_provider(provider).unwrap();
+    store.upsert_thread_lifecycle(lifecycle).unwrap();
+    drop(store);
+
+    futures_executor::block_on(async {
+        let db = cooldis_sqlite::Db::open(&db_path, cooldis_sqlite::DbConfig::default())
+            .await
+            .unwrap();
+        let conn = db.connect().await.unwrap();
+        let mut provider_rows = conn
+            .query(
+                "SELECT created_at_ms, record_json FROM llm_provider_records
+                 WHERE provider_id = 'atomic-provider'",
+                (),
+            )
+            .await
+            .unwrap();
+        let provider_row = provider_rows.next().await.unwrap().unwrap();
+        let provider_column = provider_row.get::<i64>(0).unwrap();
+        let provider_json: serde_json::Value =
+            serde_json::from_str(&provider_row.get::<String>(1).unwrap()).unwrap();
+        assert_eq!(provider_column, 1_700_000_000_100);
+        assert_eq!(
+            provider_json["created_at_ms"].as_i64(),
+            Some(provider_column)
+        );
+
+        let mut lifecycle_rows = conn
+            .query(
+                "SELECT created_at_ms, record_json FROM thread_lifecycle_records
+                 WHERE thread_id = ?1",
+                cooldis_sqlite::params![coordinates.thread_id.to_string()],
+            )
+            .await
+            .unwrap();
+        let lifecycle_row = lifecycle_rows.next().await.unwrap().unwrap();
+        let lifecycle_column = lifecycle_row.get::<i64>(0).unwrap();
+        let lifecycle_json: serde_json::Value =
+            serde_json::from_str(&lifecycle_row.get::<String>(1).unwrap()).unwrap();
+        assert_eq!(lifecycle_column, 1_700_000_000_200);
+        assert_eq!(
+            lifecycle_json["created_at_ms"].as_i64(),
+            Some(lifecycle_column)
+        );
+    });
+
+    remove_sqlite_files(&db_path);
+}
+
+#[test]
+fn turso_decodes_rusqlite_created_metadata_v1_fixture() {
+    let db_path = temp_db_path("cooldis-rusqlite-decode-compat");
+    remove_sqlite_files(&db_path);
+    std::fs::write(&db_path, RUSQLITE_METADATA_V1).unwrap();
+
+    let provider_store = SqliteLlmProviderStore::open(&db_path).unwrap();
+    let provider = provider_store
+        .get_provider("legacy-provider")
+        .unwrap()
+        .expect("legacy provider record should decode");
+    assert_eq!(provider.base_url, "https://legacy.example.invalid/v1");
+    assert_eq!(
+        provider_store.get_credential("legacy-provider").unwrap(),
+        Some(LlmProviderCredential::ApiKey {
+            key: "legacy-provider-key".to_string(),
+        })
+    );
+    drop(provider_store);
+
+    let secret_store = crate::SqliteSecretStore::open(&db_path).unwrap();
+    let secret = secret_store
+        .resolve_secret("LEGACY_SECRET")
+        .unwrap()
+        .expect("legacy secret record should decode");
+    assert_eq!(secret.value, "legacy-secret-value");
+    assert_eq!(secret.source_kind, crate::SecretSourceKind::Local);
+    drop(secret_store);
+
+    remove_sqlite_files(&db_path);
+}
 
 #[test]
 fn provider_catalog_and_auth_persist_across_reopen() {
