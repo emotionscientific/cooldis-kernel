@@ -4,6 +4,11 @@ pub(crate) use cooldis as kernel_test;
 
 mod event_trace;
 mod fault;
+mod fault_plan;
+mod invariant_claims;
+mod invariant_forks;
+mod invariants;
+mod scenario;
 mod scripted_provider;
 mod store_parity;
 mod transcript;
@@ -13,11 +18,74 @@ pub use event_trace::*;
 #[allow(unused_imports)]
 pub use fault::*;
 #[allow(unused_imports)]
+pub use fault_plan::*;
+#[allow(unused_imports)]
+pub use invariant_claims::*;
+#[allow(unused_imports)]
+pub use invariant_forks::*;
+#[allow(unused_imports)]
+pub use invariants::*;
+#[allow(unused_imports)]
+pub use scenario::*;
+#[allow(unused_imports)]
 pub use scripted_provider::*;
 #[allow(unused_imports)]
 pub use store_parity::*;
 #[allow(unused_imports)]
 pub use transcript::*;
+
+async fn scenario_app_server(
+    _config: cooldis::CooldisAppServerConfig,
+    _runtime_factory: std::sync::Arc<dyn cooldis::AgentRuntimeFactory>,
+    _decorate: impl FnOnce(
+        std::sync::Arc<dyn cooldis::RuntimeStore>,
+    ) -> std::sync::Arc<dyn cooldis::RuntimeStore>
+    + Send
+    + 'static,
+) -> cooldis::CooldisResult<cooldis::CooldisAppServer> {
+    panic!("the scenario runner is mounted into the cooldis crate test harness")
+}
+
+fn scenario_unit_harness() -> bool {
+    false
+}
+
+async fn scenario_fork_with_id(
+    _server: &cooldis::CooldisAppServer,
+    _parent: &cooldis::ThreadCoordinates,
+    _child_thread_id: cooldis::ThreadId,
+) -> cooldis::CooldisResult<cooldis::ThreadCoordinates> {
+    panic!("the scenario runner is mounted into the cooldis crate test harness")
+}
+
+async fn scenario_project_spawn_snapshot(
+    _host: cooldis::RuntimeHost,
+    _coordinates: cooldis::ThreadCoordinates,
+    _barrier: std::sync::Arc<tokio::sync::Barrier>,
+) -> cooldis::CooldisResult<cooldis::ThreadSpawnProjectionReceipt> {
+    panic!("the scenario runner is mounted into the cooldis crate test harness")
+}
+
+fn scenario_ingress_binding_barrier(
+    _bridge: &cooldis::CooldisDaemonIoBridge,
+) -> std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>> {
+    panic!("the scenario runner is mounted into the cooldis crate test harness")
+}
+
+fn scenario_pause_after_ingress_claim(
+    _bridge: &cooldis::CooldisDaemonIoBridge,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<tokio::sync::Notify>,
+) {
+    panic!("the scenario runner is mounted into the cooldis crate test harness")
+}
+
+fn scenario_thread_load_root_barrier(
+    _bridge: &cooldis::CooldisDaemonIoBridge,
+) -> std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>> {
+    panic!("the scenario runner is mounted into the cooldis crate test harness")
+}
 
 use async_trait::async_trait;
 use cooldis::{

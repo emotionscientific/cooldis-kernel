@@ -1,0 +1,101 @@
+{
+  "directives": [
+    {
+      "action": "Fail",
+      "component": "Store",
+      "nth": 7,
+      "operation": "select_branch",
+      "timing": "Before"
+    },
+    {
+      "action": {
+        "Delay": {
+          "nanos": 10000000,
+          "secs": 0
+        }
+      },
+      "component": "Store",
+      "nth": 10,
+      "operation": "read_events",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Store",
+      "nth": 9,
+      "operation": "select_branch",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Store",
+      "nth": 8,
+      "operation": "append_events",
+      "timing": "After"
+    },
+    {
+      "action": {
+        "Delay": {
+          "nanos": 1000000,
+          "secs": 0
+        }
+      },
+      "component": "Queue",
+      "nth": 5,
+      "operation": "retry_ingress",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Queue",
+      "nth": 3,
+      "operation": "complete_ingress",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Queue",
+      "nth": 1,
+      "operation": "complete_ingress",
+      "timing": "After"
+    },
+    {
+      "action": "Fail",
+      "component": "Provider",
+      "nth": 9,
+      "operation": "stream",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Provider",
+      "nth": 2,
+      "operation": "stream",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Provider",
+      "nth": 10,
+      "operation": "complete",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Process",
+      "nth": 9,
+      "operation": "ingress-binding",
+      "timing": "Before"
+    },
+    {
+      "action": "Fail",
+      "component": "Process",
+      "nth": 7,
+      "operation": "spawn-snapshot",
+      "timing": "Before"
+    }
+  ],
+  "intensity": "Hostile",
+  "seed": 16400139538738882021,
+  "vocabulary_version": 1
+}
