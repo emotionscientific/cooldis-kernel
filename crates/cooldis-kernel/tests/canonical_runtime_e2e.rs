@@ -41,7 +41,7 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
     let mut coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
 
     {
-        let host = openai_host(&server, &db_path);
+        let host = openai_host(&server, &db_path).await;
         let thread = host
             .start_thread(coordinates.clone(), ThreadTopology::root())
             .await
@@ -57,7 +57,7 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
     }
 
     {
-        let host = openai_host(&server, &db_path);
+        let host = openai_host(&server, &db_path).await;
         let thread = host
             .start_thread(coordinates.clone(), ThreadTopology::root())
             .await
@@ -127,7 +127,7 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
         "usage": {"input_tokens": 7, "output_tokens": 8}
     })])
     .await;
-    let host = anthropic_host(&server, &db_path);
+    let host = anthropic_host(&server, &db_path).await;
     let thread = host
         .start_thread(
             ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
@@ -215,7 +215,7 @@ async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
     let mut coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
 
     {
-        let host = chat_host(&server, &db_path);
+        let host = chat_host(&server, &db_path).await;
         let thread = host
             .start_thread(coordinates.clone(), ThreadTopology::root())
             .await
@@ -231,7 +231,7 @@ async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
     }
 
     {
-        let host = chat_host(&server, &db_path);
+        let host = chat_host(&server, &db_path).await;
         let thread = host
             .start_thread(coordinates.clone(), ThreadTopology::root())
             .await
@@ -418,7 +418,7 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
     })])
     .await;
     let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let store = SqliteSessionStore::open(&db_path).unwrap();
+    let store = SqliteSessionStore::open(&db_path).await.unwrap();
     store
         .append(
             &coordinates,
@@ -465,7 +465,7 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
         .await
         .unwrap();
 
-    let host = anthropic_host(&server, &db_path);
+    let host = anthropic_host(&server, &db_path).await;
     let thread = host
         .start_thread(coordinates.clone(), ThreadTopology::root())
         .await
@@ -508,7 +508,7 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
 async fn openai_responses_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
     let db_path = temp_db_path("cooldis-e2e-openai-sse");
     let server = MockHttpServer::start_text(vec![openai_responses_sse()]).await;
-    let host = openai_streaming_host(&server, &db_path);
+    let host = openai_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
             ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
@@ -554,7 +554,7 @@ async fn openai_responses_http_sse_runtime_stores_canonical_stream_without_raw_p
 async fn chat_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
     let db_path = temp_db_path("cooldis-e2e-chat-sse");
     let server = MockHttpServer::start_text(vec![chat_completions_sse()]).await;
-    let host = chat_streaming_host(&server, &db_path);
+    let host = chat_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
             ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
@@ -593,7 +593,7 @@ async fn chat_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
 async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
     let db_path = temp_db_path("cooldis-e2e-anthropic-sse");
     let server = MockHttpServer::start_text(vec![anthropic_messages_sse()]).await;
-    let host = anthropic_streaming_host(&server, &db_path);
+    let host = anthropic_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
             ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
@@ -630,19 +630,19 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
     remove_sqlite_files(&db_path);
 }
 
-fn openai_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn openai_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
     let factory = openai_factory(server, false);
     RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).unwrap()),
+        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-fn openai_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn openai_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
     let factory = openai_factory(server, true);
     RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).unwrap()),
+        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
@@ -655,7 +655,7 @@ async fn openai_supervisor(
     supervisor
         .register_tenant(TenantRegistration {
             context: TenantRuntimeContext::local("tenant_a", runtime_root, runtime_root)
-                .with_session_store(Arc::new(SqliteSessionStore::open(db_path).unwrap())),
+                .with_session_store(Arc::new(SqliteSessionStore::open(db_path).await.unwrap())),
             runtime_factory: openai_factory(server, false),
         })
         .await
@@ -688,19 +688,19 @@ fn openai_factory(server: &MockHttpServer, stream: bool) -> Arc<CanonicalProvide
     Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
 }
 
-fn chat_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn chat_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
     let factory = chat_factory(server, false);
     RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).unwrap()),
+        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-fn chat_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn chat_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
     let factory = chat_factory(server, true);
     RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).unwrap()),
+        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
@@ -729,19 +729,19 @@ fn chat_factory(server: &MockHttpServer, stream: bool) -> Arc<CanonicalProviderR
     Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
 }
 
-fn anthropic_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn anthropic_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
     let factory = anthropic_factory(server, false);
     RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).unwrap()),
+        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-fn anthropic_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn anthropic_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
     let factory = anthropic_factory(server, true);
     RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).unwrap()),
+        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 

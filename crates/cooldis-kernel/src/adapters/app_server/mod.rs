@@ -643,6 +643,7 @@ impl CooldisAppServer {
         if let Some(decorate) = session_store_decorator {
             let session_store = Arc::new(
                 SqliteSessionStore::open(&session_store_path)
+                    .await
                     .map_err(|err| CooldisError::History(err.to_string()))?,
             ) as Arc<dyn RuntimeStore>;
             tenant_context = tenant_context.with_session_store(decorate(session_store));

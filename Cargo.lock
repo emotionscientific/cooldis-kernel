@@ -825,7 +825,7 @@ dependencies = [
  "async-trait",
  "cooldis-history",
  "cooldis-runtime-contracts",
- "rusqlite",
+ "cooldis-sqlite",
  "serde_json",
  "tokio",
 ]

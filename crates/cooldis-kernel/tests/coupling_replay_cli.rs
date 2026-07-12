@@ -43,7 +43,7 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     );
 
     let coordinates = ThreadCoordinates::new("tenant", "user", "counter-session");
-    let store = SqliteSessionStore::open(&recording_path).unwrap();
+    let store = SqliteSessionStore::open(&recording_path).await.unwrap();
     let coupling = counter_coupling("org.example.counter", &artifact_ref, None);
     fs::write(
         &coupling_path,

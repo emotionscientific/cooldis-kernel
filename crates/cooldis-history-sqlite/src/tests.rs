@@ -1,8 +1,11 @@
 use super::SqliteSessionStore;
 use cooldis_history::*;
 use cooldis_runtime_contracts::ThreadCoordinates;
-use rusqlite::params;
+use cooldis_sqlite::{Connection, Db, DbConfig, params};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const RUSQLITE_HISTORY_STREAM_V0: &[u8] =
+    include_bytes!("../tests/fixtures/rusqlite-history-stream-v0.sqlite3");
 
 fn coords(tenant: &str, user: &str, session: &str) -> ThreadCoordinates {
     ThreadCoordinates::new(tenant, user, session)
@@ -110,16 +113,268 @@ async fn in_memory_store_honors_fenced_append_conformance() {
 #[tokio::test]
 async fn sqlite_store_honors_fenced_append_conformance() {
     let path = temp_db_path("cooldis-history-fenced-append");
-    let store = SqliteSessionStore::open(&path).unwrap();
+    let store = SqliteSessionStore::open(&path).await.unwrap();
 
     let stream_id = assert_fenced_append_conformance(&store).await;
 
     drop(store);
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.read_events(&stream_id, None).await.unwrap().len(),
         3
     );
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn sqlite_read_only_store_replays_and_rejects_writes() {
+    let path = temp_db_path("cooldis-history-read-only");
+    let coordinates = coords("tenant-read-only", "user-read-only", "session-read-only");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let seed = NewEventRecord::witnessed(
+        coordinates.clone(),
+        EventKind::TurnSubmitted,
+        serde_json::json!({"turn_id": "seed"}),
+    );
+    let denied = NewEventRecord::witnessed(
+        coordinates,
+        EventKind::TurnSubmitted,
+        serde_json::json!({"turn_id": "denied"}),
+    );
+
+    let writable = SqliteSessionStore::open(&path).await.unwrap();
+    writable
+        .append_events(&stream_id, vec![seed])
+        .await
+        .unwrap();
+    drop(writable);
+
+    let read_only = SqliteSessionStore::open_read_only(&path).await.unwrap();
+    assert_eq!(
+        read_only.read_events(&stream_id, None).await.unwrap().len(),
+        1
+    );
+    assert!(
+        read_only
+            .append_events(&stream_id, vec![denied])
+            .await
+            .is_err()
+    );
+    drop(read_only);
+
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    assert_eq!(
+        reopened.read_events(&stream_id, None).await.unwrap().len(),
+        1
+    );
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn sqlite_read_only_store_rejects_a_missing_database() {
+    let path = temp_db_path("cooldis-history-read-only-missing");
+
+    let error = SqliteSessionStore::open_read_only(&path)
+        .await
+        .err()
+        .expect("read-only open must not create a missing database");
+
+    assert!(matches!(error, HistoryError::Storage(_)));
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn turso_replays_rusqlite_created_stream_store_decode_compat_fixture() {
+    let path = temp_db_path("cooldis-history-rusqlite-decode-compat");
+    std::fs::write(&path, RUSQLITE_HISTORY_STREAM_V0).unwrap();
+
+    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let events = store
+        .read_events(
+            &EventStreamId::new("thread:018f0000-0000-7000-8000-000000000413"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].sequence.get(), 1);
+    assert_eq!(events[0].kind, EventKind::TurnSubmitted);
+    assert_eq!(events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(events[0].payload["turn_id"], "legacy-turn");
+    assert_eq!(events[1].sequence.get(), 2);
+    assert_eq!(events[1].kind, EventKind::ContextCompileCompleted);
+    assert_eq!(events[1].origin, EventOrigin::Discharged);
+    assert_eq!(events[1].payload["output_hash"], "sha256:legacy-rusqlite");
+    assert_eq!(
+        events[1].provenance.discharged_by.as_deref(),
+        Some("migration:origin-backfill@v1")
+    );
+
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_legacy_store_opens_apply_additive_migrations_idempotently() {
+    let path = temp_db_path("cooldis-history-concurrent-legacy-open");
+    std::fs::write(&path, RUSQLITE_HISTORY_STREAM_V0).unwrap();
+    let workers = 8;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(workers));
+    let mut handles = Vec::new();
+
+    for _ in 0..workers {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            SqliteSessionStore::open(path).await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let events = store
+        .read_events(
+            &EventStreamId::new("thread:018f0000-0000-7000-8000-000000000413"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_store_appends_serialize_stream_sequence_without_interleaving() {
+    let path = temp_db_path("cooldis-history-concurrent-appends");
+    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let coordinates = coords("tenant-concurrent", "user-concurrent", "session-concurrent");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let workers = 8;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(workers));
+    let mut handles = Vec::new();
+
+    for worker in 0..workers {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let stream_id = stream_id.clone();
+        let coordinates = coordinates.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .append_events(
+                    &stream_id,
+                    vec![NewEventRecord::witnessed(
+                        coordinates,
+                        EventKind::TurnSubmitted,
+                        serde_json::json!({"turn_id": format!("turn-{worker}")}),
+                    )],
+                )
+                .await
+        }));
+    }
+
+    for handle in handles {
+        let appended = handle.await.unwrap().unwrap();
+        assert_eq!(appended.len(), 1);
+    }
+    let events = store.read_events(&stream_id, None).await.unwrap();
+    assert_eq!(events.len(), workers);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence.get())
+            .collect::<Vec<_>>(),
+        (1..=workers as i64).collect::<Vec<_>>()
+    );
+
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_append_finishes_atomically_and_releases_the_write_lock() {
+    let path = temp_db_path("cooldis-history-cancelled-append");
+    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let coordinates = coords("tenant-cancel", "user-cancel", "session-cancel");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let records = (0..1_000)
+        .map(|index| {
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": format!("cancelled-{index}")}),
+            )
+        })
+        .collect::<Vec<_>>();
+    let append_store = store.clone();
+    let append_stream_id = stream_id.clone();
+    let append =
+        tokio::spawn(async move { append_store.append_events(&append_stream_id, records).await });
+
+    let probe_db = Db::open(
+        &path,
+        DbConfig {
+            busy_timeout: std::time::Duration::ZERO,
+            ..DbConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut observed_live_transaction = false;
+    for _ in 0..10_000 {
+        let mut connection = probe_db.connect().await.unwrap();
+        match connection
+            .transaction_with_behavior(cooldis_sqlite::TransactionBehavior::Immediate)
+            .await
+        {
+            Ok(transaction) => transaction.rollback().await.unwrap(),
+            Err(_) => {
+                observed_live_transaction = true;
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        observed_live_transaction,
+        "append completed before the test could observe its write transaction"
+    );
+
+    append.abort();
+    assert!(append.await.unwrap_err().is_cancelled());
+
+    let committed = store
+        .append_events(
+            &stream_id,
+            vec![NewEventRecord::witnessed(
+                coordinates,
+                EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "committed"}),
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed[0].sequence.get(), 1_001);
+    let events = store.read_events(&stream_id, None).await.unwrap();
+    assert_eq!(events.len(), 1_001);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence.get())
+            .collect::<Vec<_>>(),
+        (1..=1_001).collect::<Vec<_>>()
+    );
+
+    drop(store);
+    drop(probe_db);
     let _ = std::fs::remove_file(path);
 }
 
@@ -142,7 +397,7 @@ async fn sqlite_store_persists_canonical_history_across_reopen() {
     );
 
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         store
             .append(
                 &coordinates,
@@ -165,7 +420,7 @@ async fn sqlite_store_persists_canonical_history_across_reopen() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let context = reopened.build_context(&coordinates).await.unwrap();
     assert_eq!(
         message_texts(&context.messages),
@@ -174,7 +429,7 @@ async fn sqlite_store_persists_canonical_history_across_reopen() {
     assert_eq!(context.entries.len(), 2);
     assert_eq!(context.messages[1], assistant);
 
-    let raw_json = sqlite_entry_json(&path);
+    let raw_json = sqlite_entry_json(&path).await;
     assert!(raw_json.iter().any(|json| json.contains("\"provider\"")));
     assert!(raw_json.iter().any(|json| json.contains("\"openai\"")));
     assert!(
@@ -191,7 +446,7 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
     let path = temp_db_path("cooldis-history-branch-selection-rebuild");
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let (selected, other, advanced) = {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         let root = store
             .append(
                 &coordinates,
@@ -240,10 +495,13 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
     };
 
     {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection.execute("DROP TABLE active_leaves", []).unwrap();
+        let (_db, connection) = raw_connection(&path).await;
+        connection
+            .execute("DROP TABLE active_leaves", ())
+            .await
+            .unwrap();
     }
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.active_leaf(&coordinates).await.unwrap(),
         Some(advanced)
@@ -251,15 +509,16 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
     drop(reopened);
 
     {
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let (_db, connection) = raw_connection(&path).await;
         connection
             .execute(
                 "UPDATE active_leaves SET entry_id = ?1 WHERE thread_id = ?2",
                 params![other.to_string(), coordinates.thread_id.to_string()],
             )
+            .await
             .unwrap();
     }
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.active_leaf(&coordinates).await.unwrap(),
         Some(advanced)
@@ -268,15 +527,16 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
     drop(reopened);
 
     {
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let (_db, connection) = raw_connection(&path).await;
         connection
             .execute(
                 "INSERT INTO active_leaves (thread_id, entry_id) VALUES (?1, ?2)",
                 params![coordinates.thread_id.to_string(), other.to_string()],
             )
+            .await
             .unwrap();
     }
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(reopened.active_leaf(&coordinates).await.unwrap(), None);
 
     let events = reopened
@@ -314,7 +574,7 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
 async fn sqlite_store_resumes_active_branch_and_compaction() {
     let path = temp_db_path("cooldis-history-branch");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let store = SqliteSessionStore::open(&path).unwrap();
+    let store = SqliteSessionStore::open(&path).await.unwrap();
     let root = store
         .append(
             &coordinates,
@@ -347,7 +607,7 @@ async fn sqlite_store_resumes_active_branch_and_compaction() {
         .unwrap();
     drop(store);
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.active_leaf(&coordinates).await.unwrap(),
         Some(right.entry_id)
@@ -369,7 +629,7 @@ async fn sqlite_store_resumes_active_branch_and_compaction() {
 
 #[tokio::test]
 async fn sqlite_store_rejects_parent_from_wrong_coordinate_scope() {
-    let store = SqliteSessionStore::in_memory().unwrap();
+    let store = SqliteSessionStore::in_memory().await.unwrap();
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let root = store
         .append(
@@ -400,7 +660,7 @@ async fn sqlite_store_rejects_parent_from_wrong_coordinate_scope() {
 
 #[tokio::test]
 async fn clone_and_select_reject_checkpoint_leaf_from_wrong_scope() {
-    let store = SqliteSessionStore::in_memory().unwrap();
+    let store = SqliteSessionStore::in_memory().await.unwrap();
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let leaf = store
         .append(
@@ -443,7 +703,7 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
     let root;
     let source_leaf;
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         root = store
             .append(
                 &source,
@@ -484,7 +744,7 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let target_context = reopened.build_context(&target).await.unwrap();
     assert_eq!(
         message_texts(&target_context.messages),
@@ -516,7 +776,7 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
 
 #[tokio::test]
 async fn sqlite_fork_by_reference_rejects_missing_parent_cut() {
-    let store = SqliteSessionStore::in_memory().unwrap();
+    let store = SqliteSessionStore::in_memory().await.unwrap();
     let source = coords("tenant_a", "user_1", "session_1");
     let target = coords("tenant_a", "user_1", "session_1");
     let missing = SessionEntryId::new();
@@ -554,7 +814,7 @@ async fn sqlite_events_reject_discharged_records_without_provenance() {
         EventProvenance::default(),
     );
     let record_id = record.id;
-    let store = SqliteSessionStore::in_memory().unwrap();
+    let store = SqliteSessionStore::in_memory().await.unwrap();
 
     let err = store
         .append_events(&stream_id, vec![record])
@@ -588,7 +848,7 @@ async fn sqlite_events_validate_stream_schema_before_commit() {
         EventKind::TurnSubmitted,
         serde_json::json!("not-an-object-payload"),
     );
-    let store = SqliteSessionStore::open(&path).unwrap();
+    let store = SqliteSessionStore::open(&path).await.unwrap();
 
     let err = store
         .append_events(&stream_id, vec![valid.clone(), invalid])
@@ -628,7 +888,7 @@ async fn sqlite_events_round_trip_origin_and_provenance() {
     };
 
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
@@ -650,7 +910,7 @@ async fn sqlite_events_round_trip_origin_and_provenance() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].kind, EventKind::SessionEntryAppended);
@@ -682,7 +942,7 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
     };
 
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
@@ -741,7 +1001,7 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let envelopes = reopened
         .read_events(&stream_id, None)
         .await
@@ -775,7 +1035,7 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
             .all(|event| !event.provenance.is_empty())
     );
     assert_eq!(
-        sqlite_event_schema_columns(&path),
+        sqlite_event_schema_columns(&path).await,
         vec![
             (
                 EventKind::TurnSubmitted.as_str().to_string(),
@@ -808,7 +1068,7 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let stream_id = EventStreamId::for_thread(&coordinates);
     let cursor = {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         let appended = store
             .append_events(
                 &stream_id,
@@ -835,7 +1095,7 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
         appended[0].cursor_v1()
     };
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let replay = reopened
         .read_events_after_cursor(&stream_id, &cursor)
         .await
@@ -876,7 +1136,7 @@ async fn sqlite_round_trips_declared_coupling_event_kinds() {
     };
 
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
@@ -909,7 +1169,7 @@ async fn sqlite_round_trips_declared_coupling_event_kinds() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     assert_eq!(
         events
@@ -939,9 +1199,9 @@ async fn sqlite_event_load_fails_closed_on_unknown_kind() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let stream_id = EventStreamId::for_thread(&coordinates);
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         drop(store);
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let (_db, connection) = raw_connection(&path).await;
         connection
             .execute(
                 "INSERT INTO event_records (
@@ -973,10 +1233,11 @@ async fn sqlite_event_load_fails_closed_on_unknown_kind() {
                     "{}",
                 ],
             )
+            .await
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let err = reopened.read_events(&stream_id, None).await.unwrap_err();
     assert!(matches!(err, HistoryError::Codec(message) if message.contains("unknown event kind")));
 
@@ -989,7 +1250,7 @@ async fn sqlite_event_load_fails_closed_on_payload_schema_drift() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let stream_id = EventStreamId::for_thread(&coordinates);
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
@@ -1002,16 +1263,17 @@ async fn sqlite_event_load_fails_closed_on_payload_schema_drift() {
             .await
             .unwrap();
         drop(store);
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let (_db, connection) = raw_connection(&path).await;
         connection
             .execute(
                 "UPDATE event_records SET payload_schema = ?1",
                 params!["cooldis.event.other/1"],
             )
+            .await
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let err = reopened.read_events(&stream_id, None).await.unwrap_err();
     assert!(matches!(err, HistoryError::Codec(message) if message.contains("payload_schema")));
 
@@ -1024,7 +1286,7 @@ async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() 
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let stream_id = EventStreamId::for_thread(&coordinates);
     {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
@@ -1054,7 +1316,7 @@ async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() 
             .await
             .unwrap();
         drop(store);
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let (_db, connection) = raw_connection(&path).await;
         connection
             .execute(
                 "UPDATE event_records SET payload_json = ?1",
@@ -1066,10 +1328,11 @@ async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() 
                     .to_string()
                 ],
             )
+            .await
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let err = reopened.read_events(&stream_id, None).await.unwrap_err();
     assert!(matches!(err, HistoryError::Codec(message) if message.contains("egress_kind")));
 
@@ -1102,7 +1365,7 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
         },
     );
     {
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let (_db, connection) = raw_connection(&path).await;
         connection
             .execute_batch(
                 r#"
@@ -1121,6 +1384,7 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
                     );
                     "#,
             )
+            .await
             .unwrap();
         for (sequence, kind, payload_json) in [
             (
@@ -1169,11 +1433,12 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
                         payload_json,
                     ],
                 )
+                .await
                 .unwrap();
         }
     }
 
-    let migrated = SqliteSessionStore::open(&path).unwrap();
+    let migrated = SqliteSessionStore::open(&path).await.unwrap();
     let events = migrated.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].kind, EventKind::SessionEntryAppended);
@@ -1209,7 +1474,7 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
             .all(|event| !event.provenance.is_empty())
     );
     assert_eq!(
-        sqlite_event_schema_columns(&path),
+        sqlite_event_schema_columns(&path).await,
         vec![
             (
                 EventKind::SessionEntryAppended.as_str().to_string(),
@@ -1245,7 +1510,7 @@ async fn sqlite_event_and_observation_records_survive_reopen_with_provenance() {
     let stream_id = EventStreamId::for_thread(&coordinates);
 
     let receipt_id = {
-        let store = SqliteSessionStore::open(&path).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
         let entry = store
             .append(
                 &coordinates,
@@ -1294,7 +1559,7 @@ async fn sqlite_event_and_observation_records_survive_reopen_with_provenance() {
         receipt.id
     };
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence.get(), 1);
@@ -1335,32 +1600,44 @@ fn temp_db_path(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{nanos}.sqlite3"))
 }
 
-fn sqlite_entry_json(path: &std::path::Path) -> Vec<String> {
-    let connection = rusqlite::Connection::open(path).unwrap();
-    let mut statement = connection
-        .prepare("SELECT entry_json FROM session_entries ORDER BY created_at_ms")
-        .unwrap();
-    statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+async fn raw_connection(path: &std::path::Path) -> (Db, Connection) {
+    let db = Db::open(path, DbConfig::default()).await.unwrap();
+    let connection = db.connect().await.unwrap();
+    (db, connection)
 }
 
-fn sqlite_event_schema_columns(path: &std::path::Path) -> Vec<(String, String, String)> {
-    let connection = rusqlite::Connection::open(path).unwrap();
-    let mut statement = connection
-        .prepare("SELECT kind, schema, payload_schema FROM event_records ORDER BY sequence")
+async fn sqlite_entry_json(path: &std::path::Path) -> Vec<String> {
+    let (_db, connection) = raw_connection(path).await;
+    let mut rows = connection
+        .query(
+            "SELECT entry_json FROM session_entries ORDER BY created_at_ms",
+            (),
+        )
+        .await
         .unwrap();
-    statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        values.push(row.get::<String>(0).unwrap());
+    }
+    values
+}
+
+async fn sqlite_event_schema_columns(path: &std::path::Path) -> Vec<(String, String, String)> {
+    let (_db, connection) = raw_connection(path).await;
+    let mut rows = connection
+        .query(
+            "SELECT kind, schema, payload_schema FROM event_records ORDER BY sequence",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        values.push((
+            row.get::<String>(0).unwrap(),
+            row.get::<String>(1).unwrap(),
+            row.get::<String>(2).unwrap(),
+        ));
+    }
+    values
 }

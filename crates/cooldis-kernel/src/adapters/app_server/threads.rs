@@ -355,6 +355,7 @@ impl CooldisAppServer {
         record: &ThreadLifecycleRecord,
     ) -> CooldisResult<(String, BTreeMap<String, AppServerTurnState>)> {
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| CooldisError::History(err.to_string()))?;
         let context = store
             .build_context(&record.coordinates)
@@ -1747,6 +1748,7 @@ impl CapsuleBindingRuntimeFactory {
         }
         let event_store: Arc<dyn RuntimeStore> = Arc::new(
             SqliteSessionStore::open(session_store_path)
+                .await
                 .map_err(|err| CooldisError::History(err.to_string()))?,
         );
         Ok(Some(ToolUniverseSearchSurface::new_with_runtime(

@@ -594,7 +594,8 @@ async fn inspect_manifest_events(
     expect_alias: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id)?;
-    let session_store = SqliteSessionStore::open(root.join("state/session_history.sqlite3"))?;
+    let session_store =
+        SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
     let compile_events = events
@@ -642,7 +643,8 @@ async fn inspect_researcher_bind_receipt(
     thread_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id)?;
-    let session_store = SqliteSessionStore::open(root.join("state/session_history.sqlite3"))?;
+    let session_store =
+        SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
     let bind = events
@@ -784,7 +786,8 @@ async fn inspect_history(
     thread_id: &str,
 ) -> Result<SmokeInspection, Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id)?;
-    let session_store = SqliteSessionStore::open(root.join("state/session_history.sqlite3"))?;
+    let session_store =
+        SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
     let session_context = session_store.build_context(&lifecycle.coordinates).await?;
     let transcript = session_context
         .messages
@@ -1446,7 +1449,7 @@ async fn run_researcher_exa_bind_variant(
     inspect_manifest_events(&variant_root, &thread_id, &record.manifest_hash, 1, true).await?;
     let lifecycle = lifecycle_record(&variant_root, &thread_id)?;
     let session_store =
-        SqliteSessionStore::open(variant_root.join("state/session_history.sqlite3"))?;
+        SqliteSessionStore::open(variant_root.join("state/session_history.sqlite3")).await?;
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
     let bind = events

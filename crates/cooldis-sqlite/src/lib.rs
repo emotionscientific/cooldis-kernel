@@ -21,7 +21,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use turso::{params, Connection, Row, Rows, Statement, Value};
+pub use turso::{
+    params, transaction::TransactionBehavior, Connection, IntoParams, Row, Rows, Statement, Value,
+};
 
 /// Errors surfaced by the engine-owner layer.
 ///
@@ -62,11 +64,10 @@ pub struct DbConfig {
     pub foreign_keys: bool,
     pub busy_timeout: Duration,
     /// Applied per connection with `PRAGMA query_only`. ADVISORY, not
-    /// enforced: Turso 0.6.1 has no read-only open flag, and a caller can
-    /// flip the pragma back on a connection it holds. This catches
+    /// enforced: Turso 0.7.0-pre.18 has no local read-only open flag, and a
+    /// caller can flip the pragma back on a connection it holds. This catches
     /// accidental writes (they error), which is the contract our read-only
-    /// paths need today; true enforcement is re-evaluated at the wave-2
-    /// engine upgrade (EMO-413).
+    /// paths need today.
     pub read_only: bool,
 }
 

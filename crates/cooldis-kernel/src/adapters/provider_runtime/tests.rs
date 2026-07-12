@@ -3404,7 +3404,7 @@ async fn checkpoint_resume_after_store_reopen_replays_canonical_context() {
         let client = Arc::new(RecordingClient::with_responses(vec![response_text(
             "first reply",
         )]));
-        let store = Arc::new(SqliteSessionStore::open(&path).unwrap());
+        let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
         let host = RuntimeHost::with_session_store(factory(client), store);
         let thread = host
             .start_thread(coordinates.clone(), ThreadTopology::root())
@@ -3434,7 +3434,7 @@ async fn checkpoint_resume_after_store_reopen_replays_canonical_context() {
     let client = Arc::new(RecordingClient::with_responses(vec![response_text(
         "second reply",
     )]));
-    let store = Arc::new(SqliteSessionStore::open(&path).unwrap());
+    let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
     let host = RuntimeHost::with_session_store(factory(Arc::clone(&client)), store);
     let resumed = host
         .resume_thread_from_checkpoint(checkpoint.clone())
@@ -3473,7 +3473,7 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
         let client = Arc::new(RecordingClient::with_responses(vec![response_text(
             "first reply",
         )]));
-        let store = Arc::new(SqliteSessionStore::open(&path).unwrap());
+        let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
         let host = RuntimeHost::with_session_store(factory(client), store);
         let thread = host
             .start_thread(coordinates.clone(), ThreadTopology::root())
@@ -3490,7 +3490,7 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).unwrap();
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
     let stream_id = EventStreamId::for_thread(&coordinates);
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     let session_events = events

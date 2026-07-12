@@ -178,7 +178,9 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let control_events = session_store
         .read_events(&crate::control_stream_id(&lifecycle.coordinates), None)
         .await
@@ -1913,7 +1915,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
         Some(cwd_string(&workspace.join("override-workspace")).as_str())
     );
 
-    let session_store = SqliteSessionStore::open(session_path).unwrap();
+    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 3);
@@ -2071,7 +2073,7 @@ allow = ["default_cwd"]
         "fixture"
     );
 
-    let session_store = SqliteSessionStore::open(session_path).unwrap();
+    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
@@ -2478,7 +2480,9 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
@@ -3695,7 +3699,7 @@ allow = ["streaming"]
         record.manifest_hash
     );
 
-    let session_store = crate::SqliteSessionStore::open(session_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 3);
@@ -4106,7 +4110,9 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .get_thread_lifecycle(listed_thread_id)
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     session_store
         .append_events(
             &crate::EventStreamId::new(format!("control:{}", lifecycle.coordinates.thread_id)),
@@ -4779,7 +4785,9 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .unwrap()
         .unwrap();
     let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let bulk_events = (0..501)
         .map(|idx| {
             crate::NewEventRecord::witnessed(
@@ -5165,7 +5173,7 @@ streaming = false
         .as_deref(),
         Some(cwd_string(&workspace.join("outside-manifest")).as_str())
     );
-    let session_store = SqliteSessionStore::open(session_path).unwrap();
+    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
@@ -5718,7 +5726,7 @@ streaming = false
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(session_path).unwrap();
+    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
@@ -6006,7 +6014,9 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
         .get_thread_lifecycle(source_id)
         .unwrap()
         .unwrap();
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let _source_entry = session_store
         .append(
             &source_lifecycle.coordinates,
@@ -6139,7 +6149,9 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         .get_thread_lifecycle(source_id)
         .unwrap()
         .unwrap();
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let source_entry = session_store
         .append(
             &source_lifecycle.coordinates,
@@ -6583,7 +6595,9 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
@@ -6642,7 +6656,9 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
         .unwrap()
         .expect("load-all default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
@@ -6746,7 +6762,9 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
         .unwrap()
         .expect("empty registry default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path).unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);

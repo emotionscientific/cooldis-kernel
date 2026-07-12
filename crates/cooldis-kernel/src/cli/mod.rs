@@ -1862,6 +1862,7 @@ async fn start_clock_route(
     tasks: &mut Vec<JoinHandle<()>>,
 ) -> CooldisResult<()> {
     let store = SqliteSessionStore::open(server.session_store_path())
+        .await
         .map_err(|err| CooldisError::History(err.to_string()))?;
     let clock =
         CooldisDaemonClockRoute::new(route.id.clone(), store, sink, Arc::new(SystemDaemonClock));
@@ -2107,7 +2108,7 @@ async fn coupling_run(args: Vec<OsString>) -> CooldisResult<()> {
     }
     let operation_registry_root =
         resolve_replay_artifact(artifact, options.registry_root.clone(), &mut coupling_set).await?;
-    let events = load_replay_recorded_events(&options)?;
+    let events = load_replay_recorded_events(&options).await?;
     let replayed_event_count = events.len();
     let receipt = replay_coupling_events(&coupling_set, events, operation_registry_root).await?;
     let report = CouplingReplayReport::from_receipt(replayed_event_count, &coupling_set, receipt);
@@ -2317,15 +2318,16 @@ fn validate_replay_coupling_operation(
     Ok(())
 }
 
-fn load_replay_recorded_events(options: &CouplingRunArgs) -> CooldisResult<Vec<EventRecord>> {
+async fn load_replay_recorded_events(options: &CouplingRunArgs) -> CooldisResult<Vec<EventRecord>> {
     match (&options.journal, &options.thread_id, &options.export_bundle) {
         (Some(_), _, Some(_)) => Err(usage_error(
             "coupling run --replay accepts either --journal/--thread-id or --export, not both",
         )),
         (Some(journal), Some(thread_id), None) => {
             let store = SqliteSessionStore::open_read_only(journal)
+                .await
                 .map_err(|err| usage_error(format!("failed to open journal read-only: {err}")))?;
-            let events = store.list_thread_events(*thread_id).map_err(|err| {
+            let events = store.list_thread_events(*thread_id).await.map_err(|err| {
                 usage_error(format!(
                     "failed to read recorded events for thread {thread_id}: {err}"
                 ))
@@ -7143,6 +7145,7 @@ async fn manifest_receipt_event_ids(
         .map_err(|err| usage_error(format!("failed to read thread lifecycle: {err}")))?
         .ok_or_else(|| usage_error(format!("thread lifecycle was not found: {thread_id}")))?;
     let session_store = SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+        .await
         .map_err(|err| usage_error(format!("failed to open app-server session store: {err}")))?;
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store

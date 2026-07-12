@@ -1546,7 +1546,9 @@ async fn control_events_for(
     session_store_path: &Path,
     coordinates: &ThreadCoordinates,
 ) -> Vec<crate::EventRecord> {
-    let session_store = crate::SqliteSessionStore::open(session_store_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(session_store_path)
+        .await
+        .unwrap();
     session_store
         .read_events(&control_stream_id(coordinates), None)
         .await
@@ -1557,7 +1559,9 @@ async fn thread_events_for(
     session_store_path: &Path,
     coordinates: &ThreadCoordinates,
 ) -> Vec<crate::EventRecord> {
-    let session_store = crate::SqliteSessionStore::open(session_store_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(session_store_path)
+        .await
+        .unwrap();
     session_store
         .read_events(&crate::EventStreamId::for_thread(coordinates), None)
         .await
@@ -1890,7 +1894,9 @@ async fn start_clock_thread_with_mandate(
         .await
         .unwrap();
     let coordinates = handle.context().coordinates.clone();
-    let store = SqliteSessionStore::open(server.session_store_path()).unwrap();
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .unwrap();
     let receipt = start_mandate(
         &store,
         &coordinates,
@@ -2907,7 +2913,7 @@ async fn append_raw_legacy_fork_claim(
     ingress_envelope_id: &str,
     settled: bool,
 ) -> EventRecord {
-    let store = SqliteSessionStore::open(session_store_path).unwrap();
+    let store = SqliteSessionStore::open(session_store_path).await.unwrap();
     let control_stream = control_stream_id(coordinates);
     let ingress_witness_event_id = EventRecordId::new();
     let admission_event_id = EventRecordId::new();
@@ -4241,7 +4247,9 @@ async fn concurrent_lazy_load_of_cyclic_topology_fails_closed_without_lock_deadl
         )),
     )
     .await;
-    let store = SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap()).unwrap();
+    let store = SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap())
+        .await
+        .unwrap();
     let first = ThreadCoordinates {
         tenant_id: bridge.tenant_id.clone(),
         user_id: bridge.user_id.clone(),
@@ -5566,7 +5574,9 @@ async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
     );
     wait_for_user_text(&bridge, &child_coordinates, "fork me").await;
 
-    let session_store = crate::SqliteSessionStore::open(&session_store_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(&session_store_path)
+        .await
+        .unwrap();
     let child_handle = bridge
         .supervisor
         .get_thread_at(&child_coordinates)
@@ -5666,7 +5676,9 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         .next()
         .cloned()
         .expect("queue admission should create a target thread");
-    let session_store = crate::SqliteSessionStore::open(&session_store_path).unwrap();
+    let session_store = crate::SqliteSessionStore::open(&session_store_path)
+        .await
+        .unwrap();
     let control_stream = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
     let thread_stream = crate::EventStreamId::for_thread(&coordinates);
     let control_events = session_store

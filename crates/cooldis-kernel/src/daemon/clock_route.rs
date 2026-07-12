@@ -108,6 +108,7 @@ impl CooldisDaemonClockRoute {
         for coordinates in self
             .store
             .list_control_stream_coordinates()
+            .await
             .map_err(|err| CooldisError::History(err.to_string()))?
         {
             let active = list_active_mandates(&self.store, &coordinates).await?;
@@ -663,7 +664,9 @@ mod tests {
         let root = std::env::temp_dir()
             .join("cooldis-clock-route-tests")
             .join(uuid::Uuid::now_v7().to_string());
-        let store = SqliteSessionStore::open(root.join("history.sqlite3")).unwrap();
+        let store = SqliteSessionStore::open(root.join("history.sqlite3"))
+            .await
+            .unwrap();
         let coordinates = coordinates();
         let mandate = crate::NewEventRecord {
             id: EventRecordId::new(),

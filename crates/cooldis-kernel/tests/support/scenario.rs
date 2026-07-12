@@ -703,6 +703,7 @@ impl ScenarioHarness {
             Arc::clone(&runtime_store),
         );
         let raw_store = super::kernel_test::SqliteSessionStore::open(server.session_store_path())
+            .await
             .expect("open scenario store for durable probes");
         let bridge = CooldisDaemonIoBridge::from_app_server(&server);
         let route = scenario_route();

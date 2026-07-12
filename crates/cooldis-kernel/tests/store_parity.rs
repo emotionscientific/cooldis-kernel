@@ -12,7 +12,7 @@ async fn in_memory_and_sqlite_session_stores_have_observable_parity() {
     let repeated = session_store_parity_transcript(&InMemorySessionStore::new())
         .await
         .unwrap();
-    let sqlite = session_store_parity_transcript(&SqliteSessionStore::in_memory().unwrap())
+    let sqlite = session_store_parity_transcript(&SqliteSessionStore::in_memory().await.unwrap())
         .await
         .unwrap();
 

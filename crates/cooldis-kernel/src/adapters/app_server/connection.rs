@@ -1724,6 +1724,7 @@ impl CooldisAppServer {
         let stream_selector = params.stream.as_deref().unwrap_or("thread");
         let stream_id = thread_events_stream_id(&lifecycle.coordinates, stream_selector)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let mut events = if let Some(stream_cursor) = params.stream_cursor.as_ref() {
             store
@@ -1772,6 +1773,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let Some((bind_event_id, receipt)) =
             crate::active_manifest_bind_receipt(&store, &lifecycle.coordinates)
@@ -1808,6 +1810,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let mut pending = crate::list_pending_tool_call_suspensions(&store, &lifecycle.coordinates)
             .await
@@ -1828,6 +1831,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let control_stream =
             EventStreamId::new(format!("control:{}", lifecycle.coordinates.thread_id));
@@ -1907,6 +1911,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let control_stream =
             EventStreamId::new(format!("control:{}", lifecycle.coordinates.thread_id));
@@ -1985,6 +1990,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let receipt = crate::start_mandate(
             &store,
@@ -2018,6 +2024,7 @@ impl CooldisAppServer {
         let mandate_event_id = crate::parse_mandate_event_id(&params.mandate_event_id)
             .map_err(mandate_jsonrpc_error)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let receipt = crate::revoke_mandate(&store, &lifecycle.coordinates, mandate_event_id)
             .await
@@ -2037,6 +2044,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let data = crate::list_active_mandates(&store, &lifecycle.coordinates)
             .await
@@ -2072,6 +2080,7 @@ impl CooldisAppServer {
             .clamp(1, 10_000);
         let redact = params.redact.unwrap_or(true);
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
         let mut streams = Vec::new();
         let mut receipts = Vec::new();

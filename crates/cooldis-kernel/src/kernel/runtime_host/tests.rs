@@ -2484,7 +2484,9 @@ async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider
     let root = std::env::temp_dir()
         .join("cooldis-runtime-host-tests")
         .join(uuid::Uuid::now_v7().to_string());
-    let store = SqliteSessionStore::open(root.join("history.sqlite3")).unwrap();
+    let store = SqliteSessionStore::open(root.join("history.sqlite3"))
+        .await
+        .unwrap();
     let mut config = CanonicalProviderRuntimeConfig::new(
         ProviderApi::Other("local_offline".to_string()),
         "local_offline",

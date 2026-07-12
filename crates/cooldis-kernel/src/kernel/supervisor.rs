@@ -212,6 +212,7 @@ impl CooldisSupervisor {
             Some(store) => store,
             None => Arc::new(
                 SqliteSessionStore::open(context.session_history_path())
+                    .await
                     .map_err(|err| CooldisError::History(err.to_string()))?,
             ) as Arc<dyn RuntimeStore>,
         };

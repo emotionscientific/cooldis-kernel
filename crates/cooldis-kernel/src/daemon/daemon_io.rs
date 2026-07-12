@@ -258,6 +258,19 @@ impl DaemonEgressState {
         })
     }
 
+    async fn run_blocking<T>(
+        &self,
+        operation: impl FnOnce(Self) -> IoResult<T> + Send + 'static,
+    ) -> IoResult<T>
+    where
+        T: Send + 'static,
+    {
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || operation(state))
+            .await
+            .map_err(|err| IoError::Queue(format!("join egress state operation: {err}")))?
+    }
+
     fn bind_thread(
         &self,
         route_id: &str,
@@ -686,19 +699,25 @@ impl DaemonEgressState {
         ingress_ownership_streams_from(&connection, keys)
     }
 
-    fn lock_ingress_claim_admission(&self) -> IoResult<IngressClaimAdmissionLock> {
-        if sqlite_path_from_dsn(&self.dsn)? == Path::new(":memory:") {
-            return Err(IoError::Queue(
-                "durable ingress ownership requires a file-backed sqlite state store".to_string(),
-            ));
-        }
-        let connection = open_egress_state_connection(&self.dsn)?;
-        connection
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(egress_state_error)?;
-        Ok(IngressClaimAdmissionLock {
-            connection: Some(connection),
+    async fn lock_ingress_claim_admission(&self) -> IoResult<IngressClaimAdmissionLock> {
+        let dsn = Arc::clone(&self.dsn);
+        tokio::task::spawn_blocking(move || {
+            if sqlite_path_from_dsn(&dsn)? == Path::new(":memory:") {
+                return Err(IoError::Queue(
+                    "durable ingress ownership requires a file-backed sqlite state store"
+                        .to_string(),
+                ));
+            }
+            let connection = open_egress_state_connection(&dsn)?;
+            connection
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(egress_state_error)?;
+            Ok(IngressClaimAdmissionLock {
+                connection: Some(connection),
+            })
         })
+        .await
+        .map_err(|err| IoError::Queue(format!("join ingress claim admission lock: {err}")))?
     }
 
     fn lock_connection(&self) -> IoResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
@@ -1668,7 +1687,9 @@ impl CooldisDaemonIoBridge {
         receipt.thread_id = Some(coordinates.thread_id.to_string());
 
         let timer = clock_tick_payload(envelope)?;
-        let store = SqliteSessionStore::open(store_path).map_err(cooldis_history_error)?;
+        let store = SqliteSessionStore::open(store_path)
+            .await
+            .map_err(cooldis_history_error)?;
         let mandate_is_live = list_active_mandates(&store, &coordinates)
             .await
             .map_err(cooldis_bridge_error)?
@@ -1761,11 +1782,13 @@ impl CooldisDaemonIoBridge {
         Ok(target)
     }
 
-    fn ingress_event_store(&self) -> IoResult<SqliteSessionStore> {
+    async fn ingress_event_store(&self) -> IoResult<SqliteSessionStore> {
         let store_path = self.session_store_path.as_ref().ok_or_else(|| {
             IoError::Bridge("durable ingress outcomes require a daemon session store".to_string())
         })?;
-        SqliteSessionStore::open(store_path).map_err(cooldis_history_error)
+        SqliteSessionStore::open(store_path)
+            .await
+            .map_err(cooldis_history_error)
     }
 
     async fn resolved_target_coordinates(
@@ -1814,7 +1837,7 @@ impl CooldisDaemonIoBridge {
         let Some(mut coordinates) = self.resolved_target_coordinates(target).await? else {
             return Ok(IngressOutcomeState::Missing);
         };
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let mut resolved_thread = true;
         loop {
             let events = store
@@ -1848,7 +1871,7 @@ impl CooldisDaemonIoBridge {
         if streams.is_empty() {
             return Ok(IngressOutcomeState::Missing);
         }
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let mut events = Vec::new();
         for stream in streams {
             events.extend(
@@ -1859,6 +1882,30 @@ impl CooldisDaemonIoBridge {
             );
         }
         ingress_outcome_fold(&events, ingress_envelope_ids)
+    }
+
+    async fn await_ingress_outcome_on_streams(
+        &self,
+        streams: &[EventStreamId],
+        ingress_envelope_ids: &[String],
+    ) -> IoResult<IngressOutcomeState> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let state = self
+                    .ingress_outcome_on_streams(streams, ingress_envelope_ids)
+                    .await?;
+                if !matches!(state, IngressOutcomeState::Missing) {
+                    return Ok(state);
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            IoError::Bridge(
+                "timed out waiting for superseding durable ingress ownership".to_string(),
+            )
+        })?
     }
 
     async fn ingress_route_state(
@@ -1897,7 +1944,13 @@ impl CooldisDaemonIoBridge {
             }
             return Ok(None);
         };
-        let ownership_id = state.record_ingress_ownership(&keys, stream_id, attempt)?;
+        let owned_keys = keys.clone();
+        let owned_stream_id = stream_id.clone();
+        let ownership_id = state
+            .run_blocking(move |state| {
+                state.record_ingress_ownership(&owned_keys, &owned_stream_id, attempt)
+            })
+            .await?;
         Ok(Some(IngressOwnershipReservation {
             state,
             ownership_id,
@@ -1915,11 +1968,11 @@ impl CooldisDaemonIoBridge {
         intent: IngressOutcomeIntent,
         ownership: Option<&IngressOwnershipReservation>,
     ) -> IoResult<IngressClaimAppend> {
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let stream_id = control_stream_id(coordinates);
         let mut ownership_lock = match ownership {
             Some(ownership) => {
-                let lock = ownership.state.lock_ingress_claim_admission()?;
+                let lock = ownership.state.lock_ingress_claim_admission().await?;
                 let streams = lock.ownership_streams(&ownership.keys)?;
                 match self
                     .ingress_outcome_on_streams(&streams, ingress_envelope_ids)
@@ -1934,9 +1987,10 @@ impl CooldisDaemonIoBridge {
                 }
                 if !lock.reservation_is_current(ownership)? {
                     lock.commit()?;
-                    return Err(IoError::Bridge(
-                        "durable ingress ownership attempt was superseded before claim".to_string(),
-                    ));
+                    let state = self
+                        .await_ingress_outcome_on_streams(&streams, ingress_envelope_ids)
+                        .await?;
+                    return Ok(IngressClaimAppend::Existing(state));
                 }
                 lock.prune_to_reservation(ownership)?;
                 Some(lock)
@@ -2011,11 +2065,11 @@ impl CooldisDaemonIoBridge {
         intent: IngressOutcomeIntent,
         ownership: Option<&IngressOwnershipReservation>,
     ) -> IoResult<IngressClaimAppend> {
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let stream_id = control_stream_id(coordinates);
         let mut ownership_lock = match ownership {
             Some(ownership) => {
-                let lock = ownership.state.lock_ingress_claim_admission()?;
+                let lock = ownership.state.lock_ingress_claim_admission().await?;
                 let streams = lock.ownership_streams(&ownership.keys)?;
                 match self
                     .ingress_outcome_on_streams(&streams, ingress_envelope_ids)
@@ -2030,9 +2084,10 @@ impl CooldisDaemonIoBridge {
                 }
                 if !lock.reservation_is_current(ownership)? {
                     lock.commit()?;
-                    return Err(IoError::Bridge(
-                        "durable ingress ownership attempt was superseded before claim".to_string(),
-                    ));
+                    let state = self
+                        .await_ingress_outcome_on_streams(&streams, ingress_envelope_ids)
+                        .await?;
+                    return Ok(IngressClaimAppend::Existing(state));
                 }
                 lock.prune_to_reservation(ownership)?;
                 Some(lock)
@@ -2115,7 +2170,7 @@ impl CooldisDaemonIoBridge {
         evidence_event_id: Option<EventRecordId>,
         settled_by: IngressSettledBy,
     ) -> IoResult<EventRecord> {
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let stream_id = control_stream_id(coordinates);
         loop {
             let events = store
@@ -2172,7 +2227,7 @@ impl CooldisDaemonIoBridge {
         turn_id: &str,
         submission_mode: TurnSubmissionMode,
     ) -> IoResult<EventRecord> {
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let stream_id = EventStreamId::for_thread(coordinates);
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut next_sequence = EventSequence::new(1);
@@ -2328,7 +2383,7 @@ impl CooldisDaemonIoBridge {
                 .await
                 .map_err(cooldis_bridge_error);
         };
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let stream_id = control_stream_id(coordinates);
         loop {
             let events = store
@@ -2406,7 +2461,7 @@ impl CooldisDaemonIoBridge {
             admission_decided_record(coordinates.clone(), context).map_err(cooldis_bridge_error)?;
         let desired: AdmissionDecidedPayload = serde_json::from_value(record.payload.clone())
             .map_err(|err| IoError::Bridge(format!("decode admission decision payload: {err}")))?;
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let stream_id = control_stream_id(coordinates);
         loop {
             let events = store
@@ -2501,12 +2556,20 @@ impl CooldisDaemonIoBridge {
                         }
                         drop(threads);
                         if let Some((route_id, source_scope, state)) = &durable_binding {
-                            state.clear_ingress_thread_binding_if_matches(
-                                route_id,
-                                source_scope,
-                                &scope_key,
-                                coordinates.thread_id,
-                            )?;
+                            let route_id = route_id.clone();
+                            let source_scope = source_scope.clone();
+                            let scope_key = scope_key.clone();
+                            let thread_id = coordinates.thread_id;
+                            state
+                                .run_blocking(move |state| {
+                                    state.clear_ingress_thread_binding_if_matches(
+                                        &route_id,
+                                        &source_scope,
+                                        &scope_key,
+                                        thread_id,
+                                    )
+                                })
+                                .await?;
                         }
                         reserved_coordinates = None;
                     }
@@ -2561,12 +2624,19 @@ impl CooldisDaemonIoBridge {
                     barrier.wait().await;
                 }
             }
-            let selected = match state.claim_ingress_thread_binding(
-                &route_id,
-                &source_scope,
-                &target.address.scope_key(),
-                reserved_coordinates.as_ref().unwrap_or(&candidate),
-            ) {
+            let scope_key = target.address.scope_key();
+            let requested_coordinates = reserved_coordinates.as_ref().unwrap_or(&candidate).clone();
+            let selected = match state
+                .run_blocking(move |state| {
+                    state.claim_ingress_thread_binding(
+                        &route_id,
+                        &source_scope,
+                        &scope_key,
+                        &requested_coordinates,
+                    )
+                })
+                .await
+            {
                 Ok(selected) => selected,
                 Err(err) => return Err(err),
             };
@@ -3049,7 +3119,7 @@ impl CooldisDaemonIoBridge {
         #[cfg(test)]
         self.fork_claim_scan_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let store = self.ingress_event_store()?;
+        let store = self.ingress_event_store().await?;
         let events = store
             .read_events(&control_stream_id(parent_coordinates), None)
             .await
@@ -3201,7 +3271,13 @@ impl CooldisDaemonIoBridge {
         let key = source_scope(&envelope.source.protocol, &route_id);
         let state = self.egress_states.read().await.get(&key).cloned();
         if let Some(state) = state {
-            state.bind_thread(&route_id, &key, &target.address.scope_key(), coordinates)?;
+            let scope_key = target.address.scope_key();
+            let coordinates = coordinates.clone();
+            state
+                .run_blocking(move |state| {
+                    state.bind_thread(&route_id, &key, &scope_key, &coordinates)
+                })
+                .await?;
         }
         Ok(())
     }
@@ -3216,12 +3292,13 @@ impl CooldisDaemonIoBridge {
         let key = source_scope(&envelope.source.protocol, &route_id);
         let state = self.egress_states.read().await.get(&key).cloned();
         if let Some(state) = state {
-            state.rebind_ingress_thread(
-                &route_id,
-                &key,
-                &target.address.scope_key(),
-                coordinates,
-            )?;
+            let scope_key = target.address.scope_key();
+            let coordinates = coordinates.clone();
+            state
+                .run_blocking(move |state| {
+                    state.rebind_ingress_thread(&route_id, &key, &scope_key, &coordinates)
+                })
+                .await?;
         }
         Ok(())
     }
@@ -4149,7 +4226,7 @@ impl CooldisDaemonIoBridge {
             IngressOutcomeIntent::Fork { .. } => {
                 let scope_lock = self.thread_scope_lock(&target.address.scope_key()).await;
                 let _scope_guard = scope_lock.lock().await;
-                let store = self.ingress_event_store()?;
+                let store = self.ingress_event_store().await?;
                 let events = store
                     .read_events(&control_stream_id(&claim.coordinates), None)
                     .await
