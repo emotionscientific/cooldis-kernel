@@ -1074,11 +1074,11 @@ impl CooldisAppServer {
                 "featuredPluginIds": [],
             })),
             "hooks/list" => Ok(json!({ "data": [], "witnessing": true })),
-            "mcpServerStatus/list" => self.mcp_server_status_list(),
-            "mcpSource/list" => self.mcp_source_list(),
+            "mcpServerStatus/list" => self.mcp_server_status_list().await,
+            "mcpSource/list" => self.mcp_source_list().await,
             "mcpSource/read" => {
                 let params: McpSourceReadParams = parse_params(params)?;
-                self.mcp_source_read(params)
+                self.mcp_source_read(params).await
             }
             "mcpSource/upsert" => {
                 let params: McpSourceUpsertParams = parse_params(params)?;
@@ -1090,7 +1090,7 @@ impl CooldisAppServer {
             }
             "mcpSource/delete" => {
                 let params: McpSourceReadParams = parse_params(params)?;
-                self.mcp_source_delete(params)
+                self.mcp_source_delete(params).await
             }
             "mcpSource/testTool" => {
                 let params: McpSourceTestToolParams = parse_params(params)?;
@@ -1098,7 +1098,7 @@ impl CooldisAppServer {
             }
             "mcpSource/manifestPatch" => {
                 let params: McpSourceManifestPatchParams = parse_params(params)?;
-                self.mcp_source_manifest_patch(params)
+                self.mcp_source_manifest_patch(params).await
             }
             "fs/readFile" => {
                 let params: FsReadFileParams = parse_params(params)?;
@@ -1152,15 +1152,17 @@ impl CooldisAppServer {
         }
     }
 
-    pub(super) fn mcp_server_status_list(&self) -> Result<Value, JsonRpcErrorError> {
-        self.mcp_source_list()
+    pub(super) async fn mcp_server_status_list(&self) -> Result<Value, JsonRpcErrorError> {
+        self.mcp_source_list().await
     }
 
-    pub(super) fn mcp_source_list(&self) -> Result<Value, JsonRpcErrorError> {
-        let registry = SqliteMcpSourceRegistry::open(&self.inner.metadata_store_path)
+    pub(super) async fn mcp_source_list(&self) -> Result<Value, JsonRpcErrorError> {
+        let registry = SqliteMcpSourceRegistry::open_async(&self.inner.metadata_store_path)
+            .await
             .map_err(internal_error)?;
         let data = registry
-            .list_sources()
+            .list_sources_async()
+            .await
             .map_err(internal_error)?
             .into_iter()
             .map(|record| record.redacted_json())
@@ -1168,13 +1170,14 @@ impl CooldisAppServer {
         Ok(json!({ "data": data, "nextCursor": null }))
     }
 
-    pub(super) fn mcp_source_read(
+    pub(super) async fn mcp_source_read(
         &self,
         params: McpSourceReadParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let registry = self.mcp_source_registry()?;
+        let registry = self.mcp_source_registry().await?;
         let record = registry
-            .get_source(&params.name)
+            .get_source_async(&params.name)
+            .await
             .map_err(mcp_source_param_error)?
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         Ok(json!({ "source": record.redacted_json() }))
@@ -1227,8 +1230,10 @@ impl CooldisAppServer {
         }
 
         let record = self
-            .mcp_source_registry()?
-            .upsert_source(config)
+            .mcp_source_registry()
+            .await?
+            .upsert_source_async(config)
+            .await
             .map_err(internal_error)?;
         Ok(json!({ "source": record.redacted_json() }))
     }
@@ -1237,9 +1242,10 @@ impl CooldisAppServer {
         &self,
         params: McpSourceReadParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let registry = self.mcp_source_registry()?;
+        let registry = self.mcp_source_registry().await?;
         let record = registry
-            .get_source(&params.name)
+            .get_source_async(&params.name)
+            .await
             .map_err(mcp_source_param_error)?
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = McpRemoteToolProvider::connect(
@@ -1250,18 +1256,21 @@ impl CooldisAppServer {
         .map_err(internal_error)?;
         let tools = provider.tool_definitions().await;
         let record = registry
-            .update_discovered_tools(&params.name, tools)
+            .update_discovered_tools_async(&params.name, tools)
+            .await
             .map_err(internal_error)?;
         Ok(json!({ "source": record.redacted_json() }))
     }
 
-    pub(super) fn mcp_source_delete(
+    pub(super) async fn mcp_source_delete(
         &self,
         params: McpSourceReadParams,
     ) -> Result<Value, JsonRpcErrorError> {
         let deleted = self
-            .mcp_source_registry()?
-            .delete_source(&params.name)
+            .mcp_source_registry()
+            .await?
+            .delete_source_async(&params.name)
+            .await
             .map_err(mcp_source_param_error)?;
         Ok(json!({ "deleted": deleted }))
     }
@@ -1270,9 +1279,10 @@ impl CooldisAppServer {
         &self,
         params: McpSourceTestToolParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let registry = self.mcp_source_registry()?;
+        let registry = self.mcp_source_registry().await?;
         let record = registry
-            .get_source(&params.name)
+            .get_source_async(&params.name)
+            .await
             .map_err(mcp_source_param_error)?
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = McpRemoteToolProvider::connect(
@@ -1317,13 +1327,14 @@ impl CooldisAppServer {
         }
     }
 
-    pub(super) fn mcp_source_manifest_patch(
+    pub(super) async fn mcp_source_manifest_patch(
         &self,
         params: McpSourceManifestPatchParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let registry = self.mcp_source_registry()?;
+        let registry = self.mcp_source_registry().await?;
         let record = registry
-            .get_source(&params.name)
+            .get_source_async(&params.name)
+            .await
             .map_err(mcp_source_param_error)?
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let import_id = match params.import_id {
@@ -1401,8 +1412,10 @@ impl CooldisAppServer {
         Ok(diagnostics)
     }
 
-    fn mcp_source_registry(&self) -> Result<SqliteMcpSourceRegistry, JsonRpcErrorError> {
-        SqliteMcpSourceRegistry::open(&self.inner.metadata_store_path).map_err(internal_error)
+    async fn mcp_source_registry(&self) -> Result<SqliteMcpSourceRegistry, JsonRpcErrorError> {
+        SqliteMcpSourceRegistry::open_async(&self.inner.metadata_store_path)
+            .await
+            .map_err(internal_error)
     }
 
     fn mcp_secret_store(&self) -> Result<SqliteSecretStore, JsonRpcErrorError> {
@@ -2241,19 +2254,24 @@ impl CooldisAppServer {
         )
     }
 
-    pub(super) fn configured_mcp_server_refs(&self) -> CooldisResult<BTreeSet<String>> {
-        let registry = SqliteMcpSourceRegistry::open(&self.inner.metadata_store_path)
+    pub(super) async fn configured_mcp_server_refs(&self) -> CooldisResult<BTreeSet<String>> {
+        let registry = SqliteMcpSourceRegistry::open_async(&self.inner.metadata_store_path)
+            .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
         Ok(registry
-            .list_sources()
+            .list_sources_async()
+            .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?
             .into_iter()
             .map(|source| format!("mcp://{}", source.name))
             .collect())
     }
 
-    pub(super) fn tool_universe_discoverer(&self) -> CooldisResult<McpToolUniverseDiscoverer> {
-        let registry = SqliteMcpSourceRegistry::open(&self.inner.metadata_store_path)
+    pub(super) async fn tool_universe_discoverer(
+        &self,
+    ) -> CooldisResult<McpToolUniverseDiscoverer> {
+        let registry = SqliteMcpSourceRegistry::open_async(&self.inner.metadata_store_path)
+            .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
         let secret_store = SqliteSecretStore::open(&self.inner.user_metadata_store_path)
             .map_err(secret_store_error)?;

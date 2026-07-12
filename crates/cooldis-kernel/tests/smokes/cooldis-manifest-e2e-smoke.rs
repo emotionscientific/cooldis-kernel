@@ -1426,14 +1426,17 @@ async fn run_researcher_exa_bind_variant(
         SecretSourceKind::Local,
         Some("researcher-manifest-live".to_string()),
     )?;
-    SqliteMcpSourceRegistry::open(&metadata_path)?.upsert_source(
-        McpRemoteServerConfig::new(
-            "search",
-            McpRemoteTransport::StreamableHttp,
-            mcp_fixture.url().to_string(),
-        )?
-        .with_bearer_secret("EXAMPLE_API_KEY")?,
-    )?;
+    SqliteMcpSourceRegistry::open_async(&metadata_path)
+        .await?
+        .upsert_source_async(
+            McpRemoteServerConfig::new(
+                "search",
+                McpRemoteTransport::StreamableHttp,
+                mcp_fixture.url().to_string(),
+            )?
+            .with_bearer_secret("EXAMPLE_API_KEY")?,
+        )
+        .await?;
     let thread_start = app
         .local_json_rpc_request(
             "thread/start",

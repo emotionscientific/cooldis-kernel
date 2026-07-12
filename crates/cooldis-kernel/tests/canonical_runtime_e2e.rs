@@ -98,7 +98,7 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
         vec!["first prompt", "first reply", "second prompt"]
     );
 
-    let stored_payloads = sqlite_entry_payloads(&db_path);
+    let stored_payloads = sqlite_entry_payloads(&db_path).await;
     assert_eq!(stored_payloads.len(), 4);
     assert!(
         stored_payloads
@@ -175,7 +175,7 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
         "run pwd"
     );
 
-    let stored_payloads = sqlite_entry_payloads(&db_path);
+    let stored_payloads = sqlite_entry_payloads(&db_path).await;
     assert!(
         stored_payloads
             .iter()
@@ -264,7 +264,7 @@ async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
         "second chat prompt"
     );
 
-    let stored_payloads = sqlite_entry_payloads(&db_path);
+    let stored_payloads = sqlite_entry_payloads(&db_path).await;
     assert_eq!(stored_payloads.len(), 4);
     assert!(stored_payloads.iter().all(|payload| {
         !payload.contains(r#""choices""#) && !payload.contains(r#""tool_choice""#)
@@ -494,7 +494,7 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
     );
     assert_eq!(messages[3]["content"][0]["text"], "continue");
 
-    let stored_payloads = sqlite_entry_payloads(&db_path);
+    let stored_payloads = sqlite_entry_payloads(&db_path).await;
     assert!(stored_payloads.iter().all(|payload| {
         !payload.contains(r#""type":"tool_use""#) && !payload.contains(r#""messages""#)
     }));
@@ -537,7 +537,7 @@ async fn openai_responses_http_sse_runtime_stores_canonical_stream_without_raw_p
         )
     }));
     assert_streamed_tool_assistant(assistant, "call_1|fc_1");
-    assert_raw_stream_payloads_not_stored(&db_path);
+    assert_raw_stream_payloads_not_stored(&db_path).await;
 
     let requests = server.requests(1).await;
     assert_eq!(requests[0].body["stream"], true);
@@ -576,7 +576,7 @@ async fn chat_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
         matches!(event, RuntimeEventKind::TextDelta { text } if text == "chat-streamed")
     }));
     assert_streamed_tool_assistant(assistant, "call_1");
-    assert_raw_stream_payloads_not_stored(&db_path);
+    assert_raw_stream_payloads_not_stored(&db_path).await;
 
     let requests = server.requests(1).await;
     assert_eq!(requests[0].body["stream"], true);
@@ -615,7 +615,7 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
         matches!(event, RuntimeEventKind::TextDelta { text } if text == "anthropic-streamed")
     }));
     assert_streamed_tool_assistant(assistant, "toolu_1");
-    assert_raw_stream_payloads_not_stored(&db_path);
+    assert_raw_stream_payloads_not_stored(&db_path).await;
 
     let requests = server.requests(1).await;
     assert_eq!(
@@ -862,8 +862,8 @@ fn assert_streamed_tool_assistant(assistant: CanonicalMessage, expected_tool_id:
     }
 }
 
-fn assert_raw_stream_payloads_not_stored(db_path: &Path) {
-    let stored_payloads = sqlite_entry_payloads(db_path);
+async fn assert_raw_stream_payloads_not_stored(db_path: &Path) {
+    let stored_payloads = sqlite_entry_payloads(db_path).await;
     assert!(
         stored_payloads
             .iter()
@@ -957,16 +957,23 @@ fn anthropic_messages_sse() -> &'static str {
     )
 }
 
-fn sqlite_entry_payloads(path: &Path) -> Vec<String> {
-    let connection = rusqlite::Connection::open(path).unwrap();
-    let mut statement = connection
-        .prepare("SELECT entry_json FROM session_entries ORDER BY created_at_ms")
+async fn sqlite_entry_payloads(path: &Path) -> Vec<String> {
+    let db = cooldis_sqlite::Db::open(path, cooldis_sqlite::DbConfig::default())
+        .await
         .unwrap();
-    statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    let connection = db.connect().await.unwrap();
+    let mut rows = connection
+        .query(
+            "SELECT entry_json FROM session_entries ORDER BY created_at_ms",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        entries.push(row.get::<String>(0).unwrap());
+    }
+    entries
         .into_iter()
         .filter(|entry| {
             let value: serde_json::Value = serde_json::from_str(entry).unwrap();

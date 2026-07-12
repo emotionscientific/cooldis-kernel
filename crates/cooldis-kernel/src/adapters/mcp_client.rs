@@ -5,7 +5,7 @@ use crate::{
     validate_secret_name,
 };
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
+use cooldis_sqlite::{Connection, Db, DbConfig, TransactionBehavior, block_on, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -210,11 +210,15 @@ impl McpRemoteSourceRecord {
 
 #[derive(Clone)]
 pub struct SqliteMcpSourceRegistry {
-    inner: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    inner: Db,
 }
 
 impl SqliteMcpSourceRegistry {
     pub fn open(path: impl AsRef<Path>) -> CooldisResult<Self> {
+        block_on(Self::open_async(path))
+    }
+
+    pub async fn open_async(path: impl AsRef<Path>) -> CooldisResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
             && !parent.exists()
@@ -226,32 +230,51 @@ impl SqliteMcpSourceRegistry {
                 ))
             })?;
         }
-        let connection = rusqlite::Connection::open(path).map_err(sqlite_mcp_error)?;
-        Self::from_connection(connection)
+        let inner = Db::open(path, DbConfig::default())
+            .await
+            .map_err(sqlite_mcp_error)?;
+        Self::from_db(inner).await
     }
 
     pub fn in_memory() -> CooldisResult<Self> {
-        let connection = rusqlite::Connection::open_in_memory().map_err(sqlite_mcp_error)?;
-        Self::from_connection(connection)
+        block_on(Self::in_memory_async())
     }
 
-    fn from_connection(connection: rusqlite::Connection) -> CooldisResult<Self> {
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
+    pub async fn in_memory_async() -> CooldisResult<Self> {
+        let inner = Db::in_memory(DbConfig::default())
+            .await
             .map_err(sqlite_mcp_error)?;
-        init_mcp_source_schema(&connection)?;
-        Ok(Self {
-            inner: Arc::new(std::sync::Mutex::new(connection)),
-        })
+        Self::from_db(inner).await
+    }
+
+    async fn from_db(inner: Db) -> CooldisResult<Self> {
+        let registry = Self { inner };
+        let connection = registry.connect().await?;
+        init_mcp_source_schema(&connection).await?;
+        Ok(registry)
+    }
+
+    async fn connect(&self) -> CooldisResult<Connection> {
+        self.inner.connect().await.map_err(sqlite_mcp_error)
     }
 
     pub fn upsert_source(
         &self,
         config: McpRemoteServerConfig,
     ) -> CooldisResult<McpRemoteSourceRecord> {
-        let mut connection = self.lock_connection()?;
-        let tx = connection.transaction().map_err(sqlite_mcp_error)?;
-        let existing = sqlite_get_mcp_source(&tx, &config.name)?;
+        block_on(self.upsert_source_async(config))
+    }
+
+    pub async fn upsert_source_async(
+        &self,
+        config: McpRemoteServerConfig,
+    ) -> CooldisResult<McpRemoteSourceRecord> {
+        let mut connection = self.connect().await?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(sqlite_mcp_error)?;
+        let existing = sqlite_get_mcp_source(&tx, &config.name).await?;
         let now = crate::kernel::history::now_ms();
         let mut record = McpRemoteSourceRecord::from_config(config, now);
         if let Some(existing) = existing {
@@ -259,8 +282,8 @@ impl SqliteMcpSourceRegistry {
             record.discovered_tools = existing.discovered_tools;
             record.discovered_at_ms = existing.discovered_at_ms;
         }
-        sqlite_put_mcp_source(&tx, &record)?;
-        tx.commit().map_err(sqlite_mcp_error)?;
+        sqlite_put_mcp_source(&tx, &record).await?;
+        tx.commit().await.map_err(sqlite_mcp_error)?;
         Ok(record)
     }
 
@@ -268,40 +291,52 @@ impl SqliteMcpSourceRegistry {
         &self,
         name: impl AsRef<str>,
     ) -> CooldisResult<Option<McpRemoteSourceRecord>> {
+        block_on(self.get_source_async(name))
+    }
+
+    pub async fn get_source_async(
+        &self,
+        name: impl AsRef<str>,
+    ) -> CooldisResult<Option<McpRemoteSourceRecord>> {
         let name = validate_record_name(name.as_ref())?;
-        let connection = self.lock_connection()?;
-        sqlite_get_mcp_source(&connection, &name)
+        let connection = self.connect().await?;
+        sqlite_get_mcp_source(&connection, &name).await
     }
 
     pub fn list_sources(&self) -> CooldisResult<Vec<McpRemoteSourceRecord>> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare("SELECT record_json FROM cooldis_mcp_source_records ORDER BY name")
+        block_on(self.list_sources_async())
+    }
+
+    pub async fn list_sources_async(&self) -> CooldisResult<Vec<McpRemoteSourceRecord>> {
+        let connection = self.connect().await?;
+        let mut rows = connection
+            .query(
+                "SELECT record_json FROM cooldis_mcp_source_records ORDER BY name",
+                (),
+            )
+            .await
             .map_err(sqlite_mcp_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                let json: String = row.get(0)?;
-                serde_json::from_str::<McpRemoteSourceRecord>(&json).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .map_err(sqlite_mcp_error)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_mcp_error)
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().await.map_err(sqlite_mcp_error)? {
+            let json: String = row.get(0).map_err(sqlite_mcp_error)?;
+            records.push(serde_json::from_str(&json).map_err(sqlite_mcp_error)?);
+        }
+        Ok(records)
     }
 
     pub fn delete_source(&self, name: impl AsRef<str>) -> CooldisResult<bool> {
+        block_on(self.delete_source_async(name))
+    }
+
+    pub async fn delete_source_async(&self, name: impl AsRef<str>) -> CooldisResult<bool> {
         let name = validate_record_name(name.as_ref())?;
-        let connection = self.lock_connection()?;
+        let connection = self.connect().await?;
         let deleted = connection
             .execute(
                 "DELETE FROM cooldis_mcp_source_records WHERE name = ?1",
                 params![name],
             )
+            .await
             .map_err(sqlite_mcp_error)?;
         Ok(deleted > 0)
     }
@@ -311,25 +346,30 @@ impl SqliteMcpSourceRegistry {
         name: impl AsRef<str>,
         tools: Vec<ToolDefinition>,
     ) -> CooldisResult<McpRemoteSourceRecord> {
+        block_on(self.update_discovered_tools_async(name, tools))
+    }
+
+    pub async fn update_discovered_tools_async(
+        &self,
+        name: impl AsRef<str>,
+        tools: Vec<ToolDefinition>,
+    ) -> CooldisResult<McpRemoteSourceRecord> {
         let name = validate_record_name(name.as_ref())?;
-        let mut connection = self.lock_connection()?;
-        let tx = connection.transaction().map_err(sqlite_mcp_error)?;
-        let mut record = sqlite_get_mcp_source(&tx, &name)?.ok_or_else(|| {
+        let mut connection = self.connect().await?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(sqlite_mcp_error)?;
+        let mut record = sqlite_get_mcp_source(&tx, &name).await?.ok_or_else(|| {
             CooldisError::RuntimeFactory(format!("remote MCP source {name:?} was not found"))
         })?;
         let now = crate::kernel::history::now_ms();
         record.discovered_tools = tools;
         record.discovered_at_ms = Some(now);
         record.updated_at_ms = now;
-        sqlite_put_mcp_source(&tx, &record)?;
-        tx.commit().map_err(sqlite_mcp_error)?;
+        sqlite_put_mcp_source(&tx, &record).await?;
+        tx.commit().await.map_err(sqlite_mcp_error)?;
         Ok(record)
-    }
-
-    fn lock_connection(&self) -> CooldisResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
-        self.inner.lock().map_err(|err| {
-            CooldisError::RuntimeFactory(format!("MCP registry sqlite lock poisoned: {err}"))
-        })
     }
 }
 
@@ -457,16 +497,16 @@ impl McpToolUniverseDiscoverer {
     }
 
     pub async fn caller_for(&self, server_ref: &str) -> CooldisResult<Arc<McpRemoteToolProvider>> {
-        let record = self.source_record(server_ref)?;
+        let record = self.source_record(server_ref).await?;
         Ok(Arc::new(
             McpRemoteToolProvider::connect(record.to_config(), self.secret_resolver.clone())
                 .await?,
         ))
     }
 
-    fn source_record(&self, server_ref: &str) -> CooldisResult<McpRemoteSourceRecord> {
+    async fn source_record(&self, server_ref: &str) -> CooldisResult<McpRemoteSourceRecord> {
         let name = source_name_from_server_ref(server_ref)?;
-        self.registry.get_source(&name)?.ok_or_else(|| {
+        self.registry.get_source_async(&name).await?.ok_or_else(|| {
             CooldisError::RuntimeFactory(format!(
                 "remote MCP source {name:?} was not found for server_ref {server_ref:?}"
             ))
@@ -1061,13 +1101,10 @@ fn sanitize_http_error(err: reqwest::Error) -> String {
     err.without_url().to_string()
 }
 
-fn init_mcp_source_schema(connection: &rusqlite::Connection) -> CooldisResult<()> {
+async fn init_mcp_source_schema(connection: &Connection) -> CooldisResult<()> {
     connection
         .execute_batch(
             r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-
             CREATE TABLE IF NOT EXISTS cooldis_mcp_source_records (
                 name TEXT PRIMARY KEY NOT NULL,
                 transport TEXT NOT NULL,
@@ -1077,34 +1114,32 @@ fn init_mcp_source_schema(connection: &rusqlite::Connection) -> CooldisResult<()
             );
             "#,
         )
+        .await
         .map_err(sqlite_mcp_error)
 }
 
-fn sqlite_get_mcp_source(
-    connection: &rusqlite::Connection,
+async fn sqlite_get_mcp_source(
+    connection: &Connection,
     name: &str,
 ) -> CooldisResult<Option<McpRemoteSourceRecord>> {
-    connection
-        .query_row(
+    let mut rows = connection
+        .query(
             "SELECT record_json FROM cooldis_mcp_source_records WHERE name = ?1",
             params![name],
-            |row| {
-                let json: String = row.get(0)?;
-                serde_json::from_str::<McpRemoteSourceRecord>(&json).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            },
         )
-        .optional()
+        .await
+        .map_err(sqlite_mcp_error)?;
+    let Some(row) = rows.next().await.map_err(sqlite_mcp_error)? else {
+        return Ok(None);
+    };
+    let json: String = row.get(0).map_err(sqlite_mcp_error)?;
+    serde_json::from_str(&json)
+        .map(Some)
         .map_err(sqlite_mcp_error)
 }
 
-fn sqlite_put_mcp_source(
-    connection: &rusqlite::Connection,
+async fn sqlite_put_mcp_source(
+    connection: &Connection,
     record: &McpRemoteSourceRecord,
 ) -> CooldisResult<()> {
     let record_json = serde_json::to_string(record).map_err(|err| {
@@ -1128,13 +1163,14 @@ fn sqlite_put_mcp_source(
                 updated_at_ms = excluded.updated_at_ms
             "#,
             params![
-                record.name,
+                record.name.as_str(),
                 record.transport.as_str(),
-                record.url,
+                record.url.as_str(),
                 record_json,
                 record.updated_at_ms
             ],
         )
+        .await
         .map_err(sqlite_mcp_error)?;
     Ok(())
 }

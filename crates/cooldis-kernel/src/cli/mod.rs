@@ -3610,8 +3610,8 @@ async fn tool_source_add(args: Vec<OsString>) -> CooldisResult<()> {
     if let Some(max_output_bytes) = options.max_output_bytes {
         config = config.with_max_output_bytes(max_output_bytes);
     }
-    let registry = open_mcp_source_registry(options.state_home)?;
-    let record = registry.upsert_source(config)?;
+    let registry = open_mcp_source_registry(options.state_home).await?;
+    let record = registry.upsert_source_async(config).await?;
     println!("stored tool source {}", record.name);
     println!("transport {}", record.transport.as_str());
     println!("url {}", record.url);
@@ -3630,15 +3630,16 @@ async fn tool_source_discover(args: Vec<OsString>) -> CooldisResult<()> {
     let name = options
         .name
         .ok_or_else(|| usage_error("tool source discover requires <name>"))?;
-    let registry = open_mcp_source_registry(options.state_home.clone())?;
+    let registry = open_mcp_source_registry(options.state_home.clone()).await?;
     let record = registry
-        .get_source(&name)?
+        .get_source_async(&name)
+        .await?
         .ok_or_else(|| usage_error(format!("tool source {name:?} was not found")))?;
     let secret_store = open_secret_store(options.state_home)?;
     let provider =
         McpRemoteToolProvider::connect(record.to_config(), Some(Arc::new(secret_store))).await?;
     let tools = provider.tool_definitions().await;
-    let updated = registry.update_discovered_tools(&name, tools)?;
+    let updated = registry.update_discovered_tools_async(&name, tools).await?;
     println!("discovered tool source {}", updated.name);
     for tool in &updated.discovered_tools {
         println!("tool {}", tool.name);
@@ -3652,8 +3653,8 @@ async fn tool_source_list(args: Vec<OsString>) -> CooldisResult<()> {
         print_tool_source_list_help();
         return Ok(());
     }
-    let registry = open_mcp_source_registry(options.state_home)?;
-    let records = registry.list_sources()?;
+    let registry = open_mcp_source_registry(options.state_home).await?;
+    let records = registry.list_sources_async().await?;
     if options.json {
         let json = Value::Array(
             records
@@ -3693,9 +3694,10 @@ async fn tool_source_show(args: Vec<OsString>) -> CooldisResult<()> {
     let name = options
         .name
         .ok_or_else(|| usage_error("tool source show requires <name>"))?;
-    let registry = open_mcp_source_registry(options.state_home)?;
+    let registry = open_mcp_source_registry(options.state_home).await?;
     let record = registry
-        .get_source(&name)?
+        .get_source_async(&name)
+        .await?
         .ok_or_else(|| usage_error(format!("tool source {name:?} was not found")))?;
     if options.json {
         println!(
@@ -3728,8 +3730,8 @@ async fn tool_source_remove(args: Vec<OsString>) -> CooldisResult<()> {
     let name = options
         .name
         .ok_or_else(|| usage_error("tool source remove requires <name>"))?;
-    let registry = open_mcp_source_registry(options.state_home)?;
-    if registry.delete_source(&name)? {
+    let registry = open_mcp_source_registry(options.state_home).await?;
+    if registry.delete_source_async(&name).await? {
         println!("removed tool source {name}");
     } else {
         println!("tool source {name} was not found");
@@ -5962,11 +5964,14 @@ fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetad
     Ok(store)
 }
 
-fn open_mcp_source_registry(state_home: Option<PathBuf>) -> CooldisResult<SqliteMcpSourceRegistry> {
-    SqliteMcpSourceRegistry::open(metadata_store_path_for_state_home(
+async fn open_mcp_source_registry(
+    state_home: Option<PathBuf>,
+) -> CooldisResult<SqliteMcpSourceRegistry> {
+    SqliteMcpSourceRegistry::open_async(metadata_store_path_for_state_home(
         state_home,
         default_project_state_home(),
     ))
+    .await
 }
 
 fn secret_cli_error(err: impl std::fmt::Display) -> CooldisError {

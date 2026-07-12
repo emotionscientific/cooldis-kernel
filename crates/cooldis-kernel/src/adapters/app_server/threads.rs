@@ -228,8 +228,8 @@ impl CooldisAppServer {
         {
             provider_surface.model_ids.insert(model_id.clone());
         }
-        let mcp_server_refs = self.configured_mcp_server_refs()?;
-        let tool_universe_discoverer = self.tool_universe_discoverer()?;
+        let mcp_server_refs = self.configured_mcp_server_refs().await?;
+        let tool_universe_discoverer = self.tool_universe_discoverer().await?;
         let model_selection = metadata
             .get(THREAD_AGENT_MODEL_PROFILE_ID_METADATA)
             .map(|profile_id| AgentManifestModelProfileSelection::profile_id(profile_id.clone()))
@@ -296,8 +296,8 @@ impl CooldisAppServer {
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let provider_surface = self.agent_manifest_provider_surface()?;
-        let mcp_server_refs = self.configured_mcp_server_refs()?;
-        let tool_universe_discoverer = self.tool_universe_discoverer()?;
+        let mcp_server_refs = self.configured_mcp_server_refs().await?;
+        let tool_universe_discoverer = self.tool_universe_discoverer().await?;
         bind_published_agent_record(
             &record,
             alias,
@@ -1520,8 +1520,8 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
     ) -> CooldisResult<KernelThreadSpawnAgentBinding> {
         let registry = LocalAgentRegistry::new(self.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
-        let mcp_server_refs = self.configured_mcp_server_refs()?;
-        let tool_universe_discoverer = self.tool_universe_discoverer()?;
+        let mcp_server_refs = self.configured_mcp_server_refs().await?;
+        let tool_universe_discoverer = self.tool_universe_discoverer().await?;
         let bound = bind_published_agent_record(
             &record,
             alias,
@@ -1547,25 +1547,28 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
 }
 
 impl AppServerThreadSpawnAgentResolver {
-    fn configured_mcp_server_refs(&self) -> CooldisResult<BTreeSet<String>> {
+    async fn configured_mcp_server_refs(&self) -> CooldisResult<BTreeSet<String>> {
         let Some(metadata_store_path) = &self.metadata_store_path else {
             return Ok(BTreeSet::new());
         };
-        let registry = SqliteMcpSourceRegistry::open(metadata_store_path)
+        let registry = SqliteMcpSourceRegistry::open_async(metadata_store_path)
+            .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
         Ok(registry
-            .list_sources()
+            .list_sources_async()
+            .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?
             .into_iter()
             .map(|source| format!("mcp://{}", source.name))
             .collect())
     }
 
-    fn tool_universe_discoverer(&self) -> CooldisResult<Option<McpToolUniverseDiscoverer>> {
+    async fn tool_universe_discoverer(&self) -> CooldisResult<Option<McpToolUniverseDiscoverer>> {
         let Some(metadata_store_path) = &self.metadata_store_path else {
             return Ok(None);
         };
-        let registry = SqliteMcpSourceRegistry::open(metadata_store_path)
+        let registry = SqliteMcpSourceRegistry::open_async(metadata_store_path)
+            .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
         let secret_store_path = self
             .secret_store_path
@@ -1734,7 +1737,8 @@ impl CapsuleBindingRuntimeFactory {
                 "tool universe bindings require an app-server session store path".to_string(),
             )
         })?;
-        let registry = SqliteMcpSourceRegistry::open(metadata_store_path)
+        let registry = SqliteMcpSourceRegistry::open_async(metadata_store_path)
+            .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
         let discoverer = Arc::new(McpToolUniverseDiscoverer::new(
             registry,

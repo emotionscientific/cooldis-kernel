@@ -17,8 +17,11 @@
 //! - The DST seam is [`Db::open_with_io`]: scenario harnesses drive the
 //!   engine through simulated, fault-injectable, deterministic IO.
 
+use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 pub use turso::{
@@ -39,6 +42,49 @@ pub enum SqliteError {
 }
 
 pub type SqliteResult<T> = Result<T, SqliteError>;
+
+/// Drive a future to completion with a minimal thread park/unpark poll loop.
+///
+/// This exists for synchronous store surfaces layered over the async SQLite
+/// engine. It is reentrant-safe where `futures_executor::block_on` panics when
+/// nested because it has no executor-specific nesting guard. Do not call this
+/// from an async context: pending work parks the current thread and can block
+/// the executor running it.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker {
+        thread: std::thread::Thread,
+        notified: AtomicBool,
+    }
+
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.notified.store(true, Ordering::Release);
+            self.thread.unpark();
+        }
+    }
+
+    let mut future = std::pin::pin!(future);
+    let thread_waker = Arc::new(ThreadWaker {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = Waker::from(Arc::clone(&thread_waker));
+    let mut context = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => {
+                while !thread_waker.notified.swap(false, Ordering::AcqRel) {
+                    std::thread::park();
+                }
+            }
+        }
+    }
+}
 
 /// Journal mode policy for a database file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -253,6 +299,64 @@ pub async fn ensure_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn nested_block_on_preserves_the_outer_wake() {
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outer_polls = Arc::new(AtomicUsize::new(0));
+            let result = block_on(std::future::poll_fn({
+                let outer_polls = Arc::clone(&outer_polls);
+                move |outer_context| {
+                    if outer_polls.fetch_add(1, Ordering::SeqCst) > 0 {
+                        return Poll::Ready("completed");
+                    }
+
+                    let inner_polls = Arc::new(AtomicUsize::new(0));
+                    let inner_waker = Arc::new(std::sync::Mutex::new(None::<Waker>));
+                    let delayed_wake = {
+                        let inner_polls = Arc::clone(&inner_polls);
+                        let inner_waker = Arc::clone(&inner_waker);
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(50));
+                            if inner_polls.load(Ordering::SeqCst) == 1 {
+                                if let Some(waker) = inner_waker.lock().unwrap().take() {
+                                    waker.wake();
+                                }
+                            }
+                        })
+                    };
+                    block_on(std::future::poll_fn({
+                        let inner_polls = Arc::clone(&inner_polls);
+                        let inner_waker = Arc::clone(&inner_waker);
+                        let outer_waker = outer_context.waker().clone();
+                        move |inner_context| match inner_polls.fetch_add(1, Ordering::SeqCst) {
+                            0 => {
+                                *inner_waker.lock().unwrap() = Some(inner_context.waker().clone());
+                                outer_waker.wake_by_ref();
+                                Poll::Pending
+                            }
+                            1 => {
+                                inner_context.waker().wake_by_ref();
+                                Poll::Pending
+                            }
+                            _ => Poll::Ready(()),
+                        }
+                    }));
+                    delayed_wake.join().unwrap();
+                    Poll::Pending
+                }
+            }));
+            completed_tx.send(result).unwrap();
+        });
+
+        assert_eq!(
+            completed_rx.recv_timeout(Duration::from_secs(1)),
+            Ok("completed"),
+            "nested block_on consumed the outer future's wake"
+        );
+    }
 
     async fn pragma_value(conn: &Connection, name: &str) -> Value {
         let mut value = None;

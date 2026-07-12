@@ -14,6 +14,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cooldis-io-core = { path = "../cooldis-io-core" }
 pgqrs = { version = "0.15.3", default-features = false }
+# ADR 0005 decision 8: retained for the ingress IO-state enclave until EMO-409.
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

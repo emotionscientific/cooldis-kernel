@@ -67,6 +67,25 @@ fn sqlite_remote_mcp_registry_persists_and_redacts_source_records() {
     assert!(!redacted.contains("fixture"));
 }
 
+#[test]
+fn sqlite_remote_mcp_registry_sync_boundary_is_reentrant_from_futures_executor() {
+    futures_executor::block_on(async {
+        let registry = SqliteMcpSourceRegistry::in_memory().unwrap();
+        registry
+            .upsert_source(
+                McpRemoteServerConfig::new(
+                    "nested-executor",
+                    McpRemoteTransport::StreamableHttp,
+                    "https://nested.example.invalid/mcp",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert!(registry.get_source("nested-executor").unwrap().is_some());
+    });
+}
+
 #[tokio::test]
 async fn remote_mcp_provider_fails_closed_when_bearer_secret_is_missing() {
     let config = McpRemoteServerConfig::new(

@@ -901,9 +901,11 @@ async fn app_server_mcp_status_lists_redacted_remote_sources() {
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let registry = SqliteMcpSourceRegistry::open(&metadata_path).unwrap();
+    let registry = SqliteMcpSourceRegistry::open_async(&metadata_path)
+        .await
+        .unwrap();
     registry
-        .upsert_source(
+        .upsert_source_async(
             crate::McpRemoteServerConfig::new(
                 "arcade",
                 crate::McpRemoteTransport::StreamableHttp,
@@ -914,9 +916,10 @@ async fn app_server_mcp_status_lists_redacted_remote_sources() {
             .unwrap()
             .with_header("x-provider", "fixture-secret-like-value"),
         )
+        .await
         .unwrap();
 
-    let status = app.mcp_server_status_list().unwrap();
+    let status = app.mcp_server_status_list().await.unwrap();
 
     assert_eq!(status["data"][0]["name"], "arcade");
     assert_eq!(status["data"][0]["auth"]["secret"], "arcade.api_key");
@@ -1093,9 +1096,10 @@ server_ref = "mcp://arcade"
     config.agent_registry_root = agent_registry_root.clone();
     let metadata_path = config.metadata_store_path();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    SqliteMcpSourceRegistry::open(&metadata_path)
+    SqliteMcpSourceRegistry::open_async(&metadata_path)
+        .await
         .unwrap()
-        .upsert_source(
+        .upsert_source_async(
             crate::McpRemoteServerConfig::new(
                 "arcade",
                 crate::McpRemoteTransport::StreamableHttp,
@@ -1103,6 +1107,7 @@ server_ref = "mcp://arcade"
             )
             .unwrap(),
         )
+        .await
         .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone());
     initialize_for_test(&connection).await;
@@ -3758,9 +3763,10 @@ server_ref = "mcp://arcade"
         Arc::new(UniverseCallingClient::default())
     })
     .await;
-    SqliteMcpSourceRegistry::open(&app.inner.metadata_store_path)
+    SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
+        .await
         .unwrap()
-        .upsert_source(
+        .upsert_source_async(
             crate::McpRemoteServerConfig::new(
                 "arcade",
                 crate::McpRemoteTransport::StreamableHttp,
@@ -3768,6 +3774,7 @@ server_ref = "mcp://arcade"
             )
             .unwrap(),
         )
+        .await
         .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone());
     initialize_for_test(&connection).await;
@@ -3876,9 +3883,10 @@ pin = "mcptool://arcade/cooldis_mcp_echo@{schema_hash}"
         Arc::new(PinnedDirectCallingClient::default())
     })
     .await;
-    SqliteMcpSourceRegistry::open(&app.inner.metadata_store_path)
+    SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
+        .await
         .unwrap()
-        .upsert_source(
+        .upsert_source_async(
             crate::McpRemoteServerConfig::new(
                 "arcade",
                 crate::McpRemoteTransport::StreamableHttp,
@@ -3886,6 +3894,7 @@ pin = "mcptool://arcade/cooldis_mcp_echo@{schema_hash}"
             )
             .unwrap(),
         )
+        .await
         .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone());
     initialize_for_test(&connection).await;

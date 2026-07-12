@@ -68,7 +68,15 @@ behind a single engine-owner crate.
    the `sqlite3` CLI or any rusqlite-linked build while the daemon runs;
    post-migration debugging goes through `tursodb` or through daemon RPC.
    The rule is documented here and in the crate docs; it cannot be enforced
-   mechanically across processes.
+   mechanically across processes. Wave-3 finding (2026-07-11): Turso in
+   fact enforces something stronger by default — the local open takes an
+   exclusive per-process file lock, so a SECOND PROCESS is refused
+   entirely while the first holds the file (cross-process shared-WAL
+   coordination exists upstream behind a `host_shared_wal` build gate
+   only). Consequence: first-party CLI flows that directly open a live
+   daemon's database from another process now fail with a lock error
+   where WAL rusqlite allowed a concurrent reader; the audit and
+   RPC-rerouting of those flows is a follow-up ticket.
 6. **Version policy: exact pin plus a standing fork as the patch lane**
    (anchor-ratified 2026-07-11). Default posture: `turso = "=0.6.1"` from
    crates.io (latest stable at decision time; the 0.7 pre-releases carry
@@ -82,11 +90,27 @@ behind a single engine-owner crate.
    of the history. `cargo vendor` (all-deps hermetic builds) is a separate
    repo-wide policy question, deferred. Upgrades are deliberate, one
    commit, run through the full test suite plus the DST scenario corpus.
-7. **Out of scope here.** pgqrs keeps its internal rusqlite (separate
-   database files; superseded later by the store-hosted ingress queue in
-   EMO-409's design). The sync engine, remote EventStore backend, and
-   self-hosted sync endpoint are EMO-409's to specify. This ADR is the
-   local-engine decision only.
+7. **Out of scope here.** pgqrs keeps its internal rusqlite; it is
+   superseded later by the store-hosted ingress queue in EMO-409's design.
+   The sync engine, remote EventStore backend, and self-hosted sync
+   endpoint are EMO-409's to specify. This ADR is the local-engine
+   decision only.
+8. **The ingress IO-state enclave stays on rusqlite until pgqrs is
+   replaced** (architect decision at the EMO-414 stop gate, 2026-07-11).
+   Discovery during wave 3: the daemon egress-state/ownership tables
+   (`daemon_io`), the `cooldis-io-pgqrs` dedupe schema, and pgqrs's own
+   queue tables all share one database file (the ingress queue DSN;
+   `effective_queue_dsn()` feeds all three). Under rule 5 that file is
+   owned by rusqlite, so those two first-party connections cannot migrate
+   independently. Splitting the schemas into a separate Turso file was
+   considered and rejected: the `BEGIN IMMEDIATE` ingress ownership lock
+   serializes against tables in that same file, cross-table atomicity
+   would have to be re-proven, and the whole enclave is scheduled to
+   dissolve into the store-hosted ingress queue (EMO-409). Consequence:
+   `rusqlite` remains a direct dependency of `cooldis-kernel` (daemon_io
+   egress state) and `cooldis-io-pgqrs` (dedupe) for exactly this file,
+   annotated in both manifests; wave 3 migrates only sites with
+   engine-exclusive files.
 
 ## Migration plan
 
@@ -99,8 +123,10 @@ the unchanged store traits with existing tests green:
 3. `cooldis-history-sqlite` (the stream store; the crown jewel — carries the
    fenced-append paths, gets the composed-diff review gate and a DST
    scenario run before merge).
-4. Small sites bundle: `mcp_client` cache, `daemon_io`, `cooldis-io-pgqrs`
-   dedupe schema.
+4. Small sites bundle: `mcp_client` cache plus direct-connection test and
+   smoke helpers. (`daemon_io` egress state and the `cooldis-io-pgqrs`
+   dedupe schema were originally in this wave; the stop-gate discovery in
+   decision 8 keeps them on rusqlite until EMO-409 replaces pgqrs.)
 5. DST seeded IO-fault scenario against the Turso-backed store.
 
 Rollback per store is a dependency flip inside `cooldis-sqlite` or a revert

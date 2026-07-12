@@ -2,35 +2,12 @@ use cooldis_history::{ProviderApi, now_ms};
 use cooldis_runtime_contracts::{
     ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadScope,
 };
+pub(crate) use cooldis_sqlite::block_on;
 use cooldis_sqlite::{Connection, Db, DbConfig, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::path::Path;
-use std::task::{Context, Poll, Wake, Waker};
 use thiserror::Error;
-
-/// Drive a Turso future at the store's synchronous trait boundary without an
-/// executor-specific nesting guard.
-pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
-    struct ThreadWaker(std::thread::Thread);
-
-    impl Wake for ThreadWaker {
-        fn wake(self: std::sync::Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
-    let mut future = std::pin::pin!(future);
-    let waker = Waker::from(std::sync::Arc::new(ThreadWaker(std::thread::current())));
-    let mut context = Context::from_waker(&waker);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::park(),
-        }
-    }
-}
 
 pub const OPENAI_COMPATIBLE_PROVIDER_ID: &str = "openai_compatible";
 pub const OPENAI_COMPATIBLE_BASE_URL: &str = "https://api.example.invalid/v1";
