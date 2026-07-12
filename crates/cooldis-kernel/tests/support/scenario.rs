@@ -6,8 +6,7 @@
 //! plan derived from the same seed, executed with every declared invariant
 //! checked after every step (lexicon: scenario). This file fixes the
 //! operation alphabet, the invariant contract, the failure receipt, and the
-//! corpus entry format; the generator, runner, and minimizer are
-//! implementation work against this surface.
+//! corpus entry format implemented by the generator, runner, and minimizer.
 //!
 //! Vocabulary-v1 derivation uses two stable lanes from the same
 //! version-salted root as [`FaultPlan::derive`]: `scenario-op-count-v1` fixes
@@ -38,13 +37,32 @@ use cooldis_io_core::{
     IoConversation, IoDedupeKey, IoResult, IoSource, LeasedIngressEnvelope, ThreadAddress,
 };
 use cooldis_io_pgqrs::sqlite_dsn;
+use futures_util::FutureExt;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-static SCENARIO_RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+struct ScenarioRunRoot {
+    path: PathBuf,
+}
+
+impl ScenarioRunRoot {
+    fn new(seed: u64) -> Self {
+        Self {
+            path: std::env::temp_dir()
+                .join("cooldis-scenario-engine")
+                .join(format!("{seed:016x}-{}", uuid::Uuid::now_v7())),
+        }
+    }
+}
+
+impl Drop for ScenarioRunRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 
 struct DynRuntimeStore {
     inner: Arc<dyn RuntimeStore>,
@@ -56,6 +74,13 @@ impl DynRuntimeStore {
         let mut value = serde_json::to_value(&kind).expect("serialize scenario session entry");
         replace_timestamp_ms(&mut value, self.canonical_timestamp_ms);
         serde_json::from_value(value).expect("deserialize deterministic scenario session entry")
+    }
+
+    fn events(&self, mut records: Vec<NewEventRecord>) -> Vec<NewEventRecord> {
+        for record in &mut records {
+            record.created_at_ms = self.canonical_timestamp_ms;
+        }
+        records
     }
 }
 
@@ -167,7 +192,9 @@ impl EventStore for DynRuntimeStore {
         stream_id: &EventStreamId,
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
-        self.inner.append_events(stream_id, records).await
+        self.inner
+            .append_events(stream_id, self.events(records))
+            .await
     }
 
     async fn append_events_fenced(
@@ -177,7 +204,7 @@ impl EventStore for DynRuntimeStore {
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
         self.inner
-            .append_events_fenced(stream_id, expected_next_sequence, records)
+            .append_events_fenced(stream_id, expected_next_sequence, self.events(records))
             .await
     }
 
@@ -301,6 +328,15 @@ impl ScenarioQueue {
             pause_next_complete: std::sync::atomic::AtomicBool::new(false),
             complete_started: tokio::sync::Notify::new(),
         }
+    }
+
+    async fn pending_count(&self) -> usize {
+        self.messages
+            .lock()
+            .await
+            .iter()
+            .filter(|message| !message.completed)
+            .count()
     }
 }
 
@@ -624,10 +660,14 @@ impl ScenarioHarness {
         let socket = root.join("app-server.sock");
         let listen = AppServerListenAddr::parse(&format!("unix://{}", socket.display()))
             .expect("scenario app-server listen address");
-        let mut config = CooldisAppServerConfig::local(listen, &root);
+        let mut config = CooldisAppServerConfig::local(listen, "/workspace");
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.user_state_home = root.join("user-state");
+        config.agent_registry_root = root.join("agent-registry");
+        config.blob_registry_root = root.join("blob-registry");
+        config.skill_registry_root = root.join("skill-registry");
+        config.capsule_bindings.registry_root = None;
         config.tenant_id = format!("scenario-{:016x}", plan.seed);
         config.user_id = "scenario-user".to_string();
 
@@ -841,6 +881,64 @@ impl ScenarioHarness {
         previous
     }
 
+    fn rebind_root_to_child(&self, index: usize, coordinates: &ThreadCoordinates) {
+        let address = ThreadAddress::new(
+            coordinates.tenant_id.clone(),
+            coordinates.user_id.clone(),
+            Self::session_id(index),
+        );
+        let mut connection = rusqlite::Connection::open(&self.route_db)
+            .expect("open scenario route state for child rebind");
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("lock scenario route state for child rebind");
+        let updated = tx
+            .execute(
+                "UPDATE cooldis_daemon_ingress_bindings
+                 SET tenant_id = ?4, user_id = ?5, session_id = ?6, thread_id = ?7, updated_at_ms = ?8
+                 WHERE route_id = ?1 AND source_scope = ?2 AND scope_key = ?3",
+                rusqlite::params![
+                    "scenario",
+                    Self::source().stable_scope(),
+                    address.scope_key(),
+                    coordinates.tenant_id,
+                    coordinates.user_id,
+                    coordinates.session_id,
+                    coordinates.thread_id.to_string(),
+                    0i64,
+                ],
+            )
+            .expect("rebind scenario ingress route to child");
+        assert_eq!(
+            updated, 1,
+            "scenario root reservation must exist before fork"
+        );
+        tx.execute(
+            "INSERT INTO cooldis_daemon_egress_threads (
+                route_id, source_scope, scope_key, tenant_id, user_id, session_id, thread_id, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(route_id, thread_id) DO UPDATE SET
+                source_scope = excluded.source_scope,
+                scope_key = excluded.scope_key,
+                tenant_id = excluded.tenant_id,
+                user_id = excluded.user_id,
+                session_id = excluded.session_id,
+                updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![
+                "scenario",
+                Self::source().stable_scope(),
+                address.scope_key(),
+                coordinates.tenant_id,
+                coordinates.user_id,
+                coordinates.session_id,
+                coordinates.thread_id.to_string(),
+                0i64,
+            ],
+        )
+        .expect("project scenario child into egress route state");
+        tx.commit().expect("commit scenario child route rebind");
+    }
+
     fn envelope(&mut self, root_index: usize, policy: &str, text: &str) -> IngressEnvelope {
         self.envelope_index += 1;
         let source = Self::source();
@@ -920,7 +1018,12 @@ impl ScenarioHarness {
         }
     }
 
-    async fn append_placement(&mut self, coordinates: &ThreadCoordinates, state: &str) {
+    async fn append_placement(
+        &mut self,
+        coordinates: &ThreadCoordinates,
+        state: &str,
+        resident_state: Option<&str>,
+    ) {
         let thread_id = coordinates.thread_id.to_string();
         let runtime_id = if state == "active" {
             let runtime_id = format!(
@@ -941,15 +1044,18 @@ impl ScenarioHarness {
                 })
         };
         let record = || {
-            NewEventRecord::witnessed(
-                coordinates.clone(),
-                EventKind::PlacementDecision,
-                json!({
-                    "runtime_id": runtime_id,
-                    "runtime_state": state,
-                    "reservation_progress": format!("thread:{}", coordinates.thread_id),
-                }),
-            )
+            let reservation_key = format!("thread:{}", coordinates.thread_id);
+            let mut payload = json!({
+                "runtime_id": runtime_id,
+                "runtime_state": state,
+                "reservation_progress": reservation_key,
+            });
+            if let Some(resident_state) = resident_state {
+                let object = payload.as_object_mut().expect("placement payload object");
+                object.insert("resident_state".to_string(), json!(resident_state));
+                object.insert("reservation_key".to_string(), json!(reservation_key));
+            }
+            NewEventRecord::witnessed(coordinates.clone(), EventKind::PlacementDecision, payload)
         };
         let stream_id = EventStreamId::for_thread(coordinates);
         for _ in 0..32 {
@@ -1010,16 +1116,11 @@ impl ScenarioHarness {
             30,
         )
         .with_max_messages(16);
-        let mut remaining = 0usize;
         for _ in 0..16 {
             match worker.drain_once().await {
-                Ok(0) => {
-                    remaining = 0;
-                    break;
-                }
-                Ok(count) => remaining = count,
+                Ok(0) => break,
+                Ok(_) => {}
                 Err(error) => {
-                    remaining = 1;
                     self.transcript.push_receipt(
                         "scenario.operation.error",
                         &json!({"operation": "drain_queue", "error": error.to_string()}),
@@ -1029,6 +1130,7 @@ impl ScenarioHarness {
             }
         }
         self.flush_queue_probes();
+        let remaining = self.queue_inner.pending_count().await;
         self.transcript
             .push_receipt("queue.drain.completed", &json!({"remaining": remaining}));
         remaining
@@ -1072,7 +1174,7 @@ impl ScenarioHarness {
         }
         self.wait_for_idle(&coordinates).await;
         self.runtime_generation += 1;
-        self.append_placement(&coordinates, "active").await;
+        self.append_placement(&coordinates, "active", None).await;
         self.coordinates.push(coordinates);
     }
 
@@ -1100,26 +1202,40 @@ impl ScenarioHarness {
     }
 
     async fn fresh_active_root(&mut self, label: &str) -> ThreadCoordinates {
-        let root_index = self.root_count;
-        self.root_count += 1;
-        self.current_root = root_index;
-        let coordinates = self.reserve_root(root_index);
-        let envelope = self.envelope(root_index, "observe_only", label);
-        self.queue
-            .submit(envelope)
-            .await
-            .expect("submit crash-cut setup envelope");
-        self.drain_queue().await;
-        self.wait_for_idle(&coordinates).await;
-        self.server
-            .supervisor()
-            .get_thread_at(&coordinates)
-            .await
-            .expect("crash-cut setup must create a resident real runtime");
-        self.runtime_generation += 1;
-        self.append_placement(&coordinates, "active").await;
-        self.coordinates.push(coordinates.clone());
-        coordinates
+        for retry in 0..32 {
+            let root_index = self.root_count;
+            self.root_count += 1;
+            self.current_root = root_index;
+            let coordinates = self.reserve_root(root_index);
+            let envelope = self.envelope(
+                root_index,
+                "observe_only",
+                &format!("{label}-setup-{retry}"),
+            );
+            self.queue
+                .submit(envelope)
+                .await
+                .expect("submit crash-cut setup envelope");
+            self.drain_queue().await;
+            self.wait_for_idle(&coordinates).await;
+            if self
+                .server
+                .supervisor()
+                .get_thread_at(&coordinates)
+                .await
+                .is_ok_and(|handle| handle.status() == ThreadStatus::Idle)
+            {
+                self.runtime_generation += 1;
+                self.append_placement(&coordinates, "active", None).await;
+                self.coordinates.push(coordinates.clone());
+                return coordinates;
+            }
+            self.runtime_generation += 1;
+            self.append_placement(&coordinates, "terminal", Some("failed"))
+                .await;
+            self.coordinates.push(coordinates);
+        }
+        panic!("fault plan prevented a live crash-cut setup runtime after bounded retries");
     }
 
     async fn queue_cut_envelope(&mut self, policy: &str, label: &str) -> ThreadCoordinates {
@@ -1149,7 +1265,7 @@ impl ScenarioHarness {
                         self.drain_queue().await;
                         self.wait_for_idle(&coordinates).await;
                         self.runtime_generation += 1;
-                        self.append_placement(&coordinates, "active").await;
+                        self.append_placement(&coordinates, "active", None).await;
                         self.coordinates.push(coordinates);
                     }
                     Err(error) => self.transcript.push_receipt(
@@ -1207,6 +1323,7 @@ impl ScenarioHarness {
             ScenarioOp::Fork => {
                 if let Some(parent) = self.bound_coordinates(self.current_root) {
                     self.envelope_index += 1;
+                    let fork_envelope_id = format!("scenario-fork-{}", self.envelope_index);
                     let child_thread_id = self.deterministic_thread_id(
                         0x1000_0000usize.saturating_add(self.envelope_index),
                     );
@@ -1219,14 +1336,14 @@ impl ScenarioHarness {
                                 parent.clone(),
                                 EventKind::IoIngressClaimed,
                                 json!({
-                                    "ingress_envelope_ids": [format!("scenario-fork-{}", self.envelope_index)],
+                                    "ingress_envelope_ids": [&fork_envelope_id],
                                     "ingress_witness_event_ids": [],
                                     "admission_event_id": uuid::Uuid::from_u128(
                                         (u128::from(self.plan.seed) << 64) | self.envelope_index as u128
                                     ).to_string(),
                                     "intent": {
                                         "outcome": "fork",
-                                        "child_key": format!("scenario-fork-{}", self.envelope_index),
+                                        "child_key": &fork_envelope_id,
                                         "input_digest": format!("sha256:{:064x}", self.plan.seed),
                                         "child_thread_id": child_thread_id,
                                     }
@@ -1256,14 +1373,20 @@ impl ScenarioHarness {
                                     NewEventRecord::witnessed(
                                         parent,
                                         EventKind::IoIngressSettled,
-                                        json!({"claim_event_id": claim.id}),
+                                        json!({
+                                            "claim_event_id": claim.id,
+                                            "ingress_envelope_ids": [fork_envelope_id],
+                                            "evidence_event_id": null,
+                                            "settled_by": "execution",
+                                        }),
                                     ),
                                 ],
                             )
                             .await;
+                        self.rebind_root_to_child(self.current_root, &child);
                         self.wait_for_idle(&child).await;
                         self.runtime_generation += 1;
-                        self.append_placement(&child, "active").await;
+                        self.append_placement(&child, "active", None).await;
                         self.coordinates.push(child);
                     }
                 }
@@ -1278,7 +1401,8 @@ impl ScenarioHarness {
                 let _ = self.drain_queue().await;
                 let _ = self.server.supervisor().shutdown_all().await;
                 for coordinates in self.coordinates.clone() {
-                    self.append_placement(&coordinates, "terminal").await;
+                    self.append_placement(&coordinates, "terminal", Some("completed"))
+                        .await;
                 }
                 self.shut_down = true;
                 self.transcript.push_receipt(
@@ -1331,7 +1455,7 @@ impl CrashCutHost for ScenarioHarness {
                             drain.abort();
                             let _ = drain.await;
                             self.runtime_generation += 1;
-                            self.append_placement(&coordinates, "active").await;
+                            self.append_placement(&coordinates, "active", None).await;
                             self.coordinates.push(coordinates.clone());
                             break;
                         }
@@ -1344,12 +1468,13 @@ impl CrashCutHost for ScenarioHarness {
                 }
             }
             CrashCutSeam::PersistedInputRuntimeNotify => {
-                let coordinates = self.fresh_active_root("provider-cut-setup").await;
+                let mut coordinates = self.fresh_active_root("provider-cut").await;
                 self.provider
                     .pause_next_complete
                     .store(true, std::sync::atomic::Ordering::SeqCst);
+                let mut submit_errors = Vec::new();
                 for attempt in 0..32 {
-                    let _ = self
+                    if let Err(error) = self
                         .server
                         .supervisor()
                         .submit_to(
@@ -1357,7 +1482,12 @@ impl CrashCutHost for ScenarioHarness {
                             format!("scenario-provider-cut-{attempt}"),
                             "provider crash cut",
                         )
-                        .await;
+                        .await
+                    {
+                        submit_errors.push(error.to_string());
+                        coordinates = self.fresh_active_root("provider-cut-retry").await;
+                        continue;
+                    }
                     for _ in 0..512 {
                         if !self
                             .provider
@@ -1382,7 +1512,7 @@ impl CrashCutHost for ScenarioHarness {
                         .provider
                         .pause_next_complete
                         .load(std::sync::atomic::Ordering::SeqCst),
-                    "real runtime did not reach provider after persisting input"
+                    "real runtime did not reach provider after persisting input; submit errors: {submit_errors:?}"
                 );
             }
             CrashCutSeam::QueueCompleteBarrier => {
@@ -1403,7 +1533,7 @@ impl CrashCutHost for ScenarioHarness {
                             drain.abort();
                             let _ = drain.await;
                             self.runtime_generation += 1;
-                            self.append_placement(&coordinates, "active").await;
+                            self.append_placement(&coordinates, "active", None).await;
                             self.coordinates.push(coordinates.clone());
                             break;
                         }
@@ -1503,7 +1633,8 @@ impl CrashCutHost for ScenarioHarness {
             }
         }
         for coordinates in self.coordinates.clone() {
-            self.append_placement(&coordinates, "terminal").await;
+            self.append_placement(&coordinates, "terminal", Some("failed"))
+                .await;
         }
         self.collect_events().await;
     }
@@ -1574,6 +1705,11 @@ impl CrashCutHost for ScenarioHarness {
                 let _ = self.queue.submit(envelope).await;
                 let _ = self.drain_queue().await;
             }
+        }
+        // Loading a bound child recursively adopts its parent. Observe final
+        // placement only after every bound-route recovery has had that chance;
+        // a single pass would falsely leave an earlier parent terminal.
+        for coordinates in self.coordinates.clone() {
             let state = if self
                 .server
                 .supervisor()
@@ -1585,7 +1721,12 @@ impl CrashCutHost for ScenarioHarness {
             } else {
                 "terminal"
             };
-            self.append_placement(&coordinates, state).await;
+            self.append_placement(
+                &coordinates,
+                state,
+                (state == "terminal").then_some("failed"),
+            )
+            .await;
         }
     }
 }
@@ -1756,10 +1897,8 @@ async fn run_scenario_once(
     scenario: &Scenario,
     invariants: &[Box<dyn ScenarioInvariant>],
 ) -> Result<NormalizedTranscript, ScenarioFailure> {
-    let _run_guard = SCENARIO_RUN_LOCK.lock().await;
-    let root = std::env::temp_dir()
-        .join("cooldis-scenario-engine")
-        .join(format!("{:016x}", scenario.seed));
+    let run_root = ScenarioRunRoot::new(scenario.seed);
+    let root = run_root.path.clone();
     let mut harness =
         ScenarioHarness::build(root.clone(), clone_plan(&scenario.plan), true, None).await;
     let mut normative_invariants = invariant_set_v1();
@@ -1813,7 +1952,6 @@ async fn run_scenario_once(
             };
             let _ = harness.server.supervisor().shutdown_all().await;
             drop(harness);
-            let _ = std::fs::remove_dir_all(root);
             return Err(failure);
         }
     }
@@ -1821,7 +1959,6 @@ async fn run_scenario_once(
     let transcript = harness.transcript.normalize();
     let _ = harness.server.supervisor().shutdown_all().await;
     drop(harness);
-    let _ = std::fs::remove_dir_all(root);
     Ok(transcript)
 }
 
@@ -1835,7 +1972,7 @@ async fn minimize_scenario(
     let target = first
         .violations
         .iter()
-        .map(|violation| violation.invariant)
+        .map(|violation| (violation.invariant, violation.detail.clone()))
         .collect::<BTreeSet<_>>();
 
     // Delta-debug contiguous subsequences first. A candidate is retained only
@@ -1917,14 +2054,14 @@ async fn minimize_scenario(
 async fn failure_matches(
     scenario: &Scenario,
     invariants: &[Box<dyn ScenarioInvariant>],
-    target: &BTreeSet<&'static str>,
+    target: &BTreeSet<(&'static str, String)>,
 ) -> bool {
     match run_scenario_once(scenario, invariants).await {
         Ok(_) => false,
         Err(failure) => failure
             .violations
             .iter()
-            .any(|violation| target.contains(violation.invariant)),
+            .any(|violation| target.contains(&(violation.invariant, violation.detail.clone()))),
     }
 }
 
@@ -2065,6 +2202,25 @@ mod tests {
         }
     }
 
+    fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else {
+            "non-string panic payload".to_string()
+        }
+    }
+
+    async fn catch_scenario_once(
+        scenario: &Scenario,
+    ) -> Result<Result<NormalizedTranscript, ScenarioFailure>, String> {
+        std::panic::AssertUnwindSafe(run_scenario_once(scenario, &[]))
+            .catch_unwind()
+            .await
+            .map_err(panic_detail)
+    }
+
     fn write_sweep_receipt(receipt: &SweepReceipt) {
         let json = serde_json::to_string_pretty(receipt).expect("serialize nightly sweep receipt");
         if let Ok(path) = std::env::var("COOLDIS_SCENARIO_SWEEP_RECEIPT_PATH") {
@@ -2136,6 +2292,23 @@ mod tests {
     }
 
     #[test]
+    fn operation_lane_is_independent_of_fault_intensity() {
+        let seed = 0x4050_0003;
+        let ops = [Intensity::Sparse, Intensity::Moderate, Intensity::Hostile].map(|intensity| {
+            Scenario::derive(
+                seed,
+                ScenarioBounds {
+                    max_ops: 12,
+                    intensity,
+                },
+            )
+            .ops
+        });
+        assert_eq!(ops[0], ops[1]);
+        assert_eq!(ops[1], ops[2]);
+    }
+
+    #[test]
     fn zero_bound_derives_an_empty_sequence() {
         let scenario = Scenario::derive(
             7,
@@ -2148,7 +2321,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn seeded_runner_engages_inv2_inv3_inv6_inv7_and_inv8_witnesses() {
+    async fn seeded_runner_engages_inv2_inv3_inv5_inv6_inv7_and_inv8_witnesses() {
         if !super::super::scenario_unit_harness() {
             return;
         }
@@ -2192,6 +2365,53 @@ mod tests {
                 .iter()
                 .any(|item| item.label == "thread.reservation")
         );
+
+        let recovery = Scenario {
+            seed: 0x4030_0005,
+            ops: vec![ScenarioOp::StartThread, ScenarioOp::Restart],
+            plan: FaultPlan {
+                seed: 0x4030_0005,
+                vocabulary_version: FAULT_VOCABULARY_VERSION,
+                intensity: Intensity::Sparse,
+                directives: vec![FaultDirective {
+                    component: FaultComponent::Process,
+                    operation: "ingress-binding",
+                    nth: 1,
+                    timing: FaultTiming::Before,
+                    action: PlannedAction::Fail,
+                }],
+            },
+        };
+        let recovery = run_scenario_once(&recovery, &[])
+            .await
+            .expect("real crash-cut scenario should engage inv5");
+        let terminal = recovery
+            .items
+            .iter()
+            .position(|item| {
+                item.kind == "event"
+                    && item.value.pointer("/payload/resident_state").is_some()
+                    && item.value.pointer("/payload/reservation_key").is_some()
+            })
+            .expect("inv5 requires a durable terminal-resident witness");
+        let probe = recovery
+            .items
+            .iter()
+            .position(|item| item.label == "recovery.probe")
+            .expect("inv5 requires a completed recovery probe");
+        let progress = recovery
+            .items
+            .iter()
+            .enumerate()
+            .skip(probe + 1)
+            .find(|(_, item)| {
+                item.value
+                    .pointer("/payload/reservation_progress")
+                    .is_some()
+            })
+            .map(|(index, _)| index)
+            .expect("inv5 requires durable progress after recovery");
+        assert!(terminal < probe && probe < progress);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2220,6 +2440,38 @@ mod tests {
         run_scenario_once(&scenario, &[])
             .await
             .expect("a completed first lease must not require redelivery");
+    }
+
+    #[tokio::test]
+    async fn scenario_queue_accepts_message_id_completion_after_visibility_expiry() {
+        let tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let queue = ScenarioQueue::new(Arc::clone(&tick));
+        let source = ScenarioHarness::source();
+        let envelope = IngressEnvelope::new(
+            source.clone(),
+            ScenarioHarness::conversation(0),
+            IngressContent::text("accepted stale completion"),
+            0,
+        )
+        .with_dedupe_key(IoDedupeKey::for_source(&source, "stale-completion"));
+        queue.submit(envelope).await.unwrap();
+        let leased = queue.lease_ingress("worker-a", 1, 1).await.unwrap();
+        assert_eq!(leased.len(), 1);
+        tick.store(2, std::sync::atomic::Ordering::SeqCst);
+
+        queue
+            .complete_ingress(&leased[0].message_id)
+            .await
+            .expect("message-id queue contract accepts completion after expiry");
+
+        assert!(
+            queue
+                .lease_ingress("worker-b", 1, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(queue.pending_count().await, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2262,6 +2514,10 @@ mod tests {
         let corpus = load_corpus(&corpus_path()).unwrap_or_else(|error| panic!("{error}"));
         let corpus_size = corpus.len();
         for (entry, intensity) in corpus {
+            eprintln!(
+                "scenario corpus: running seed {} intensity={} max_ops={} pin={}",
+                entry.seed, entry.intensity, entry.max_ops, entry.pins
+            );
             let scenario = Scenario::derive(
                 entry.seed,
                 ScenarioBounds {
@@ -2337,36 +2593,67 @@ mod tests {
             };
             *tallies.get_mut(intensity_name).unwrap() += 1;
             let derive = || Scenario::derive(seed, ScenarioBounds { max_ops, intensity });
-            let first = run_scenario_once(&derive(), &[]).await;
-            let second = run_scenario_once(&derive(), &[]).await;
-            let first_transcript = outcome_transcript(&first);
-            let second_transcript = outcome_transcript(&second);
+            let first = catch_scenario_once(&derive()).await;
+            let second = catch_scenario_once(&derive()).await;
 
-            if first_transcript != second_transcript {
-                let mismatch = first_transcript_mismatch(first_transcript, second_transcript);
+            if let (Ok(first), Ok(second)) = (&first, &second) {
+                let first_transcript = outcome_transcript(first);
+                let second_transcript = outcome_transcript(second);
+                if first_transcript != second_transcript {
+                    let mismatch = first_transcript_mismatch(first_transcript, second_transcript);
+                    failures.push(SweepFailure {
+                        seed,
+                        kind: "same-seed-drift",
+                        detail: format!(
+                            "same-seed transcript mismatch at {mismatch:?}: left={:?} right={:?}",
+                            mismatch.and_then(|item| first_transcript.items.get(item)),
+                            mismatch.and_then(|item| second_transcript.items.get(item)),
+                        ),
+                    });
+                }
+            }
+            if let Err(detail) = &first {
                 failures.push(SweepFailure {
                     seed,
-                    kind: "same-seed-drift",
-                    detail: format!(
-                        "same-seed transcript mismatch at {mismatch:?}: left={:?} right={:?}",
-                        mismatch.and_then(|item| first_transcript.items.get(item)),
-                        mismatch.and_then(|item| second_transcript.items.get(item)),
-                    ),
+                    kind: "runner-panic",
+                    detail: format!("first same-seed run panicked: {detail}"),
                 });
             }
-            if let Err(failure) = first {
-                eprintln!("nightly scenario failure for seed {seed}: {failure:?}");
-                let minimized = run_scenario(derive(), &[])
-                    .await
-                    .expect_err("a deterministic nightly failure must reproduce for minimization");
+            if let Err(detail) = &second {
                 failures.push(SweepFailure {
                     seed,
-                    kind: "scenario-failure",
-                    detail: format!(
-                        "vocabulary {} failed at step {} with {:?}",
-                        minimized.vocabulary_version, minimized.failing_step, minimized.violations
-                    ),
+                    kind: "runner-panic",
+                    detail: format!("second same-seed run panicked: {detail}"),
                 });
+            }
+            if let Ok(Err(failure)) = first {
+                eprintln!("nightly scenario failure for seed {seed}: {failure:?}");
+                match std::panic::AssertUnwindSafe(run_scenario(derive(), &[]))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(Err(minimized)) => failures.push(SweepFailure {
+                        seed,
+                        kind: "scenario-failure",
+                        detail: format!(
+                            "vocabulary {} failed at step {} with {:?}",
+                            minimized.vocabulary_version,
+                            minimized.failing_step,
+                            minimized.violations
+                        ),
+                    }),
+                    Ok(Ok(())) => failures.push(SweepFailure {
+                        seed,
+                        kind: "nondeterministic-failure",
+                        detail: "first run failed but minimization did not reproduce it"
+                            .to_string(),
+                    }),
+                    Err(payload) => failures.push(SweepFailure {
+                        seed,
+                        kind: "minimizer-panic",
+                        detail: panic_detail(payload),
+                    }),
+                }
             }
         }
 
@@ -2449,6 +2736,30 @@ mod tests {
                         .is_some_and(|stream_id| !stream_id.starts_with('$'))
                 })
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_sweep_output_hash_seeds_are_same_seed_deterministic() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        for seed in [12756048029454721330, 4861954629787943465] {
+            let derive = || {
+                Scenario::derive(
+                    seed,
+                    ScenarioBounds {
+                        max_ops: 8,
+                        intensity: Intensity::Hostile,
+                    },
+                )
+            };
+            let first = run_scenario_once(&derive(), &[]).await.unwrap();
+            let second = run_scenario_once(&derive(), &[]).await.unwrap();
+            assert_eq!(
+                first, second,
+                "fresh sweep seed {seed} drifted between same-seed runs"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -2586,5 +2897,94 @@ mod tests {
             "the step-sensitive failure should minimize to three operations"
         );
         assert!(failure.violations[0].detail.contains("deliberately broken"));
+    }
+
+    struct ReservationCountInvariant;
+
+    #[async_trait]
+    impl ScenarioInvariant for ReservationCountInvariant {
+        fn name(&self) -> &'static str {
+            "test-reservation-count-invariant"
+        }
+
+        async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+            (world.step >= 1)
+                .then(|| {
+                    let count = world
+                        .transcript
+                        .items
+                        .iter()
+                        .filter(|item| item.label == "thread.reservation")
+                        .count();
+                    InvariantViolation {
+                        invariant: self.name(),
+                        detail: format!("reservation-count={count}"),
+                    }
+                })
+                .into_iter()
+                .collect()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn minimizer_preserves_the_original_violation_not_only_its_invariant_name() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let scenario = no_fault_scenario(
+            0x4050_0001,
+            vec![
+                ScenarioOp::StartThread,
+                ScenarioOp::SubmitTurn,
+                ScenarioOp::DrainQueue,
+                ScenarioOp::Cancel,
+            ],
+        );
+        let failure = run_scenario(scenario, &[Box::new(ReservationCountInvariant)])
+            .await
+            .unwrap_err();
+        assert_eq!(failure.violations[0].detail, "reservation-count=1");
+    }
+
+    struct OverlapInvariant {
+        rendezvous: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl ScenarioInvariant for OverlapInvariant {
+        fn name(&self) -> &'static str {
+            "test-overlapping-scenario-runs"
+        }
+
+        async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+            if world.step == 0 {
+                self.rendezvous.wait().await;
+            }
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn same_seed_runs_do_not_require_process_global_serialization() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let rendezvous = Arc::new(tokio::sync::Barrier::new(2));
+        let first_invariant: Vec<Box<dyn ScenarioInvariant>> = vec![Box::new(OverlapInvariant {
+            rendezvous: Arc::clone(&rendezvous),
+        })];
+        let second_invariant: Vec<Box<dyn ScenarioInvariant>> =
+            vec![Box::new(OverlapInvariant { rendezvous })];
+        let first = no_fault_scenario(0x4050_0002, vec![ScenarioOp::StartThread]);
+        let second = no_fault_scenario(0x4050_0002, vec![ScenarioOp::StartThread]);
+        let overlapping = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                run_scenario_once(&first, &first_invariant),
+                run_scenario_once(&second, &second_invariant),
+            )
+        })
+        .await
+        .expect("scenario runs were serialized by process-global test state");
+        assert_eq!(overlapping.0.unwrap(), overlapping.1.unwrap());
     }
 }

@@ -2,8 +2,8 @@
 
 //! Scenario invariant library v1 (ADR 0004, invariants 1-5).
 //!
-//! The runner has not landed yet, so the library defines the durable witness
-//! shapes it needs without widening [`ScenarioWorld`]:
+//! The runner emits the durable witness shapes below without widening
+//! [`ScenarioWorld`]:
 //!
 //! - event streams are discovered from normalized transcript event values
 //!   (the runner must preserve literal `stream_id` values while normalizing);
@@ -460,53 +460,67 @@ impl ScenarioInvariant for TerminalConsistencyInvariant {
     }
 
     async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
-        let events = match durable_events(world, self.name()).await {
-            Ok(events) => events,
+        match durable_events(world, self.name()).await {
+            Ok(_) => {}
             Err(violations) => return violations,
-        };
-        let probes = world
-            .transcript
-            .items
-            .iter()
-            .filter(|item| item.label == "recovery.probe")
-            .filter_map(|item| item.value.get("reservation_key").and_then(Value::as_str))
-            .collect::<HashSet<_>>();
+        }
+        let mut probes: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut terminal: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+        let mut progress: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, item) in world.transcript.items.iter().enumerate() {
+            if item.label == "recovery.probe"
+                && let Some(key) = item.value.get("reservation_key").and_then(Value::as_str)
+            {
+                probes.entry(key.to_string()).or_default().push(index);
+            }
+            if item.kind != "event" {
+                continue;
+            }
+            let Some(payload) = item.value.get("payload") else {
+                continue;
+            };
+            if let (Some(state @ ("failed" | "completed")), Some(key)) = (
+                payload.get("resident_state").and_then(Value::as_str),
+                payload.get("reservation_key").and_then(Value::as_str),
+            ) {
+                terminal
+                    .entry(key.to_string())
+                    .or_default()
+                    .push((state.to_string(), index));
+            }
+            if let Some(key) = payload.get("reservation_progress").and_then(Value::as_str) {
+                progress.entry(key.to_string()).or_default().push(index);
+            }
+        }
         if probes.is_empty() {
             return Vec::new();
         }
-
-        let mut terminal: HashMap<String, (String, i64)> = HashMap::new();
-        let mut progress: HashMap<String, i64> = HashMap::new();
-        for event in events {
-            if let (Some(state @ ("failed" | "completed")), Some(key)) = (
-                event.payload.get("resident_state").and_then(Value::as_str),
-                event.payload.get("reservation_key").and_then(Value::as_str),
-            ) {
-                terminal.insert(key.to_string(), (state.to_string(), event.created_at_ms));
-            }
-            if let Some(key) = event
-                .payload
-                .get("reservation_progress")
-                .and_then(Value::as_str)
-            {
-                progress
-                    .entry(key.to_string())
-                    .and_modify(|at| *at = (*at).max(event.created_at_ms))
-                    .or_insert(event.created_at_ms);
-            }
-        }
-
         terminal
             .into_iter()
-            .filter(|(key, _)| probes.contains(key.as_str()))
-            .filter(|(key, (_, terminal_at))| {
-                progress.get(key).is_none_or(|progress_at| progress_at <= terminal_at)
+            .flat_map(|(key, terminals)| {
+                terminals.into_iter().filter_map({
+                    let probes = probes.get(&key);
+                    let progress = progress.get(&key);
+                    move |(state, terminal_index)| {
+                        let probe_index = probes?
+                            .iter()
+                            .copied()
+                            .find(|probe_index| *probe_index > terminal_index)?;
+                        progress
+                            .is_none_or(|indices| {
+                                !indices
+                                    .iter()
+                                    .any(|progress_index| *progress_index > probe_index)
+                            })
+                            .then_some((key.clone(), state, terminal_index, probe_index))
+                    }
+                })
             })
-            .map(|(key, (state, terminal_at))| {
+            .map(|(key, state, terminal_index, probe_index)| {
                 violation(
                     self.name(),
                     format!(
-                        "{state} resident for reservation {key} at {terminal_at} has a completed recovery probe but no later durable progress evidence"
+                        "{state} resident for reservation {key} at transcript item {terminal_index} has a completed recovery probe at item {probe_index} but no later durable progress evidence"
                     ),
                 )
             })
@@ -953,10 +967,84 @@ mod tests {
         )
         .await;
         let mut transcript = transcript_for(&events);
-        transcript.items.push(receipt(
-            "recovery.probe",
-            json!({"reservation_key": "turn-1"}),
-        ));
+        transcript.items.insert(
+            1,
+            receipt("recovery.probe", json!({"reservation_key": "turn-1"})),
+        );
+        assert!(
+            TerminalConsistencyInvariant
+                .check(&world(&store, &transcript))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn inv5_orders_terminal_and_progress_by_transcript_sequence() {
+        let store = InMemorySessionStore::new();
+        let events = append(
+            &store,
+            vec![
+                event(
+                    34,
+                    1,
+                    EventKind::CouplingRunFailed,
+                    json!({"resident_state": "failed", "reservation_key": "turn-3"}),
+                ),
+                event(
+                    35,
+                    1,
+                    EventKind::TurnResumed,
+                    json!({"reservation_progress": "turn-3"}),
+                ),
+            ],
+        )
+        .await;
+        let mut transcript = transcript_for(&events);
+        transcript.items.insert(
+            1,
+            receipt("recovery.probe", json!({"reservation_key": "turn-3"})),
+        );
+        assert!(
+            TerminalConsistencyInvariant
+                .check(&world(&store, &transcript))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn inv5_does_not_apply_an_earlier_probe_to_a_later_terminal_record() {
+        let store = InMemorySessionStore::new();
+        let events = append(
+            &store,
+            vec![
+                event(
+                    36,
+                    1,
+                    EventKind::CouplingRunFailed,
+                    json!({"resident_state": "failed", "reservation_key": "turn-4"}),
+                ),
+                event(
+                    37,
+                    1,
+                    EventKind::TurnResumed,
+                    json!({"reservation_progress": "turn-4"}),
+                ),
+                event(
+                    38,
+                    1,
+                    EventKind::CouplingRunCompleted,
+                    json!({"resident_state": "completed", "reservation_key": "turn-4"}),
+                ),
+            ],
+        )
+        .await;
+        let mut transcript = transcript_for(&events);
+        transcript.items.insert(
+            1,
+            receipt("recovery.probe", json!({"reservation_key": "turn-4"})),
+        );
         assert!(
             TerminalConsistencyInvariant
                 .check(&world(&store, &transcript))

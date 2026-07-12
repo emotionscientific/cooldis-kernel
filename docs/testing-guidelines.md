@@ -192,11 +192,39 @@ scenario step:
 - `inv2-unique-active-topology`;
 - `inv3-bounded-queue`;
 - `inv4-no-duplicate-projected-output`;
-- `inv5-terminal-consistency`.
+- `inv5-terminal-consistency`;
+- `inv6-claims-settle`;
+- `inv7-one-child-per-fork-claim`;
+- `inv8-reserved-before-created`.
 
-Each new composed-review gate finding lands as a numbered invariant and carries
-a deterministic corpus seed that reproduces the finding. The seed joins the
-fixed corpus with a provenance line naming the defect or gate finding it pins.
+The runner executes against the real daemon/app-server lifecycle over a
+temporary SQLite store, with deterministic test-only adapters for provider,
+queue, placement, and crash-cut witnesses. Invariant inputs remain store-first:
+durable events plus normalized non-mutating receipts. The fixed corpus is a
+normal library test and must enumerate every seed it runs; missing, empty,
+malformed, stale-vocabulary, or unknown-intensity entries fail closed:
+
+```bash
+scripts/cargo-lane.sh test -p cooldis --lib scenario_corpus_holds -- --nocapture
+```
+
+Run a fresh rotating sweep by supplying a base seed and count without mutating
+process environment from inside the test:
+
+```bash
+COOLDIS_SCENARIO_SWEEP_BASE_SEED=40520260711 \
+COOLDIS_SCENARIO_SWEEP_COUNT=24 \
+scripts/cargo-lane.sh test -p cooldis --lib scenario_nightly_sweep -- --ignored --nocapture
+```
+
+The receipt reports the attempted count, per-intensity tallies, corpus size,
+commit witness, and every scenario failure, determinism drift, or caught runner
+panic. A caught panic is a failed sweep, but it must not suppress the receipt.
+
+Each reproducible scenario failure joins the fixed corpus with a provenance
+line naming the defect or gate finding it pins. Harness defects such as
+same-seed drift or receipt suppression also require a focused regression; when
+a sweep seed exposes one, its corpus provenance points to that regression.
 
 ### Nightly Failure Promotion
 
