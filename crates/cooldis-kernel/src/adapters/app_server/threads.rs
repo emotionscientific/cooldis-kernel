@@ -88,6 +88,7 @@ impl CooldisAppServer {
             .inner
             .metadata_store
             .list_thread_lifecycle_for_user(&self.inner.tenant_id, &self.inner.user_id)
+            .await
             .map_err(metadata_store_error)?;
         for record in records {
             if !is_loadable_lifecycle_status(record.status) {
@@ -150,6 +151,7 @@ impl CooldisAppServer {
             .inner
             .metadata_store
             .get_thread_lifecycle(parsed)
+            .await
             .map_err(metadata_store_jsonrpc_error)?
             .ok_or_else(|| thread_not_found(thread_id))?;
         if record.coordinates.tenant_id != self.inner.tenant_id
@@ -218,7 +220,7 @@ impl CooldisAppServer {
                 record.manifest_hash
             )));
         }
-        let mut provider_surface = self.agent_manifest_provider_surface()?;
+        let mut provider_surface = self.agent_manifest_provider_surface().await?;
         if record.name == default_manifest::DEFAULT_AGENT_NAME
             && record.namespace.as_deref() == Some(default_manifest::DEFAULT_AGENT_NAMESPACE)
             && metadata
@@ -295,7 +297,7 @@ impl CooldisAppServer {
     ) -> CooldisResult<AgentManifestBoundThread> {
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
-        let provider_surface = self.agent_manifest_provider_surface()?;
+        let provider_surface = self.agent_manifest_provider_surface().await?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
         bind_published_agent_record(
@@ -394,6 +396,7 @@ impl CooldisAppServer {
             .inner
             .metadata_store
             .get_thread_lifecycle(record.coordinates.thread_id)
+            .await
             .map_err(metadata_store_error)?
         {
             record.metadata = existing.metadata;
@@ -403,6 +406,7 @@ impl CooldisAppServer {
         self.inner
             .metadata_store
             .upsert_thread_lifecycle(record.clone())
+            .await
             .map_err(metadata_store_error)?;
         Ok(record)
     }
@@ -1574,8 +1578,9 @@ impl AppServerThreadSpawnAgentResolver {
             .secret_store_path
             .as_ref()
             .unwrap_or(metadata_store_path);
-        let secret_store =
-            SqliteSecretStore::open(secret_store_path).map_err(secret_store_error)?;
+        let secret_store = SqliteSecretStore::open(secret_store_path)
+            .await
+            .map_err(secret_store_error)?;
         Ok(Some(McpToolUniverseDiscoverer::new(
             registry,
             Some(Arc::new(secret_store)),

@@ -176,6 +176,7 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
         .inner
         .metadata_store
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .await
         .unwrap()
         .unwrap();
     let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
@@ -423,9 +424,12 @@ async fn app_server_new_local_seeds_default_provider_store() {
     let app = CooldisAppServer::new_local(config).await.unwrap();
     assert_eq!(app.model_provider(), APP_SERVER_LOCAL_PROVIDER);
 
-    let store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
+    let store = crate::SqliteMetadataStore::open(&metadata_path)
+        .await
+        .unwrap();
     let openai_compatible = store
         .get_provider(crate::OPENAI_COMPATIBLE_PROVIDER_ID)
+        .await
         .unwrap()
         .expect("app-server boot should seed OpenAI Compatible provider metadata");
     assert_eq!(
@@ -453,7 +457,9 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
     let provider_id = "fixture-auth";
     let project_metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path).unwrap();
+    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path)
+        .await
+        .unwrap();
     metadata_store
         .upsert_provider(
             LlmProviderRecord::new(
@@ -464,6 +470,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
             .with_display_name("Fixture Auth")
             .with_auth_header(true),
         )
+        .await
         .unwrap();
     drop(metadata_store);
 
@@ -502,10 +509,15 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
             .contains("stored-openai_compatible-key")
     );
 
-    let project_store = crate::SqliteMetadataStore::open(&project_metadata_path).unwrap();
-    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path).unwrap();
+    let project_store = crate::SqliteMetadataStore::open(&project_metadata_path)
+        .await
+        .unwrap();
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
+        .await
+        .unwrap();
     let provider = project_store
         .get_provider(provider_id)
+        .await
         .unwrap()
         .expect("default provider should be seeded");
     assert!(
@@ -514,6 +526,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
             &provider,
             &crate::LlmProviderAuthContext::new()
         )
+        .await
         .unwrap()
         .is_none()
     );
@@ -522,6 +535,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         &provider,
         &crate::LlmProviderAuthContext::new(),
     )
+    .await
     .unwrap()
     .expect("stored provider credential should resolve");
     assert_eq!(resolved.source, crate::LlmProviderAuthSourceKind::Stored);
@@ -536,13 +550,16 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .await
         .unwrap();
     assert_eq!(deleted["auth"]["configured"], false);
-    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path).unwrap();
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
+        .await
+        .unwrap();
     assert!(
         crate::resolve_llm_provider_auth(
             &user_store,
             &provider,
             &crate::LlmProviderAuthContext::new()
         )
+        .await
         .unwrap()
         .is_none()
     );
@@ -563,7 +580,9 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
     let provider_id = "fixture-list";
     let project_metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path).unwrap();
+    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path)
+        .await
+        .unwrap();
     metadata_store
         .upsert_provider(
             LlmProviderRecord::new(
@@ -586,9 +605,11 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
                     .with_context_window_tokens(4096),
             ),
         )
+        .await
         .unwrap();
     drop(metadata_store);
     crate::SqliteMetadataStore::open(&user_metadata_path)
+        .await
         .unwrap()
         .set_credential(
             provider_id,
@@ -596,6 +617,7 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
                 key: "stored-list-key".to_string(),
             },
         )
+        .await
         .unwrap();
     let app = CooldisAppServer::new_local(config).await.unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone());
@@ -719,8 +741,10 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
     assert!(!created.to_string().contains("secret-model"));
 
     let stored = crate::SqliteMetadataStore::open(&metadata_path)
+        .await
         .unwrap()
         .get_provider("fixture-upsert")
+        .await
         .unwrap()
         .expect("provider should be stored");
     assert_eq!(stored.display_name.as_deref(), Some("Fixture Upsert"));
@@ -835,13 +859,16 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let metadata_store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
+    let metadata_store = crate::SqliteMetadataStore::open(&metadata_path)
+        .await
+        .unwrap();
     metadata_store
         .upsert_provider(LlmProviderRecord::new(
             "fixture-delete",
             ProviderApi::OpenAIChatCompletions,
             "https://example.invalid/v1",
         ))
+        .await
         .unwrap();
     metadata_store
         .set_credential(
@@ -850,9 +877,11 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
                 key: "stored-delete-key".to_string(),
             },
         )
+        .await
         .unwrap();
     drop(metadata_store);
     crate::SqliteMetadataStore::open(&user_metadata_path)
+        .await
         .unwrap()
         .set_credential(
             "fixture-delete",
@@ -860,6 +889,7 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
                 key: "stored-user-delete-key".to_string(),
             },
         )
+        .await
         .unwrap();
     let app = CooldisAppServer::new_local(config).await.unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone());
@@ -876,16 +906,156 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
     assert_eq!(deleted["deleted"], true);
     assert_eq!(deleted["providerId"], "fixture-delete");
 
-    let store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
-    assert!(store.get_provider("fixture-delete").unwrap().is_none());
-    assert!(store.get_credential("fixture-delete").unwrap().is_none());
-    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path).unwrap();
+    let store = crate::SqliteMetadataStore::open(&metadata_path)
+        .await
+        .unwrap();
     assert!(
-        user_store
-            .get_credential("fixture-delete")
+        store
+            .get_provider("fixture-delete")
+            .await
             .unwrap()
             .is_none()
     );
+    assert!(
+        store
+            .get_credential("fixture-delete")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
+        .await
+        .unwrap();
+    assert!(
+        user_store
+            .get_credential("fixture-delete")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
+    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+        "cooldis-provider-cancel-delete-{}.sock",
+        Uuid::now_v7()
+    )));
+    let root = unique_test_root("app-server-provider-cancel-delete");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let metadata_path = config.metadata_store_path();
+    let user_metadata_path = config.user_metadata_store_path();
+    let metadata_store = crate::SqliteMetadataStore::open(&metadata_path)
+        .await
+        .unwrap();
+    metadata_store
+        .upsert_provider(LlmProviderRecord::new(
+            "fixture-cancel-delete",
+            ProviderApi::OpenAIChatCompletions,
+            "https://example.invalid/v1",
+        ))
+        .await
+        .unwrap();
+    metadata_store
+        .set_credential(
+            "fixture-cancel-delete",
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-project-delete-key".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
+        .await
+        .unwrap();
+    user_store
+        .set_credential(
+            "fixture-cancel-delete",
+            crate::LlmProviderCredential::ApiKey {
+                key: "stored-user-delete-key".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let user_db =
+        cooldis_sqlite::Db::open(&user_metadata_path, cooldis_sqlite::DbConfig::default())
+            .await
+            .unwrap();
+    let mut user_connection = user_db.connect().await.unwrap();
+    let blocker = user_connection
+        .transaction_with_behavior(cooldis_sqlite::TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+
+    let delete_app = app.clone();
+    let delete_task = tokio::spawn(async move {
+        delete_app
+            .dispatch_request(
+                &connection,
+                "modelProvider/delete",
+                Some(json!({ "providerId": "fixture-cancel-delete" })),
+            )
+            .await
+    });
+
+    let mut provider_deleted = false;
+    for _ in 0..10_000 {
+        if metadata_store
+            .get_provider("fixture-cancel-delete")
+            .await
+            .unwrap()
+            .is_none()
+        {
+            provider_deleted = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        provider_deleted,
+        "provider delete did not reach the blocked credential cleanup"
+    );
+
+    delete_task.abort();
+    assert!(delete_task.await.unwrap_err().is_cancelled());
+    blocker.rollback().await.unwrap();
+
+    let mut cleanup_finished = false;
+    for _ in 0..10_000 {
+        let project_credential = metadata_store
+            .get_credential("fixture-cancel-delete")
+            .await
+            .unwrap();
+        let user_credential = user_store
+            .get_credential("fixture-cancel-delete")
+            .await
+            .unwrap();
+        if project_credential.is_none() && user_credential.is_none() {
+            cleanup_finished = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        cleanup_finished,
+        "cancelled provider delete left stored credentials behind"
+    );
+
+    drop(user_connection);
+    drop(user_db);
+    drop(user_store);
+    drop(metadata_store);
+    drop(app);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -974,14 +1144,18 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
 
     assert!(
         SqliteSecretStore::open(&metadata_path)
+            .await
             .unwrap()
             .resolve_secret("mcp.arcade.bearer")
+            .await
             .unwrap()
             .is_none()
     );
     let secret = SqliteSecretStore::open(&user_metadata_path)
+        .await
         .unwrap()
         .resolve_secret("mcp.arcade.bearer")
+        .await
         .unwrap()
         .expect("upsert should persist pasted bearer token");
     assert_eq!(secret.value, "fixture-token");
@@ -1598,7 +1772,9 @@ async fn model_list_projects_catalog_provider_models() {
         .with_catalog_openai_chat_completions("fixture", Some("fixture-large".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     metadata_store
         .upsert_provider(
             LlmProviderRecord::new(
@@ -1618,8 +1794,11 @@ async fn model_list_projects_catalog_provider_models() {
                     .with_max_output_tokens(2048),
             ),
         )
+        .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store).unwrap();
+    sync_catalog_provider_identity(&mut config, &metadata_store)
+        .await
+        .unwrap();
     let runtime_config = CanonicalProviderRuntimeConfig::new(
         ProviderApi::OpenAIResponses,
         "fixture",
@@ -1668,7 +1847,9 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
         .with_catalog_openai_chat_completions("fixture", Some("fixture-default".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     metadata_store
         .upsert_provider(
             LlmProviderRecord::new(
@@ -1680,8 +1861,11 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
             .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
             .with_model(crate::LlmProviderModelRecord::new("fixture-large")),
         )
+        .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store).unwrap();
+    sync_catalog_provider_identity(&mut config, &metadata_store)
+        .await
+        .unwrap();
     let runtime_config = CanonicalProviderRuntimeConfig::new(
         ProviderApi::OpenAIResponses,
         "fixture",
@@ -1747,9 +1931,12 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
     let thread_id = ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap())
         .expect("thread/start should return a thread id");
 
-    let store = crate::SqliteMetadataStore::open(&metadata_path).unwrap();
+    let store = crate::SqliteMetadataStore::open(&metadata_path)
+        .await
+        .unwrap();
     let record = store
         .get_thread_lifecycle(thread_id)
+        .await
         .unwrap()
         .expect("app-server thread/start should persist thread lifecycle metadata");
     assert_eq!(record.coordinates.tenant_id, "cooldis_app_server");
@@ -1759,6 +1946,7 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
     assert_eq!(
         store
             .list_thread_lifecycle(&record.coordinates.scope())
+            .await
             .unwrap()
             .len(),
         1
@@ -1897,9 +2085,10 @@ async fn ref_less_thread_start_binds_default_manifest() {
         Some(cwd_string(&workspace.join("override-workspace")).as_str())
     );
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).unwrap();
+    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
     let lifecycle = metadata_store
         .get_thread_lifecycle(thread_id)
+        .await
         .unwrap()
         .expect("default manifest start should persist lifecycle metadata");
     assert_eq!(
@@ -2010,7 +2199,9 @@ allow = ["default_cwd"]
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     metadata_store
         .upsert_provider(
             LlmProviderRecord::new(
@@ -2021,8 +2212,11 @@ allow = ["default_cwd"]
             .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
             .with_model(crate::LlmProviderModelRecord::new("fixture-large")),
         )
+        .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store).unwrap();
+    sync_catalog_provider_identity(&mut config, &metadata_store)
+        .await
+        .unwrap();
     let session_path = config.state_home.join("session_history.sqlite3");
     let runtime_config = CanonicalProviderRuntimeConfig::new(
         ProviderApi::OpenAIChatCompletions,
@@ -2063,6 +2257,7 @@ allow = ["default_cwd"]
         .inner
         .metadata_store
         .get_thread_lifecycle(thread_id)
+        .await
         .unwrap()
         .expect("profile-selected start should persist lifecycle metadata");
     assert_eq!(
@@ -2108,6 +2303,7 @@ allow = ["default_cwd"]
         .inner
         .metadata_store
         .get_thread_lifecycle(large_thread_id)
+        .await
         .unwrap()
         .expect("provider/model selected start should persist lifecycle metadata");
     assert_eq!(
@@ -2163,7 +2359,9 @@ allow = ["default_cwd"]
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     metadata_store
         .upsert_provider(
             LlmProviderRecord::new(
@@ -2174,8 +2372,11 @@ allow = ["default_cwd"]
             .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
             .with_model(crate::LlmProviderModelRecord::new("fixture-large")),
         )
+        .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store).unwrap();
+    sync_catalog_provider_identity(&mut config, &metadata_store)
+        .await
+        .unwrap();
     let runtime_config = CanonicalProviderRuntimeConfig::new(
         ProviderApi::OpenAIChatCompletions,
         "fixture",
@@ -2483,6 +2684,7 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
         .inner
         .metadata_store
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .await
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
@@ -2720,7 +2922,9 @@ streaming = false
         None,
         &config,
     );
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     let app = CooldisAppServer::with_runtime_factory_and_metadata_store(
         config,
         runtime_factory,
@@ -2902,7 +3106,9 @@ budget_share = 0.75
         None,
         &config,
     );
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     let app = CooldisAppServer::with_runtime_factory_and_metadata_store(
         config,
         runtime_factory,
@@ -3256,7 +3462,9 @@ streaming = false
         None,
         &config,
     );
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     let app = CooldisAppServer::with_runtime_factory_and_metadata_store(
         config,
         runtime_factory,
@@ -3296,9 +3504,10 @@ streaming = false
         .expect("thread/list should expose the spawned child thread");
     let child_thread_id = child_thread["id"].as_str().unwrap().to_string();
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).unwrap();
+    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
     let child_record = metadata_store
         .get_thread_lifecycle(ThreadId::parse_str(&child_thread_id).unwrap())
+        .await
         .unwrap()
         .expect("thread_spawn should persist child thread lifecycle metadata");
     assert_eq!(child_record.parent_thread_id, Some(root_id));
@@ -3525,8 +3734,10 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
 
     let parsed = ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = SqliteMetadataStore::open(metadata_path)
+        .await
         .unwrap()
         .get_thread_lifecycle(parsed)
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -3574,16 +3785,17 @@ async fn app_server_startup_skips_stale_manifest_threads() {
     }
 
     let parsed = ThreadId::parse_str(&thread_id).unwrap();
-    let store = SqliteMetadataStore::open(&metadata_path).unwrap();
+    let store = SqliteMetadataStore::open(&metadata_path).await.unwrap();
     let mut lifecycle = store
         .get_thread_lifecycle(parsed)
+        .await
         .unwrap()
         .expect("thread/start should persist lifecycle metadata");
     lifecycle.metadata.insert(
         THREAD_AGENT_MANIFEST_HASH_METADATA.to_string(),
         "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
     );
-    store.upsert_thread_lifecycle(lifecycle).unwrap();
+    store.upsert_thread_lifecycle(lifecycle).await.unwrap();
     drop(store);
 
     let listen = AppServerListenAddr::Unix(
@@ -3690,9 +3902,10 @@ allow = ["streaming"]
         Some(cwd_string(&workspace.join("agent-workspace")).as_str())
     );
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).unwrap();
+    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
     let lifecycle = metadata_store
         .get_thread_lifecycle(thread_id)
+        .await
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
     assert_eq!(
@@ -3793,6 +4006,7 @@ server_ref = "mcp://arcade"
         .inner
         .metadata_store
         .get_thread_lifecycle(parsed)
+        .await
         .unwrap()
         .unwrap();
     assert!(
@@ -4117,6 +4331,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .inner
         .metadata_store
         .get_thread_lifecycle(listed_thread_id)
+        .await
         .unwrap()
         .unwrap();
     let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
@@ -4791,6 +5006,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .inner
         .metadata_store
         .get_thread_lifecycle(bulk_thread_id)
+        .await
         .unwrap()
         .unwrap();
     let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
@@ -5171,6 +5387,7 @@ streaming = false
         .inner
         .metadata_store
         .get_thread_lifecycle(thread_id)
+        .await
         .unwrap()
         .expect("cwd-lowered manifest start should persist lifecycle metadata");
     assert_eq!(
@@ -5253,10 +5470,11 @@ streaming = false
             .contains("operations are declared in an agent manifest")
     );
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).unwrap();
+    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
     assert_eq!(
         metadata_store
             .list_thread_lifecycle_for_user("cooldis_app_server", "local_user")
+            .await
             .unwrap()
             .len(),
         1
@@ -5548,6 +5766,7 @@ streaming = false
         .inner
         .metadata_store
         .get_thread_lifecycle(thread_id)
+        .await
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
     let coupling_set: crate::BoundCouplingSet = serde_json::from_str(
@@ -5733,6 +5952,7 @@ streaming = false
         .inner
         .metadata_store
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .await
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
     let session_store = SqliteSessionStore::open(session_path).await.unwrap();
@@ -5880,12 +6100,12 @@ async fn manifest_operation_grants_extend_loaded_record_without_duplicates() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[test]
-fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_stored_auth() {
+#[tokio::test]
+async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_stored_auth() {
     let root = std::env::temp_dir().join(format!("cooldis-provider-resolve-{}", Uuid::now_v7()));
     let store_path = root.join("metadata.sqlite3");
-    let store = crate::SqliteMetadataStore::open(&store_path).unwrap();
-    crate::seed_default_llm_providers(&store).unwrap();
+    let store = crate::SqliteMetadataStore::open(&store_path).await.unwrap();
+    crate::seed_default_llm_providers(&store).await.unwrap();
     store
         .set_credential(
             crate::OPENAI_COMPATIBLE_PROVIDER_ID,
@@ -5893,6 +6113,7 @@ fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_stored_au
                 key: "stored-openai_compatible-key".to_string(),
             },
         )
+        .await
         .unwrap();
 
     let resolved = resolve_catalog_openai_chat_completions_provider(
@@ -5904,6 +6125,7 @@ fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_stored_au
         777,
         false,
     )
+    .await
     .unwrap();
 
     assert_eq!(
@@ -6021,6 +6243,7 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
         .inner
         .metadata_store
         .get_thread_lifecycle(source_id)
+        .await
         .unwrap()
         .unwrap();
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
@@ -6156,6 +6379,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         .inner
         .metadata_store
         .get_thread_lifecycle(source_id)
+        .await
         .unwrap()
         .unwrap();
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
@@ -6212,6 +6436,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         .inner
         .metadata_store
         .get_thread_lifecycle(child_id)
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -6402,6 +6627,7 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
         .inner
         .metadata_store
         .get_thread_lifecycle(parsed)
+        .await
         .unwrap()
         .expect("thread/start should persist a loadable lifecycle record");
 
@@ -6470,6 +6696,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
         .inner
         .metadata_store
         .get_thread_lifecycle(parsed)
+        .await
         .unwrap()
         .expect("thread/start should persist a loadable lifecycle record");
 
@@ -6490,6 +6717,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
     app.inner
         .metadata_store
         .upsert_thread_lifecycle(record)
+        .await
         .unwrap();
 
     let resume = app
@@ -6602,6 +6830,7 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
         .inner
         .metadata_store
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .await
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
@@ -6663,6 +6892,7 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
         .inner
         .metadata_store
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .await
         .unwrap()
         .expect("load-all default manifest thread should persist lifecycle metadata");
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
@@ -6769,6 +6999,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
         .inner
         .metadata_store
         .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .await
         .unwrap()
         .expect("empty registry default manifest thread should persist lifecycle metadata");
     let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
@@ -9315,6 +9546,7 @@ async fn local_thread_read_echoes_thread_thinking_config() {
         .inner
         .metadata_store
         .get_thread_lifecycle(parsed)
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -9335,6 +9567,7 @@ async fn local_thread_read_echoes_thread_thinking_config() {
         .inner
         .metadata_store
         .get_thread_lifecycle(parsed)
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -9515,7 +9748,9 @@ async fn test_app_with_provider_root_listen_and_stream(
     // lexicon-allow: capsule - existing app-server test helper
     let runtime_factory =
         runtime_factory_from_provider_parts(runtime_config, provider_client, operation_bindings); // lexicon-allow: capsule - existing app-server test helper
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path()).unwrap();
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
     CooldisAppServer::with_runtime_factory_and_metadata_store(
         config,
         runtime_factory,
@@ -10753,7 +10988,7 @@ async fn wait_for_lifecycle_status(
     status: crate::ThreadLifecycleStatus,
 ) -> ThreadLifecycleRecord {
     for _ in 0..100 {
-        if let Some(record) = store.get_thread_lifecycle(thread_id).unwrap()
+        if let Some(record) = store.get_thread_lifecycle(thread_id).await.unwrap()
             && record.status == status
         {
             return record;

@@ -205,6 +205,7 @@ impl LocalPluginCatalog {
                     secret_resolver.as_ref(),
                     &selected_manifest,
                 )
+                .await
                 .map_err(|err| {
                     CooldisError::RuntimeFactory(format!("secret store failed: {err}"))
                 })?;

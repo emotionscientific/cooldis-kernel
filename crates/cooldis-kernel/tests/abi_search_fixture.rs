@@ -146,7 +146,9 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
         })
         .await
         .unwrap();
-    let secret_store = SqliteSecretStore::open(root.join("state/metadata.sqlite3")).unwrap();
+    let secret_store = SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+        .await
+        .unwrap();
     secret_store
         .set_secret(
             "EXAMPLE_API_KEY",
@@ -154,6 +156,7 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
             SecretSourceKind::Env,
             Some("EXAMPLE_API_KEY".to_string()),
         )
+        .await
         .unwrap();
 
     let catalog = LocalPluginCatalog::load_records_with_secret_resolver(

@@ -1,11 +1,12 @@
+use async_trait::async_trait;
 use cooldis_history::{ProviderApi, now_ms};
 use cooldis_runtime_contracts::{
     ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadScope,
 };
-pub(crate) use cooldis_sqlite::block_on;
 use cooldis_sqlite::{Connection, Db, DbConfig, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
 use thiserror::Error;
 
@@ -18,6 +19,28 @@ pub const OPENAI_COMPATIBLE_EXAMPLE_HEADER: &str = "X-Example-Provider";
 pub type LlmProviderStoreResult<T> = Result<T, LlmProviderStoreError>;
 
 pub type MetadataStoreResult<T> = Result<T, MetadataStoreError>;
+
+async fn provider_cancellation_safe<T>(
+    future: impl Future<Output = LlmProviderStoreResult<T>> + Send + 'static,
+) -> LlmProviderStoreResult<T>
+where
+    T: Send + 'static,
+{
+    tokio::spawn(future).await.map_err(|error| {
+        LlmProviderStoreError::Storage(format!("sqlite transaction task failed: {error}"))
+    })?
+}
+
+async fn metadata_cancellation_safe<T>(
+    future: impl Future<Output = MetadataStoreResult<T>> + Send + 'static,
+) -> MetadataStoreResult<T>
+where
+    T: Send + 'static,
+{
+    tokio::spawn(future).await.map_err(|error| {
+        MetadataStoreError::Storage(format!("sqlite transaction task failed: {error}"))
+    })?
+}
 
 #[derive(Debug, Error)]
 pub enum LlmProviderStoreError {
@@ -339,37 +362,46 @@ pub struct LlmProviderResolvedAuth {
     pub source: LlmProviderAuthSourceKind,
 }
 
+#[async_trait]
 pub trait LlmProviderCatalogStore: Send + Sync {
-    fn upsert_provider(&self, record: LlmProviderRecord) -> LlmProviderStoreResult<()>;
-    fn get_provider(&self, provider_id: &str) -> LlmProviderStoreResult<Option<LlmProviderRecord>>;
-    fn list_providers(&self) -> LlmProviderStoreResult<Vec<LlmProviderRecord>>;
-    fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()>;
+    async fn upsert_provider(&self, record: LlmProviderRecord) -> LlmProviderStoreResult<()>;
+    async fn get_provider(
+        &self,
+        provider_id: &str,
+    ) -> LlmProviderStoreResult<Option<LlmProviderRecord>>;
+    async fn list_providers(&self) -> LlmProviderStoreResult<Vec<LlmProviderRecord>>;
+    async fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()>;
 }
 
+#[async_trait]
 pub trait LlmProviderAuthStore: Send + Sync {
-    fn set_credential(
+    async fn set_credential(
         &self,
         provider_id: &str,
         credential: LlmProviderCredential,
     ) -> LlmProviderStoreResult<()>;
-    fn get_credential(
+    async fn get_credential(
         &self,
         provider_id: &str,
     ) -> LlmProviderStoreResult<Option<LlmProviderCredential>>;
-    fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()>;
+    async fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()>;
 }
 
+#[async_trait]
 pub trait ThreadMetadataStore: Send + Sync {
-    fn upsert_thread_lifecycle(&self, record: ThreadLifecycleRecord) -> MetadataStoreResult<()>;
-    fn get_thread_lifecycle(
+    async fn upsert_thread_lifecycle(
+        &self,
+        record: ThreadLifecycleRecord,
+    ) -> MetadataStoreResult<()>;
+    async fn get_thread_lifecycle(
         &self,
         thread_id: ThreadId,
     ) -> MetadataStoreResult<Option<ThreadLifecycleRecord>>;
-    fn list_thread_lifecycle(
+    async fn list_thread_lifecycle(
         &self,
         scope: &ThreadScope,
     ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>>;
-    fn list_thread_lifecycle_for_user(
+    async fn list_thread_lifecycle_for_user(
         &self,
         tenant_id: &str,
         user_id: &str,
@@ -406,16 +438,18 @@ pub fn default_openai_compatible_llm_provider_record() -> LlmProviderRecord {
     )
 }
 
-pub fn seed_openai_compatible_llm_provider(
+pub async fn seed_openai_compatible_llm_provider(
     store: &dyn LlmProviderCatalogStore,
 ) -> LlmProviderStoreResult<()> {
-    store.upsert_provider(default_openai_compatible_llm_provider_record())
+    store
+        .upsert_provider(default_openai_compatible_llm_provider_record())
+        .await
 }
 
-pub fn seed_default_llm_providers(
+pub async fn seed_default_llm_providers(
     store: &dyn LlmProviderCatalogStore,
 ) -> LlmProviderStoreResult<()> {
-    seed_openai_compatible_llm_provider(store)
+    seed_openai_compatible_llm_provider(store).await
 }
 
 #[derive(Clone)]
@@ -424,7 +458,7 @@ pub struct SqliteLlmProviderStore {
 }
 
 impl SqliteLlmProviderStore {
-    pub fn open(path: impl AsRef<Path>) -> LlmProviderStoreResult<Self> {
+    pub async fn open(path: impl AsRef<Path>) -> LlmProviderStoreResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -432,23 +466,28 @@ impl SqliteLlmProviderStore {
                 restrict_dir_permissions(parent)?;
             }
         }
-        let inner = block_on(Db::open(path, DbConfig::default())).map_err(storage_error)?;
+        let inner = Db::open(path, DbConfig::default())
+            .await
+            .map_err(storage_error)?;
         restrict_file_permissions(path)?;
-        Self::from_db(inner)
+        Self::from_db(inner).await
     }
 
-    pub fn in_memory() -> LlmProviderStoreResult<Self> {
-        let inner = block_on(Db::in_memory(DbConfig::default())).map_err(storage_error)?;
-        Self::from_db(inner)
+    pub async fn in_memory() -> LlmProviderStoreResult<Self> {
+        let inner = Db::in_memory(DbConfig::default())
+            .await
+            .map_err(storage_error)?;
+        Self::from_db(inner).await
     }
 
-    fn from_db(inner: Db) -> LlmProviderStoreResult<Self> {
-        let store = Self { inner };
-        block_on(async {
+    async fn from_db(inner: Db) -> LlmProviderStoreResult<Self> {
+        provider_cancellation_safe(async move {
+            let store = Self { inner };
             let connection = store.inner.connect().await.map_err(storage_error)?;
-            init_provider_store_schema(&connection).await
-        })?;
-        Ok(store)
+            init_provider_store_schema(&connection).await?;
+            Ok(store)
+        })
+        .await
     }
 
     async fn connect(&self) -> LlmProviderStoreResult<Connection> {
@@ -462,99 +501,112 @@ pub struct SqliteMetadataStore {
 }
 
 impl SqliteMetadataStore {
-    pub fn open(path: impl AsRef<Path>) -> MetadataStoreResult<Self> {
-        let provider_store =
-            SqliteLlmProviderStore::open(path).map_err(MetadataStoreError::from)?;
-        let store = Self { provider_store };
-        store.init_metadata_schema()?;
-        Ok(store)
+    pub async fn open(path: impl AsRef<Path>) -> MetadataStoreResult<Self> {
+        let provider_store = SqliteLlmProviderStore::open(path)
+            .await
+            .map_err(MetadataStoreError::from)?;
+        metadata_cancellation_safe(async move {
+            let store = Self { provider_store };
+            store.init_metadata_schema().await?;
+            Ok(store)
+        })
+        .await
     }
 
-    pub fn in_memory() -> MetadataStoreResult<Self> {
-        let provider_store =
-            SqliteLlmProviderStore::in_memory().map_err(MetadataStoreError::from)?;
-        let store = Self { provider_store };
-        store.init_metadata_schema()?;
-        Ok(store)
+    pub async fn in_memory() -> MetadataStoreResult<Self> {
+        let provider_store = SqliteLlmProviderStore::in_memory()
+            .await
+            .map_err(MetadataStoreError::from)?;
+        metadata_cancellation_safe(async move {
+            let store = Self { provider_store };
+            store.init_metadata_schema().await?;
+            Ok(store)
+        })
+        .await
     }
 
     pub fn llm_provider_store(&self) -> &SqliteLlmProviderStore {
         &self.provider_store
     }
 
-    fn init_metadata_schema(&self) -> MetadataStoreResult<()> {
-        block_on(async {
-            let connection = self
-                .provider_store
-                .connect()
-                .await
-                .map_err(MetadataStoreError::from)?;
-            init_thread_metadata_schema(&connection).await
-        })
+    async fn init_metadata_schema(&self) -> MetadataStoreResult<()> {
+        let connection = self
+            .provider_store
+            .connect()
+            .await
+            .map_err(MetadataStoreError::from)?;
+        init_thread_metadata_schema(&connection).await
     }
 }
 
+#[async_trait]
 impl LlmProviderCatalogStore for SqliteMetadataStore {
-    fn upsert_provider(&self, record: LlmProviderRecord) -> LlmProviderStoreResult<()> {
-        self.provider_store.upsert_provider(record)
+    async fn upsert_provider(&self, record: LlmProviderRecord) -> LlmProviderStoreResult<()> {
+        self.provider_store.upsert_provider(record).await
     }
 
-    fn get_provider(&self, provider_id: &str) -> LlmProviderStoreResult<Option<LlmProviderRecord>> {
-        self.provider_store.get_provider(provider_id)
+    async fn get_provider(
+        &self,
+        provider_id: &str,
+    ) -> LlmProviderStoreResult<Option<LlmProviderRecord>> {
+        self.provider_store.get_provider(provider_id).await
     }
 
-    fn list_providers(&self) -> LlmProviderStoreResult<Vec<LlmProviderRecord>> {
-        self.provider_store.list_providers()
+    async fn list_providers(&self) -> LlmProviderStoreResult<Vec<LlmProviderRecord>> {
+        self.provider_store.list_providers().await
     }
 
-    fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
-        self.provider_store.delete_provider(provider_id)
+    async fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
+        self.provider_store.delete_provider(provider_id).await
     }
 }
 
+#[async_trait]
 impl LlmProviderAuthStore for SqliteMetadataStore {
-    fn set_credential(
+    async fn set_credential(
         &self,
         provider_id: &str,
         credential: LlmProviderCredential,
     ) -> LlmProviderStoreResult<()> {
-        self.provider_store.set_credential(provider_id, credential)
+        self.provider_store
+            .set_credential(provider_id, credential)
+            .await
     }
 
-    fn get_credential(
+    async fn get_credential(
         &self,
         provider_id: &str,
     ) -> LlmProviderStoreResult<Option<LlmProviderCredential>> {
-        self.provider_store.get_credential(provider_id)
+        self.provider_store.get_credential(provider_id).await
     }
 
-    fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
-        self.provider_store.delete_credential(provider_id)
+    async fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
+        self.provider_store.delete_credential(provider_id).await
     }
 }
 
+#[async_trait]
 impl ThreadMetadataStore for SqliteMetadataStore {
-    fn upsert_thread_lifecycle(
+    async fn upsert_thread_lifecycle(
         &self,
         mut record: ThreadLifecycleRecord,
     ) -> MetadataStoreResult<()> {
-        block_on(async {
-            let connection = self
-                .provider_store
-                .connect()
-                .await
-                .map_err(MetadataStoreError::from)?;
-            let thread_id = record.coordinates.thread_id.to_string();
-            record.updated_at_ms = now_ms_u64()?;
-            let tenant_id = record.coordinates.tenant_id.clone();
-            let user_id = record.coordinates.user_id.clone();
-            let session_id = record.coordinates.session_id.clone();
-            let parent_thread_id = record.parent_thread_id.map(|id| id.to_string());
-            let status = thread_lifecycle_status_string(record.status);
-            let record_json = serde_json::to_string(&record).map_err(metadata_codec_error)?;
-            connection
-                .execute(
-                    "INSERT INTO thread_lifecycle_records (
+        let connection = self
+            .provider_store
+            .connect()
+            .await
+            .map_err(MetadataStoreError::from)?;
+        let thread_id = record.coordinates.thread_id.to_string();
+        record.updated_at_ms = now_ms_u64()?;
+        let tenant_id = record.coordinates.tenant_id.clone();
+        let user_id = record.coordinates.user_id.clone();
+        let session_id = record.coordinates.session_id.clone();
+        let parent_thread_id = record.parent_thread_id.map(|id| id.to_string());
+        let status = thread_lifecycle_status_string(record.status);
+        let record_json = serde_json::to_string(&record).map_err(metadata_codec_error)?;
+        connection
+            .execute(
+                "INSERT INTO thread_lifecycle_records (
                     thread_id, tenant_id, user_id, session_id, parent_thread_id,
                     status, record_json, created_at_ms, updated_at_ms
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -570,78 +622,71 @@ impl ThreadMetadataStore for SqliteMetadataStore {
                         thread_lifecycle_records.created_at_ms
                     ),
                     updated_at_ms = excluded.updated_at_ms",
-                    params![
-                        thread_id,
-                        tenant_id,
-                        user_id,
-                        session_id,
-                        parent_thread_id,
-                        status,
-                        record_json,
-                        sqlite_timestamp(record.created_at_ms)?,
-                        sqlite_timestamp(record.updated_at_ms)?,
-                    ],
-                )
-                .await
-                .map_err(metadata_storage_error)?;
-            Ok(())
-        })
+                params![
+                    thread_id,
+                    tenant_id,
+                    user_id,
+                    session_id,
+                    parent_thread_id,
+                    status,
+                    record_json,
+                    sqlite_timestamp(record.created_at_ms)?,
+                    sqlite_timestamp(record.updated_at_ms)?,
+                ],
+            )
+            .await
+            .map_err(metadata_storage_error)?;
+        Ok(())
     }
 
-    fn get_thread_lifecycle(
+    async fn get_thread_lifecycle(
         &self,
         thread_id: ThreadId,
     ) -> MetadataStoreResult<Option<ThreadLifecycleRecord>> {
-        block_on(async {
-            let connection = self
-                .provider_store
-                .connect()
-                .await
-                .map_err(MetadataStoreError::from)?;
-            sqlite_get_thread_lifecycle(&connection, thread_id).await
-        })
+        let connection = self
+            .provider_store
+            .connect()
+            .await
+            .map_err(MetadataStoreError::from)?;
+        sqlite_get_thread_lifecycle(&connection, thread_id).await
     }
 
-    fn list_thread_lifecycle(
+    async fn list_thread_lifecycle(
         &self,
         scope: &ThreadScope,
     ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
-        block_on(async {
-            let connection = self
-                .provider_store
-                .connect()
-                .await
-                .map_err(MetadataStoreError::from)?;
-            sqlite_list_thread_lifecycle(&connection, scope).await
-        })
+        let connection = self
+            .provider_store
+            .connect()
+            .await
+            .map_err(MetadataStoreError::from)?;
+        sqlite_list_thread_lifecycle(&connection, scope).await
     }
 
-    fn list_thread_lifecycle_for_user(
+    async fn list_thread_lifecycle_for_user(
         &self,
         tenant_id: &str,
         user_id: &str,
     ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
-        block_on(async {
-            let connection = self
-                .provider_store
-                .connect()
-                .await
-                .map_err(MetadataStoreError::from)?;
-            sqlite_list_thread_lifecycle_for_user(&connection, tenant_id, user_id).await
-        })
+        let connection = self
+            .provider_store
+            .connect()
+            .await
+            .map_err(MetadataStoreError::from)?;
+        sqlite_list_thread_lifecycle_for_user(&connection, tenant_id, user_id).await
     }
 }
 
+#[async_trait]
 impl LlmProviderCatalogStore for SqliteLlmProviderStore {
-    fn upsert_provider(&self, mut record: LlmProviderRecord) -> LlmProviderStoreResult<()> {
+    async fn upsert_provider(&self, mut record: LlmProviderRecord) -> LlmProviderStoreResult<()> {
         record.validate()?;
-        block_on(async {
-            let connection = self.connect().await?;
-            record.updated_at_ms = now_ms();
-            let record_json = serde_json::to_string(&record).map_err(codec_error)?;
-            connection
-                .execute(
-                    "INSERT INTO llm_provider_records (
+        let connection = self.connect().await?;
+        record.updated_at_ms = now_ms();
+        let record_json = serde_json::to_string(&record).map_err(codec_error)?;
+        connection
+            .execute(
+                "INSERT INTO llm_provider_records (
                     provider_id, record_json, created_at_ms, updated_at_ms
                 ) VALUES (?1, ?2, ?3, ?4)
                 ON CONFLICT(provider_id) DO UPDATE SET
@@ -651,65 +696,62 @@ impl LlmProviderCatalogStore for SqliteLlmProviderStore {
                         llm_provider_records.created_at_ms
                     ),
                     updated_at_ms = excluded.updated_at_ms",
-                    params![
-                        record.provider_id,
-                        record_json,
-                        record.created_at_ms,
-                        record.updated_at_ms,
-                    ],
-                )
-                .await
-                .map_err(storage_error)?;
-            Ok(())
-        })
+                params![
+                    record.provider_id,
+                    record_json,
+                    record.created_at_ms,
+                    record.updated_at_ms,
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(())
     }
 
-    fn get_provider(&self, provider_id: &str) -> LlmProviderStoreResult<Option<LlmProviderRecord>> {
+    async fn get_provider(
+        &self,
+        provider_id: &str,
+    ) -> LlmProviderStoreResult<Option<LlmProviderRecord>> {
         validate_provider_id(provider_id)?;
-        block_on(async {
-            let connection = self.connect().await?;
-            sqlite_get_provider(&connection, provider_id).await
-        })
+        let connection = self.connect().await?;
+        sqlite_get_provider(&connection, provider_id).await
     }
 
-    fn list_providers(&self) -> LlmProviderStoreResult<Vec<LlmProviderRecord>> {
-        block_on(async {
-            let connection = self.connect().await?;
-            let mut rows = connection
-                .query(
-                    "SELECT record_json FROM llm_provider_records ORDER BY provider_id",
-                    (),
-                )
-                .await
-                .map_err(storage_error)?;
-            let mut records = Vec::new();
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
-                records.push(decode_provider_record(
-                    &row.get::<String>(0).map_err(storage_error)?,
-                )?);
-            }
-            Ok(records)
-        })
+    async fn list_providers(&self) -> LlmProviderStoreResult<Vec<LlmProviderRecord>> {
+        let connection = self.connect().await?;
+        let mut rows = connection
+            .query(
+                "SELECT record_json FROM llm_provider_records ORDER BY provider_id",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            records.push(decode_provider_record(
+                &row.get::<String>(0).map_err(storage_error)?,
+            )?);
+        }
+        Ok(records)
     }
 
-    fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
+    async fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
         validate_provider_id(provider_id)?;
-        block_on(async {
-            let connection = self.connect().await?;
-            connection
-                .execute(
-                    "DELETE FROM llm_provider_records WHERE provider_id = ?1",
-                    params![provider_id],
-                )
-                .await
-                .map_err(storage_error)?;
-            Ok(())
-        })
+        let connection = self.connect().await?;
+        connection
+            .execute(
+                "DELETE FROM llm_provider_records WHERE provider_id = ?1",
+                params![provider_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(())
     }
 }
 
+#[async_trait]
 impl LlmProviderAuthStore for SqliteLlmProviderStore {
-    fn set_credential(
+    async fn set_credential(
         &self,
         provider_id: &str,
         credential: LlmProviderCredential,
@@ -717,52 +759,46 @@ impl LlmProviderAuthStore for SqliteLlmProviderStore {
         validate_provider_id(provider_id)?;
         let credential_json = serde_json::to_string(&credential).map_err(codec_error)?;
         let now = now_ms();
-        block_on(async {
-            let connection = self.connect().await?;
-            connection
-                .execute(
-                    "INSERT INTO llm_provider_credentials (
+        let connection = self.connect().await?;
+        connection
+            .execute(
+                "INSERT INTO llm_provider_credentials (
                         provider_id, credential_json, updated_at_ms
                     ) VALUES (?1, ?2, ?3)
                     ON CONFLICT(provider_id) DO UPDATE SET
                         credential_json = excluded.credential_json,
                         updated_at_ms = excluded.updated_at_ms",
-                    params![provider_id, credential_json, now],
-                )
-                .await
-                .map_err(storage_error)?;
-            Ok(())
-        })
+                params![provider_id, credential_json, now],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(())
     }
 
-    fn get_credential(
+    async fn get_credential(
         &self,
         provider_id: &str,
     ) -> LlmProviderStoreResult<Option<LlmProviderCredential>> {
         validate_provider_id(provider_id)?;
-        block_on(async {
-            let connection = self.connect().await?;
-            sqlite_get_credential(&connection, provider_id).await
-        })
+        let connection = self.connect().await?;
+        sqlite_get_credential(&connection, provider_id).await
     }
 
-    fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
+    async fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()> {
         validate_provider_id(provider_id)?;
-        block_on(async {
-            let connection = self.connect().await?;
-            connection
-                .execute(
-                    "DELETE FROM llm_provider_credentials WHERE provider_id = ?1",
-                    params![provider_id],
-                )
-                .await
-                .map_err(storage_error)?;
-            Ok(())
-        })
+        let connection = self.connect().await?;
+        connection
+            .execute(
+                "DELETE FROM llm_provider_credentials WHERE provider_id = ?1",
+                params![provider_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(())
     }
 }
 
-pub fn resolve_llm_provider_auth(
+pub async fn resolve_llm_provider_auth(
     auth_store: &dyn LlmProviderAuthStore,
     provider: &LlmProviderRecord,
     context: &LlmProviderAuthContext,
@@ -774,7 +810,7 @@ pub fn resolve_llm_provider_auth(
         }));
     }
 
-    if let Some(credential) = auth_store.get_credential(&provider.provider_id)? {
+    if let Some(credential) = auth_store.get_credential(&provider.provider_id).await? {
         return credential_to_resolved_auth(&provider.provider_id, credential)
             .map(|api_key| Some((api_key, LlmProviderAuthSourceKind::Stored).into()));
     }
@@ -812,7 +848,7 @@ pub fn resolve_llm_provider_auth(
     }
 }
 
-pub fn llm_provider_auth_status(
+pub async fn llm_provider_auth_status(
     auth_store: &dyn LlmProviderAuthStore,
     provider: &LlmProviderRecord,
     context: &LlmProviderAuthContext,
@@ -824,7 +860,11 @@ pub fn llm_provider_auth_status(
         ));
     }
 
-    if auth_store.get_credential(&provider.provider_id)?.is_some() {
+    if auth_store
+        .get_credential(&provider.provider_id)
+        .await?
+        .is_some()
+    {
         return Ok(LlmProviderAuthStatus::configured(
             LlmProviderAuthSourceKind::Stored,
             "stored credential",

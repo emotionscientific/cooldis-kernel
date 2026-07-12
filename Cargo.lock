@@ -875,6 +875,7 @@ dependencies = [
 name = "cooldis-metadata"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cooldis-abi",
  "cooldis-history",
  "cooldis-runtime-contracts",
@@ -883,6 +884,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 

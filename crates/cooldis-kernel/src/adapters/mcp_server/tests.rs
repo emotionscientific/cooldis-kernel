@@ -420,7 +420,9 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
     let url = format!("{base_url}/search");
     let http_grant = format!("net.http.private:POST:{base_url}");
     publish_search_for_url(&registry_root, &url, &http_grant, br#"{"query":"cooldis"}"#).await;
-    let secret_store = SqliteSecretStore::open(root.join("state/metadata.sqlite3")).unwrap();
+    let secret_store = SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+        .await
+        .unwrap();
     secret_store
         .set_secret(
             "EXAMPLE_API_KEY",
@@ -428,6 +430,7 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
             SecretSourceKind::Env,
             Some("EXAMPLE_API_KEY".to_string()),
         )
+        .await
         .unwrap();
     let provider = Arc::new(ModelVbinLifecycleClient::expecting_search_success());
     let provider_client: Arc<dyn ProviderClient> = provider.clone();

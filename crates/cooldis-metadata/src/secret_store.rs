@@ -1,4 +1,4 @@
-use crate::provider_store::block_on;
+use async_trait::async_trait;
 use cooldis_abi::WasmOperationManifest;
 use cooldis_history::now_ms;
 use cooldis_sqlite::{Connection, Db, DbConfig, params};
@@ -93,8 +93,9 @@ impl ManifestSecretResolution {
     }
 }
 
+#[async_trait]
 pub trait SecretResolver: Send + Sync + 'static {
-    fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>>;
+    async fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>>;
 }
 
 #[derive(Clone)]
@@ -103,7 +104,7 @@ pub struct SqliteSecretStore {
 }
 
 impl SqliteSecretStore {
-    pub fn open(path: impl AsRef<Path>) -> SecretStoreResult<Self> {
+    pub async fn open(path: impl AsRef<Path>) -> SecretStoreResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
             && !parent.exists()
@@ -111,26 +112,28 @@ impl SqliteSecretStore {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
             restrict_dir_permissions(parent)?;
         }
-        let inner = block_on(Db::open(path, DbConfig::default())).map_err(storage_error)?;
+        let inner = Db::open(path, DbConfig::default())
+            .await
+            .map_err(storage_error)?;
         restrict_file_permissions(path)?;
-        Self::from_db(inner)
+        Self::from_db(inner).await
     }
 
-    pub fn in_memory() -> SecretStoreResult<Self> {
-        let inner = block_on(Db::in_memory(DbConfig::default())).map_err(storage_error)?;
-        Self::from_db(inner)
+    pub async fn in_memory() -> SecretStoreResult<Self> {
+        let inner = Db::in_memory(DbConfig::default())
+            .await
+            .map_err(storage_error)?;
+        Self::from_db(inner).await
     }
 
-    fn from_db(inner: Db) -> SecretStoreResult<Self> {
+    async fn from_db(inner: Db) -> SecretStoreResult<Self> {
         let store = Self { inner };
-        block_on(async {
-            let connection = store.inner.connect().await.map_err(storage_error)?;
-            init_secret_store_schema(&connection).await
-        })?;
+        let connection = store.inner.connect().await.map_err(storage_error)?;
+        init_secret_store_schema(&connection).await?;
         Ok(store)
     }
 
-    pub fn set_secret(
+    pub async fn set_secret(
         &self,
         name: impl AsRef<str>,
         value: impl Into<String>,
@@ -143,11 +146,10 @@ impl SqliteSecretStore {
             return Err(SecretStoreError::EmptyValue(name));
         }
         let now = now_ms();
-        block_on(async {
-            let connection = self.inner.connect().await.map_err(storage_error)?;
-            connection
-                .execute(
-                    r#"
+        let connection = self.inner.connect().await.map_err(storage_error)?;
+        connection
+            .execute(
+                r#"
                     INSERT INTO cooldis_secret_records (
                         name, value, source_kind, source_label, created_at_ms, updated_at_ms
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -157,24 +159,23 @@ impl SqliteSecretStore {
                         source_label = excluded.source_label,
                         updated_at_ms = excluded.updated_at_ms
                     "#,
-                    params![
-                        name.as_str(),
-                        value,
-                        source_kind.as_str(),
-                        source_label,
-                        now,
-                        now
-                    ],
-                )
-                .await
-                .map_err(storage_error)?;
-            sqlite_secret_status_by_name(&connection, &name)
-                .await?
-                .ok_or_else(|| SecretStoreError::Storage(format!("secret {name:?} was not stored")))
-        })
+                params![
+                    name.as_str(),
+                    value,
+                    source_kind.as_str(),
+                    source_label,
+                    now,
+                    now
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        sqlite_secret_status_by_name(&connection, &name)
+            .await?
+            .ok_or_else(|| SecretStoreError::Storage(format!("secret {name:?} was not stored")))
     }
 
-    pub fn import_secret_from_env(
+    pub async fn import_secret_from_env(
         &self,
         name: impl AsRef<str>,
         env_name: impl AsRef<str>,
@@ -189,85 +190,79 @@ impl SqliteSecretStore {
             return Err(SecretStoreError::EmptyValue(name));
         }
         self.set_secret(name, value, SecretSourceKind::Env, Some(env_name))
+            .await
     }
 
-    pub fn status(&self, name: impl AsRef<str>) -> SecretStoreResult<Option<SecretStatus>> {
+    pub async fn status(&self, name: impl AsRef<str>) -> SecretStoreResult<Option<SecretStatus>> {
         let name = validate_secret_name(name.as_ref())?;
-        block_on(async {
-            let connection = self.inner.connect().await.map_err(storage_error)?;
-            sqlite_secret_status_by_name(&connection, &name).await
-        })
+        let connection = self.inner.connect().await.map_err(storage_error)?;
+        sqlite_secret_status_by_name(&connection, &name).await
     }
 
-    pub fn list(&self) -> SecretStoreResult<Vec<SecretStatus>> {
-        block_on(async {
-            let connection = self.inner.connect().await.map_err(storage_error)?;
-            let mut rows = connection
-                .query(
-                    r#"
+    pub async fn list(&self) -> SecretStoreResult<Vec<SecretStatus>> {
+        let connection = self.inner.connect().await.map_err(storage_error)?;
+        let mut rows = connection
+            .query(
+                r#"
                 SELECT name, source_kind, source_label, created_at_ms, updated_at_ms
                 FROM cooldis_secret_records
                 ORDER BY name
                 "#,
-                    (),
-                )
-                .await
-                .map_err(storage_error)?;
-            let mut statuses = Vec::new();
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
-                statuses.push(sqlite_secret_status_from_row(&row)?);
-            }
-            Ok(statuses)
-        })
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut statuses = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            statuses.push(sqlite_secret_status_from_row(&row)?);
+        }
+        Ok(statuses)
     }
 
-    pub fn delete_secret(&self, name: impl AsRef<str>) -> SecretStoreResult<bool> {
+    pub async fn delete_secret(&self, name: impl AsRef<str>) -> SecretStoreResult<bool> {
         let name = validate_secret_name(name.as_ref())?;
-        block_on(async {
-            let connection = self.inner.connect().await.map_err(storage_error)?;
-            let deleted = connection
-                .execute(
-                    "DELETE FROM cooldis_secret_records WHERE name = ?1",
-                    params![name],
-                )
-                .await
-                .map_err(storage_error)?;
-            Ok(deleted > 0)
-        })
+        let connection = self.inner.connect().await.map_err(storage_error)?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM cooldis_secret_records WHERE name = ?1",
+                params![name],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(deleted > 0)
     }
 }
 
+#[async_trait]
 impl SecretResolver for SqliteSecretStore {
-    fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
+    async fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
         let name = validate_secret_name(name)?;
-        block_on(async {
-            let connection = self.inner.connect().await.map_err(storage_error)?;
-            let mut rows = connection
-                .query(
-                    r#"
+        let connection = self.inner.connect().await.map_err(storage_error)?;
+        let mut rows = connection
+            .query(
+                r#"
                 SELECT name, value, source_kind, source_label, updated_at_ms
                 FROM cooldis_secret_records
                 WHERE name = ?1
                 "#,
-                    params![name],
-                )
-                .await
-                .map_err(storage_error)?;
-            rows.next()
-                .await
-                .map_err(storage_error)?
-                .map(|row| {
-                    let source_kind = row.get::<String>(2).map_err(storage_error)?;
-                    Ok(ResolvedSecret {
-                        name: row.get(0).map_err(storage_error)?,
-                        value: row.get(1).map_err(storage_error)?,
-                        source_kind: SecretSourceKind::from_str(&source_kind)?,
-                        source_label: row.get(3).map_err(storage_error)?,
-                        updated_at_ms: row.get(4).map_err(storage_error)?,
-                    })
+                params![name],
+            )
+            .await
+            .map_err(storage_error)?;
+        rows.next()
+            .await
+            .map_err(storage_error)?
+            .map(|row| {
+                let source_kind = row.get::<String>(2).map_err(storage_error)?;
+                Ok(ResolvedSecret {
+                    name: row.get(0).map_err(storage_error)?,
+                    value: row.get(1).map_err(storage_error)?,
+                    source_kind: SecretSourceKind::from_str(&source_kind)?,
+                    source_label: row.get(3).map_err(storage_error)?,
+                    updated_at_ms: row.get(4).map_err(storage_error)?,
                 })
-                .transpose()
-        })
+            })
+            .transpose()
     }
 }
 
@@ -285,21 +280,23 @@ pub fn required_secret_names(
     Ok(names)
 }
 
-pub fn resolve_manifest_secrets(
+pub async fn resolve_manifest_secrets(
     resolver: &dyn SecretResolver,
     manifest: &WasmOperationManifest,
 ) -> SecretStoreResult<BTreeMap<String, String>> {
-    Ok(resolve_manifest_secret_resolution(resolver, manifest)?.values)
+    Ok(resolve_manifest_secret_resolution(resolver, manifest)
+        .await?
+        .values)
 }
 
-pub fn resolve_manifest_secret_resolution(
+pub async fn resolve_manifest_secret_resolution(
     resolver: &dyn SecretResolver,
     manifest: &WasmOperationManifest,
 ) -> SecretStoreResult<ManifestSecretResolution> {
     let mut secrets = BTreeMap::new();
     let mut missing = std::collections::BTreeSet::new();
     for name in required_secret_names(manifest)? {
-        if let Some(secret) = resolver.resolve_secret(&name)? {
+        if let Some(secret) = resolver.resolve_secret(&name).await? {
             secrets.insert(secret.name, secret.value);
         } else {
             missing.insert(name);

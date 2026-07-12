@@ -533,9 +533,10 @@ impl ProviderClient for AppServerOfflineProviderClient {
 
 impl CooldisAppServer {
     pub async fn new_local(mut config: CooldisAppServerConfig) -> CooldisResult<Self> {
-        let metadata_store = open_and_seed_metadata_store(config.metadata_store_path())?;
-        let user_metadata_store = open_and_seed_metadata_store(config.user_metadata_store_path())?;
-        sync_catalog_provider_identity(&mut config, &metadata_store)?;
+        let metadata_store = open_and_seed_metadata_store(config.metadata_store_path()).await?;
+        let user_metadata_store =
+            open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
+        sync_catalog_provider_identity(&mut config, &metadata_store).await?;
         normalize_registry_roots(&mut config);
         let runtime_factory =
             runtime_factory_from_config(&config, &metadata_store, &user_metadata_store).await?;
@@ -552,8 +553,12 @@ impl CooldisAppServer {
         config: CooldisAppServerConfig,
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
     ) -> CooldisResult<Self> {
-        let metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
-        let user_metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
+        let metadata_store = SqliteMetadataStore::in_memory()
+            .await
+            .map_err(metadata_store_error)?;
+        let user_metadata_store = SqliteMetadataStore::in_memory()
+            .await
+            .map_err(metadata_store_error)?;
         Self::with_runtime_factory_and_metadata_stores(
             config,
             runtime_factory,
@@ -569,8 +574,12 @@ impl CooldisAppServer {
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
         decorate: impl FnOnce(Arc<dyn RuntimeStore>) -> Arc<dyn RuntimeStore> + Send + 'static,
     ) -> CooldisResult<Self> {
-        let metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
-        let user_metadata_store = SqliteMetadataStore::in_memory().map_err(metadata_store_error)?;
+        let metadata_store = SqliteMetadataStore::in_memory()
+            .await
+            .map_err(metadata_store_error)?;
+        let user_metadata_store = SqliteMetadataStore::in_memory()
+            .await
+            .map_err(metadata_store_error)?;
         Self::with_runtime_factory_and_metadata_stores_inner(
             config,
             runtime_factory,
@@ -587,7 +596,8 @@ impl CooldisAppServer {
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
         metadata_store: SqliteMetadataStore,
     ) -> CooldisResult<Self> {
-        let user_metadata_store = open_and_seed_metadata_store(config.user_metadata_store_path())?;
+        let user_metadata_store =
+            open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
         Self::with_runtime_factory_and_metadata_stores(
             config,
             runtime_factory,
@@ -624,7 +634,7 @@ impl CooldisAppServer {
     ) -> CooldisResult<Self> {
         normalize_registry_roots(&mut config);
         let provider_surface =
-            agent_manifest_provider_surface_for_config(&config, &metadata_store)?;
+            agent_manifest_provider_surface_for_config(&config, &metadata_store).await?;
         ensure_cooldis_threads_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_schedule_published(operation_registry_root_for_kernel_publish(&config))?;
         ensure_cooldis_process_published(operation_registry_root_for_kernel_publish(&config))?;
@@ -915,7 +925,7 @@ struct ResolvedCatalogOpenAIChatCompletionsProvider {
     endpoint: ProviderEndpoint,
 }
 
-fn resolve_catalog_openai_chat_completions_provider<C, A>(
+async fn resolve_catalog_openai_chat_completions_provider<C, A>(
     provider_store: &C,
     auth_store: &A,
     auth_context: &LlmProviderAuthContext,
@@ -930,6 +940,7 @@ where
 {
     let provider = provider_store
         .get_provider(provider_id)
+        .await
         .map_err(provider_store_error)?
         .ok_or_else(|| {
             CooldisError::RuntimeFactory(format!(
@@ -953,6 +964,7 @@ where
         .and_then(|model| model.base_url.clone())
         .unwrap_or_else(|| provider.base_url.clone());
     let resolved_auth = resolve_llm_provider_auth(auth_store, &provider, auth_context)
+        .await
         .map_err(provider_store_error)?;
     if provider.auth_header && resolved_auth.is_none() {
         return Err(CooldisError::RuntimeFactory(format!(
@@ -1053,7 +1065,7 @@ fn provider_store_error(err: LlmProviderStoreError) -> CooldisError {
     CooldisError::RuntimeFactory(format!("provider metadata store failed: {err}"))
 }
 
-fn agent_manifest_provider_surface_for_config(
+async fn agent_manifest_provider_surface_for_config(
     config: &CooldisAppServerConfig,
     metadata_store: &SqliteMetadataStore,
 ) -> CooldisResult<AgentManifestProviderSurface> {
@@ -1063,9 +1075,10 @@ fn agent_manifest_provider_surface_for_config(
         &config.model,
         metadata_store,
     )
+    .await
 }
 
-fn agent_manifest_provider_surface_from_parts(
+async fn agent_manifest_provider_surface_from_parts(
     provider_config: &AppServerProviderConfig,
     model_provider: &str,
     model: &str,
@@ -1075,6 +1088,7 @@ fn agent_manifest_provider_surface_from_parts(
         AppServerProviderConfig::CatalogOpenAIChatCompletions { provider_id, .. } => {
             let provider = metadata_store
                 .get_provider(provider_id)
+                .await
                 .map_err(provider_store_error)?
                 .ok_or_else(|| {
                     CooldisError::RuntimeFactory(format!(
@@ -1137,13 +1151,19 @@ fn thinking_text_from_canonical_content(content: &[CanonicalContent]) -> String 
         .join("")
 }
 
-fn open_and_seed_metadata_store(path: impl AsRef<Path>) -> CooldisResult<SqliteMetadataStore> {
-    let store = SqliteMetadataStore::open(path).map_err(metadata_store_error)?;
-    seed_default_llm_providers(&store).map_err(provider_store_error)?;
+async fn open_and_seed_metadata_store(
+    path: impl AsRef<Path>,
+) -> CooldisResult<SqliteMetadataStore> {
+    let store = SqliteMetadataStore::open(path)
+        .await
+        .map_err(metadata_store_error)?;
+    seed_default_llm_providers(&store)
+        .await
+        .map_err(provider_store_error)?;
     Ok(store)
 }
 
-fn sync_catalog_provider_identity(
+async fn sync_catalog_provider_identity(
     config: &mut CooldisAppServerConfig,
     provider_store: &SqliteMetadataStore,
 ) -> CooldisResult<()> {
@@ -1153,6 +1173,7 @@ fn sync_catalog_provider_identity(
     {
         let provider = provider_store
             .get_provider(provider_id)
+            .await
             .map_err(provider_store_error)?
             .ok_or_else(|| {
                 CooldisError::RuntimeFactory(format!(
@@ -1179,7 +1200,7 @@ async fn runtime_factory_from_config(
                 provider.clone(),
                 model.clone(),
             );
-            let secret_resolver = secret_resolver_from_config(config)?;
+            let secret_resolver = secret_resolver_from_config(config).await?;
             Ok(runtime_factory_from_provider_parts_with_app_paths(
                 runtime_config,
                 Arc::new(AppServerOfflineProviderClient::new(provider, model)),
@@ -1217,7 +1238,7 @@ async fn runtime_factory_from_config(
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config)?;
+            let secret_resolver = secret_resolver_from_config(config).await?;
             Ok(runtime_factory_from_provider_parts_with_app_paths(
                 runtime_config,
                 client,
@@ -1250,7 +1271,7 @@ async fn runtime_factory_from_config(
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config)?;
+            let secret_resolver = secret_resolver_from_config(config).await?;
             Ok(runtime_factory_from_provider_parts_with_app_paths(
                 runtime_config,
                 client,
@@ -1285,7 +1306,7 @@ async fn runtime_factory_from_config(
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config)?;
+            let secret_resolver = secret_resolver_from_config(config).await?;
             Ok(runtime_factory_from_provider_parts_with_app_paths(
                 runtime_config,
                 client,
@@ -1335,7 +1356,7 @@ async fn runtime_factory_from_config(
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config)?;
+            let secret_resolver = secret_resolver_from_config(config).await?;
             Ok(runtime_factory_from_provider_parts_with_app_paths(
                 runtime_config,
                 client,
@@ -1358,7 +1379,8 @@ async fn runtime_factory_from_config(
                 model.as_deref(),
                 *max_tokens,
                 *stream,
-            )?;
+            )
+            .await?;
             let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(OpenAIChatCompletionsAdapter);
             let client = Arc::new(ProviderHttpClient::new(resolved.endpoint, adapter).map_err(
                 |err| {
@@ -1367,7 +1389,7 @@ async fn runtime_factory_from_config(
                     ))
                 },
             )?);
-            let secret_resolver = secret_resolver_from_config(config)?;
+            let secret_resolver = secret_resolver_from_config(config).await?;
             Ok(runtime_factory_from_provider_parts_with_app_paths(
                 resolved.runtime_config,
                 client,
@@ -1472,11 +1494,12 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     })
 }
 
-fn secret_resolver_from_config(
+async fn secret_resolver_from_config(
     config: &CooldisAppServerConfig,
 ) -> CooldisResult<Option<Arc<dyn SecretResolver>>> {
-    let store =
-        SqliteSecretStore::open(config.user_metadata_store_path()).map_err(secret_store_error)?;
+    let store = SqliteSecretStore::open(config.user_metadata_store_path())
+        .await
+        .map_err(secret_store_error)?;
     Ok(Some(Arc::new(store)))
 }
 

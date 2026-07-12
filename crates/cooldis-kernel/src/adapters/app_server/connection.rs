@@ -882,34 +882,34 @@ impl CooldisAppServer {
                 self.command_exec_resize(params)
             }
             "model/list" => Ok(json!({
-                "data": self.model_list_json()?,
+                "data": self.model_list_json().await?,
                 "nextCursor": null,
             })),
-            "modelProvider/capabilities/read" => Ok(self.model_provider_capabilities_json()),
-            "modelProvider/list" => self.model_provider_list(),
+            "modelProvider/capabilities/read" => Ok(self.model_provider_capabilities_json().await),
+            "modelProvider/list" => self.model_provider_list().await,
             "modelProvider/read" => {
                 let params: ModelProviderReadParams = parse_params(params)?;
-                self.model_provider_read(params)
+                self.model_provider_read(params).await
             }
             "modelProvider/upsert" => {
                 let params: ModelProviderUpsertParams = parse_params(params)?;
-                self.model_provider_upsert(params)
+                self.model_provider_upsert(params).await
             }
             "modelProvider/delete" => {
                 let params: ModelProviderDeleteParams = parse_params(params)?;
-                self.model_provider_delete(params)
+                self.model_provider_delete(params).await
             }
             "modelProvider/auth/status" => {
                 let params: ModelProviderAuthStatusParams = parse_params(params)?;
-                self.model_provider_auth_status(params)
+                self.model_provider_auth_status(params).await
             }
             "modelProvider/auth/set" => {
                 let params: ModelProviderAuthSetParams = parse_params(params)?;
-                self.model_provider_auth_set(params)
+                self.model_provider_auth_set(params).await
             }
             "modelProvider/auth/delete" => {
                 let params: ModelProviderAuthDeleteParams = parse_params(params)?;
-                self.model_provider_auth_delete(params)
+                self.model_provider_auth_delete(params).await
             }
             "experimentalFeature/list" => Ok(json!({ "data": [], "nextCursor": null })),
             "experimentalFeature/enablement/set" => {
@@ -1199,13 +1199,15 @@ impl CooldisAppServer {
             let secret_name = params
                 .bearer_secret
                 .unwrap_or_else(|| format!("mcp.{}.bearer", config.name));
-            self.mcp_secret_store()?
+            self.mcp_secret_store()
+                .await?
                 .set_secret(
                     &secret_name,
                     token,
                     SecretSourceKind::Local,
                     Some(format!("mcp:{}", config.name)),
                 )
+                .await
                 .map_err(mcp_source_param_error)?;
             config = config
                 .with_bearer_secret(secret_name)
@@ -1250,7 +1252,7 @@ impl CooldisAppServer {
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = McpRemoteToolProvider::connect(
             record.to_config(),
-            Some(Arc::new(self.mcp_secret_store()?)),
+            Some(Arc::new(self.mcp_secret_store().await?)),
         )
         .await
         .map_err(internal_error)?;
@@ -1287,7 +1289,7 @@ impl CooldisAppServer {
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = McpRemoteToolProvider::connect(
             record.to_config(),
-            Some(Arc::new(self.mcp_secret_store()?)),
+            Some(Arc::new(self.mcp_secret_store().await?)),
         )
         .await
         .map_err(internal_error)?;
@@ -1418,8 +1420,9 @@ impl CooldisAppServer {
             .map_err(internal_error)
     }
 
-    fn mcp_secret_store(&self) -> Result<SqliteSecretStore, JsonRpcErrorError> {
+    async fn mcp_secret_store(&self) -> Result<SqliteSecretStore, JsonRpcErrorError> {
         SqliteSecretStore::open(&self.inner.user_metadata_store_path)
+            .await
             .map_err(|err| internal_error(secret_store_error(err)))
     }
 
@@ -1501,29 +1504,30 @@ impl CooldisAppServer {
             .unwrap_or_else(crate::default_operations_registry_root)
     }
 
-    pub(super) fn model_provider_list(&self) -> Result<Value, JsonRpcErrorError> {
+    pub(super) async fn model_provider_list(&self) -> Result<Value, JsonRpcErrorError> {
         let mut providers = self
             .inner
             .metadata_store
             .list_providers()
+            .await
             .map_err(|err| internal_error(provider_store_error(err)))?;
         providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
-        let data = providers
-            .iter()
-            .map(|provider| self.model_provider_json(provider))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut data = Vec::with_capacity(providers.len());
+        for provider in &providers {
+            data.push(self.model_provider_json(provider).await?);
+        }
         Ok(json!({ "data": data, "nextCursor": null }))
     }
 
-    pub(super) fn model_provider_read(
+    pub(super) async fn model_provider_read(
         &self,
         params: ModelProviderReadParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let provider = self.model_provider_record(&params.provider_id)?;
-        Ok(json!({ "provider": self.model_provider_json(&provider)? }))
+        let provider = self.model_provider_record(&params.provider_id).await?;
+        Ok(json!({ "provider": self.model_provider_json(&provider).await? }))
     }
 
-    pub(super) fn model_provider_upsert(
+    pub(super) async fn model_provider_upsert(
         &self,
         params: ModelProviderUpsertParams,
     ) -> Result<Value, JsonRpcErrorError> {
@@ -1531,51 +1535,65 @@ impl CooldisAppServer {
         self.inner
             .metadata_store
             .upsert_provider(provider.clone())
+            .await
             .map_err(|err| internal_error(provider_store_error(err)))?;
-        let provider = self.model_provider_record(&provider.provider_id)?;
-        Ok(json!({ "provider": self.model_provider_json(&provider)? }))
+        let provider = self.model_provider_record(&provider.provider_id).await?;
+        Ok(json!({ "provider": self.model_provider_json(&provider).await? }))
     }
 
-    pub(super) fn model_provider_delete(
+    pub(super) async fn model_provider_delete(
         &self,
         params: ModelProviderDeleteParams,
     ) -> Result<Value, JsonRpcErrorError> {
         let provider_id = params.provider_id;
-        self.model_provider_record(&provider_id)?;
-        self.inner
-            .metadata_store
-            .delete_provider(&provider_id)
-            .map_err(|err| internal_error(provider_store_error(err)))?;
-        self.inner
-            .user_metadata_store
-            .delete_credential(&provider_id)
-            .map_err(|err| internal_error(provider_store_error(err)))?;
-        self.inner
-            .metadata_store
-            .delete_credential(&provider_id)
-            .map_err(|err| internal_error(provider_store_error(err)))?;
+        self.model_provider_record(&provider_id).await?;
+        let metadata_store = self.inner.metadata_store.clone();
+        let user_metadata_store = self.inner.user_metadata_store.clone();
+        let delete_provider_id = provider_id.clone();
+        tokio::spawn(async move {
+            metadata_store
+                .delete_provider(&delete_provider_id)
+                .await
+                .map_err(|err| internal_error(provider_store_error(err)))?;
+            user_metadata_store
+                .delete_credential(&delete_provider_id)
+                .await
+                .map_err(|err| internal_error(provider_store_error(err)))?;
+            metadata_store
+                .delete_credential(&delete_provider_id)
+                .await
+                .map_err(|err| internal_error(provider_store_error(err)))?;
+            Ok::<(), JsonRpcErrorError>(())
+        })
+        .await
+        .map_err(|error| {
+            internal_error(CooldisError::RuntimeFactory(format!(
+                "model provider deletion task failed: {error}"
+            )))
+        })??;
         Ok(json!({ "deleted": true, "providerId": provider_id }))
     }
 
-    pub(super) fn model_provider_auth_status(
+    pub(super) async fn model_provider_auth_status(
         &self,
         params: ModelProviderAuthStatusParams,
     ) -> Result<Value, JsonRpcErrorError> {
         let providers = if let Some(provider_id) = params.provider_id.as_deref() {
-            vec![self.model_provider_record(provider_id)?]
+            vec![self.model_provider_record(provider_id).await?]
         } else {
             let mut providers = self
                 .inner
                 .metadata_store
                 .list_providers()
+                .await
                 .map_err(|err| internal_error(provider_store_error(err)))?;
             providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
             providers
         };
-        let data = providers
-            .iter()
-            .map(|provider| self.model_provider_auth_json(provider))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut data = Vec::with_capacity(providers.len());
+        for provider in &providers {
+            data.push(self.model_provider_auth_json(provider).await?);
+        }
         let auth = if params.provider_id.is_some() {
             data.first().cloned().unwrap_or(Value::Null)
         } else {
@@ -1584,7 +1602,7 @@ impl CooldisAppServer {
         Ok(json!({ "auth": auth, "data": data, "nextCursor": null }))
     }
 
-    pub(super) fn model_provider_auth_set(
+    pub(super) async fn model_provider_auth_set(
         &self,
         params: ModelProviderAuthSetParams,
     ) -> Result<Value, JsonRpcErrorError> {
@@ -1595,7 +1613,7 @@ impl CooldisAppServer {
                 "modelProvider/auth/set requires a non-empty apiKey",
             ));
         }
-        let provider = self.model_provider_record(&params.provider_id)?;
+        let provider = self.model_provider_record(&params.provider_id).await?;
         self.inner
             .user_metadata_store
             .set_credential(
@@ -1604,29 +1622,32 @@ impl CooldisAppServer {
                     key: api_key.to_string(),
                 },
             )
+            .await
             .map_err(|err| internal_error(provider_store_error(err)))?;
-        Ok(json!({ "auth": self.model_provider_auth_json(&provider)? }))
+        Ok(json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
-    pub(super) fn model_provider_auth_delete(
+    pub(super) async fn model_provider_auth_delete(
         &self,
         params: ModelProviderAuthDeleteParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let provider = self.model_provider_record(&params.provider_id)?;
+        let provider = self.model_provider_record(&params.provider_id).await?;
         self.inner
             .user_metadata_store
             .delete_credential(&provider.provider_id)
+            .await
             .map_err(|err| internal_error(provider_store_error(err)))?;
-        Ok(json!({ "auth": self.model_provider_auth_json(&provider)? }))
+        Ok(json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
-    fn model_provider_record(
+    async fn model_provider_record(
         &self,
         provider_id: &str,
     ) -> Result<LlmProviderRecord, JsonRpcErrorError> {
         self.inner
             .metadata_store
             .get_provider(provider_id)
+            .await
             .map_err(|err| internal_error(provider_store_error(err)))?
             .ok_or_else(|| {
                 jsonrpc_error(
@@ -1636,7 +1657,7 @@ impl CooldisAppServer {
             })
     }
 
-    fn model_provider_auth_json(
+    async fn model_provider_auth_json(
         &self,
         provider: &LlmProviderRecord,
     ) -> Result<Value, JsonRpcErrorError> {
@@ -1645,6 +1666,7 @@ impl CooldisAppServer {
             provider,
             &LlmProviderAuthContext::from_process_env(),
         )
+        .await
         .map_err(|err| internal_error(provider_store_error(err)))?;
         Ok(json!({
             "providerId": provider.provider_id,
@@ -1656,7 +1678,7 @@ impl CooldisAppServer {
         }))
     }
 
-    fn model_provider_json(
+    async fn model_provider_json(
         &self,
         provider: &LlmProviderRecord,
     ) -> Result<Value, JsonRpcErrorError> {
@@ -1665,6 +1687,7 @@ impl CooldisAppServer {
             provider,
             &LlmProviderAuthContext::from_process_env(),
         )
+        .await
         .map_err(|err| internal_error(provider_store_error(err)))?;
         Ok(json!({
             "providerId": provider.provider_id,
@@ -1703,7 +1726,7 @@ impl CooldisAppServer {
         Ok(json!({ "data": data, "cursor": null }))
     }
 
-    fn lifecycle_for_thread_query(
+    async fn lifecycle_for_thread_query(
         &self,
         thread_id: &str,
     ) -> Result<ThreadLifecycleRecord, JsonRpcErrorError> {
@@ -1712,6 +1735,7 @@ impl CooldisAppServer {
             .inner
             .metadata_store
             .get_thread_lifecycle(thread_id)
+            .await
             .map_err(metadata_store_jsonrpc_error)?
             .ok_or_else(|| thread_not_found(&thread_id.to_string()))?;
         if lifecycle.coordinates.tenant_id != self.inner.tenant_id
@@ -1726,7 +1750,7 @@ impl CooldisAppServer {
         &self,
         params: ThreadEventsListParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
 
         if params.cursor.is_some() && params.stream_cursor.is_some() {
             return Err(jsonrpc_error(
@@ -1784,7 +1808,7 @@ impl CooldisAppServer {
         &self,
         params: ThreadControlListParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
@@ -1821,7 +1845,7 @@ impl CooldisAppServer {
         &self,
         params: ThreadControlListParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
@@ -1842,7 +1866,7 @@ impl CooldisAppServer {
         &self,
         params: ThreadControlListParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
@@ -1922,7 +1946,7 @@ impl CooldisAppServer {
         &self,
         params: ApprovalResolveParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
@@ -2001,7 +2025,7 @@ impl CooldisAppServer {
         &self,
         params: MandateStartParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
@@ -2033,7 +2057,7 @@ impl CooldisAppServer {
         &self,
         params: MandateRevokeParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
         let mandate_event_id = crate::parse_mandate_event_id(&params.mandate_event_id)
             .map_err(mandate_jsonrpc_error)?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
@@ -2055,7 +2079,7 @@ impl CooldisAppServer {
         &self,
         params: MandateListParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
         let store = SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(|err| internal_error(CooldisError::History(err.to_string())))?;
@@ -2072,7 +2096,7 @@ impl CooldisAppServer {
         &self,
         params: ThreadDebugExportParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id)?;
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
 
         let mut selectors = if params.streams.is_empty() {
             vec!["thread".to_string(), "control".to_string()]
@@ -2243,7 +2267,7 @@ impl CooldisAppServer {
             .map_err(thread_start_bind_error)
     }
 
-    pub(super) fn agent_manifest_provider_surface(
+    pub(super) async fn agent_manifest_provider_surface(
         &self,
     ) -> CooldisResult<AgentManifestProviderSurface> {
         agent_manifest_provider_surface_from_parts(
@@ -2252,6 +2276,7 @@ impl CooldisAppServer {
             &self.inner.model,
             &self.inner.metadata_store,
         )
+        .await
     }
 
     pub(super) async fn configured_mcp_server_refs(&self) -> CooldisResult<BTreeSet<String>> {
@@ -2274,6 +2299,7 @@ impl CooldisAppServer {
             .await
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
         let secret_store = SqliteSecretStore::open(&self.inner.user_metadata_store_path)
+            .await
             .map_err(secret_store_error)?;
         Ok(McpToolUniverseDiscoverer::new(
             registry,
@@ -3571,13 +3597,14 @@ impl CooldisAppServer {
         }
     }
 
-    pub(super) fn model_list_json(&self) -> Result<Vec<Value>, JsonRpcErrorError> {
+    pub(super) async fn model_list_json(&self) -> Result<Vec<Value>, JsonRpcErrorError> {
         match &self.inner.provider {
             AppServerProviderConfig::CatalogOpenAIChatCompletions { provider_id, .. } => {
                 let provider = self
                     .inner
                     .metadata_store
                     .get_provider(provider_id)
+                    .await
                     .map_err(|err| internal_error(provider_store_error(err)))?
                     .ok_or_else(|| {
                         internal_error(CooldisError::RuntimeFactory(format!(
@@ -3624,13 +3651,14 @@ impl CooldisAppServer {
         }
     }
 
-    pub(super) fn model_provider_capabilities_json(&self) -> Value {
+    pub(super) async fn model_provider_capabilities_json(&self) -> Value {
         let supports_streaming = agent_manifest_provider_surface_from_parts(
             &self.inner.provider,
             &self.inner.model_provider,
             &self.inner.model,
             &self.inner.metadata_store,
         )
+        .await
         .map(|surface| surface.supports_streaming)
         .unwrap_or(false);
         json!({

@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 struct EmptySecretResolver;
 
+#[async_trait::async_trait]
 impl SecretResolver for EmptySecretResolver {
-    fn resolve_secret(&self, _name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
+    async fn resolve_secret(&self, _name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
         Ok(None)
     }
 }
@@ -30,8 +31,9 @@ impl StaticSecretResolver {
     }
 }
 
+#[async_trait::async_trait]
 impl SecretResolver for StaticSecretResolver {
-    fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
+    async fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
         Ok(self.secrets.get(name).map(|value| ResolvedSecret {
             name: name.to_string(),
             value: value.clone(),

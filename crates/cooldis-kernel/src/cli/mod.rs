@@ -3481,9 +3481,10 @@ async fn tool_run(args: Vec<OsString>) -> CooldisResult<()> {
                 .map_err(secret_cli_error)?
                 .is_empty()
             {
-                let secret_store = open_secret_store(options.state_home.clone())?;
+                let secret_store = open_secret_store(options.state_home.clone()).await?;
                 let resolution =
                     resolve_manifest_secret_resolution(&secret_store, &record.manifest)
+                        .await
                         .map_err(secret_cli_error)?;
                 if !resolution.is_ready() {
                     return Err(usage_error(format!(
@@ -3640,7 +3641,7 @@ async fn tool_source_discover(args: Vec<OsString>) -> CooldisResult<()> {
         .get_source_async(&name)
         .await?
         .ok_or_else(|| usage_error(format!("tool source {name:?} was not found")))?;
-    let secret_store = open_secret_store(options.state_home)?;
+    let secret_store = open_secret_store(options.state_home).await?;
     let provider =
         McpRemoteToolProvider::connect(record.to_config(), Some(Arc::new(secret_store))).await?;
     let tools = provider.tool_definitions().await;
@@ -3756,9 +3757,10 @@ async fn secret_import(args: Vec<OsString>) -> CooldisResult<()> {
     let from_env = options
         .from_env
         .ok_or_else(|| usage_error("secret import requires --from-env <ENV>"))?;
-    let store = open_secret_store(options.state_home)?;
+    let store = open_secret_store(options.state_home).await?;
     let status = store
         .import_secret_from_env(&name, &from_env)
+        .await
         .map_err(secret_cli_error)?;
     println!("imported secret {}", status.name);
     println!("source {}", secret_source_display(&status));
@@ -3782,9 +3784,10 @@ async fn secret_set(args: Vec<OsString>) -> CooldisResult<()> {
         .read_to_string(&mut value)
         .map_err(io_error)?;
     let value = trim_stdin_secret_value(value);
-    let store = open_secret_store(options.state_home)?;
+    let store = open_secret_store(options.state_home).await?;
     let status = store
         .set_secret(&name, value, SecretSourceKind::Stdin, None)
+        .await
         .map_err(secret_cli_error)?;
     println!("stored secret {}", status.name);
     println!("source {}", secret_source_display(&status));
@@ -3797,8 +3800,8 @@ async fn secret_list(args: Vec<OsString>) -> CooldisResult<()> {
         print_secret_list_help();
         return Ok(());
     }
-    let store = open_secret_store(options.state_home)?;
-    let statuses = store.list().map_err(secret_cli_error)?;
+    let store = open_secret_store(options.state_home).await?;
+    let statuses = store.list().await.map_err(secret_cli_error)?;
     if statuses.is_empty() {
         println!("no secrets");
         return Ok(());
@@ -3823,9 +3826,10 @@ async fn secret_status(args: Vec<OsString>) -> CooldisResult<()> {
     let name = options
         .name
         .ok_or_else(|| usage_error("secret status requires <name>"))?;
-    let store = open_secret_store(options.state_home)?;
+    let store = open_secret_store(options.state_home).await?;
     let status = store
         .status(&name)
+        .await
         .map_err(secret_cli_error)?
         .ok_or_else(|| usage_error(format!("secret {name:?} was not found")))?;
     println!(
@@ -3846,8 +3850,8 @@ async fn secret_delete(args: Vec<OsString>) -> CooldisResult<()> {
     let name = options
         .name
         .ok_or_else(|| usage_error("secret delete requires <name>"))?;
-    let store = open_secret_store(options.state_home)?;
-    if store.delete_secret(&name).map_err(secret_cli_error)? {
+    let store = open_secret_store(options.state_home).await?;
+    if store.delete_secret(&name).await.map_err(secret_cli_error)? {
         println!("deleted secret {name}");
     } else {
         println!("secret {name} was not found");
@@ -3864,13 +3868,15 @@ async fn auth_status(args: Vec<OsString>) -> CooldisResult<()> {
     let provider_id = options
         .provider_id
         .ok_or_else(|| usage_error("auth status requires <provider-id>"))?;
-    let store = open_provider_store(options.state_home)?;
+    let store = open_provider_store(options.state_home).await?;
     let provider = store
         .get_provider(&provider_id)
+        .await
         .map_err(provider_cli_error)?
         .ok_or_else(|| usage_error(format!("provider {provider_id:?} was not found")))?;
     let status =
         crate::llm_provider_auth_status(&store, &provider, &crate::LlmProviderAuthContext::new())
+            .await
             .map_err(provider_cli_error)?;
     let value = json!({
         "provider_id": provider.provider_id,
@@ -3908,9 +3914,10 @@ async fn auth_set(args: Vec<OsString>) -> CooldisResult<()> {
     if value.is_empty() {
         return Err(usage_error("auth set requires a non-empty API key"));
     }
-    let store = open_provider_store(options.state_home)?;
+    let store = open_provider_store(options.state_home).await?;
     if store
         .get_provider(&provider_id)
+        .await
         .map_err(provider_cli_error)?
         .is_none()
     {
@@ -3923,6 +3930,7 @@ async fn auth_set(args: Vec<OsString>) -> CooldisResult<()> {
             &provider_id,
             crate::LlmProviderCredential::ApiKey { key: value },
         )
+        .await
         .map_err(provider_cli_error)?;
     println!("stored provider credential {provider_id}");
     Ok(())
@@ -3937,9 +3945,10 @@ async fn auth_delete(args: Vec<OsString>) -> CooldisResult<()> {
     let provider_id = options
         .provider_id
         .ok_or_else(|| usage_error("auth delete requires <provider-id>"))?;
-    let store = open_provider_store(options.state_home)?;
+    let store = open_provider_store(options.state_home).await?;
     store
         .delete_credential(&provider_id)
+        .await
         .map_err(provider_cli_error)?;
     println!("deleted provider credential {provider_id}");
     Ok(())
@@ -5951,11 +5960,12 @@ fn metadata_store_path_for_state_home(
         .join("metadata.sqlite3")
 }
 
-fn open_secret_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteSecretStore> {
+async fn open_secret_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteSecretStore> {
     SqliteSecretStore::open(metadata_store_path_for_state_home(
         state_home,
         default_user_state_home()?,
     ))
+    .await
     .map_err(|err| {
         if turso_cross_process_lock_error(&err.to_string()) {
             cross_process_database_guidance("stop the daemon and retry")
@@ -5965,11 +5975,12 @@ fn open_secret_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteSecretS
     })
 }
 
-fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetadataStore> {
+async fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetadataStore> {
     let store = SqliteMetadataStore::open(metadata_store_path_for_state_home(
         state_home,
         default_user_state_home()?,
     ))
+    .await
     .map_err(|err| {
         if turso_cross_process_lock_error(&err.to_string()) {
             cross_process_database_guidance(
@@ -5979,7 +5990,9 @@ fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetad
             provider_cli_error(err)
         }
     })?;
-    crate::seed_default_llm_providers(&store).map_err(provider_cli_error)?;
+    crate::seed_default_llm_providers(&store)
+        .await
+        .map_err(provider_cli_error)?;
     Ok(store)
 }
 

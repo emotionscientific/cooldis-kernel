@@ -736,6 +736,7 @@ impl McpRemoteClient {
             })?;
             let secret = resolver
                 .resolve_secret(secret_name)
+                .await
                 .map_err(|err| {
                     CooldisError::RuntimeExecution(format!(
                         "remote MCP source `{}` failed to resolve bearer secret: {err}",

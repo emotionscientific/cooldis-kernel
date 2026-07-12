@@ -593,7 +593,7 @@ async fn inspect_manifest_events(
     expected_bind_count: usize,
     expect_alias: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let lifecycle = lifecycle_record(root, thread_id)?;
+    let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
         SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
@@ -642,7 +642,7 @@ async fn inspect_researcher_bind_receipt(
     root: &Path,
     thread_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let lifecycle = lifecycle_record(root, thread_id)?;
+    let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
         SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
@@ -785,7 +785,7 @@ async fn inspect_history(
     root: &Path,
     thread_id: &str,
 ) -> Result<SmokeInspection, Box<dyn std::error::Error>> {
-    let lifecycle = lifecycle_record(root, thread_id)?;
+    let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
         SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
     let session_context = session_store.build_context(&lifecycle.coordinates).await?;
@@ -1029,14 +1029,15 @@ fn assert_receipt_count(
     Ok(())
 }
 
-fn lifecycle_record(
+async fn lifecycle_record(
     root: &Path,
     thread_id: &str,
 ) -> Result<cooldis::ThreadLifecycleRecord, Box<dyn std::error::Error>> {
     let parsed = ThreadId::parse_str(thread_id)?;
-    let metadata_store = SqliteMetadataStore::open(root.join("state/metadata.sqlite3"))?;
+    let metadata_store = SqliteMetadataStore::open(root.join("state/metadata.sqlite3")).await?;
     Ok(metadata_store
-        .get_thread_lifecycle(parsed)?
+        .get_thread_lifecycle(parsed)
+        .await?
         .ok_or("missing persisted thread lifecycle record")?)
 }
 
@@ -1420,12 +1421,15 @@ async fn run_researcher_exa_bind_variant(
     config_app.agent_registry_root = agent_registry_root;
     let metadata_path = config_app.state_home.join("metadata.sqlite3");
     let app = CooldisAppServer::new_local(config_app).await?;
-    SqliteSecretStore::open(&metadata_path)?.set_secret(
-        "EXAMPLE_API_KEY",
-        "fixture-token",
-        SecretSourceKind::Local,
-        Some("researcher-manifest-live".to_string()),
-    )?;
+    SqliteSecretStore::open(&metadata_path)
+        .await?
+        .set_secret(
+            "EXAMPLE_API_KEY",
+            "fixture-token",
+            SecretSourceKind::Local,
+            Some("researcher-manifest-live".to_string()),
+        )
+        .await?;
     SqliteMcpSourceRegistry::open_async(&metadata_path)
         .await?
         .upsert_source_async(
@@ -1450,7 +1454,7 @@ async fn run_researcher_exa_bind_variant(
         .ok_or("researcher-search thread/start response missing thread id")?
         .to_string();
     inspect_manifest_events(&variant_root, &thread_id, &record.manifest_hash, 1, true).await?;
-    let lifecycle = lifecycle_record(&variant_root, &thread_id)?;
+    let lifecycle = lifecycle_record(&variant_root, &thread_id).await?;
     let session_store =
         SqliteSessionStore::open(variant_root.join("state/session_history.sqlite3")).await?;
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);

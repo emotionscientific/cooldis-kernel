@@ -98,7 +98,7 @@ async fn remote_mcp_provider_fails_closed_when_bearer_secret_is_missing() {
     .unwrap();
     let err = match McpRemoteToolProvider::connect(
         config,
-        Some(Arc::new(SqliteSecretStore::in_memory().unwrap())),
+        Some(Arc::new(SqliteSecretStore::in_memory().await.unwrap())),
     )
     .await
     {
@@ -114,7 +114,7 @@ async fn remote_mcp_provider_discovers_and_invokes_streamable_http_tool() {
     let seen_authorization = Arc::new(StdMutex::new(Vec::new()));
     let (url, server) =
         spawn_mcp_http_fixture("application/json", seen_authorization.clone()).await;
-    let secret_store = SqliteSecretStore::in_memory().unwrap();
+    let secret_store = SqliteSecretStore::in_memory().await.unwrap();
     secret_store
         .set_secret(
             "ARCADE_API_KEY",
@@ -122,6 +122,7 @@ async fn remote_mcp_provider_discovers_and_invokes_streamable_http_tool() {
             SecretSourceKind::Local,
             None,
         )
+        .await
         .unwrap();
     let config = McpRemoteServerConfig::new("arcade", McpRemoteTransport::StreamableHttp, url)
         .unwrap()
