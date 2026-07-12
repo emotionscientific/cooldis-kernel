@@ -169,6 +169,59 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     }));
 }
 
+#[tokio::test]
+async fn coupling_replay_guides_user_when_daemon_holds_journal() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let example_module = repo.join("../../examples/wasm-counter-coupling");
+    let root = temp_dir("coupling-replay-held-journal");
+    let journal_path = root.join("session_history.sqlite3");
+    let coupling_path = root.join("coupling.json");
+
+    let build = build_rust_wasm_module(RustWasmBuildOptions::new(&example_module)).unwrap();
+    let coupling = counter_coupling(
+        "org.example.counter",
+        "op://counter/fold_counter@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        None,
+    );
+    fs::write(
+        &coupling_path,
+        serde_json::to_vec_pretty(&BoundCouplingSet::new("snapshot", vec![coupling])).unwrap(),
+    )
+    .unwrap();
+
+    let held_store = SqliteSessionStore::open(&journal_path).await.unwrap();
+    let thread_id = ThreadCoordinates::new("tenant", "user", "held-journal").thread_id;
+    let output = Command::new(env!("CARGO_BIN_EXE_cooldis"))
+        .args([
+            "coupling",
+            "run",
+            "--replay",
+            "--artifact",
+            build.artifact_path.to_str().unwrap(),
+            "--coupling-file",
+            coupling_path.to_str().unwrap(),
+            "--thread-id",
+            &thread_id.to_string(),
+            "--journal",
+            journal_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run cooldis cli");
+    drop(held_store);
+
+    assert!(
+        !output.status.success(),
+        "contended replay unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "another process holds this database (most likely the cooldis daemon); stop the daemon and retry"
+        ),
+        "missing lock guidance in stderr:\n{stderr}"
+    );
+}
+
 fn counter_coupling(
     id: &str,
     artifact_ref: &str,

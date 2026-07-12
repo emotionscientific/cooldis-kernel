@@ -18,16 +18,15 @@ use crate::{
     PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
     RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore,
     SqliteSecretStore, SqliteSessionStore, StreamRecordEnvelopeV1, SystemDaemonClock,
-    TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId, ThreadMetadataStore,
-    ToolBuildReceipt, ToolCommandContract, ToolFixtureRun, ToolInterfaceContract,
-    ToolManualExitStatus, ToolOperationInterface, ToolOperationManual, ToolPackageIdentity,
-    ToolPackageSource, ToolRuntimeContract, WasmOperationManifest, WasmOperationValueKind,
-    WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
-    agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
-    default_blob_registry_root, default_blob_registry_root_for_agent_registry_root,
-    default_operations_registry_root, discover_cooldis_daemon_config_path,
-    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
-    load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
+    TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId, ToolBuildReceipt,
+    ToolCommandContract, ToolFixtureRun, ToolInterfaceContract, ToolManualExitStatus,
+    ToolOperationInterface, ToolOperationManual, ToolPackageIdentity, ToolPackageSource,
+    ToolRuntimeContract, WasmOperationManifest, WasmOperationValueKind, WasmRuntimeArtifact,
+    WasmRuntimeConfig, WasmRuntimeFactory, agent::agent_tool_router::AgentKernelToolProvider,
+    build_rust_wasm_module, default_blob_registry_root,
+    default_blob_registry_root_for_agent_registry_root, default_operations_registry_root,
+    discover_cooldis_daemon_config_path, discover_cooldis_project, install_cooldis_daemon_service,
+    load_cooldis_daemon_config, load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
     render_openapi_import_artifact, required_secret_names, resolve_manifest_secret_resolution,
     uninstall_cooldis_daemon_service, wasm_sha256,
 };
@@ -871,7 +870,6 @@ async fn agent_run(args: Vec<OsString>) -> CooldisResult<()> {
     config.blob_registry_root =
         default_blob_registry_root_for_agent_registry_root(&agent_registry_root);
     config.agent_registry_root = agent_registry_root;
-    let state_home = config.state_home.clone();
     let app = CooldisAppServer::new_local(config).await?;
     let thread_start = app
         .local_json_rpc_request(
@@ -885,7 +883,7 @@ async fn agent_run(args: Vec<OsString>) -> CooldisResult<()> {
         .as_str()
         .ok_or_else(|| usage_error("thread/start response missing thread id"))?
         .to_string();
-    let receipt_ids = manifest_receipt_event_ids(&state_home, &thread_id).await?;
+    let receipt_ids = manifest_receipt_event_ids(&app, &thread_id).await?;
     let assistant_text = run_local_app_turn(&app, &thread_id, &input).await?;
     println!("{assistant_text}");
     println!("manifest.compile.completed: {}", receipt_ids.0);
@@ -2326,7 +2324,14 @@ async fn load_replay_recorded_events(options: &CouplingRunArgs) -> CooldisResult
         (Some(journal), Some(thread_id), None) => {
             let store = SqliteSessionStore::open_read_only(journal)
                 .await
-                .map_err(|err| usage_error(format!("failed to open journal read-only: {err}")))?;
+                .map_err(|err| {
+                    let message = err.to_string();
+                    if turso_cross_process_lock_error(&message) {
+                        cross_process_database_guidance("stop the daemon and retry")
+                    } else {
+                        usage_error(format!("failed to open journal read-only: {err}"))
+                    }
+                })?;
             let events = store.list_thread_events(*thread_id).await.map_err(|err| {
                 usage_error(format!(
                     "failed to read recorded events for thread {thread_id}: {err}"
@@ -5951,7 +5956,13 @@ fn open_secret_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteSecretS
         state_home,
         default_user_state_home()?,
     ))
-    .map_err(secret_cli_error)
+    .map_err(|err| {
+        if turso_cross_process_lock_error(&err.to_string()) {
+            cross_process_database_guidance("stop the daemon and retry")
+        } else {
+            secret_cli_error(err)
+        }
+    })
 }
 
 fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetadataStore> {
@@ -5959,7 +5970,15 @@ fn open_provider_store(state_home: Option<PathBuf>) -> CooldisResult<SqliteMetad
         state_home,
         default_user_state_home()?,
     ))
-    .map_err(provider_cli_error)?;
+    .map_err(|err| {
+        if turso_cross_process_lock_error(&err.to_string()) {
+            cross_process_database_guidance(
+                "use the running daemon's modelProvider RPC or stop the daemon and retry",
+            )
+        } else {
+            provider_cli_error(err)
+        }
+    })?;
     crate::seed_default_llm_providers(&store).map_err(provider_cli_error)?;
     Ok(store)
 }
@@ -5972,6 +5991,31 @@ async fn open_mcp_source_registry(
         default_project_state_home(),
     ))
     .await
+    .map_err(|err| {
+        if turso_cross_process_lock_error(&err.to_string()) {
+            cross_process_database_guidance(
+                "use the running daemon's mcpSource RPC or stop the daemon and retry",
+            )
+        } else {
+            err
+        }
+    })
+}
+
+fn cross_process_database_guidance(alternative: &str) -> CooldisError {
+    usage_error(format!(
+        "another process holds this database (most likely the cooldis daemon); {alternative}"
+    ))
+}
+
+fn turso_cross_process_lock_error(message: &str) -> bool {
+    // turso 0.7.0-pre.18 erases LimboError::LockingError through turso::Error.
+    let Some((_, engine_error)) = message.split_once("sqlite engine error: ") else {
+        return false;
+    };
+    engine_error == "Locking error: Failed locking file. File is locked by another process"
+        || (engine_error.starts_with("Locking error: Failed locking file '")
+            && engine_error.ends_with("'. File is locked by another process"))
 }
 
 fn secret_cli_error(err: impl std::fmt::Display) -> CooldisError {
@@ -7138,34 +7182,40 @@ async fn wait_for_private_socket(path: &Path) -> CooldisResult<()> {
 }
 
 async fn manifest_receipt_event_ids(
-    state_home: &Path,
+    app: &CooldisAppServer,
     thread_id: &str,
 ) -> CooldisResult<(String, String)> {
-    let parsed = ThreadId::parse_str(thread_id)
-        .map_err(|err| usage_error(format!("invalid thread id {thread_id:?}: {err}")))?;
-    let metadata_store = SqliteMetadataStore::open(state_home.join("metadata.sqlite3"))
-        .map_err(|err| usage_error(format!("failed to open app-server metadata store: {err}")))?;
-    let lifecycle = metadata_store
-        .get_thread_lifecycle(parsed)
-        .map_err(|err| usage_error(format!("failed to read thread lifecycle: {err}")))?
-        .ok_or_else(|| usage_error(format!("thread lifecycle was not found: {thread_id}")))?;
-    let session_store = SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
-        .await
-        .map_err(|err| usage_error(format!("failed to open app-server session store: {err}")))?;
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
-    let events = session_store
-        .read_events(&stream_id, None)
+    let response = app
+        .local_json_rpc_request(
+            "thread/events/list",
+            json!({
+                "threadId": thread_id,
+                "kinds": [
+                    EventKind::ManifestCompileCompleted.as_str(),
+                    EventKind::ManifestBindCompleted.as_str(),
+                ],
+            }),
+        )
         .await
         .map_err(|err| usage_error(format!("failed to read thread events: {err}")))?;
+    let events = response["data"]
+        .as_array()
+        .ok_or_else(|| usage_error("thread/events/list response missing data array"))?;
     let compile = events
         .iter()
-        .find(|event| event.kind == EventKind::ManifestCompileCompleted)
+        .find(|event| event["kind"] == EventKind::ManifestCompileCompleted.as_str())
         .ok_or_else(|| usage_error("manifest.compile.completed receipt event was not found"))?;
     let bind = events
         .iter()
-        .find(|event| event.kind == EventKind::ManifestBindCompleted)
+        .find(|event| event["kind"] == EventKind::ManifestBindCompleted.as_str())
         .ok_or_else(|| usage_error("manifest.bind.completed receipt event was not found"))?;
-    Ok((compile.id.to_string(), bind.id.to_string()))
+    let compile_id = compile["eventId"]
+        .as_str()
+        .ok_or_else(|| usage_error("manifest.compile.completed event missing eventId"))?;
+    let bind_id = bind["eventId"]
+        .as_str()
+        .ok_or_else(|| usage_error("manifest.bind.completed event missing eventId"))?;
+    Ok((compile_id.to_string(), bind_id.to_string()))
 }
 
 async fn run_local_app_turn(
