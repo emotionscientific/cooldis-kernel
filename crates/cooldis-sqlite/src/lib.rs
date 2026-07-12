@@ -453,13 +453,12 @@ mod tests {
             .is_err());
     }
 
-    #[ignore = "pins a Turso 0.6.1 transaction failure that gates EMO-413"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn turso_061_concurrent_transaction_commit_repro() {
-        // Turso 0.6.1 was observed returning `cannot commit - no transaction is active`
-        // from Transaction::commit under concurrent read-then-upsert traffic. Wave 2
-        // (EMO-413) is gated on resolving this via an engine upgrade or ADR 0005 §6's
-        // `[patch.crates-io]` fork lane.
+    async fn concurrent_transaction_commit_regression() {
+        // Turso 0.6.1 returned `cannot commit - no transaction is active` from
+        // Transaction::commit under concurrent read-then-upsert traffic; fixed
+        // in the 0.7 line (verified on 0.7.0-pre.18, EMO-412). Runs un-ignored
+        // as the regression guard for every future engine pin change.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("transaction-repro.sqlite3");
         let db = Db::open(&path, DbConfig::default()).await.unwrap();
