@@ -1,0 +1,15 @@
+[package]
+name = "cooldis-sqlite"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Engine-owner crate for cooldis SQLite stores (ADR 0005): configuration, connections, migrations, DST IO hook"
+
+[dependencies]
+turso = "=0.6.1"
+turso_core = "=0.6.1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tempfile = "3"

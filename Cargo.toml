@@ -10,6 +10,7 @@ members = [
     "crates/cooldis-process",
     "crates/cooldis-provider",
     "crates/cooldis-runtime-contracts",
+    "crates/cooldis-sqlite",
     "crates/cooldis-vfs",
     "crates/cooldis-vbash",
     "crates/cooldis-wasm",
