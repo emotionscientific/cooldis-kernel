@@ -51,7 +51,8 @@ This repository contains the standalone Cooldis kernel workspace:
 - Agent and operation contracts: manifests, tool publication, operation ABI,
   coupling ABI, grants, command projections, and Wasm operation support.
 - Runtime surfaces: CLI, daemon, app-server RPC, MCP, ACP, provider adapters,
-  virtual bash, VFS, and process handles.
+  virtual bash, VFS, process handles, and daemon-embedded store-primary stream
+  sync with scoped credentials and single-writer leases.
 - Release and verification tooling for tagged binary releases.
 
 The product layer is outside this repository. Auth products, billing,
@@ -82,6 +83,8 @@ The V1 work is focused on runtime primitives:
   declared event folds;
 - local runtime execution through provider, virtual bash, and Wasm paths;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
+- optional daemon-embedded HTTP propagation for local-first child streams,
+  fenced by durable scoped credentials and leases;
 - release packaging for `cooldis`, `cooldis-acp-agent`, and
   `cooldis-mcp-server`.
 

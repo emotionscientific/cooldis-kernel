@@ -89,6 +89,10 @@ name = "cooldis-mcp-echo-server"
 path = "tests/support_bins/cooldis-mcp-echo-server.rs"
 
 [[bin]]
+name = "cooldis-sync-test-peer"
+path = "tests/support_bins/cooldis-sync-test-peer.rs"
+
+[[bin]]
 name = "cooldis-plugin-live-smoke"
 path = "tests/smokes/cooldis-plugin-live-smoke.rs"
 

@@ -74,8 +74,8 @@ agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
 couplings, witnessed OpenAPI operation imports, offline coupling replay,
 local runtime execution, provider adapters,
 virtual bash, VFS,
-skill-package resources, daemon/RPC
-surfaces, and the proof path for packageable local agents.
+skill-package resources, daemon/RPC surfaces, daemon-embedded store-primary
+stream propagation, and the proof path for packageable local agents.
 
 The managed cloud, public package registry, private marketplace, and stateful
 harness product layer are V2 direction.

@@ -448,6 +448,41 @@ load_all_active_when_unbound = true
 }
 
 #[test]
+fn layered_toml_daemon_sync_config_merges_by_field_presence() {
+    let root = temp_root("sync-layered");
+    std::fs::create_dir_all(&root).unwrap();
+    let base = root.join("base.toml");
+    let overlay = root.join("overlay.toml");
+    std::fs::write(
+        &base,
+        r#"
+[daemon.sync]
+listen = "ws://127.0.0.1:0"
+lease_ttl_secs = 45
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &overlay,
+        r#"
+[daemon.sync]
+lease_ttl_secs = 90
+"#,
+    )
+    .unwrap();
+
+    let loaded = load_cooldis_daemon_config_layers(&[base, overlay], root.clone()).unwrap();
+    assert_eq!(
+        loaded.config.sync.listen.as_deref(),
+        Some("ws://127.0.0.1:0")
+    );
+    assert_eq!(loaded.config.sync.lease_ttl_secs, 90);
+    loaded.config.validate().unwrap();
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn toml_config_accepts_raw_daemon_shape() {
     let root = temp_root("raw");
     std::fs::create_dir_all(&root).unwrap();
@@ -538,6 +573,29 @@ listen = "unix://run/cooldis.sock"
     assert_eq!(
         loaded.config.app_server.listen,
         format!("unix://{}", root.join("run/cooldis.sock").display())
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn resolves_relative_sync_unix_socket_listen_against_config_dir() {
+    let root = temp_root("relative-sync-socket");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("cooldis.toml");
+    std::fs::write(
+        &path,
+        r#"
+[daemon.sync]
+listen = "unix://run/sync.sock"
+"#,
+    )
+    .unwrap();
+
+    let loaded = load_cooldis_daemon_config(Some(&path)).unwrap();
+
+    assert_eq!(
+        loaded.config.sync.listen,
+        Some(format!("unix://{}", root.join("run/sync.sock").display()))
     );
     let _ = std::fs::remove_dir_all(root);
 }

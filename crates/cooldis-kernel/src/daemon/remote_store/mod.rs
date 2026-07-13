@@ -41,6 +41,7 @@
 //! live connection between runtimes.
 
 pub mod endpoint;
+pub mod endpoint_http;
 pub mod lease;
 pub mod propagator;
 pub mod queue;

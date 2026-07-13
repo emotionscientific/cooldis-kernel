@@ -22,6 +22,13 @@ target = "local"
 # on macOS or ~/.local/state/cooldis/run on Linux.
 listen = "unix://.cooldis/run/cooldis.sock"
 
+[daemon.sync]
+# Optional. Omit `listen` to keep the store-primary sync endpoint disabled.
+# TCP uses the app-server listen grammar; this binds an HTTP endpoint even
+# though the address selector is written with ws://.
+listen = "ws://127.0.0.1:9443"
+lease_ttl_secs = 60
+
 [daemon.registries]
 operations = ".cooldis/operations"
 agents = ".cooldis/agents"
@@ -98,6 +105,38 @@ takes precedence over this default. Until the remote EventStore backend lands,
 `remote` and `sandbox` fail closed at bind with
 `requires the remote EventStore backend capability`; absent placement resolves
 to local.
+
+## Store-primary sync endpoint
+
+`daemon.sync` enables the daemon-owned door to its EventStore. It is disabled
+when `listen` is absent, which preserves local-only daemon behavior. When
+enabled, the daemon serves authenticated HTTP push, verified-cursor pull, and
+lease renewal routes over the configured socket. TCP listeners use the same
+address parser as the app-server (`ws://HOST:PORT[/rpc]`); the sync service
+itself is ordinary HTTP and logs its effective `http://` address. Unix socket
+listeners use `unix://PATH`; relative socket paths resolve against the config
+file's directory, like `daemon.app_server.listen`.
+
+The V1 server is close-per-response and content-length-only. It caps headers at
+64 KiB and 128 fields, request bodies at 8 MiB, concurrent request tasks at
+128, and total request handling at 30 seconds. Transient listener accept
+failures retry with bounded backoff instead of stopping the endpoint.
+
+The built-in TCP listener is loopback-only because the V1 service does not
+terminate TLS. Expose it to another machine only through an authenticated TLS
+proxy or private tunnel terminating on the daemon host. Bearer credentials are
+minted with stream leases by the dispatch path; there is no static bearer-token
+config field. Tokens belong only in the HTTP `Authorization: Bearer ...` header
+and must not appear in URLs or logs.
+
+Every push follows credential, prefix-scope, credential/lease binding, then
+atomic lease-and-sequence fencing. Rejections are durably witnessed in redacted
+daemon-owned state before a rejection response is sent. Pull performs
+credential and prefix-scope authorization plus verified cursor replay, without
+a write lease fence. The child appends locally first; endpoint downtime changes
+propagation lag, not the local append result. Fence loss and divergent history
+are terminal, while transport failures are retried by the child loop with
+bounded backoff.
 
 `content_policies` applies only to envelopes whose content is
 `Event { kind, .. }`; plain text, commands, and metadata use the route's

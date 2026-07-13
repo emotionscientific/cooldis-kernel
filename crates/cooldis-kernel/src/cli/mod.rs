@@ -1,4 +1,7 @@
 use crate::daemon::handle_ingress::ThreadHandleIngressAdapter;
+use crate::daemon::remote_store::endpoint::{CooldisDaemonSyncConfig, SqliteSyncEndpoint};
+use crate::daemon::remote_store::endpoint_http::DaemonSyncHttpServer;
+use crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority;
 use crate::{
     APP_SERVER_ANTHROPIC_BEDROCK_MODEL, APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
     APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
@@ -1478,7 +1481,7 @@ async fn daemon_run(args: Vec<OsString>) -> CooldisResult<()> {
     let listen = config.listen.clone();
 
     let server = CooldisAppServer::new_local(config).await?;
-    let _io_tasks = start_daemon_io(&loaded.config.io, &server).await?;
+    let _io_tasks = start_daemon_io(&loaded.config.io, &loaded.config.sync, &server).await?;
     eprintln!(
         "cooldis daemon listening on {}",
         loaded.config.app_server.listen
@@ -1782,6 +1785,7 @@ fn browser_open_command(_url: &str) -> CooldisResult<std::process::Command> {
 
 async fn start_daemon_io(
     io: &CooldisIoConfig,
+    sync: &CooldisDaemonSyncConfig,
     server: &CooldisAppServer,
 ) -> CooldisResult<Vec<JoinHandle<()>>> {
     let bridge = CooldisDaemonIoBridge::from_app_server(server);
@@ -1815,6 +1819,8 @@ async fn start_daemon_io(
             }
         }
     }
+    start_daemon_sync(sync, server, &mut tasks).await?;
+
     if !io.routes.is_empty() {
         eprintln!(
             "cooldis daemon loaded {} IO route(s), {} task(s) active",
@@ -1823,6 +1829,35 @@ async fn start_daemon_io(
         );
     }
     Ok(tasks)
+}
+
+async fn start_daemon_sync(
+    config: &CooldisDaemonSyncConfig,
+    app_server: &CooldisAppServer,
+    tasks: &mut Vec<JoinHandle<()>>,
+) -> CooldisResult<()> {
+    let Some(listen) = config.listen_addr()? else {
+        return Ok(());
+    };
+    let store = SqliteSessionStore::open(app_server.session_store_path())
+        .await
+        .map_err(|error| CooldisError::History(error.to_string()))?;
+    let clock: Arc<dyn crate::DaemonClock> = Arc::new(SystemDaemonClock);
+    let authority = Arc::new(
+        SqliteStreamLeaseAuthority::new(store.clone(), config.clone(), Arc::clone(&clock)).await?,
+    );
+    let endpoint = Arc::new(SqliteSyncEndpoint::new(store, authority, clock).await?);
+    let server = DaemonSyncHttpServer::bind(listen, endpoint).await?;
+    eprintln!(
+        "cooldis daemon sync endpoint listening on {}",
+        server.display_addr()?
+    );
+    tasks.push(tokio::spawn(async move {
+        if let Err(error) = server.serve().await {
+            eprintln!("cooldis daemon sync endpoint stopped: {error}");
+        }
+    }));
+    Ok(())
 }
 
 /// Starts the push-first settlement lane independently of external route

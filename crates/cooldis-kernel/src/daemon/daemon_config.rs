@@ -1,3 +1,4 @@
+use crate::daemon::remote_store::endpoint::CooldisDaemonSyncConfig;
 use crate::{
     AgentManifestPlacementBinding, AgentRecordRef, AppServerListenAddr, CooldisError, CooldisResult,
 };
@@ -51,6 +52,8 @@ pub struct CooldisDaemonConfig {
     pub provider: CooldisProviderConfig,
     #[serde(default)]
     pub io: CooldisIoConfig,
+    #[serde(default)]
+    pub sync: CooldisDaemonSyncConfig,
 }
 
 impl Default for CooldisDaemonConfig {
@@ -62,6 +65,7 @@ impl Default for CooldisDaemonConfig {
             operations: CooldisDaemonOperationsConfig::default(),
             provider: CooldisProviderConfig::default(),
             io: CooldisIoConfig::default(),
+            sync: CooldisDaemonSyncConfig::default(),
         }
     }
 }
@@ -115,11 +119,20 @@ impl CooldisDaemonConfig {
         }
 
         self.io.validate(&mut errors);
+        if let Err(err) = self.sync.validate() {
+            errors.push(format!("sync: {err}"));
+        }
         errors
     }
 
     fn resolve_paths(&mut self, base: &Path) {
         self.app_server.resolve_paths(base);
+        if let Some(listen) = self.sync.listen.as_deref()
+            && let Ok(AppServerListenAddr::Unix(path)) = AppServerListenAddr::parse(listen)
+            && path.is_relative()
+        {
+            self.sync.listen = Some(unix_listen_url(resolve_config_path(base, path)));
+        }
         self.registries.resolve_paths(base);
         if let Some(path) = self.runtime.cwd.take() {
             self.runtime.cwd = Some(resolve_config_path(base, path));
@@ -842,6 +855,13 @@ struct DaemonConfigPresence {
     operations: OperationsPresence,
     provider: ProviderPresence,
     io: bool,
+    sync: SyncPresence,
+}
+
+#[derive(Default)]
+struct SyncPresence {
+    listen: bool,
+    lease_ttl_secs: bool,
 }
 
 #[derive(Default)]
@@ -931,6 +951,10 @@ fn daemon_config_presence(text: &str) -> CooldisResult<DaemonConfigPresence> {
             env_file: section_has_key(table, "provider", "env_file"),
         },
         io: table.contains_key("io"),
+        sync: SyncPresence {
+            listen: section_has_key(table, "sync", "listen"),
+            lease_ttl_secs: section_has_key(table, "sync", "lease_ttl_secs"),
+        },
     })
 }
 
@@ -1012,6 +1036,12 @@ fn merge_daemon_config_layer(
     }
     if presence.io {
         config.io = layer.io;
+    }
+    if presence.sync.listen {
+        config.sync.listen = layer.sync.listen.take();
+    }
+    if presence.sync.lease_ttl_secs {
+        config.sync.lease_ttl_secs = layer.sync.lease_ttl_secs;
     }
 }
 

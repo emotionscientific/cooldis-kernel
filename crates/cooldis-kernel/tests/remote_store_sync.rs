@@ -1,0 +1,1068 @@
+use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
+use cooldis::daemon::remote_store::endpoint::{
+    CooldisDaemonSyncConfig, SqliteSyncEndpoint, SyncPullSource, SyncPushGate, SyncPushOutcome,
+    SyncPushRejectionReason, SyncPushRequestV1,
+};
+use cooldis::daemon::remote_store::endpoint_http::{DaemonSyncHttpServer, HttpSyncClient};
+use cooldis::daemon::remote_store::lease::{
+    SqliteStreamLeaseAuthority, StreamLeaseAuthority, StreamLeaseLineage, StreamPrefixScope,
+    SyncCredentialAuthority,
+};
+use cooldis::daemon::remote_store::propagator::{
+    LocalFirstStreamPropagator, PropagationStep, SqlitePropagationStateStore,
+    StreamPropagationState, StreamPropagator,
+};
+use cooldis::{
+    AppServerListenAddr, CooldisError, CooldisResult, DaemonClock, EventKind, EventSequence,
+    EventStore, EventStreamId, NewEventRecord, SqliteSessionStore, SystemDaemonClock,
+};
+use cooldis_runtime_contracts::{DispatchId, ThreadCoordinates};
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, timeout};
+use uuid::Uuid;
+
+const LEASE_RACE_DST_SEED: u64 = 0x4290_0000_0000_0001;
+const OFFLINE_WINDOW_DST_SEED: u64 = 0x4290_0000_0000_0002;
+
+#[derive(Clone)]
+struct FixedClock(i64);
+
+impl DaemonClock for FixedClock {
+    fn now(&self) -> chrono::DateTime<Utc> {
+        Utc.timestamp_millis_opt(self.0)
+            .single()
+            .expect("test timestamp should be representable")
+    }
+}
+
+struct Fixture {
+    parent_path: PathBuf,
+    parent_store: SqliteSessionStore,
+    authority: Arc<SqliteStreamLeaseAuthority>,
+    endpoint: Arc<SqliteSyncEndpoint>,
+    clock: Arc<FixedClock>,
+}
+
+impl Fixture {
+    async fn new(name: &str) -> Self {
+        let parent_path = temp_db_path(&format!("{name}-parent"));
+        let parent_store = SqliteSessionStore::open(&parent_path).await.unwrap();
+        let clock = Arc::new(FixedClock(1_700_000_000_000));
+        let authority = Arc::new(
+            SqliteStreamLeaseAuthority::new(
+                parent_store.clone(),
+                CooldisDaemonSyncConfig::default(),
+                Arc::clone(&clock) as Arc<dyn DaemonClock>,
+            )
+            .await
+            .unwrap(),
+        );
+        let endpoint = Arc::new(
+            SqliteSyncEndpoint::new(
+                parent_store.clone(),
+                Arc::clone(&authority),
+                Arc::clone(&clock) as Arc<dyn DaemonClock>,
+            )
+            .await
+            .unwrap(),
+        );
+        Self {
+            parent_path,
+            parent_store,
+            authority,
+            endpoint,
+            clock,
+        }
+    }
+
+    async fn credential(
+        &self,
+        scope: &str,
+        dispatch: &str,
+        lineage: StreamLeaseLineage,
+    ) -> (
+        cooldis::daemon::remote_store::lease::StreamLeaseGrantV1,
+        String,
+    ) {
+        let grant = self
+            .authority
+            .grant_lease(
+                &StreamPrefixScope::new(scope),
+                &DispatchId::new(dispatch),
+                lineage,
+            )
+            .await
+            .unwrap();
+        let (_, token) = self.authority.mint_credential(&grant).await.unwrap();
+        (grant, token)
+    }
+}
+
+#[tokio::test]
+async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without_secrets() {
+    let fixture = Fixture::new("scope-witness").await;
+    let (grant, token) = fixture
+        .credential(
+            "thread:prefix-a",
+            "dispatch-a",
+            StreamLeaseLineage::default(),
+        )
+        .await;
+    let stream_id = EventStreamId::new("thread:prefix-b");
+    let request = request_for(&stream_id, &grant.lease_id, vec![record("outside-scope")]);
+
+    let outcome = fixture.endpoint.push(&token, request).await.unwrap();
+    assert!(matches!(
+        outcome,
+        SyncPushOutcome::Rejected {
+            rejection: cooldis::daemon::remote_store::endpoint::SyncPushRejectionV1 {
+                reason: SyncPushRejectionReason::ScopeViolation { .. },
+                ..
+            }
+        }
+    ));
+    assert!(
+        fixture
+            .parent_store
+            .read_events(&stream_id, None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "scope rejection must not move the protected stream tail"
+    );
+    fixture
+        .parent_store
+        .append_events(&stream_id, vec![record("private-to-prefix-b")])
+        .await
+        .unwrap();
+    assert!(matches!(
+        fixture.endpoint.pull_after(&token, &stream_id, None).await,
+        Err(CooldisError::History(message)) if message == "sync pull not authorized"
+    ));
+
+    let witnessed = fixture
+        .endpoint
+        .rejection_witnesses(Some(&stream_id))
+        .await
+        .unwrap();
+    assert_eq!(witnessed.len(), 1);
+    let encoded = serde_json::to_string(&witnessed).unwrap();
+    assert!(!encoded.contains(&token));
+    assert!(!encoded.contains(grant.lease_id.as_str()));
+
+    drop(fixture.endpoint);
+    drop(fixture.authority);
+    drop(fixture.parent_store);
+    let reopened_store = SqliteSessionStore::open(&fixture.parent_path)
+        .await
+        .unwrap();
+    let reopened_authority = Arc::new(
+        SqliteStreamLeaseAuthority::new(
+            reopened_store.clone(),
+            CooldisDaemonSyncConfig::default(),
+            Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+        )
+        .await
+        .unwrap(),
+    );
+    let reopened = SqliteSyncEndpoint::new(
+        reopened_store,
+        reopened_authority,
+        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened
+            .rejection_witnesses(Some(&stream_id))
+            .await
+            .unwrap(),
+        witnessed,
+        "witnessed fence decisions must survive daemon restart unchanged"
+    );
+}
+
+#[tokio::test]
+async fn superseding_propagators_commit_one_batch_and_witness_the_loser() {
+    let fixture = Fixture::new(&format!("lease-race-{LEASE_RACE_DST_SEED:016x}")).await;
+    let stream_id = EventStreamId::new("thread:racing-child");
+    let (first, first_token) = fixture
+        .credential(
+            stream_id.as_str(),
+            "dispatch-first",
+            StreamLeaseLineage::default(),
+        )
+        .await;
+    let (successor, successor_token) = fixture
+        .credential(
+            stream_id.as_str(),
+            "dispatch-successor",
+            StreamLeaseLineage {
+                superseded_lease_id: Some(first.lease_id.clone()),
+            },
+        )
+        .await;
+    let local = SqliteSessionStore::in_memory().await.unwrap();
+    let event = local
+        .append_events(&stream_id, vec![record("raced")])
+        .await
+        .unwrap()
+        .remove(0)
+        .to_stream_record_v1();
+    let losing = SyncPushRequestV1 {
+        schema: cooldis::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
+        stream_id: stream_id.clone(),
+        lease_id: first.lease_id,
+        expected_next_sequence: EventSequence::new(1),
+        records: vec![event.clone()],
+    };
+    let winning = SyncPushRequestV1 {
+        lease_id: successor.lease_id,
+        ..losing.clone()
+    };
+
+    let (loser, winner) = if seeded_bool(LEASE_RACE_DST_SEED) {
+        tokio::join!(
+            fixture.endpoint.push(&first_token, losing),
+            fixture.endpoint.push(&successor_token, winning),
+        )
+    } else {
+        let (winner, loser) = tokio::join!(
+            fixture.endpoint.push(&successor_token, winning),
+            fixture.endpoint.push(&first_token, losing),
+        );
+        (loser, winner)
+    };
+    assert!(matches!(
+        loser.unwrap(),
+        SyncPushOutcome::Rejected {
+            rejection: cooldis::daemon::remote_store::endpoint::SyncPushRejectionV1 {
+                reason: SyncPushRejectionReason::CredentialUnknown,
+                ..
+            }
+        }
+    ));
+    assert!(matches!(winner.unwrap(), SyncPushOutcome::Accepted { .. }));
+    let parent_events = fixture
+        .parent_store
+        .read_events(&stream_id, None)
+        .await
+        .unwrap();
+    assert_eq!(parent_events.len(), 1);
+    assert_eq!(parent_events[0].id, event.event_id);
+    assert_eq!(
+        fixture
+            .endpoint
+            .rejection_witnesses(Some(&stream_id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+struct LoseAcceptedResponse {
+    inner: Arc<SqliteSyncEndpoint>,
+    lose_once: AtomicBool,
+    offline: AtomicBool,
+}
+
+#[async_trait]
+impl SyncPushGate for LoseAcceptedResponse {
+    async fn push(
+        &self,
+        bearer_token: &str,
+        request: SyncPushRequestV1,
+    ) -> CooldisResult<SyncPushOutcome> {
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(CooldisError::RuntimeExecution(
+                "injected endpoint outage".to_string(),
+            ));
+        }
+        let outcome = self.inner.push(bearer_token, request).await?;
+        if matches!(outcome, SyncPushOutcome::Accepted { .. })
+            && self.lose_once.swap(false, Ordering::SeqCst)
+        {
+            return Err(CooldisError::RuntimeExecution(
+                "injected lost response after durable ack".to_string(),
+            ));
+        }
+        Ok(outcome)
+    }
+}
+
+#[tokio::test]
+async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
+    let fixture = Fixture::new(&format!("lost-ack-offline-{OFFLINE_WINDOW_DST_SEED:016x}")).await;
+    let stream_id = EventStreamId::new("thread:offline-child");
+    let (grant, token) = fixture
+        .credential(
+            stream_id.as_str(),
+            "dispatch-child",
+            StreamLeaseLineage::default(),
+        )
+        .await;
+    let child_path = temp_db_path(&format!(
+        "lost-ack-offline-child-{OFFLINE_WINDOW_DST_SEED:016x}"
+    ));
+    let child_store = SqliteSessionStore::open(&child_path).await.unwrap();
+    let state_store = Arc::new(
+        SqlitePropagationStateStore::new(child_store.clone())
+            .await
+            .unwrap(),
+    );
+    let push = Arc::new(LoseAcceptedResponse {
+        inner: Arc::clone(&fixture.endpoint),
+        lose_once: AtomicBool::new(false),
+        offline: AtomicBool::new(false),
+    });
+    let propagator = LocalFirstStreamPropagator::new(
+        child_store.clone(),
+        Arc::clone(&push) as Arc<dyn SyncPushGate>,
+        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPullSource>,
+        Arc::clone(&fixture.endpoint)
+            as Arc<dyn cooldis::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        state_store.clone(),
+        token.clone(),
+        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+    );
+    let mut state = StreamPropagationState {
+        stream_id: stream_id.clone(),
+        lease: grant,
+        pushed_through: None,
+    };
+
+    let cuts = if seeded_bool(OFFLINE_WINDOW_DST_SEED) {
+        [
+            OfflineFaultCut::CommitBeforeResponse,
+            OfflineFaultCut::AckBeforeState,
+        ]
+    } else {
+        [
+            OfflineFaultCut::AckBeforeState,
+            OfflineFaultCut::CommitBeforeResponse,
+        ]
+    };
+    for (index, cut) in cuts.into_iter().enumerate() {
+        let sequence = EventSequence::new(index as i64 + 1);
+        child_store
+            .append_events(
+                &stream_id,
+                vec![record(&format!("seeded-cut-{}", sequence.get()))],
+            )
+            .await
+            .unwrap();
+        match cut {
+            OfflineFaultCut::CommitBeforeResponse => {
+                push.lose_once.store(true, Ordering::SeqCst);
+                assert_eq!(
+                    propagator.propagate_once(&mut state).await.unwrap(),
+                    PropagationStep::EndpointUnavailable,
+                    "seed {OFFLINE_WINDOW_DST_SEED:#x}: response must be lost after commit"
+                );
+            }
+            OfflineFaultCut::AckBeforeState => {
+                let local = child_store
+                    .read_events(&stream_id, Some(sequence))
+                    .await
+                    .unwrap()
+                    .remove(0)
+                    .to_stream_record_v1();
+                let outcome = fixture
+                    .endpoint
+                    .push(
+                        &token,
+                        SyncPushRequestV1 {
+                            schema: cooldis::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1
+                                .to_string(),
+                            stream_id: stream_id.clone(),
+                            lease_id: state.lease.lease_id.clone(),
+                            expected_next_sequence: sequence,
+                            records: vec![local],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(outcome, SyncPushOutcome::Accepted { .. }));
+                // A hard process kill here loses the in-memory ack before the
+                // child-side propagation state transaction can begin.
+            }
+        }
+        assert_eq!(
+            state.pushed_through.map(|value| value.get()),
+            (sequence.get() > 1).then_some(sequence.get() - 1),
+            "seed {OFFLINE_WINDOW_DST_SEED:#x}: the injected cut must leave stale local state"
+        );
+        assert_eq!(
+            propagator.propagate_once(&mut state).await.unwrap(),
+            PropagationStep::Advanced {
+                pushed_through: sequence
+            },
+            "seed {OFFLINE_WINDOW_DST_SEED:#x}: sequence conflict must adopt an identical batch"
+        );
+    }
+
+    push.offline.store(true, Ordering::SeqCst);
+    child_store
+        .append_events(&stream_id, vec![record("offline-three")])
+        .await
+        .unwrap();
+    assert_eq!(
+        propagator.propagate_once(&mut state).await.unwrap(),
+        PropagationStep::EndpointUnavailable
+    );
+    assert_eq!(state.pushed_through, Some(EventSequence::new(2)));
+    push.offline.store(false, Ordering::SeqCst);
+    assert_eq!(
+        propagator.propagate_once(&mut state).await.unwrap(),
+        PropagationStep::Advanced {
+            pushed_through: EventSequence::new(3)
+        }
+    );
+
+    let parent = fixture
+        .parent_store
+        .read_events(&stream_id, None)
+        .await
+        .unwrap();
+    let child = child_store.read_events(&stream_id, None).await.unwrap();
+    assert_eq!(parent, child);
+    assert_eq!(
+        state_store.load(&stream_id).await.unwrap(),
+        Some(state),
+        "pushed_through must be durable before progress is returned"
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead() {
+    let fixture = Fixture::new("remote-matching-ahead").await;
+    let stream_id = EventStreamId::new("thread:remote-matching-ahead");
+    let (grant, token) = fixture
+        .credential(
+            stream_id.as_str(),
+            "dispatch-remote-matching-ahead",
+            StreamLeaseLineage::default(),
+        )
+        .await;
+    let child_store = SqliteSessionStore::in_memory().await.unwrap();
+    let local = child_store
+        .append_events(
+            &stream_id,
+            vec![record("matching-one"), record("matching-two")],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|event| event.to_stream_record_v1())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        fixture
+            .endpoint
+            .push(
+                &token,
+                SyncPushRequestV1 {
+                    schema: cooldis::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1
+                        .to_string(),
+                    stream_id: stream_id.clone(),
+                    lease_id: grant.lease_id.clone(),
+                    expected_next_sequence: EventSequence::new(1),
+                    records: local,
+                },
+            )
+            .await
+            .unwrap(),
+        SyncPushOutcome::Accepted { .. }
+    ));
+    let state_store = Arc::new(
+        SqlitePropagationStateStore::new(child_store.clone())
+            .await
+            .unwrap(),
+    );
+    let propagator = LocalFirstStreamPropagator::new(
+        child_store,
+        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPushGate>,
+        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPullSource>,
+        Arc::clone(&fixture.endpoint)
+            as Arc<dyn cooldis::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        state_store,
+        token,
+        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+    )
+    .with_batch_size(1);
+    let mut state = StreamPropagationState {
+        stream_id,
+        lease: grant,
+        pushed_through: None,
+    };
+    assert!(!format!("{state:?}").contains(state.lease.lease_id.as_str()));
+
+    assert_eq!(
+        propagator.propagate_once(&mut state).await.unwrap(),
+        PropagationStep::Advanced {
+            pushed_through: EventSequence::new(1)
+        }
+    );
+    assert_eq!(
+        propagator.propagate_once(&mut state).await.unwrap(),
+        PropagationStep::Advanced {
+            pushed_through: EventSequence::new(2)
+        }
+    );
+    assert_eq!(
+        propagator.propagate_once(&mut state).await.unwrap(),
+        PropagationStep::Converged
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_remote_records_past_the_local_tail() {
+    let fixture = Fixture::new("remote-unmatched-ahead").await;
+    let stream_id = EventStreamId::new("thread:remote-unmatched-ahead");
+    let (grant, token) = fixture
+        .credential(
+            stream_id.as_str(),
+            "dispatch-remote-unmatched-ahead",
+            StreamLeaseLineage::default(),
+        )
+        .await;
+    let child_store = SqliteSessionStore::in_memory().await.unwrap();
+    let local = child_store
+        .append_events(&stream_id, vec![record("local-only-one")])
+        .await
+        .unwrap()
+        .remove(0)
+        .to_stream_record_v1();
+    assert!(matches!(
+        fixture
+            .endpoint
+            .push(
+                &token,
+                SyncPushRequestV1 {
+                    schema: cooldis::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1
+                        .to_string(),
+                    stream_id: stream_id.clone(),
+                    lease_id: grant.lease_id.clone(),
+                    expected_next_sequence: EventSequence::new(1),
+                    records: vec![local],
+                },
+            )
+            .await
+            .unwrap(),
+        SyncPushOutcome::Accepted { .. }
+    ));
+    fixture
+        .parent_store
+        .append_events(&stream_id, vec![record("remote-only-two")])
+        .await
+        .unwrap();
+    let state_store = Arc::new(
+        SqlitePropagationStateStore::new(child_store.clone())
+            .await
+            .unwrap(),
+    );
+    let propagator = LocalFirstStreamPropagator::new(
+        child_store,
+        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPushGate>,
+        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPullSource>,
+        Arc::clone(&fixture.endpoint)
+            as Arc<dyn cooldis::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        state_store,
+        token,
+        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+    )
+    .with_batch_size(1);
+    let mut state = StreamPropagationState {
+        stream_id,
+        lease: grant,
+        pushed_through: None,
+    };
+
+    assert_eq!(
+        propagator.propagate_once(&mut state).await.unwrap(),
+        PropagationStep::StreamDiverged {
+            actual_next_sequence: EventSequence::new(3)
+        }
+    );
+    assert_eq!(state.pushed_through, None);
+}
+
+#[tokio::test]
+async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and_socket() {
+    let fixture = Fixture::new("http-projection").await;
+    let stream_id = EventStreamId::new("thread:http-child");
+    let (grant, token) = fixture
+        .credential(
+            stream_id.as_str(),
+            "dispatch-http-child",
+            StreamLeaseLineage::default(),
+        )
+        .await;
+    let local = SqliteSessionStore::in_memory().await.unwrap();
+    let event = local
+        .append_events(&stream_id, vec![record("over-http")])
+        .await
+        .unwrap()
+        .remove(0)
+        .to_stream_record_v1();
+    let server = DaemonSyncHttpServer::bind(
+        AppServerListenAddr::parse("ws://127.0.0.1:0").unwrap(),
+        Arc::clone(&fixture.endpoint),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr().unwrap().unwrap();
+    let task = tokio::spawn(server.serve());
+    let client = HttpSyncClient::new(format!("http://{addr}")).unwrap();
+
+    let outcome = client
+        .push(
+            &token,
+            SyncPushRequestV1 {
+                schema: cooldis::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
+                stream_id: stream_id.clone(),
+                lease_id: grant.lease_id,
+                expected_next_sequence: EventSequence::new(1),
+                records: vec![event.clone()],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SyncPushOutcome::Accepted { .. }));
+    assert_eq!(
+        client.pull_after(&token, &stream_id, None).await.unwrap(),
+        vec![event]
+    );
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
+    drop(rebound);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
+    let fixture = Fixture::new("unix-http-cleanup").await;
+    let root = temp_root_path("unix-http-cleanup");
+    let socket = root.join("run/sync.sock");
+    let server = DaemonSyncHttpServer::bind(
+        AppServerListenAddr::Unix(socket.clone()),
+        Arc::clone(&fixture.endpoint),
+    )
+    .await
+    .unwrap();
+    assert!(socket.exists());
+
+    let task = tokio::spawn(server.serve());
+    tokio::task::yield_now().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(!socket.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
+    let daemon_root = temp_root_path("process-daemon");
+    let parent_path = daemon_root.join("state/session_history.sqlite3");
+    let child_path = temp_db_path("process-child");
+    let stream_id = EventStreamId::new("thread:process-child");
+    let store = SqliteSessionStore::open(&parent_path).await.unwrap();
+    let clock: Arc<dyn DaemonClock> = Arc::new(SystemDaemonClock);
+    let authority = SqliteStreamLeaseAuthority::new(
+        store.clone(),
+        CooldisDaemonSyncConfig {
+            lease_ttl_secs: 300,
+            ..CooldisDaemonSyncConfig::default()
+        },
+        Arc::clone(&clock),
+    )
+    .await
+    .unwrap();
+    let first = authority
+        .grant_lease(
+            &StreamPrefixScope::new(stream_id.as_str()),
+            &DispatchId::new("dispatch-process-first"),
+            StreamLeaseLineage::default(),
+        )
+        .await
+        .unwrap();
+    let (_, first_token) = authority.mint_credential(&first).await.unwrap();
+    drop(authority);
+    drop(store);
+
+    let (parent, first_url) = start_sync_daemon(&daemon_root).await;
+    let first_run = run_sync_child(
+        "child-once",
+        &child_path,
+        Some("one"),
+        &first_url,
+        &first_token,
+        &stream_id,
+        &first,
+    )
+    .await;
+    assert_eq!(first_run, "STEP advanced=1");
+    let first_converged = run_sync_child(
+        "child-once",
+        &child_path,
+        None,
+        &first_url,
+        &first_token,
+        &stream_id,
+        &first,
+    )
+    .await;
+    assert_eq!(first_converged, "STEP converged");
+    parent.stop().await;
+
+    let offline = run_sync_child(
+        "child-once",
+        &child_path,
+        Some("offline-two"),
+        &first_url,
+        &first_token,
+        &stream_id,
+        &first,
+    )
+    .await;
+    assert_eq!(offline, "STEP endpoint_unavailable");
+
+    let (restarted_parent, restarted_url) = start_sync_daemon(&daemon_root).await;
+    let resumed = run_sync_child(
+        "child-once",
+        &child_path,
+        None,
+        &restarted_url,
+        &first_token,
+        &stream_id,
+        &first,
+    )
+    .await;
+    assert_eq!(resumed, "STEP advanced=2");
+    restarted_parent.stop().await;
+
+    let mut parked = spawn_sync_child(
+        "child-park",
+        &child_path,
+        Some("killed-three"),
+        &restarted_url,
+        &first_token,
+        &stream_id,
+        &first,
+    );
+    let parked_stdout = parked.stdout.take().unwrap();
+    let mut parked_lines = BufReader::new(parked_stdout).lines();
+    let ready = timeout(Duration::from_secs(5), parked_lines.next_line())
+        .await
+        .expect("child park readiness timed out")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, "READY child tail persisted");
+    stop_process(&mut parked).await;
+
+    let store = SqliteSessionStore::open(&parent_path).await.unwrap();
+    let authority = SqliteStreamLeaseAuthority::new(
+        store.clone(),
+        CooldisDaemonSyncConfig {
+            lease_ttl_secs: 300,
+            ..CooldisDaemonSyncConfig::default()
+        },
+        Arc::new(SystemDaemonClock),
+    )
+    .await
+    .unwrap();
+    let successor = authority
+        .grant_lease(
+            &StreamPrefixScope::new(stream_id.as_str()),
+            &DispatchId::new("dispatch-process-successor"),
+            StreamLeaseLineage {
+                superseded_lease_id: Some(first.lease_id.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        successor.lineage.superseded_lease_id.as_ref(),
+        Some(&first.lease_id)
+    );
+    let (_, successor_token) = authority.mint_credential(&successor).await.unwrap();
+    drop(authority);
+    drop(store);
+
+    let (final_parent, final_url) = start_sync_daemon(&daemon_root).await;
+    let fenced = run_sync_child(
+        "child-once",
+        &child_path,
+        None,
+        &final_url,
+        &first_token,
+        &stream_id,
+        &first,
+    )
+    .await;
+    assert_eq!(fenced, "STEP lease_fenced");
+    let re_leased = run_sync_child(
+        "child-once",
+        &child_path,
+        None,
+        &final_url,
+        &successor_token,
+        &stream_id,
+        &successor,
+    )
+    .await;
+    assert_eq!(re_leased, "STEP advanced=3");
+    let final_converged = run_sync_child(
+        "child-once",
+        &child_path,
+        None,
+        &final_url,
+        &successor_token,
+        &stream_id,
+        &successor,
+    )
+    .await;
+    assert_eq!(final_converged, "STEP converged");
+    final_parent.stop().await;
+
+    let parent_store = SqliteSessionStore::open(&parent_path).await.unwrap();
+    let child_store = SqliteSessionStore::open(&child_path).await.unwrap();
+    let parent = parent_store.read_events(&stream_id, None).await.unwrap();
+    let child = child_store.read_events(&stream_id, None).await.unwrap();
+    assert_eq!(parent, child);
+    assert_eq!(parent.len(), 3);
+    let _ = std::fs::remove_dir_all(daemon_root);
+}
+
+async fn start_sync_daemon(root: &std::path::Path) -> (DaemonProcess, String) {
+    std::fs::create_dir_all(root).unwrap();
+    let config_path = root.join("cooldis.toml");
+    let socket_path = root.join("run/cooldis.sock");
+    let config = format!(
+        r#"
+[daemon.runtime]
+cwd = "{}"
+runtime_home = "runtime"
+state_home = "state"
+
+[daemon.app_server]
+listen = "unix://{}"
+
+[daemon.sync]
+listen = "ws://127.0.0.1:0"
+lease_ttl_secs = 300
+
+[daemon.provider]
+provider = "local"
+"#,
+        escape_toml(&std::env::current_dir().unwrap().display().to_string()),
+        escape_toml(&socket_path.display().to_string()),
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cooldis"))
+        .arg("daemon")
+        .arg("run")
+        .arg("--config")
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let drain = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut ready_tx = Some(ready_tx);
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(url) = line.strip_prefix("cooldis daemon sync endpoint listening on ")
+                && let Some(tx) = ready_tx.take()
+            {
+                let _ = tx.send(url.to_string());
+            }
+        }
+    });
+    let url = timeout(Duration::from_secs(10), ready_rx)
+        .await
+        .expect("daemon sync readiness timed out")
+        .expect("daemon exited before sync readiness");
+    let address = url
+        .strip_prefix("http://")
+        .expect("daemon sync readiness must report an HTTP origin")
+        .parse::<std::net::SocketAddr>()
+        .expect("daemon sync readiness must report a socket address");
+    assert!(address.ip().is_loopback());
+    assert_ne!(
+        address.port(),
+        0,
+        "port 0 must be resolved before readiness"
+    );
+    (DaemonProcess { child, drain }, url)
+}
+
+struct DaemonProcess {
+    child: Child,
+    drain: JoinHandle<()>,
+}
+
+impl DaemonProcess {
+    async fn stop(mut self) {
+        self.child.start_kill().unwrap();
+        let status = timeout(Duration::from_secs(5), self.child.wait())
+            .await
+            .expect("daemon did not terminate")
+            .unwrap();
+        assert!(!status.success());
+        let _ = timeout(Duration::from_secs(2), &mut self.drain).await;
+    }
+}
+
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+        self.drain.abort();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OfflineFaultCut {
+    CommitBeforeResponse,
+    AckBeforeState,
+}
+
+fn seeded_bool(seed: u64) -> bool {
+    let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    (value ^ (value >> 31)) & 1 == 1
+}
+
+fn escape_toml(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn temp_root_path(name: &str) -> PathBuf {
+    let id = Uuid::now_v7().simple().to_string();
+    std::path::Path::new("/tmp").join(format!("cdis-{name}-{}", &id[..12]))
+}
+
+async fn run_sync_child(
+    mode: &str,
+    child_path: &std::path::Path,
+    label: Option<&str>,
+    endpoint_url: &str,
+    token: &str,
+    stream_id: &EventStreamId,
+    grant: &cooldis::daemon::remote_store::lease::StreamLeaseGrantV1,
+) -> String {
+    let output = spawn_sync_child(
+        mode,
+        child_path,
+        label,
+        endpoint_url,
+        token,
+        stream_id,
+        grant,
+    )
+    .wait_with_output()
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut steps = stdout.lines().filter(|line| line.starts_with("STEP "));
+    let step = steps.next().expect("child did not print a STEP outcome");
+    assert!(
+        steps.next().is_none(),
+        "child printed multiple STEP outcomes"
+    );
+    step.to_string()
+}
+
+fn spawn_sync_child(
+    mode: &str,
+    child_path: &std::path::Path,
+    label: Option<&str>,
+    endpoint_url: &str,
+    token: &str,
+    stream_id: &EventStreamId,
+    grant: &cooldis::daemon::remote_store::lease::StreamLeaseGrantV1,
+) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cooldis-sync-test-peer"));
+    command
+        .arg(mode)
+        .arg(child_path)
+        .arg(label.unwrap_or("-"))
+        .env("COOLDIS_SYNC_TEST_URL", endpoint_url)
+        .env("COOLDIS_SYNC_TEST_TOKEN", token)
+        .env("COOLDIS_SYNC_TEST_STREAM", stream_id.as_str())
+        .env(
+            "COOLDIS_SYNC_TEST_GRANT",
+            serde_json::to_string(grant).unwrap(),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command.spawn().unwrap()
+}
+
+async fn stop_process(child: &mut Child) {
+    child.start_kill().unwrap();
+    let status = timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("process did not terminate")
+        .unwrap();
+    assert!(!status.success());
+}
+
+fn request_for(
+    stream_id: &EventStreamId,
+    lease_id: &cooldis::daemon::remote_store::lease::StreamLeaseId,
+    records: Vec<NewEventRecord>,
+) -> SyncPushRequestV1 {
+    let envelopes = records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| {
+            cooldis::EventRecord::from_new(
+                stream_id.clone(),
+                EventSequence::new(index as i64 + 1),
+                record,
+            )
+            .to_stream_record_v1()
+        })
+        .collect();
+    SyncPushRequestV1 {
+        schema: cooldis::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
+        stream_id: stream_id.clone(),
+        lease_id: lease_id.clone(),
+        expected_next_sequence: EventSequence::new(1),
+        records: envelopes,
+    }
+}
+
+fn record(entry_id: &str) -> NewEventRecord {
+    NewEventRecord::witnessed(
+        ThreadCoordinates::new("tenant-a", "user-a", "session-a"),
+        EventKind::SessionEntryAppended,
+        serde_json::json!({"entry_id": entry_id}),
+    )
+}
+
+fn temp_db_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("cooldis-{name}-{}.sqlite3", Uuid::now_v7()))
+}
