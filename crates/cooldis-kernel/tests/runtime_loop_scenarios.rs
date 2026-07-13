@@ -1,31 +1,34 @@
 mod support;
 
 use cooldis::{
-    AgentToolRouter, BashExecutionPolicy, CanonicalProviderRuntimeConfig,
-    CanonicalProviderRuntimeFactory, CanonicalStopReason, CanonicalUsage, CompactionTrigger,
-    HookEventName, HookHandler, HookHandlerOutput, HookRequest, HookRunStatus,
-    KernelOperationRegistration, OperationRegistry, OperationToolAlias, ProviderApi,
-    ProviderClient, ProviderRequest, ProviderResponse, ProviderResult, ProviderStreamEvent,
-    RuntimeEventKind, RuntimeHost, RuntimeModelRequestMode, RuntimeModelRequestPurpose,
-    RuntimePermissionDecision, RuntimeToolLogLevel, SessionContext, THREAD_SPAWN_OPERATION,
-    ThreadCoordinates, ThreadEvent, ThreadSignal, ThreadSignalKind, ThreadStatus, ThreadTopology,
-    TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualBashRuntimeFactory,
-    cooldis_threads_kernel_package,
+    AgentKernelToolCall, AgentKernelToolProvider, AgentToolRouter, BashExecutionPolicy,
+    CanonicalMessage, CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory,
+    CanonicalStopReason, CanonicalUsage, CompactionTrigger, CooldisResult, EventKind, EventStore,
+    EventStreamId, HookEventName, HookHandler, HookHandlerOutput, HookRequest, HookRunStatus,
+    InMemorySessionStore, KernelOperationRegistration, OperationRegistry, OperationToolAlias,
+    ProviderApi, ProviderClient, ProviderRequest, ProviderResponse, ProviderResult,
+    ProviderStreamEvent, RuntimeEventKind, RuntimeHost, RuntimeModelRequestMode,
+    RuntimeModelRequestPurpose, RuntimePermissionDecision, RuntimeToolLogLevel, SessionContext,
+    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadEvent, ThreadSignal,
+    ThreadSignalKind, ThreadStatus, ThreadTopology, ToolDefinition, TurnSubmissionMode,
+    VirtualBashRuntimeConfig, VirtualBashRuntimeFactory, cooldis_threads_kernel_package,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 use support::{
-    DenyGate, RootProviderChildEchoFactory, ScriptedProviderClient, ScriptedProviderStep,
-    StaticHookHandler, assert_event_order, collect_until_cancelled, collect_until_compaction,
-    collect_until_failed, collect_until_output, echo_router, hook_pipeline, response_text,
-    response_tool_call, response_tool_call_with_id, streaming_provider_factory, text_from_message,
+    DenyGate, FaultingProviderClient, FaultingRuntimeStore, RootProviderChildEchoFactory,
+    ScriptedProviderClient, ScriptedProviderStep, StaticHookHandler, assert_event_order,
+    collect_until_cancelled, collect_until_compaction, collect_until_failed, collect_until_output,
+    echo_router, hook_pipeline, response_text, response_tool_call, response_tool_call_with_id,
+    streaming_provider_factory, text_from_message,
 };
 
 #[tokio::test]
@@ -680,7 +683,8 @@ async fn interrupt_mode_cancels_active_turn_and_front_queues_replacement() {
 #[tokio::test]
 async fn steer_mode_is_model_visible_inside_active_provider_turn() {
     let client = Arc::new(GatedProviderClient::new(vec![
-        response_tool_call("echo_search", json!({"input": "original"})),
+        response_tool_call_with_id("call_first", "echo_search", json!({"input": "original"})),
+        response_tool_call_with_id("call_second", "echo_search", json!({"input": "follow-up"})),
         response_text("steered reply"),
     ]));
     let factory =
@@ -712,16 +716,349 @@ async fn steer_mode_is_model_visible_inside_active_provider_turn() {
     client.release_first();
 
     collect_until_output(&mut events, "steered reply").await;
-    wait_for_gated_requests(&client, 2).await;
+    wait_for_gated_requests(&client, 3).await;
     let requests = client.requests();
-    assert!(
-        request_texts(&requests[1]).iter().any(|text| {
-            text.contains("Additional user steering for active turn turn-steer:")
-                && text.contains("please revise with the tool result")
-        }),
-        "second provider request did not include steering context: {:?}",
-        request_texts(&requests[1])
+    assert_eq!(
+        steering_injection_count(
+            &requests[1],
+            "turn-steer",
+            "please revise with the tool result"
+        ),
+        1,
+        "the first request after the boundary must deliver the steer: {:?}",
+        request_texts(&requests[1]),
     );
+    assert_eq!(
+        steering_injection_count(
+            &requests[2],
+            "turn-steer",
+            "please revise with the tool result"
+        ),
+        0,
+        "a later tool round must not inject the same steer again: {:?}",
+        request_texts(&requests[2]),
+    );
+}
+
+#[tokio::test]
+async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() {
+    let client = Arc::new(ScriptedProviderClient::with_responses(vec![
+        response_tool_call("boundary_echo", json!({"input": "original"})),
+        response_text("boundary reply"),
+    ]));
+    let tool = Arc::new(GatedToolProvider::new("boundary_echo"));
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool.clone()),
+    );
+    let factory = provider_factory(Arc::clone(&client)).with_tool_router(router);
+    let host = RuntimeHost::new(Arc::new(factory));
+    let thread = start_thread(&host).await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-root", "root")
+        .await
+        .unwrap();
+    tool.wait_until_started().await;
+    host.submit_with_mode(
+        thread.context().coordinates.thread_id,
+        "turn-boundary-steer",
+        "arrived while tool results were completing",
+        TurnSubmissionMode::Steer,
+    )
+    .await
+    .unwrap();
+    tool.release();
+
+    collect_until_signal(&mut events, ThreadSignalKind::UserSteer).await;
+    collect_until_output(&mut events, "boundary reply").await;
+    wait_for_requests(&client, 2).await;
+    let requests = client.requests();
+    assert_eq!(
+        steering_injection_count(
+            &requests[1],
+            "turn-boundary-steer",
+            "arrived while tool results were completing"
+        ),
+        1,
+        "the boundary request did not fold the concurrently settling steer: {:?}",
+        request_texts(&requests[1]),
+    );
+    assert_eq!(
+        request_text_occurrence_count(&requests[1], "arrived while tool results were completing"),
+        1,
+        "the boundary request must present the steer exactly once across history and hook context: {:?}",
+        request_texts(&requests[1]),
+    );
+}
+
+#[tokio::test]
+async fn cancel_settling_during_tool_execution_cancels_at_boundary_and_keeps_thread_reusable() {
+    let client = Arc::new(ScriptedProviderClient::with_responses(vec![
+        response_tool_call("cancel_boundary_echo", json!({"input": "original"})),
+        response_text("reply after boundary cancel"),
+    ]));
+    let tool = Arc::new(GatedToolProvider::new("cancel_boundary_echo"));
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool.clone()),
+    );
+    let factory = provider_factory(Arc::clone(&client)).with_tool_router(router);
+    let host = RuntimeHost::new(Arc::new(factory));
+    let thread = start_thread(&host).await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-root", "root")
+        .await
+        .unwrap();
+    tool.wait_until_started().await;
+    let cancel_host = host.clone();
+    let thread_id = thread.context().coordinates.thread_id;
+    let cancel =
+        tokio::spawn(async move { cancel_host.cancel(thread_id, "cancel at boundary").await });
+    wait_for_queued_commands(&thread, 1).await;
+    tool.release();
+
+    cancel.await.unwrap().unwrap();
+    collect_until_cancelled(&mut events, "cancel at boundary").await;
+    assert_eq!(thread.status(), ThreadStatus::Idle);
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-after-cancel",
+        "continue",
+    )
+    .await
+    .unwrap();
+    collect_until_output(&mut events, "reply after boundary cancel").await;
+}
+
+#[tokio::test]
+async fn steer_append_failure_at_tool_boundary_fails_the_provider_runtime() {
+    let client = Arc::new(ScriptedProviderClient::with_responses(vec![
+        response_tool_call("failed_boundary_echo", json!({"input": "original"})),
+    ]));
+    let tool = Arc::new(GatedToolProvider::new("failed_boundary_echo"));
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool.clone()),
+    );
+    let store = Arc::new(
+        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
+            "append_turn_input",
+            2,
+            "boundary steer append failed",
+        ),
+    );
+    let factory = provider_factory(Arc::clone(&client)).with_tool_router(router);
+    let host = RuntimeHost::with_session_store(Arc::new(factory), store);
+    let thread = start_thread(&host).await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-root", "root")
+        .await
+        .unwrap();
+    tool.wait_until_started().await;
+    host.submit_with_mode(
+        thread.context().coordinates.thread_id,
+        "turn-failed-steer",
+        "cannot persist",
+        TurnSubmissionMode::Steer,
+    )
+    .await
+    .unwrap();
+    tool.release();
+
+    collect_until_failed(&mut events, "boundary steer append failed").await;
+    assert_eq!(thread.status(), ThreadStatus::Failed);
+    assert_eq!(client.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn steer_after_last_tool_boundary_is_delivered_by_the_next_turn() {
+    let client = Arc::new(GatedProviderClient::gating_request(
+        2,
+        vec![
+            response_tool_call("echo_search", json!({"input": "original"})),
+            response_text("root reply"),
+            response_text("next reply"),
+        ],
+    ));
+    let factory =
+        provider_factory(Arc::clone(&client)).with_tool_router(echo_router("echo_search"));
+    let host = RuntimeHost::new(Arc::new(factory));
+    let thread = start_thread(&host).await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-root", "root")
+        .await
+        .unwrap();
+    wait_for_gated_requests(&client, 2).await;
+    let boundary_request_texts = request_texts(&client.requests()[1]);
+    assert!(
+        !boundary_request_texts
+            .iter()
+            .any(|text| text.contains("missed the last boundary")),
+        "the final boundary request was assembled before the late steer: {boundary_request_texts:?}",
+    );
+    host.submit_with_mode(
+        thread.context().coordinates.thread_id,
+        "turn-late-steer",
+        "missed the last boundary",
+        TurnSubmissionMode::Steer,
+    )
+    .await
+    .unwrap();
+    collect_until_signal(&mut events, ThreadSignalKind::UserSteer).await;
+    client.release_gate();
+    collect_until_output(&mut events, "root reply").await;
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-next",
+        "continue",
+    )
+    .await
+    .unwrap();
+    collect_until_output(&mut events, "next reply").await;
+    wait_for_gated_requests(&client, 3).await;
+    let next_texts = request_texts(&client.requests()[2]);
+    assert_eq!(
+        next_texts
+            .iter()
+            .filter(|text| text.as_str() == "missed the last boundary")
+            .count(),
+        1,
+        "the next turn must contain the persisted late steer exactly once: {next_texts:?}",
+    );
+    assert!(
+        !next_texts
+            .iter()
+            .any(|text| text.contains("Additional user steering for active turn turn-late-steer:")),
+        "next-turn fallback must preserve the existing history assembly path: {next_texts:?}",
+    );
+}
+
+#[tokio::test]
+async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer() {
+    let path = temp_db_path("cooldis-intra-turn-steer-replay");
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_steer_replay");
+    let first_client = Arc::new(ScriptedProviderClient::with_responses(vec![
+        response_tool_call("crash_echo", json!({"input": "original"})),
+        response_text("lost before persistence"),
+    ]));
+    let faulting_client = Arc::new(
+        FaultingProviderClient::new(Arc::clone(&first_client)).fail_nth_after_http(
+            "complete",
+            2,
+            "simulated crash after the boundary request before result persistence",
+        ),
+    );
+    let tool = Arc::new(GatedToolProvider::new("crash_echo"));
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool.clone()),
+    );
+    {
+        let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
+        let factory = provider_factory(faulting_client).with_tool_router(router);
+        let host = RuntimeHost::with_session_store(Arc::new(factory), store);
+        let thread = host
+            .start_thread(coordinates.clone(), ThreadTopology::root())
+            .await
+            .unwrap();
+        let mut events = thread.subscribe_events();
+
+        host.submit(thread.context().coordinates.thread_id, "turn-root", "root")
+            .await
+            .unwrap();
+        tool.wait_until_started().await;
+        host.submit_with_mode(
+            thread.context().coordinates.thread_id,
+            "turn-crash-steer",
+            "survive the delivery window",
+            TurnSubmissionMode::Steer,
+        )
+        .await
+        .unwrap();
+        tool.release();
+        collect_until_signal(&mut events, ThreadSignalKind::UserSteer).await;
+        collect_until_failed(&mut events, "simulated crash").await;
+
+        let requests = first_client.requests();
+        assert_eq!(
+            steering_injection_count(
+                &requests[1],
+                "turn-crash-steer",
+                "survive the delivery window"
+            ),
+            1,
+            "the crash cut must be after the steer-bearing request was assembled",
+        );
+    }
+
+    let reopened = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
+    let persisted_events = reopened
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    let steer_entry_id = persisted_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["turn_id"] == "turn-crash-steer"
+        })
+        .and_then(|event| event.payload["entry_id"].as_str())
+        .expect("persisted steer entry must exist before replay");
+    assert!(
+        persisted_events.iter().any(|event| {
+            event.kind == EventKind::ContextCompileCompleted
+                && event.payload["session_entry_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(steer_entry_id)))
+        }),
+        "the steer-bearing request must have a durable context compile witness",
+    );
+
+    let replay_client = Arc::new(ScriptedProviderClient::with_responses(vec![response_text(
+        "replayed reply",
+    )]));
+    let replay_host = RuntimeHost::with_session_store(
+        Arc::new(provider_factory(Arc::clone(&replay_client))),
+        reopened,
+    );
+    let replayed = replay_host
+        .start_thread(coordinates, ThreadTopology::root())
+        .await
+        .unwrap();
+    let mut replay_events = replayed.subscribe_events();
+    replay_host
+        .submit(
+            replayed.context().coordinates.thread_id,
+            "turn-root",
+            "root",
+        )
+        .await
+        .unwrap();
+    collect_until_output(&mut replay_events, "replayed reply").await;
+
+    let replay_texts = request_texts(&replay_client.requests()[0]);
+    assert_eq!(
+        replay_texts
+            .iter()
+            .filter(|text| text.as_str() == "survive the delivery window")
+            .count(),
+        1,
+        "replay must retain exactly one persisted steer input: {replay_texts:?}",
+    );
+    assert!(
+        !replay_texts.iter().any(|text| {
+            text.contains("Additional user steering for active turn turn-crash-steer:")
+        }),
+        "the prior compile witness must prevent a second steer injection: {replay_texts:?}",
+    );
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]
@@ -945,6 +1282,29 @@ fn request_texts(request: &cooldis::ProviderRequest) -> Vec<String> {
     request.messages.iter().map(text_from_message).collect()
 }
 
+fn steering_injection_count(request: &ProviderRequest, turn_id: &str, text: &str) -> usize {
+    let prefix = format!("Additional user steering for active turn {turn_id}:");
+    request_texts(request)
+        .iter()
+        .filter(|message| message.contains(&prefix) && message.contains(text))
+        .count()
+}
+
+fn request_text_occurrence_count(request: &ProviderRequest, text: &str) -> usize {
+    request_texts(request)
+        .iter()
+        .map(|message| message.matches(text).count())
+        .sum()
+}
+
+fn temp_db_path(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}.sqlite3"))
+}
+
 fn bash_tool_result_json(events: &[RuntimeEventKind], expected_call_id: &str) -> serde_json::Value {
     let output = events
         .iter()
@@ -963,15 +1323,91 @@ fn bash_tool_result_json(events: &[RuntimeEventKind], expected_call_id: &str) ->
 struct GatedProviderClient {
     requests: Mutex<Vec<ProviderRequest>>,
     responses: Mutex<VecDeque<ProviderResponse>>,
+    gated_request: usize,
     first_released: AtomicBool,
     first_release: Notify,
 }
 
+struct GatedToolProvider {
+    tool_name: String,
+    started: AtomicBool,
+    started_notify: Notify,
+    released: AtomicBool,
+    release_notify: Notify,
+}
+
+impl GatedToolProvider {
+    fn new(tool_name: &str) -> Self {
+        Self {
+            tool_name: tool_name.to_string(),
+            started: AtomicBool::new(false),
+            started_notify: Notify::new(),
+            released: AtomicBool::new(false),
+            release_notify: Notify::new(),
+        }
+    }
+
+    async fn wait_until_started(&self) {
+        while !self.started.load(Ordering::SeqCst) {
+            self.started_notify.notified().await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentKernelToolProvider for GatedToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            self.tool_name.clone(),
+            "Wait at the tool-round boundary and echo input.",
+            json!({
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+                "additionalProperties": false
+            }),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        self.started.store(true, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        while !self.released.load(Ordering::SeqCst) {
+            self.release_notify.notified().await;
+        }
+        let input = call
+            .arguments
+            .get("input")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            format!("echo:{input}"),
+            false,
+        )))
+    }
+}
+
 impl GatedProviderClient {
     fn new(responses: Vec<ProviderResponse>) -> Self {
+        Self::gating_request(1, responses)
+    }
+
+    fn gating_request(gated_request: usize, responses: Vec<ProviderResponse>) -> Self {
+        assert!(gated_request > 0, "gated request index is one-based");
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses.into()),
+            gated_request,
             first_released: AtomicBool::new(false),
             first_release: Notify::new(),
         }
@@ -982,6 +1418,10 @@ impl GatedProviderClient {
     }
 
     fn release_first(&self) {
+        self.release_gate();
+    }
+
+    fn release_gate(&self) {
         self.first_released.store(true, Ordering::SeqCst);
         self.first_release.notify_waiters();
     }
@@ -995,7 +1435,7 @@ impl ProviderClient for GatedProviderClient {
             requests.push(request.clone());
             requests.len()
         };
-        if request_index == 1 {
+        if request_index == self.gated_request {
             while !self.first_released.load(Ordering::SeqCst) {
                 self.first_release.notified().await;
             }
@@ -1019,6 +1459,19 @@ async fn wait_for_requests(client: &ScriptedProviderClient, expected: usize) {
     panic!(
         "timed out waiting for {expected} provider request(s); saw {}",
         client.requests().len()
+    );
+}
+
+async fn wait_for_queued_commands(thread: &cooldis::RuntimeThreadHandle, expected: usize) {
+    for _ in 0..30 {
+        if thread.queued_command_count() >= expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "timed out waiting for {expected} queued command(s); saw {}",
+        thread.queued_command_count()
     );
 }
 

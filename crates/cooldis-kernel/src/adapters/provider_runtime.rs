@@ -1,3 +1,22 @@
+//! Canonical provider turn-loop adapter.
+//!
+//! A tool round ends only after the assistant entry and every tool result have
+//! been persisted. Before polling the next model-request assembly, the loop
+//! gives ready thread commands priority. The next assembly then folds persisted
+//! steer inputs admitted since the active turn began that are absent from its
+//! prior `context.compile.completed` receipts and injects them as user-role hook
+//! context. The compile receipt for that request is the durable delivery
+//! witness; a steer that misses the final tool boundary remains ordinary
+//! persisted history for the next turn.
+//!
+//! Cancellation exposure is explicit: draining a ready steer awaits the
+//! existing idempotent turn-input append (an ingress-backed steer cannot settle
+//! its claim until that entry exists), and the delivery fold adds one read-only
+//! event-store await. Cancellation or a crash before the compile receipt leaves
+//! the entry eligible for a later boundary; once the receipt commits, replay
+//! uses that witness and the persisted user entry remains in ordinary request
+//! history.
+
 use crate::agent::contracts::sha256_hex;
 use crate::{
     AgentContextCompileInput, AgentContextCompilePolicy, AgentContextCompiler,
@@ -5,16 +24,17 @@ use crate::{
     AllowAllToolPermissionGate, BashToolProvider, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
     COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent, CanonicalMessage,
     CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError, CooldisResult,
-    EventKind, EventProvenance, EventRecordId, EventStreamId, HookHandlerSpec, HookMutationWitness,
-    HookPipeline, HookRunRecord, KernelNotifyOperationProvider, KernelOperationDispatcher,
-    KernelProcessOperationProvider, KernelScheduleOperationProvider, KernelThreadOperationProvider,
-    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationProvenance,
-    OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient,
-    ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
-    ReplayTransformCounts, RuntimeEventKind, RuntimeModelRequestErrorClass,
-    RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
-    RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
-    SessionEntryId, SessionEntryKind, SessionStartHookRequest, StopHookRequest, SystemBlock,
+    EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId,
+    HookHandlerSpec, HookMutationWitness, HookPipeline, HookRunRecord,
+    KernelNotifyOperationProvider, KernelOperationDispatcher, KernelProcessOperationProvider,
+    KernelScheduleOperationProvider, KernelThreadOperationProvider, KernelThreadSpawnAgentResolver,
+    NewEventRecord, NewObservationRecord, ObservationProvenance, OperationRegistry,
+    PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient, ProviderError,
+    ProviderRequest, ProviderRequestMode, ProviderStreamEvent, ReplayTransformCounts,
+    RuntimeEventKind, RuntimeModelRequestErrorClass, RuntimeModelRequestMode,
+    RuntimeModelRequestPurpose, RuntimePermissionDecision, RuntimeServices, RuntimeTerminalState,
+    RuntimeToolLogLevel, RuntimeUsage, SessionEntry, SessionEntryId, SessionEntryKind,
+    SessionStartHookRequest, StopHookRequest, SystemBlock,
     THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
     ThinkingConfig, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
     ThreadTerminalState, ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload,
@@ -28,7 +48,7 @@ use crate::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -567,15 +587,37 @@ impl CanonicalProviderRuntime {
     async fn run_turn(
         &self,
         turn_context: &TurnContext,
+        turn_delivery_start_sequence: EventSequence,
         turn_anchor_timestamp_ms: i64,
         services: &RuntimeServices,
         events: &broadcast::Sender<ThreadEvent>,
-        steering_contexts: Vec<String>,
+        fold_intra_turn_steers: bool,
     ) -> CooldisResult<CanonicalMessage> {
         let coordinates = turn_context.coordinates();
         let context = services.build_session_context(coordinates).await?;
         let source_cuts = context.source_cuts.clone();
         let session_entries = context.entries;
+        let steering_contexts = if fold_intra_turn_steers {
+            undelivered_intra_turn_steering_contexts(
+                services,
+                coordinates,
+                &turn_context.turn_id,
+                turn_delivery_start_sequence,
+                &session_entries,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let steering_entry_ids = steering_contexts
+            .iter()
+            .map(|steer| steer.entry_id)
+            .collect::<HashSet<_>>();
+        let assembly_session_entries = session_entries
+            .iter()
+            .filter(|entry| !steering_entry_ids.contains(&entry.entry_id))
+            .cloned()
+            .collect();
         let memory_contexts = services
             .build_recall_read_plan_contexts(coordinates)
             .await?;
@@ -593,10 +635,13 @@ impl CanonicalProviderRuntime {
         let compiled_context = AgentContextCompiler::compile(AgentContextCompileInput {
             system: self.config.system.clone(),
             static_system_sources: static_context_segments.clone(),
-            session_entries: session_entries.clone(),
+            session_entries: assembly_session_entries,
             turn_anchor_timestamp_ms,
             turn_context: turn_context.snapshot(),
-            hook_contexts: steering_contexts,
+            hook_contexts: steering_contexts
+                .into_iter()
+                .map(|steer| steer.context)
+                .collect(),
             environment_contexts,
             attachments: Vec::new(),
             tools: self.tool_definitions().await,
@@ -777,14 +822,19 @@ async fn run_idle_provider_command(
                 );
                 return true;
             }
-            let (turn_source_event_id, turn_anchor_timestamp_ms) = match services
-                .append_user_turn_input(coordinates, &turn_id, &input)
-                .await
-            {
-                Ok(entry) => {
-                    let submitted =
-                        match append_turn_submitted_event(services, coordinates, &turn_id, &entry)
-                            .await
+            let (turn_source_event_id, turn_delivery_start_sequence, turn_anchor_timestamp_ms) =
+                match services
+                    .append_user_turn_input(coordinates, &turn_id, &input)
+                    .await
+                {
+                    Ok(entry) => {
+                        let submitted = match append_turn_submitted_event(
+                            services,
+                            coordinates,
+                            &turn_id,
+                            &entry,
+                        )
+                        .await
                         {
                             Ok(submitted) => submitted,
                             Err(err) => {
@@ -796,24 +846,25 @@ async fn run_idle_provider_command(
                                 return true;
                             }
                         };
-                    let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
-                    (submitted.id, submitted.created_at_ms)
-                }
-                Err(err) => {
-                    let _ = status.send(ThreadStatus::Failed);
-                    let _ = events.send(ThreadEvent::Failed {
-                        thread_id,
-                        message: err.to_string(),
-                    });
-                    return true;
-                }
-            };
+                        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                        (submitted.id, submitted.sequence, submitted.created_at_ms)
+                    }
+                    Err(err) => {
+                        let _ = status.send(ThreadStatus::Failed);
+                        let _ = events.send(ThreadEvent::Failed {
+                            thread_id,
+                            message: err.to_string(),
+                        });
+                        return true;
+                    }
+                };
             run_provider_turn(
                 runtime,
                 thread_context,
                 turn_id,
                 input,
                 turn_source_event_id,
+                turn_delivery_start_sequence,
                 turn_anchor_timestamp_ms,
                 coordinates,
                 services,
@@ -876,6 +927,7 @@ async fn run_idle_provider_command(
             {
                 Ok(ToolResumeOutcome::Resumed {
                     source_event_id,
+                    turn_delivery_start_sequence,
                     turn_anchor_timestamp_ms,
                 }) => {
                     run_provider_turn(
@@ -884,6 +936,7 @@ async fn run_idle_provider_command(
                         turn_id,
                         TurnInput::text(""),
                         source_event_id,
+                        turn_delivery_start_sequence,
                         turn_anchor_timestamp_ms,
                         coordinates,
                         services,
@@ -1547,6 +1600,7 @@ async fn run_provider_turn(
     turn_id: String,
     turn_input: TurnInput,
     turn_source_event_id: EventRecordId,
+    turn_delivery_start_sequence: EventSequence,
     turn_anchor_timestamp_ms: i64,
     coordinates: &crate::ThreadCoordinates,
     services: &RuntimeServices,
@@ -1558,7 +1612,6 @@ async fn run_provider_turn(
     pending_commands: &mut VecDeque<ThreadCommand>,
 ) -> bool {
     let mut tool_rounds = 0;
-    let mut steering_contexts = Vec::new();
     let turn_cancellation = CancellationToken::new();
     let turn_context = runtime.turn_context(
         thread_context,
@@ -1633,12 +1686,91 @@ async fn run_provider_turn(
         let mut continue_after_tools = false;
         let mut suspended_after_tools = false;
         let mut last_assistant_text = None;
+        if tool_rounds > 0 {
+            // This is the tool-round boundary: tool results are durable and no
+            // next-round assembly future exists yet. Give the commands that are
+            // ready at this boundary priority without letting a continuously
+            // refilled channel starve assembly or runtime cancellation.
+            let ready_command_count = commands.len();
+            let mut handled_ready_commands = 0;
+            loop {
+                if handled_ready_commands >= ready_command_count && !commands.is_closed() {
+                    break;
+                }
+                let command = match commands.try_recv() {
+                    Ok(command) => {
+                        handled_ready_commands += 1;
+                        Some(command)
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
+                };
+                let disconnected = command.is_none();
+                match handle_active_provider_command(
+                    command,
+                    &turn_input,
+                    &turn_context,
+                    turn_source_event_id,
+                    coordinates,
+                    services,
+                    thread_id,
+                    events,
+                    status,
+                    pending_commands,
+                    &turn_cancellation,
+                    false,
+                )
+                .await
+                {
+                    ActiveProviderCommandOutcome::Continue => {}
+                    ActiveProviderCommandOutcome::Cancelled { reason } => {
+                        emit_runtime_event(
+                            events,
+                            coordinates,
+                            RuntimeEventKind::Cancelled {
+                                reason: reason.clone(),
+                            },
+                        );
+                        emit_runtime_event(
+                            events,
+                            coordinates,
+                            RuntimeEventKind::Terminal {
+                                state: RuntimeTerminalState::Cancelled,
+                            },
+                        );
+                        let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
+                        let _ = status.send(ThreadStatus::Idle);
+                        return false;
+                    }
+                    ActiveProviderCommandOutcome::Shutdown => {
+                        emit_runtime_event(
+                            events,
+                            coordinates,
+                            RuntimeEventKind::Terminal {
+                                state: RuntimeTerminalState::Stopped,
+                            },
+                        );
+                        let _ = status.send(ThreadStatus::Stopped);
+                        let _ = events.send(ThreadEvent::Stopped { thread_id });
+                        return true;
+                    }
+                    ActiveProviderCommandOutcome::Failed { code, reason } => {
+                        fail_provider_turn(coordinates, thread_id, events, status, code, reason);
+                        return true;
+                    }
+                }
+                if disconnected {
+                    break;
+                }
+            }
+        }
         let turn = runtime.run_turn(
             &turn_context,
+            turn_delivery_start_sequence,
             turn_anchor_timestamp_ms,
             services,
             events,
-            steering_contexts.clone(),
+            tool_rounds > 0,
         );
         tokio::pin!(turn);
 
@@ -1660,157 +1792,35 @@ async fn run_provider_turn(
                     cancelled_reason = Some(reason);
                 }
                 command = commands.recv() => {
-                    match command {
-                        Some(ThreadCommand::Cancel { reason }) => {
-                            let _ = status.send(ThreadStatus::Cancelling);
-                            let _ = events.send(ThreadEvent::Signal {
-                                thread_id,
-                                signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
-                            });
-                            turn_cancellation.cancel();
-                            if cancelled_reason.is_none() {
-                                append_terminal_join_until_recorded(
-                                    services,
-                                    &turn_context.thread,
-                                    ThreadTerminalState::Cancelled,
-                                    Some(reason.clone()),
-                                    Some(turn_source_event_id),
-                                )
-                                .await;
-                                terminal_join_recorded = true;
-                                cancelled_reason = Some(reason);
-                            }
+                    match handle_active_provider_command(
+                        command,
+                        &turn_input,
+                        &turn_context,
+                        turn_source_event_id,
+                        coordinates,
+                        services,
+                        thread_id,
+                        events,
+                        status,
+                        pending_commands,
+                        &turn_cancellation,
+                        cancelled_reason.is_some(),
+                    )
+                    .await
+                    {
+                        ActiveProviderCommandOutcome::Continue => {}
+                        ActiveProviderCommandOutcome::Cancelled { reason } => {
+                            terminal_join_recorded = true;
+                            cancelled_reason = Some(reason);
                         }
-                        Some(ThreadCommand::CancelTurn {
-                            watchdog_token_id,
-                            reason,
-                        }) => {
-                            if turn_input.turn_watchdog_id() != Some(watchdog_token_id) {
-                                continue;
-                            }
-                            let _ = status.send(ThreadStatus::Cancelling);
-                            let _ = events.send(ThreadEvent::Signal {
-                                thread_id,
-                                signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
-                            });
-                            turn_cancellation.cancel();
-                            if cancelled_reason.is_none() {
-                                append_terminal_join_until_recorded(
-                                    services,
-                                    &turn_context.thread,
-                                    ThreadTerminalState::Cancelled,
-                                    Some(reason.clone()),
-                                    Some(turn_source_event_id),
-                                )
-                                .await;
-                                terminal_join_recorded = true;
-                                cancelled_reason = Some(reason);
-                            }
-                        }
-                        Some(ThreadCommand::Shutdown) | None => {
-                            let _ = events.send(ThreadEvent::Signal {
-                                thread_id,
-                                signal: ThreadSignal::shutdown(coordinates),
-                            });
-                            emit_runtime_event(
-                                events,
-                                coordinates,
-                                RuntimeEventKind::Terminal {
-                                    state: RuntimeTerminalState::Stopped,
-                                },
-                            );
-                            turn_cancellation.cancel();
+                        ActiveProviderCommandOutcome::Shutdown => {
                             shutdown_after_turn = true;
                         }
-                        Some(ThreadCommand::Submit { turn_id, input, mode }) => {
-                            match mode {
-                                TurnSubmissionMode::Queue => {
-                                    let _ = events.send(ThreadEvent::Signal {
-                                        thread_id,
-                                        signal: ThreadSignal::user_queue(coordinates, turn_id.clone()),
-                                    });
-                                    pending_commands.push_back(ThreadCommand::Submit {
-                                        turn_id,
-                                        input,
-                                        mode,
-                                    });
-                                }
-                                TurnSubmissionMode::Steer => {
-                                    match services
-                                        .append_user_turn_input(coordinates, &turn_id, &input)
-                                        .await
-                                    {
-                                        Ok(entry) => {
-                                            let _ = events.send(ThreadEvent::CanonicalMirror {
-                                                thread_id,
-                                                entry,
-                                            });
-                                        }
-                                        Err(err) => {
-                                            failed = true;
-                                            failure_code = Some("history");
-                                            failure_reason = Some(err.to_string());
-                                            turn_cancellation.cancel();
-                                            append_terminal_join_until_recorded(
-                                                services,
-                                                &turn_context.thread,
-                                                ThreadTerminalState::Failed,
-                                                failure_reason.clone(),
-                                                Some(turn_source_event_id),
-                                            )
-                                            .await;
-                                            terminal_join_recorded = true;
-                                            continue;
-                                        }
-                                    }
-                                    let _ = events.send(ThreadEvent::Signal {
-                                        thread_id,
-                                        signal: ThreadSignal::user_steer(
-                                            coordinates,
-                                            turn_id.clone(),
-                                        )
-                                        .with_metadata(BTreeMap::from([(
-                                            "active_turn_id".to_string(),
-                                            turn_context.turn_id.clone(),
-                                        )])),
-                                    });
-                                    if let Some(context) = steering_context(&turn_id, &input) {
-                                        steering_contexts.push(context);
-                                    }
-                                }
-                                TurnSubmissionMode::Interrupt => {
-                                    let reason = format!("interrupted by turn {turn_id}");
-                                    let _ = status.send(ThreadStatus::Cancelling);
-                                    let _ = events.send(ThreadEvent::Signal {
-                                        thread_id,
-                                        signal: ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
-                                    });
-                                    turn_cancellation.cancel();
-                                    if cancelled_reason.is_none() {
-                                        append_terminal_join_until_recorded(
-                                            services,
-                                            &turn_context.thread,
-                                            ThreadTerminalState::Cancelled,
-                                            Some(reason.clone()),
-                                            Some(turn_source_event_id),
-                                        )
-                                        .await;
-                                        terminal_join_recorded = true;
-                                        cancelled_reason = Some(reason);
-                                    }
-                                    pending_commands.push_front(ThreadCommand::Submit {
-                                        turn_id,
-                                        input,
-                                        mode: TurnSubmissionMode::Queue,
-                                    });
-                                }
-                            }
-                        }
-                        Some(command @ ThreadCommand::Compact { .. }) => {
-                            pending_commands.push_back(command);
-                        }
-                        Some(command @ ThreadCommand::ResumeToolCall { .. }) => {
-                            pending_commands.push_back(command);
+                        ActiveProviderCommandOutcome::Failed { code, reason } => {
+                            failed = true;
+                            failure_code = Some(code);
+                            failure_reason = Some(reason);
+                            terminal_join_recorded = true;
                         }
                     }
                 }
@@ -2057,6 +2067,178 @@ async fn run_provider_turn(
     }
 }
 
+enum ActiveProviderCommandOutcome {
+    Continue,
+    Cancelled { reason: String },
+    Shutdown,
+    Failed { code: &'static str, reason: String },
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_active_provider_command(
+    command: Option<ThreadCommand>,
+    turn_input: &TurnInput,
+    turn_context: &TurnContext,
+    turn_source_event_id: EventRecordId,
+    coordinates: &crate::ThreadCoordinates,
+    services: &RuntimeServices,
+    thread_id: crate::ThreadId,
+    events: &broadcast::Sender<ThreadEvent>,
+    status: &watch::Sender<ThreadStatus>,
+    pending_commands: &mut VecDeque<ThreadCommand>,
+    turn_cancellation: &CancellationToken,
+    already_cancelled: bool,
+) -> ActiveProviderCommandOutcome {
+    match command {
+        Some(ThreadCommand::Cancel { reason }) => {
+            let _ = status.send(ThreadStatus::Cancelling);
+            let _ = events.send(ThreadEvent::Signal {
+                thread_id,
+                signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+            });
+            turn_cancellation.cancel();
+            if already_cancelled {
+                return ActiveProviderCommandOutcome::Continue;
+            }
+            append_terminal_join_until_recorded(
+                services,
+                &turn_context.thread,
+                ThreadTerminalState::Cancelled,
+                Some(reason.clone()),
+                Some(turn_source_event_id),
+            )
+            .await;
+            ActiveProviderCommandOutcome::Cancelled { reason }
+        }
+        Some(ThreadCommand::CancelTurn {
+            watchdog_token_id,
+            reason,
+        }) => {
+            if turn_input.turn_watchdog_id() != Some(watchdog_token_id) {
+                return ActiveProviderCommandOutcome::Continue;
+            }
+            let _ = status.send(ThreadStatus::Cancelling);
+            let _ = events.send(ThreadEvent::Signal {
+                thread_id,
+                signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+            });
+            turn_cancellation.cancel();
+            if already_cancelled {
+                return ActiveProviderCommandOutcome::Continue;
+            }
+            append_terminal_join_until_recorded(
+                services,
+                &turn_context.thread,
+                ThreadTerminalState::Cancelled,
+                Some(reason.clone()),
+                Some(turn_source_event_id),
+            )
+            .await;
+            ActiveProviderCommandOutcome::Cancelled { reason }
+        }
+        Some(ThreadCommand::Shutdown) | None => {
+            let _ = events.send(ThreadEvent::Signal {
+                thread_id,
+                signal: ThreadSignal::shutdown(coordinates),
+            });
+            emit_runtime_event(
+                events,
+                coordinates,
+                RuntimeEventKind::Terminal {
+                    state: RuntimeTerminalState::Stopped,
+                },
+            );
+            turn_cancellation.cancel();
+            ActiveProviderCommandOutcome::Shutdown
+        }
+        Some(ThreadCommand::Submit {
+            turn_id,
+            input,
+            mode,
+        }) => match mode {
+            TurnSubmissionMode::Queue => {
+                let _ = events.send(ThreadEvent::Signal {
+                    thread_id,
+                    signal: ThreadSignal::user_queue(coordinates, turn_id.clone()),
+                });
+                pending_commands.push_back(ThreadCommand::Submit {
+                    turn_id,
+                    input,
+                    mode,
+                });
+                ActiveProviderCommandOutcome::Continue
+            }
+            TurnSubmissionMode::Steer => {
+                match services
+                    .append_user_turn_input(coordinates, &turn_id, &input)
+                    .await
+                {
+                    Ok(entry) => {
+                        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        turn_cancellation.cancel();
+                        append_terminal_join_until_recorded(
+                            services,
+                            &turn_context.thread,
+                            ThreadTerminalState::Failed,
+                            Some(reason.clone()),
+                            Some(turn_source_event_id),
+                        )
+                        .await;
+                        return ActiveProviderCommandOutcome::Failed {
+                            code: "history",
+                            reason,
+                        };
+                    }
+                }
+                let _ = events.send(ThreadEvent::Signal {
+                    thread_id,
+                    signal: ThreadSignal::user_steer(coordinates, turn_id).with_metadata(
+                        BTreeMap::from([(
+                            "active_turn_id".to_string(),
+                            turn_context.turn_id.clone(),
+                        )]),
+                    ),
+                });
+                ActiveProviderCommandOutcome::Continue
+            }
+            TurnSubmissionMode::Interrupt => {
+                let reason = format!("interrupted by turn {turn_id}");
+                let _ = status.send(ThreadStatus::Cancelling);
+                let _ = events.send(ThreadEvent::Signal {
+                    thread_id,
+                    signal: ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
+                });
+                turn_cancellation.cancel();
+                pending_commands.push_front(ThreadCommand::Submit {
+                    turn_id,
+                    input,
+                    mode: TurnSubmissionMode::Queue,
+                });
+                if already_cancelled {
+                    return ActiveProviderCommandOutcome::Continue;
+                }
+                append_terminal_join_until_recorded(
+                    services,
+                    &turn_context.thread,
+                    ThreadTerminalState::Cancelled,
+                    Some(reason.clone()),
+                    Some(turn_source_event_id),
+                )
+                .await;
+                ActiveProviderCommandOutcome::Cancelled { reason }
+            }
+        },
+        Some(command @ ThreadCommand::Compact { .. })
+        | Some(command @ ThreadCommand::ResumeToolCall { .. }) => {
+            pending_commands.push_back(command);
+            ActiveProviderCommandOutcome::Continue
+        }
+    }
+}
+
 fn fail_provider_turn(
     coordinates: &crate::ThreadCoordinates,
     thread_id: crate::ThreadId,
@@ -2124,6 +2306,7 @@ enum ToolAppendOutcome {
 enum ToolResumeOutcome {
     Resumed {
         source_event_id: EventRecordId,
+        turn_delivery_start_sequence: EventSequence,
         turn_anchor_timestamp_ms: i64,
     },
     StillWaiting,
@@ -2308,15 +2491,16 @@ async fn resume_pending_tool_call(
             "missing tool.call.requested for pending call {turn_id}/{call_id}"
         )));
     };
-    let turn_anchor_timestamp_ms =
+    let turn_submitted =
         existing_turn_submitted_event(services, &thread_context.coordinates, turn_id)
             .await?
-            .map(|event| event.created_at_ms)
             .ok_or_else(|| {
                 CooldisError::History(format!(
                     "turn {turn_id} has no persisted context timestamp anchor"
                 ))
             })?;
+    let turn_anchor_timestamp_ms = turn_submitted.created_at_ms;
+    let turn_delivery_start_sequence = turn_submitted.sequence;
     let decision = decide_tool_call(
         services.runtime_store().as_ref(),
         ToolDecisionRequest {
@@ -2363,6 +2547,7 @@ async fn resume_pending_tool_call(
             .await?;
             Ok(ToolResumeOutcome::Resumed {
                 source_event_id: resumed.id,
+                turn_delivery_start_sequence,
                 turn_anchor_timestamp_ms,
             })
         }
@@ -2401,6 +2586,7 @@ async fn resume_pending_tool_call(
             .await?;
             Ok(ToolResumeOutcome::Resumed {
                 source_event_id: resumed.id,
+                turn_delivery_start_sequence,
                 turn_anchor_timestamp_ms,
             })
         }
@@ -2436,6 +2622,7 @@ async fn resume_pending_tool_call(
             .await?;
             Ok(ToolResumeOutcome::Resumed {
                 source_event_id: resumed.id,
+                turn_delivery_start_sequence,
                 turn_anchor_timestamp_ms,
             })
         }
@@ -3186,14 +3373,193 @@ async fn append_hook_mutation_witnesses(
     Ok(())
 }
 
-fn steering_context(turn_id: &str, input: &TurnInput) -> Option<String> {
-    let text = input.text_projection();
+struct IntraTurnSteeringContext {
+    entry_id: SessionEntryId,
+    context: String,
+}
+
+async fn undelivered_intra_turn_steering_contexts(
+    services: &RuntimeServices,
+    coordinates: &crate::ThreadCoordinates,
+    active_turn_id: &str,
+    turn_delivery_start_sequence: EventSequence,
+    session_entries: &[SessionEntry],
+) -> CooldisResult<Vec<IntraTurnSteeringContext>> {
+    // The original turn.submitted event is the safe lower bound: an entry
+    // admitted before it belongs to ordinary history, while every steer that
+    // can target this active turn and every receipt capable of delivering that
+    // steer follows it. Resumed turns deliberately retain the original bound,
+    // so a crash before the delivery receipt cannot hide an eligible steer.
+    let events = services
+        .runtime_store()
+        .read_events(
+            &EventStreamId::for_thread(coordinates),
+            Some(turn_delivery_start_sequence),
+        )
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?;
+    Ok(intra_turn_steering_contexts_from_events(
+        &events,
+        active_turn_id,
+        turn_delivery_start_sequence,
+        session_entries,
+    ))
+}
+
+fn intra_turn_steering_contexts_from_events(
+    events: &[EventRecord],
+    active_turn_id: &str,
+    turn_delivery_start_sequence: EventSequence,
+    session_entries: &[SessionEntry],
+) -> Vec<IntraTurnSteeringContext> {
+    let admitted_entry_ids = events
+        .iter()
+        .filter(|event| {
+            event.sequence.get() > turn_delivery_start_sequence.get()
+                && event.kind == EventKind::SessionEntryAppended
+        })
+        .filter_map(|event| event.payload.get("entry_id"))
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let delivered_entry_ids = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ContextCompileCompleted)
+        .filter_map(|event| event.payload.get("session_entry_ids"))
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    session_entries
+        .iter()
+        .filter_map(|entry| {
+            let turn_id = entry.turn_id.as_deref()?;
+            let entry_id = entry.entry_id.to_string();
+            if turn_id == active_turn_id
+                || !admitted_entry_ids.contains(&entry_id)
+                || delivered_entry_ids.contains(&entry_id)
+            {
+                return None;
+            }
+            let SessionEntryKind::Message {
+                message: CanonicalMessage::User { content, .. },
+            } = &entry.kind
+            else {
+                return None;
+            };
+            steering_context(turn_id, canonical_content_text_projection(content)).map(|context| {
+                IntraTurnSteeringContext {
+                    entry_id: entry.entry_id,
+                    context,
+                }
+            })
+        })
+        .collect()
+}
+
+fn canonical_content_text_projection(content: &[CanonicalContent]) -> String {
+    content
+        .iter()
+        .filter_map(|content| match content {
+            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            CanonicalContent::Image { .. }
+            | CanonicalContent::Thinking { .. }
+            | CanonicalContent::ToolCall { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn steering_context(turn_id: &str, text: String) -> Option<String> {
     if text.trim().is_empty() {
         return None;
     }
     Some(format!(
         "Additional user steering for active turn {turn_id}:\n{text}"
     ))
+}
+
+#[cfg(test)]
+mod intra_turn_steering_context_tests {
+    use super::*;
+
+    #[test]
+    fn completed_history_without_compile_receipt_is_not_reclassified_as_steering() {
+        let coordinates =
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_completed_history");
+        let stream_id = EventStreamId::for_thread(&coordinates);
+        let old_entry = SessionEntry::for_turn(
+            coordinates.clone(),
+            None,
+            "turn-old",
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("completed historical input"),
+            },
+        );
+        let steer_entry = SessionEntry::for_turn(
+            coordinates.clone(),
+            Some(old_entry.entry_id),
+            "turn-steer",
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("new boundary steer"),
+            },
+        );
+        let event = |sequence, kind, payload| EventRecord {
+            id: EventRecordId::new(),
+            stream_id: stream_id.clone(),
+            sequence: EventSequence::new(sequence),
+            coordinates: coordinates.clone(),
+            created_at_ms: sequence,
+            kind,
+            origin: crate::EventOrigin::Witnessed,
+            provenance: EventProvenance::default(),
+            payload,
+        };
+        let events = vec![
+            event(
+                1,
+                EventKind::SessionEntryAppended,
+                serde_json::json!({
+                    "entry_id": old_entry.entry_id.to_string(),
+                    "turn_id": "turn-old",
+                    "entry_kind": "message",
+                }),
+            ),
+            event(
+                2,
+                EventKind::TurnCompleted,
+                serde_json::json!({"turn_id": "turn-old"}),
+            ),
+            event(
+                3,
+                EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "turn-active"}),
+            ),
+            event(
+                4,
+                EventKind::SessionEntryAppended,
+                serde_json::json!({
+                    "entry_id": steer_entry.entry_id.to_string(),
+                    "turn_id": "turn-steer",
+                    "entry_kind": "message",
+                }),
+            ),
+        ];
+
+        let contexts = intra_turn_steering_contexts_from_events(
+            &events,
+            "turn-active",
+            EventSequence::new(3),
+            &[old_entry, steer_entry.clone()],
+        );
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].entry_id, steer_entry.entry_id);
+        assert!(contexts[0].context.contains("new boundary steer"));
+        assert!(!contexts[0].context.contains("completed historical input"));
+    }
 }
 
 async fn run_stop_hooks(
