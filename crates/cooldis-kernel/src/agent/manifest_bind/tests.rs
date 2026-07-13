@@ -2068,3 +2068,85 @@ fn wat_bytes(bytes: &[u8]) -> String {
         })
         .collect()
 }
+
+#[test]
+fn bind_receipt_placement_is_optional_on_the_wire() {
+    // Receipts witnessed before ADR 0006 have no placement field; that
+    // exact wire shape must keep decoding, with absent meaning local.
+    let legacy_wire = serde_json::json!({
+        "ref_uri": "cooldis://agents/karl",
+        "manifest_hash": "sha256-manifest",
+        "model_profile_id": "default",
+        "provider_id": "anthropic",
+        "model_id": "claude-sonnet-5",
+        "tool_ids": ["threads/spawn"],
+        "operation_bindings": [],
+        "granted": [THREADS_SPAWN_CAPABILITY],
+        "effective_runtime": {
+            "default_cwd": "workspace",
+            "streaming": true,
+            "turn_timeout_ms": 1000,
+            "cancellation_grace_ms": null,
+            "compaction": {"auto_at_text_bytes": 500},
+            "overrides": {"allow": []}
+        },
+        "overridden_keys": []
+    });
+    let legacy_receipt: AgentManifestBindReceipt =
+        serde_json::from_value(legacy_wire.clone()).unwrap();
+    assert_eq!(legacy_receipt.placement, None);
+    assert_eq!(legacy_receipt.ref_uri, "cooldis://agents/karl");
+    assert_eq!(legacy_receipt.tool_ids, vec!["threads/spawn"]);
+    assert!(
+        serde_json::to_value(&legacy_receipt)
+            .unwrap()
+            .get("placement")
+            .is_none(),
+        "absent placement must serialize to the legacy wire shape"
+    );
+
+    let placed = AgentManifestBindReceipt {
+        placement: Some(AgentManifestPlacementBinding {
+            target: crate::PlacementTarget::Sandbox,
+            executor_ref: Some("executors/pi-sandbox".to_string()),
+            config: std::collections::BTreeMap::new(),
+        }),
+        ..legacy_receipt
+    };
+    let round_tripped: AgentManifestBindReceipt =
+        serde_json::from_str(&serde_json::to_string(&placed).unwrap()).unwrap();
+    assert_eq!(round_tripped, placed);
+}
+
+#[test]
+fn bind_receipt_placement_tolerates_future_wire_fields() {
+    let future_wire = serde_json::json!({
+        "ref_uri": "cooldis://agents/karl",
+        "manifest_hash": "sha256-manifest",
+        "model_profile_id": "default",
+        "provider_id": "anthropic",
+        "model_id": "claude-sonnet-5",
+        "tool_ids": [],
+        "operation_bindings": [],
+        "granted": [],
+        "effective_runtime": {},
+        "overridden_keys": [],
+        "placement": {
+            "target": "sandbox",
+            "executor_ref": "executors/pi-sandbox",
+            "config": {},
+            "future_lease_epoch": 7
+        },
+        "future_receipt_field": true
+    });
+
+    let decoded: AgentManifestBindReceipt = serde_json::from_value(future_wire).unwrap();
+    assert_eq!(
+        decoded.placement,
+        Some(AgentManifestPlacementBinding {
+            target: crate::PlacementTarget::Sandbox,
+            executor_ref: Some("executors/pi-sandbox".to_string()),
+            config: std::collections::BTreeMap::new(),
+        })
+    );
+}

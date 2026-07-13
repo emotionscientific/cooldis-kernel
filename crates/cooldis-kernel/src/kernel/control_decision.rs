@@ -1362,6 +1362,7 @@ mod tests {
                 granted: Vec::new(),
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
+                placement: None,
             };
             self.store
                 .append_events(

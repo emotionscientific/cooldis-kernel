@@ -111,6 +111,7 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 granted: vec!["threads.read".to_string()],
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
+                placement: None,
             })
             .unwrap(),
         })
@@ -3084,6 +3085,7 @@ async fn append_tool_controller_bind_receipt(
         granted: Vec::new(),
         effective_runtime: AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
+        placement: None,
     };
     store
         .append_events(

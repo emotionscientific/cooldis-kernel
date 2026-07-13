@@ -5,8 +5,10 @@
 //! history, adapter, and kernel crates can share without depending on the full
 //! kernel implementation.
 
+pub mod handle;
 pub mod schema;
 
+pub use handle::*;
 pub use schema::*;
 
 use serde::{Deserialize, Serialize};

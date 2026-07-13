@@ -21,6 +21,7 @@ use crate::agent::manifest_schema::{
 use crate::agent::tool_universe::{
     PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
 };
+use crate::kernel::control_decision::PlacementTarget;
 use crate::kernel::coupling_executor_registry::{
     RegisteredCouplingExecutorKind, registered_coupling_executor_for_id,
 };
@@ -287,6 +288,9 @@ pub async fn bind_published_agent_record(
         granted: bound_tools.granted,
         effective_runtime,
         overridden_keys,
+        // Placement resolution lands with the ADR 0006 implementation
+        // ticket; until then every bind is local and the field stays absent.
+        placement: None,
     };
     Ok(AgentManifestBoundThread {
         manifest,
@@ -1524,6 +1528,30 @@ pub struct AgentManifestBindReceipt {
     pub effective_runtime: AgentManifestRuntimeDefaults,
     /// Which override keys the caller actually exercised.
     pub overridden_keys: Vec<String>,
+    /// Where this thread's runtime executes, fixed at bind time (ADR 0006).
+    /// Absent means local. Optional with a serde default so receipts
+    /// witnessed before the field existed keep decoding and folding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<AgentManifestPlacementBinding>,
+}
+
+/// The placement resolved for a manifest-backed thread at bind time.
+///
+/// Placement attaches at the binding — or the conductor boundary call that
+/// creates one — never inline in a model-visible tool call. The manifest
+/// itself carries no placement (a manifest is portable by construction);
+/// daemon config supplies deployment defaults and operator surfaces may
+/// override at bind time. ADR 0006 requires the resolved binding target to be
+/// witnessed with the existing `placement.decision` event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentManifestPlacementBinding {
+    pub target: PlacementTarget,
+    /// Which registered executor serves a non-local target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_ref: Option<String>,
+    /// Executor-specific configuration, opaque to the bind layer.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config: BTreeMap<String, JsonValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
