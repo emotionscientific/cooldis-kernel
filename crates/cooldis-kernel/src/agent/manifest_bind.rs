@@ -225,6 +225,7 @@ pub async fn bind_published_agent_record(
         overrides,
         None,
         None,
+        false,
     )
     .await
 }
@@ -248,9 +249,14 @@ pub async fn bind_published_agent_record_with_placement(
     overrides: &AgentManifestBindOverrides,
     default_placement: Option<&AgentManifestPlacementBinding>,
     placement_override: Option<&AgentManifestPlacementBinding>,
+    remote_event_store_served: bool,
 ) -> CooldisResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
-    let placement = resolve_manifest_placement(default_placement, placement_override)?;
+    let placement = resolve_manifest_placement(
+        default_placement,
+        placement_override,
+        remote_event_store_served,
+    )?;
     let selected = select_manifest_model_profile(&manifest, model_selection)?;
     let profile = selected.profile;
     let provider_id = selected.provider_id;
@@ -1602,17 +1608,22 @@ impl Default for AgentManifestPlacementBinding {
 
 /// Resolve daemon placement defaults and an optional operator bind override.
 ///
-/// Non-local placement requires a remote EventStore backend so the conductor
-/// and executor share durable lifecycle truth. That capability is not yet
-/// available, so remote and sandbox targets fail closed at bind time.
+/// Remote placement requires a sync endpoint that has completed its bind and
+/// is being served by this daemon generation. Merely parsing `[daemon.sync]`
+/// is not authority to open the gate. Sandbox remains fail-closed until its
+/// executor lands.
 pub fn resolve_manifest_placement(
     default_placement: Option<&AgentManifestPlacementBinding>,
     placement_override: Option<&AgentManifestPlacementBinding>,
+    remote_event_store_served: bool,
 ) -> CooldisResult<AgentManifestPlacementBinding> {
     let resolved = placement_override
         .or(default_placement)
         .cloned()
         .unwrap_or_default();
+    if resolved.target == PlacementTarget::Remote && remote_event_store_served {
+        return Ok(resolved);
+    }
     if resolved.target != PlacementTarget::Local {
         let target = match resolved.target {
             PlacementTarget::Local => "local",

@@ -2288,14 +2288,17 @@ impl CooldisAppServer {
             params.model_provider.clone(),
             params.model.clone(),
         );
-        self.bind_app_server_agent_ref(
-            agent_ref,
-            &model_selection,
-            &overrides,
-            params.placement.as_ref(),
-        )
-        .await
-        .map_err(thread_start_bind_error)
+        let bound = self
+            .bind_app_server_agent_ref(
+                agent_ref,
+                &model_selection,
+                &overrides,
+                params.placement.as_ref(),
+            )
+            .await
+            .map_err(thread_start_bind_error)?;
+        require_local_binding_surface("thread/start", &bound).map_err(thread_start_bind_error)?;
+        Ok(bound)
     }
 
     pub(super) async fn bind_rebind_fork_agent(
@@ -2309,9 +2312,13 @@ impl CooldisAppServer {
             .map(AgentManifestModelProfileSelection::profile_id)
             .unwrap_or_default();
         let overrides = overrides.cloned().unwrap_or_default();
-        self.bind_app_server_agent_ref(agent_ref, &model_selection, &overrides, placement)
+        let bound = self
+            .bind_app_server_agent_ref(agent_ref, &model_selection, &overrides, placement)
             .await
-            .map_err(thread_start_bind_error)
+            .map_err(thread_start_bind_error)?;
+        require_local_binding_surface("thread/rebindFork", &bound)
+            .map_err(thread_start_bind_error)?;
+        Ok(bound)
     }
 
     pub(super) async fn agent_manifest_provider_surface(
@@ -3117,9 +3124,16 @@ impl CooldisAppServer {
             .await
             .map_err(internal_error)?;
         let child_id = receipt.thread_id.to_string();
-        let child = self.handle_for_thread(&child_id).await?;
-        connection.subscribe_thread(child).await;
-        let thread = self.thread_json_by_id(&child_id, false).await?;
+        let thread = match self.handle_for_thread(&child_id).await {
+            Ok(child) => {
+                connection.subscribe_thread(child).await;
+                self.thread_json_by_id(&child_id, false).await?
+            }
+            Err(_) => {
+                self.register_remote_thread_projection(&parent, &receipt)
+                    .await?
+            }
+        };
         Ok(json!({
             "thread": thread,
             "threadId": child_id,
@@ -3136,7 +3150,19 @@ impl CooldisAppServer {
         &self,
         params: ThreadSubmitParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let target = self.handle_for_thread(&params.thread_id).await?;
+        let target_thread_id = ThreadId::parse_str(&params.thread_id)
+            .map_err(|_| thread_not_found(&params.thread_id))?;
+        let caller = match self.handle_for_thread(&params.thread_id).await {
+            Ok(target) => target,
+            Err(_) => {
+                let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
+                let parent_thread_id = lifecycle
+                    .parent_thread_id
+                    .ok_or_else(|| thread_not_found(&params.thread_id))?;
+                self.handle_for_thread(&parent_thread_id.to_string())
+                    .await?
+            }
+        };
         let dispatch_id = cooldis_runtime_contracts::DispatchId::new(
             params
                 .dispatch_id
@@ -3149,8 +3175,8 @@ impl CooldisAppServer {
             .await
             .map_err(internal_error)?
             .submit_to_thread_with_dispatch(
-                target.context(),
-                target.context().coordinates.thread_id,
+                caller.context(),
+                target_thread_id,
                 dispatch_id,
                 TurnInput::text(params.message),
             )

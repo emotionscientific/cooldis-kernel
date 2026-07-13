@@ -83,8 +83,9 @@ The V1 work is focused on runtime primitives:
   declared event folds;
 - local runtime execution through provider, virtual bash, and Wasm paths;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
-- optional daemon-embedded HTTP propagation for local-first child streams,
-  fenced by durable scoped credentials and leases;
+- daemon-hosted remote child placement: store-backed ingress, separate local
+  child processes, and local-first stream propagation fenced by durable scoped
+  credentials and leases;
 - release packaging for `cooldis`, `cooldis-acp-agent`, and
   `cooldis-mcp-server`.
 

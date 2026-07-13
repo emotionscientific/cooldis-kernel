@@ -33,11 +33,15 @@ use super::lease::{
     LeaseFenceDecision, LeaseFencedAppendOutcome, SqliteStreamLeaseAuthority, StreamLeaseAuthority,
     StreamLeaseGrantV1, StreamLeaseId, StreamPrefixScope, SyncCredentialAuthority,
 };
+use super::queue::{
+    RemoteIngressQueue, SYNC_INGRESS_QUEUE_STREAM_PREFIX, SqliteRemoteIngressQueue,
+    remote_ingress_queue_stream_id, remote_ingress_queue_target,
+};
 use crate::{
     AppServerListenAddr, CooldisError, CooldisResult, DaemonClock, EventKind, EventRecord,
     EventSequence, EventStore, EventStreamId, NewEventRecord, STREAM_APPEND_ACK_SCHEMA_V1,
     STREAM_RECORD_SCHEMA_V1, SqliteSessionStore, StreamAckClass, StreamAppendAckV1, StreamCursorV1,
-    StreamRecordEnvelopeV1,
+    StreamRecordEnvelopeV1, ThreadId,
 };
 use async_trait::async_trait;
 use cooldis_sqlite::{TransactionBehavior, params};
@@ -59,6 +63,9 @@ pub const SYNC_PUSH_REJECTION_WITNESS_SCHEMA_V1: &str =
 
 /// Wire schema identifier for an authenticated cursor pull.
 pub const SYNC_PULL_SCHEMA_V1: &str = "cooldis.stream.sync_pull/1";
+
+/// Wire schema for queue-delivery acknowledgement bookkeeping.
+pub const SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1: &str = "cooldis.stream.sync_ingress_queue_ack/1";
 
 /// Wire schema identifier for an authenticated lease renewal response.
 pub const SYNC_LEASE_RENEWAL_SCHEMA_V1: &str = "cooldis.stream.sync_lease_renewal/1";
@@ -106,6 +113,14 @@ pub struct SyncPullRequestV1 {
 pub struct SyncPullResponseV1 {
     pub schema: String,
     pub records: Vec<StreamRecordEnvelopeV1>,
+}
+
+/// Authenticated acknowledgement of one queue delivery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SyncIngressQueueAckRequestV1 {
+    pub schema: String,
+    pub target_thread_id: ThreadId,
+    pub dispatch_id: cooldis_runtime_contracts::DispatchId,
 }
 
 /// Result of renewing the lease bound to the bearer credential.
@@ -317,6 +332,16 @@ pub trait SyncPullSource: Send + Sync {
     ) -> CooldisResult<Vec<StreamRecordEnvelopeV1>>;
 }
 
+/// Child-side bookkeeping after its own ingress lane accepted a queue row.
+#[async_trait]
+pub trait SyncIngressQueueAcknowledger: Send + Sync {
+    async fn acknowledge_ingress(
+        &self,
+        bearer_token: &str,
+        request: SyncIngressQueueAckRequestV1,
+    ) -> CooldisResult<()>;
+}
+
 /// SQLite-backed daemon endpoint composing credential, lease, and event-store
 /// authorities without adding another append surface.
 #[derive(Clone)]
@@ -324,6 +349,7 @@ pub struct SqliteSyncEndpoint {
     store: SqliteSessionStore,
     authority: Arc<SqliteStreamLeaseAuthority>,
     clock: Arc<dyn DaemonClock>,
+    ingress_queue: SqliteRemoteIngressQueue,
 }
 
 impl std::fmt::Debug for SqliteSyncEndpoint {
@@ -340,10 +366,12 @@ impl SqliteSyncEndpoint {
         authority: Arc<SqliteStreamLeaseAuthority>,
         clock: Arc<dyn DaemonClock>,
     ) -> CooldisResult<Self> {
+        let ingress_queue = SqliteRemoteIngressQueue::new(store.clone()).await?;
         let endpoint = Self {
             store,
             authority,
             clock,
+            ingress_queue,
         };
         endpoint.init_witness_schema().await?;
         Ok(endpoint)
@@ -577,6 +605,17 @@ impl SyncPullSource for SqliteSyncEndpoint {
         if !identity.scope.authorizes(stream_id) {
             return Err(not_authorized());
         }
+        if remote_ingress_queue_target(stream_id).is_some() {
+            return self.ingress_queue.pull_after(stream_id, cursor).await;
+        }
+        if stream_id
+            .as_str()
+            .starts_with(SYNC_INGRESS_QUEUE_STREAM_PREFIX)
+        {
+            return Err(CooldisError::History(
+                "invalid remote ingress queue stream".to_string(),
+            ));
+        }
         let events = match cursor {
             Some(cursor) => {
                 self.store
@@ -590,6 +629,31 @@ impl SyncPullSource for SqliteSyncEndpoint {
             .into_iter()
             .map(|event| event.to_stream_record_v1())
             .collect())
+    }
+}
+
+#[async_trait]
+impl SyncIngressQueueAcknowledger for SqliteSyncEndpoint {
+    async fn acknowledge_ingress(
+        &self,
+        bearer_token: &str,
+        request: SyncIngressQueueAckRequestV1,
+    ) -> CooldisResult<()> {
+        if request.schema != SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1 {
+            return Err(CooldisError::History(
+                "unsupported remote ingress acknowledgement schema".to_string(),
+            ));
+        }
+        let Some(identity) = self.authority.verify_token(bearer_token).await? else {
+            return Err(not_authorized());
+        };
+        let stream_id = remote_ingress_queue_stream_id(request.target_thread_id);
+        if !identity.scope.authorizes(&stream_id) {
+            return Err(not_authorized());
+        }
+        self.ingress_queue
+            .acknowledge(request.target_thread_id, &request.dispatch_id)
+            .await
     }
 }
 

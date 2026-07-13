@@ -43,6 +43,8 @@
 pub mod endpoint;
 pub mod endpoint_http;
 pub mod lease;
+pub mod placement;
+pub(crate) mod process_executor;
 pub mod propagator;
 pub mod queue;
 pub mod tail;

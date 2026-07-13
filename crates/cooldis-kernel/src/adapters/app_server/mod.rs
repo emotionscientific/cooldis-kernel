@@ -53,6 +53,7 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -197,6 +198,9 @@ pub struct CooldisAppServerConfig {
     pub skill_registry_root: PathBuf,
     /// Deployment placement used when a bind surface does not override it.
     pub default_placement: AgentManifestPlacementBinding,
+    /// Generation-local capability bit. The daemon flips this only after the
+    /// configured sync listener has bound successfully.
+    pub remote_event_store_served: Arc<AtomicBool>,
     pub console_assets: Option<ConsoleAssetConfig>,
 }
 
@@ -220,6 +224,7 @@ impl CooldisAppServerConfig {
             blob_registry_root: PathBuf::from(DEFAULT_BLOB_REGISTRY_ROOT),
             skill_registry_root: PathBuf::from(DEFAULT_SKILL_REGISTRY_ROOT),
             default_placement: AgentManifestPlacementBinding::default(),
+            remote_event_store_served: Arc::new(AtomicBool::new(false)),
             console_assets: None,
         }
     }
@@ -478,6 +483,7 @@ struct CooldisAppServerInner {
     blob_registry_root: PathBuf,
     skill_registry_root: PathBuf,
     default_placement: AgentManifestPlacementBinding,
+    remote_event_store_served: Arc<AtomicBool>,
     console_assets: Option<ConsoleAssetConfig>,
     cwd: PathBuf,
     codex_home: PathBuf,
@@ -709,6 +715,7 @@ impl CooldisAppServer {
                 blob_registry_root: config.blob_registry_root,
                 skill_registry_root: config.skill_registry_root,
                 default_placement: config.default_placement,
+                remote_event_store_served: config.remote_event_store_served,
                 console_assets: config.console_assets,
                 cwd: config.cwd,
                 codex_home,
@@ -815,6 +822,16 @@ impl CooldisAppServer {
 
     pub fn session_store_path(&self) -> &Path {
         &self.inner.session_store_path
+    }
+
+    pub(crate) fn mark_remote_event_store_served(&self) {
+        self.inner
+            .remote_event_store_served
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn remote_event_store_served(&self) -> bool {
+        self.inner.remote_event_store_served.load(Ordering::Acquire)
     }
 
     #[cfg(unix)]
@@ -1519,6 +1536,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         AgentManifestPlacementBinding::default(),
+        Arc::new(AtomicBool::new(false)),
     )
 }
 
@@ -1544,6 +1562,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
         Some(config.skill_registry_root.clone()),
         Some(config.cwd.clone()),
         config.default_placement.clone(),
+        Arc::clone(&config.remote_event_store_served),
     )
 }
 
@@ -1561,6 +1580,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     skill_registry_root: Option<PathBuf>,
     cwd: Option<PathBuf>,
     default_placement: AgentManifestPlacementBinding,
+    remote_event_store_served: Arc<AtomicBool>,
 ) -> Arc<dyn crate::AgentRuntimeFactory> {
     // lexicon-allow: capsule - existing app-server runtime factory name
     Arc::new(threads::CapsuleBindingRuntimeFactory {
@@ -1577,6 +1597,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         skill_registry_root,
         cwd,
         default_placement,
+        remote_event_store_served,
     })
 }
 

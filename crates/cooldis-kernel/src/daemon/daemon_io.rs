@@ -1521,6 +1521,31 @@ impl CooldisDaemonIoBridge {
         .await
     }
 
+    /// Child-side remote placement admission. The queue transport has
+    /// already authenticated and scoped the entry; this method preserves its
+    /// exact target and decision while still entering through the ordinary
+    /// durable ingress claim/settle lane (including dedupe ownership).
+    pub(crate) async fn submit_durable_remote_envelope(
+        &self,
+        envelope: IngressEnvelope,
+        target: ResolvedIoTarget,
+        decision: AdmissionDecision,
+        attempt: u32,
+    ) -> IoResult<KernelIoReceipt> {
+        let source_envelopes = [envelope.clone()];
+        let ingress_message_ids = [envelope.id.clone()];
+        self.submit_envelope_with_sources_at_target(
+            envelope,
+            &source_envelopes,
+            &ingress_message_ids,
+            false,
+            Some(attempt),
+            Some(target),
+            Some(decision),
+        )
+        .await
+    }
+
     async fn queued_message_was_applied(&self, message: &LeasedIngressEnvelope) -> IoResult<bool> {
         let ingress_message_ids = [message.envelope.id.clone()];
         let target = self.resolve_target(&message.envelope).await?;
@@ -1589,12 +1614,38 @@ impl CooldisDaemonIoBridge {
         coalesced: bool,
         ingress_attempt: Option<u32>,
     ) -> IoResult<KernelIoReceipt> {
+        self.submit_envelope_with_sources_at_target(
+            envelope,
+            source_envelopes,
+            ingress_message_ids,
+            coalesced,
+            ingress_attempt,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_envelope_with_sources_at_target(
+        &self,
+        envelope: IngressEnvelope,
+        source_envelopes: &[IngressEnvelope],
+        ingress_message_ids: &[String],
+        coalesced: bool,
+        ingress_attempt: Option<u32>,
+        target_override: Option<ResolvedIoTarget>,
+        decision_override: Option<AdmissionDecision>,
+    ) -> IoResult<KernelIoReceipt> {
         if !ingress_message_ids.is_empty() && source_envelopes.len() != ingress_message_ids.len() {
             return Err(IoError::Bridge(
                 "durable ingress requires one message id per source envelope".to_string(),
             ));
         }
-        let mut target = self.resolve_target(&envelope).await?;
+        let mut target = match target_override {
+            Some(target) => target,
+            None => self.resolve_target(&envelope).await?,
+        };
         if !ingress_message_ids.is_empty() {
             match self
                 .ingress_outcome(&target, source_envelopes, ingress_message_ids)
@@ -1631,7 +1682,10 @@ impl CooldisDaemonIoBridge {
                 .await?;
             ingress_event_ids.push(ingress_event.id);
         }
-        let decision = self.decide(&envelope, &target, &state).await?;
+        let decision = match decision_override {
+            Some(decision) => decision,
+            None => self.decide(&envelope, &target, &state).await?,
+        };
         let ingress_source_stream = control_stream_id(&coordinates);
         let admission_event = self
             .record_admission_decided(

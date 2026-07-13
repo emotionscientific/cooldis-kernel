@@ -4,6 +4,7 @@ use super::runtime_utils::{
 };
 use super::{
     CooldisError, CooldisResult, RuntimeHost, RuntimeHostInner, RuntimeThreadHandle, TurnInput,
+    append_thread_joined_first_wins,
 };
 use crate::agent::contracts::{
     CompiledThreadContract, THREAD_HANDLE_KIND, ThreadContractCompiler, ThreadContractReference,
@@ -11,6 +12,9 @@ use crate::agent::contracts::{
     ThreadPropagatorSelection, ThreadReceiptSet, sha256_hex,
 };
 use crate::agent::manifest_bind::{BoundCouplingSet, coupling_set_content_hash};
+use crate::daemon::remote_store::placement::{
+    RemoteThreadExecutor, RemoteThreadSpawnRequest, RemoteThreadSubmitRequest,
+};
 use crate::kernel::history::{
     EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId,
     NewEventRecord, SessionContext, ThreadSpawnedPayload,
@@ -50,10 +54,10 @@ impl RuntimeKernelControl {
 async fn append_thread_spawned_event(
     parent: &RuntimeThreadHandle,
     caller: &ThreadContext,
-    child: &RuntimeThreadHandle,
+    child: &ThreadContext,
     witness: ThreadSpawnWitness,
 ) -> CooldisResult<EventRecord> {
-    let metadata = &child.context().metadata;
+    let metadata = &child.metadata;
     let child_manifest_hash = metadata
         .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
         .cloned()
@@ -75,7 +79,7 @@ async fn append_thread_spawned_event(
         .unwrap_or_else(|| {
             format!(
                 "sha256:{}",
-                sha256_hex(child.context().coordinates.thread_id.to_string().as_bytes())
+                sha256_hex(child.coordinates.thread_id.to_string().as_bytes())
             )
         });
     let child_policy_hash = metadata
@@ -93,7 +97,7 @@ async fn append_thread_spawned_event(
     let payload = ThreadSpawnedPayload {
         parent_thread_id: caller.coordinates.thread_id,
         parent_turn_id: witness.parent_turn_id.clone(),
-        child_thread_id: child.context().coordinates.thread_id,
+        child_thread_id: child.coordinates.thread_id,
         child_manifest_hash,
         child_policy_hash,
         granted,
@@ -330,7 +334,18 @@ impl RuntimeKernelControl {
         let thread_id = ThreadId::parse_str(&dispatched.handle.id).map_err(|err| {
             CooldisError::History(format!("thread dispatch returned invalid handle: {err}"))
         })?;
-        let status = self.host()?.get_thread(thread_id).await?.status();
+        let host = self.host()?;
+        let status = match host.get_thread(thread_id).await {
+            Ok(thread) => thread.status(),
+            Err(CooldisError::ThreadNotFound(_)) => {
+                let executor = host
+                    .remote_thread_executor()
+                    .await
+                    .ok_or_else(|| CooldisError::ThreadNotFound(thread_id))?;
+                executor.observe(thread_id).await?.status
+            }
+            Err(error) => return Err(error),
+        };
         Ok(AgentProcessSpawnReceipt {
             operation: "cooldis.spawn_subagent".to_string(),
             caller_thread_id: caller.coordinates.thread_id,
@@ -415,7 +430,9 @@ impl RuntimeKernelControl {
             .clone()
             .filter(|turn_id| !turn_id.trim().is_empty())
             .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
-        if let Err(err) = append_thread_spawned_event(&parent, caller, &child, witness).await {
+        if let Err(err) =
+            append_thread_spawned_event(&parent, caller, child.context(), witness).await
+        {
             let _ = host.shutdown_thread(child_thread_id).await;
             return Err(err);
         }
@@ -436,6 +453,94 @@ impl RuntimeKernelControl {
             task_name,
             submitted_turn_id: turn_id,
             handle: HandleId::thread(child_thread_id),
+            dispatch_id,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn spawn_remote_child_with_witness(
+        &self,
+        caller: &ThreadContext,
+        task_name: Option<String>,
+        input: TurnInput,
+        mut metadata: BTreeMap<String, String>,
+        witness: ThreadSpawnWitness,
+        compile_payload: Option<serde_json::Value>,
+        bind_payload: Option<serde_json::Value>,
+    ) -> CooldisResult<AgentProcessSpawnReceipt> {
+        let host = self.host()?;
+        let executor = host.remote_thread_executor().await.ok_or_else(|| {
+            CooldisError::RuntimeFactory(
+                "placement target remote requires a served remote thread executor".to_string(),
+            )
+        })?;
+        let coordinates = ThreadCoordinates::new(
+            caller.coordinates.tenant_id.clone(),
+            caller.coordinates.user_id.clone(),
+            caller.coordinates.session_id.clone(),
+        );
+        let task_name = task_name.filter(|name| !name.trim().is_empty());
+        metadata.insert("agent_process_v1".to_string(), "true".to_string());
+        metadata.insert(
+            "spawned_by_thread_id".to_string(),
+            caller.coordinates.thread_id.to_string(),
+        );
+        if let Some(task_name) = &task_name {
+            metadata.insert("task_name".to_string(), task_name.clone());
+        }
+        let child = ThreadContext::with_topology_and_metadata(
+            coordinates,
+            ThreadTopology::spawned_from(caller.coordinates.thread_id),
+            metadata,
+        );
+        let parent = host.get_thread(caller.coordinates.thread_id).await?;
+        let dispatch_id = DispatchId::new(
+            witness
+                .correlation_id
+                .clone()
+                .unwrap_or_else(|| format!("thread-spawn-{}", ThreadSignalId::new())),
+        );
+        let turn_id = witness
+            .submitted_turn_id
+            .clone()
+            .filter(|turn_id| !turn_id.trim().is_empty())
+            .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
+        let spawned = append_thread_spawned_event(&parent, caller, &child, witness).await?;
+        let request = RemoteThreadSpawnRequest {
+            child: child.clone(),
+            task_name: task_name.clone(),
+            turn_id: turn_id.clone(),
+            dispatch_id: dispatch_id.clone(),
+            input,
+            spawned_event_id: spawned.id,
+            compile_payload,
+            bind_payload,
+        };
+        if let Err(error) = executor.spawn(request).await {
+            let _ = append_thread_joined_first_wins(
+                host.runtime_store().as_ref(),
+                caller.coordinates.clone(),
+                child.coordinates.clone(),
+                spawned.id,
+                crate::ThreadTerminalState::Failed,
+                Some(error.to_string()),
+                Some("remote child process failed to start".to_string()),
+                None,
+                "executor:remote-thread",
+                "remote_thread_spawn/v1",
+            )
+            .await;
+            return Err(error);
+        }
+        Ok(AgentProcessSpawnReceipt {
+            operation: "cooldis.spawn_subagent".to_string(),
+            caller_thread_id: caller.coordinates.thread_id,
+            thread_id: child.coordinates.thread_id,
+            parent_thread_id: caller.coordinates.thread_id,
+            status: ThreadStatus::Starting,
+            task_name,
+            submitted_turn_id: turn_id,
+            handle: HandleId::thread(child.coordinates.thread_id),
             dispatch_id,
         })
     }
@@ -603,6 +708,49 @@ impl RuntimeKernelControl {
         let caller_thread = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
+        if let Some((executor, _)) = self
+            .scoped_remote_thread_executor(caller, target_thread_id)
+            .await?
+        {
+            let status = executor
+                .submit(RemoteThreadSubmitRequest {
+                    target_thread_id,
+                    turn_id: turn_id.clone(),
+                    dispatch_id: dispatch_id.clone(),
+                    input,
+                })
+                .await?;
+            let metadata = BTreeMap::from([
+                (
+                    "operation".to_string(),
+                    "cooldis.submit_to_thread".to_string(),
+                ),
+                (
+                    "mode".to_string(),
+                    TurnSubmissionMode::Queue.as_str().to_string(),
+                ),
+            ]);
+            emit_thread_interaction(
+                &caller_thread,
+                interaction_id,
+                ThreadInteractionKind::PromptSubmitted,
+                caller.coordinates.thread_id,
+                target_thread_id,
+                None,
+                Some(turn_id.clone()),
+                None,
+                metadata,
+            );
+            return Ok(AgentProcessSubmitReceipt {
+                operation: "cooldis.submit_to_thread".to_string(),
+                caller_thread_id: caller.coordinates.thread_id,
+                target_thread_id,
+                interaction_id,
+                status,
+                turn_id,
+                dispatch_id,
+            });
+        }
         let target = self.scoped_thread(caller, target_thread_id).await?;
         let submitted = host
             .reserve_turn_submission_with_admission(
@@ -674,6 +822,47 @@ impl RuntimeKernelControl {
         let caller_thread = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
+        if let Some((executor, _)) = self
+            .scoped_remote_thread_executor(caller, target_thread_id)
+            .await?
+        {
+            let waited = executor.wait(target_thread_id, timeout_ms).await?;
+            let result_interaction_id = if !waited.timed_out {
+                waited
+                    .observation
+                    .latest_output
+                    .as_ref()
+                    .map(|latest_output| {
+                        let interaction_id = RuntimeEventId::new();
+                        emit_thread_interaction(
+                            &caller_thread,
+                            interaction_id,
+                            ThreadInteractionKind::ResultAttached,
+                            target_thread_id,
+                            caller.coordinates.thread_id,
+                            None,
+                            None,
+                            Some(thread_interaction_preview(latest_output)),
+                            BTreeMap::from([(
+                                "operation".to_string(),
+                                "cooldis.wait_thread".to_string(),
+                            )]),
+                        );
+                        interaction_id
+                    })
+            } else {
+                None
+            };
+            return Ok(AgentProcessWaitReceipt {
+                operation: "cooldis.wait_thread".to_string(),
+                caller_thread_id: caller.coordinates.thread_id,
+                target_thread_id,
+                status: waited.observation.status,
+                timed_out: waited.timed_out,
+                latest_output: waited.observation.latest_output,
+                result_interaction_id,
+            });
+        }
         let target = self.scoped_thread(caller, target_thread_id).await?;
         let timed_out = match timeout_ms {
             Some(timeout_ms) => tokio::time::timeout(
@@ -855,6 +1044,19 @@ impl RuntimeKernelControl {
         caller: &ThreadContext,
         target_thread_id: ThreadId,
     ) -> CooldisResult<AgentProcessStatusReceipt> {
+        if let Some((executor, remote_context)) = self
+            .scoped_remote_thread_executor(caller, target_thread_id)
+            .await?
+        {
+            let observation = executor.observe(target_thread_id).await?;
+            return Ok(AgentProcessStatusReceipt {
+                operation: "cooldis.thread_status".to_string(),
+                caller_thread_id: caller.coordinates.thread_id,
+                target_thread_id,
+                parent_thread_id: remote_context.parent_thread_id,
+                status: observation.status,
+            });
+        }
         let target = self.scoped_thread(caller, target_thread_id).await?;
         Ok(AgentProcessStatusReceipt {
             operation: "cooldis.thread_status".to_string(),
@@ -1004,17 +1206,37 @@ impl RuntimeKernelControl {
     ) -> CooldisResult<RuntimeThreadHandle> {
         let host = self.host()?;
         let target = host.get_thread(target_thread_id).await?;
-        let requested = caller.coordinates.scope();
-        let actual = target.context().coordinates.scope();
-        if requested != actual {
-            return Err(CooldisError::ThreadScopeMismatch {
-                thread_id: target_thread_id,
-                requested: Box::new(requested),
-                actual: Box::new(actual),
-            });
-        }
+        ensure_thread_scope(caller, &target.context().coordinates)?;
         Ok(target)
     }
+
+    async fn scoped_remote_thread_executor(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+    ) -> CooldisResult<Option<(Arc<dyn RemoteThreadExecutor>, ThreadContext)>> {
+        let Some(executor) = self.host()?.remote_thread_executor().await else {
+            return Ok(None);
+        };
+        let Some(context) = executor.context(target_thread_id).await else {
+            return Ok(None);
+        };
+        ensure_thread_scope(caller, &context.coordinates)?;
+        Ok(Some((executor, context)))
+    }
+}
+
+fn ensure_thread_scope(caller: &ThreadContext, target: &ThreadCoordinates) -> CooldisResult<()> {
+    let requested = caller.coordinates.scope();
+    let actual = target.scope();
+    if requested != actual {
+        return Err(CooldisError::ThreadScopeMismatch {
+            thread_id: target.thread_id,
+            requested: Box::new(requested),
+            actual: Box::new(actual),
+        });
+    }
+    Ok(())
 }
 
 /// Derives the target-scoped interaction identity for a local submit fold.
@@ -1031,4 +1253,24 @@ fn submit_dispatch_interaction_id(
     value = (value & !(0xf_u128 << 76)) | (8_u128 << 76);
     value = (value & !(0b11_u128 << 62)) | (0b10_u128 << 62);
     RuntimeEventId::from_uuid(uuid::Uuid::from_u128(value))
+}
+
+#[cfg(test)]
+mod remote_scope_tests {
+    use super::*;
+
+    #[test]
+    fn remote_execution_preserves_the_local_thread_scope_fence() {
+        let caller = ThreadContext::root(ThreadCoordinates::new("tenant", "user", "session-a"));
+        let target = ThreadContext::with_topology(
+            ThreadCoordinates::new("tenant", "user", "session-b"),
+            ThreadTopology::spawned_from(caller.coordinates.thread_id),
+        );
+        let error = ensure_thread_scope(&caller, &target.coordinates).unwrap_err();
+        assert!(matches!(
+            error,
+            CooldisError::ThreadScopeMismatch { thread_id, .. }
+                if thread_id == target.coordinates.thread_id
+        ));
+    }
 }

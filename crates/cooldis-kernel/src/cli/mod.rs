@@ -2,6 +2,9 @@ use crate::daemon::handle_ingress::ThreadHandleIngressAdapter;
 use crate::daemon::remote_store::endpoint::{CooldisDaemonSyncConfig, SqliteSyncEndpoint};
 use crate::daemon::remote_store::endpoint_http::DaemonSyncHttpServer;
 use crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority;
+use crate::daemon::remote_store::process_executor::{
+    ProcessRemoteThreadExecutor, RemoteChildBootstrapV1, is_remote_child_command, run_remote_child,
+};
 use crate::{
     APP_SERVER_ANTHROPIC_BEDROCK_MODEL, APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
     APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
@@ -58,6 +61,12 @@ mod chat;
 
 pub async fn run() -> CooldisResult<()> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if args
+        .first()
+        .is_some_and(|command| is_remote_child_command(command))
+    {
+        return remote_child_run().await;
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
@@ -1481,7 +1490,13 @@ async fn daemon_run(args: Vec<OsString>) -> CooldisResult<()> {
     let listen = config.listen.clone();
 
     let server = CooldisAppServer::new_local(config).await?;
-    let _io_tasks = start_daemon_io(&loaded.config.io, &loaded.config.sync, &server).await?;
+    let _io_tasks = start_daemon_io(
+        &loaded.config.io,
+        &loaded.config.sync,
+        loaded.path.clone(),
+        &server,
+    )
+    .await?;
     eprintln!(
         "cooldis daemon listening on {}",
         loaded.config.app_server.listen
@@ -1786,6 +1801,7 @@ fn browser_open_command(_url: &str) -> CooldisResult<std::process::Command> {
 async fn start_daemon_io(
     io: &CooldisIoConfig,
     sync: &CooldisDaemonSyncConfig,
+    daemon_config_path: Option<PathBuf>,
     server: &CooldisAppServer,
 ) -> CooldisResult<Vec<JoinHandle<()>>> {
     let bridge = CooldisDaemonIoBridge::from_app_server(server);
@@ -1819,7 +1835,7 @@ async fn start_daemon_io(
             }
         }
     }
-    start_daemon_sync(sync, server, &mut tasks).await?;
+    start_daemon_sync(sync, daemon_config_path, server, &mut tasks).await?;
 
     if !io.routes.is_empty() {
         eprintln!(
@@ -1833,6 +1849,7 @@ async fn start_daemon_io(
 
 async fn start_daemon_sync(
     config: &CooldisDaemonSyncConfig,
+    daemon_config_path: Option<PathBuf>,
     app_server: &CooldisAppServer,
     tasks: &mut Vec<JoinHandle<()>>,
 ) -> CooldisResult<()> {
@@ -1846,11 +1863,38 @@ async fn start_daemon_sync(
     let authority = Arc::new(
         SqliteStreamLeaseAuthority::new(store.clone(), config.clone(), Arc::clone(&clock)).await?,
     );
-    let endpoint = Arc::new(SqliteSyncEndpoint::new(store, authority, clock).await?);
+    let endpoint =
+        Arc::new(SqliteSyncEndpoint::new(store.clone(), Arc::clone(&authority), clock).await?);
     let server = DaemonSyncHttpServer::bind(listen, endpoint).await?;
+    let sync_endpoint = server.display_addr()?;
+    let child_root = app_server
+        .session_store_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("remote-children");
+    let executor = Arc::new(
+        ProcessRemoteThreadExecutor::new(
+            store,
+            authority,
+            sync_endpoint.clone(),
+            daemon_config_path,
+            child_root,
+            std::env::current_exe().map_err(|error| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to locate executable for remote placement: {error}"
+                ))
+            })?,
+        )
+        .await?,
+    );
+    app_server
+        .supervisor()
+        .set_remote_thread_executor(app_server.tenant_id(), Some(executor))
+        .await?;
+    app_server.mark_remote_event_store_served();
     eprintln!(
         "cooldis daemon sync endpoint listening on {}",
-        server.display_addr()?
+        sync_endpoint
     );
     tasks.push(tokio::spawn(async move {
         if let Err(error) = server.serve().await {
@@ -1858,6 +1902,26 @@ async fn start_daemon_sync(
         }
     }));
     Ok(())
+}
+
+async fn remote_child_run() -> CooldisResult<()> {
+    let mut encoded = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut encoded)
+        .map_err(|error| {
+            CooldisError::RuntimeExecution(format!(
+                "failed to read remote child bootstrap: {error}"
+            ))
+        })?;
+    let bootstrap =
+        serde_json::from_slice::<RemoteChildBootstrapV1>(&encoded).map_err(|error| {
+            CooldisError::RuntimeExecution(format!(
+                "failed to decode remote child bootstrap: {error}"
+            ))
+        })?;
+    let loaded = load_cooldis_daemon_config(bootstrap.daemon_config_path.as_deref())?;
+    let config = daemon_app_server_config_from_loaded(&loaded)?;
+    run_remote_child(config, bootstrap).await
 }
 
 /// Starts the push-first settlement lane independently of external route

@@ -33,6 +33,8 @@ allowed to exercise.
 - Resume work from durable records.
 - Start idempotent process handles whose terminal outcomes re-enter the owning
   thread through durable ingress.
+- Place manifest-bound child threads in separate local processes through the
+  daemon's authenticated store-backed queue and stream-sync surface.
 - Publish the same declared agent shape toward managed placement when the cloud
   path is ready.
 
@@ -75,7 +77,8 @@ couplings, witnessed OpenAPI operation imports, offline coupling replay,
 local runtime execution, provider adapters,
 virtual bash, VFS,
 skill-package resources, daemon/RPC surfaces, daemon-embedded store-primary
-stream propagation, and the proof path for packageable local agents.
+stream propagation, store-backed remote child placement, and the proof path for
+packageable local agents.
 
 The managed cloud, public package registry, private marketplace, and stateful
 harness product layer are V2 direction.
@@ -87,6 +90,7 @@ harness product layer are V2 direction.
 - [Local To Managed Deployment](concepts/local-to-managed.md)
 - [Permissions And Governance](concepts/permissions-and-governance.md)
 - [Runtime Primitives](developers/runtime-primitives.md)
+- [Daemon And Remote Placement](daemon.md)
 - [Protocol Surfaces](developers/protocol-surfaces.md)
 - [OpenAPI Operation Imports](openapi-adapter.md)
 - [How Cooldis Is Tested](how-cooldis-is-tested.md)

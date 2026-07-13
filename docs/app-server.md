@@ -230,8 +230,12 @@ start another child. The durable request continues to carry that identity in
 its existing `correlation_id` field, as specified by ADR 0006.
 
 `thread/submit` accepts `{ "threadId", "message", "dispatchId"? }`. Its local
-lane binds the dispatch identity to the target turn reservation, so a retry
-returns the same turn identity without injecting a second queued input.
+lane binds the dispatch identity to the target turn reservation. For a remotely
+placed child it instead lands the same identity in that child's store-hosted
+queue; the child pulls it through the sync endpoint and admits it through its
+own durable ingress lane. In both placements a retry returns the same turn
+identity without injecting a second queued input, and a different payload under
+the same identity is rejected.
 
 ## Thread Forks
 
@@ -272,13 +276,19 @@ metadata. Relative agent registry roots and operation registry roots are
 resolved against the configured runtime `cwd`, matching the root reported by
 `config/read`.
 
-`thread/start` also accepts an optional operator placement binding:
+`thread/start` parses an optional operator placement binding:
 `{"placement":{"target":"local","executor_ref":null,"config":{}}}`. The
 same additive `placement` parameter is accepted by manifest-binding
 `thread/spawn` and `thread/rebindFork` calls. It overrides
 `daemon.runtime.placement`; existing callers that omit it keep using the daemon
 default. The model-visible `thread_spawn` tool remains
 `{task_name, message, agent_ref}` and cannot select placement.
+
+Remote execution in this slice is deliberately a conductor-to-child operation:
+only `thread/spawn` executes a `remote` binding, and only after this daemon
+generation has bound and started its configured sync endpoint. `thread/start`,
+daemon routes, and `thread/rebindFork` reject a remote binding rather than
+silently starting it in the local runtime. `sandbox` remains fail-closed.
 
 At startup the app-server also publishes a kernel-synthesized default manifest
 as `agent://cooldis/default@latest`. Its envelope is the configured provider,
@@ -310,9 +320,10 @@ the thread event stream before the first turn. The placement fact is derived
 from the same effective binding stored on the bind receipt, including defaulted
 local, so the receipt cannot commit without its witness. The compile and bind
 events are discharged and include provenance. An `@latest` start includes the
-alias resolution receipt in the compile event payload. Until the remote
-EventStore backend lands, a resolved `remote` or `sandbox` target fails closed
-at bind with an error naming that missing capability.
+alias resolution receipt in the compile event payload. A remote child records
+the same bind receipt and unchanged `placement.decision` in its local stream
+before that stream converges to the parent store. Without a served sync backend,
+`remote` retains the missing-capability error; `sandbox` always does.
 
 ## Thinking Config
 

@@ -10659,6 +10659,7 @@ where
         None,
         None,
         config.default_placement.clone(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     CooldisAppServer::with_runtime_factory(config, factory)
         .await

@@ -531,6 +531,97 @@ async fn test_server() -> CooldisAppServer {
     test_server_at_root(&test_root("server")).await
 }
 
+#[tokio::test]
+async fn remote_queue_redelivery_enters_child_ingress_once() {
+    const QUEUE_DELIVERY_CRASH_DST_SEED: u64 = 0x4300_0000_0000_0002;
+
+    let root = test_root(&format!(
+        "remote-queue-redelivery-{QUEUE_DELIVERY_CRASH_DST_SEED:016x}"
+    ));
+    let server = test_server_at_root(&root).await;
+    let supervisor = server.supervisor();
+    let child = supervisor
+        .start_thread(ThreadStartRequest {
+            tenant_id: server.tenant_id().to_string(),
+            user_id: server.user_id().to_string(),
+            session_id: "remote-child-session".to_string(),
+            topology: ThreadTopology::root(),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+    let child_coordinates = child.context().coordinates.clone();
+    let session_store_path = server.session_store_path().to_path_buf();
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let source = IoSource::new("cooldis.remote", "ingress");
+    let mut envelope = IngressEnvelope::new(
+        source.clone(),
+        IoConversation::new("remote-child", ConversationKind::System),
+        IngressContent::text("deliver once"),
+        now_ms(),
+    )
+    .with_dedupe_key(IoDedupeKey::for_source(&source, "dispatch-redelivery"));
+    envelope.id = "remote-ingress-redelivery".to_string();
+    let mut target = ResolvedIoTarget::new(
+        ThreadAddress::new(
+            server.tenant_id(),
+            server.user_id(),
+            child.context().coordinates.session_id.clone(),
+        )
+        .with_thread_id(child.context().coordinates.thread_id.to_string()),
+    );
+    target.create_thread_if_missing = false;
+    let decision =
+        AdmissionDecision::queue("remote-redelivery-turn", IoTurnInput::text("deliver once"));
+
+    bridge
+        .submit_durable_remote_envelope(envelope.clone(), target.clone(), decision.clone(), 1)
+        .await
+        .unwrap();
+    // Seeded crash cut: admission committed, parent-side queue ack did not.
+    // Drop the child generation and make its cold replacement re-present the
+    // identical envelope against the same durable state.
+    drop(bridge);
+    drop(child);
+    drop(supervisor);
+    drop(server);
+    let (restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&root).await;
+    restarted_bridge
+        .submit_durable_remote_envelope(envelope, target, decision, 2)
+        .await
+        .unwrap();
+
+    let store = SqliteSessionStore::open(&session_store_path).await.unwrap();
+    let events = store
+        .read_events(&EventStreamId::for_thread(&child_coordinates), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        1,
+        "lost queue acknowledgement must not inject a second child turn"
+    );
+    let control = store
+        .read_events(&control_stream_id(&child_coordinates), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        control
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1,
+        "the durable ingress claim is the child-side dedupe authority"
+    );
+    drop(store);
+    drop(restarted_bridge);
+    drop(restarted_server);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 async fn test_server_at_root(fixture_root: &Path) -> CooldisAppServer {
     let socket_path = fixture_root.join("app-server.sock");
     let listen = AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();

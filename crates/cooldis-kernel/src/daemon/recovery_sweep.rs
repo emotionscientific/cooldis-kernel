@@ -280,12 +280,12 @@ fn fold_joined_spawn_ids(events: &[EventRecord]) -> CooldisResult<BTreeSet<Strin
 }
 
 #[derive(Clone)]
-struct ChildTerminalTruth {
-    state: ThreadTerminalState,
-    outcome_reason: Option<String>,
-    kind: EventKind,
-    stream_id: EventStreamId,
-    event_id: crate::EventRecordId,
+pub(crate) struct ChildTerminalTruth {
+    pub(crate) state: ThreadTerminalState,
+    pub(crate) outcome_reason: Option<String>,
+    pub(crate) kind: EventKind,
+    pub(crate) stream_id: EventStreamId,
+    pub(crate) event_id: crate::EventRecordId,
 }
 
 fn fold_child_terminal_truth(
@@ -293,26 +293,13 @@ fn fold_child_terminal_truth(
     submitted_turn_id: &str,
 ) -> CooldisResult<Option<ChildTerminalTruth>> {
     let mut terminal: Option<ChildTerminalTruth> = None;
-    for event in events
-        .iter()
-        .filter(|event| terminal_record_names_turn(event, submitted_turn_id))
-    {
-        let (state, default_reason) = match event.kind {
-            EventKind::TurnCompleted | EventKind::LoopCompleted => {
-                (ThreadTerminalState::Completed, None)
-            }
-            EventKind::LoopBudgetExhausted => (
-                ThreadTerminalState::BudgetExhausted,
-                Some("child thread budget exhausted"),
-            ),
-            EventKind::LoopDenied | EventKind::LoopBlocked => {
-                (ThreadTerminalState::Failed, Some("child thread failed"))
-            }
-            _ => continue,
+    for event in events.iter() {
+        let Some(projected) = project_child_terminal_record(event, submitted_turn_id) else {
+            continue;
         };
         if terminal
             .as_ref()
-            .is_some_and(|existing| existing.state != state)
+            .is_some_and(|existing| existing.state != projected.state)
         {
             return Err(CooldisError::History(format!(
                 "child stream has conflicting terminal records ending at {}",
@@ -320,16 +307,42 @@ fn fold_child_terminal_truth(
             )));
         }
         if terminal.is_none() {
-            terminal = Some(ChildTerminalTruth {
-                state,
-                outcome_reason: default_reason.map(ToString::to_string),
-                kind: event.kind,
-                stream_id: event.stream_id.clone(),
-                event_id: event.id,
-            });
+            terminal = Some(projected);
         }
     }
     Ok(terminal)
+}
+
+/// Project one durable child record through EMO-426's turn-scoped terminal
+/// law. Live remote tails and startup recovery share this exact mapping so a
+/// restart cannot reinterpret the same child fact differently.
+pub(crate) fn project_child_terminal_record(
+    event: &EventRecord,
+    submitted_turn_id: &str,
+) -> Option<ChildTerminalTruth> {
+    if !terminal_record_names_turn(event, submitted_turn_id) {
+        return None;
+    }
+    let (state, default_reason) = match event.kind {
+        EventKind::TurnCompleted | EventKind::LoopCompleted => {
+            (ThreadTerminalState::Completed, None)
+        }
+        EventKind::LoopBudgetExhausted => (
+            ThreadTerminalState::BudgetExhausted,
+            Some("child thread budget exhausted"),
+        ),
+        EventKind::LoopDenied | EventKind::LoopBlocked => {
+            (ThreadTerminalState::Failed, Some("child thread failed"))
+        }
+        _ => return None,
+    };
+    Some(ChildTerminalTruth {
+        state,
+        outcome_reason: default_reason.map(ToString::to_string),
+        kind: event.kind,
+        stream_id: event.stream_id.clone(),
+        event_id: event.id,
+    })
 }
 
 /// A spawned handle settles the first turn named durably by its spawn request.

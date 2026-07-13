@@ -2,11 +2,12 @@ use crate::agent::manifest_bind::canonical_json_hash;
 use crate::{
     AgentManifestBindReceipt, BoundCouplingSet, CooldisError, CooldisResult, EventKind,
     EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId, HistoryError,
-    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, NewEventRecord, RuntimeHost,
-    RuntimeThreadHandle, STD_SUPERVISOR_SPAWN_TEMPLATE_ID, THREAD_AGENT_MANIFEST_HASH_METADATA,
-    THREAD_BOUND_COUPLING_SET_METADATA, THREAD_SPAWN_GRANTED_METADATA,
-    THREAD_SPAWN_INPUTS_HASH_METADATA, THREADS_SPAWN_CAPABILITY, ThreadCoordinates, ThreadId,
-    ThreadSpawnRequestedPayload, ThreadSpawnWitness, ThreadSpawnedPayload, TurnInput,
+    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, NewEventRecord, PlacementTarget,
+    RuntimeHost, RuntimeThreadHandle, STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
+    THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA, THREADS_SPAWN_CAPABILITY,
+    ThreadCoordinates, ThreadId, ThreadSpawnRequestedPayload, ThreadSpawnWitness,
+    ThreadSpawnedPayload, TurnInput,
 };
 use cooldis_runtime_contracts::{DispatchId, HandleId};
 use serde_json::{Value as JsonValue, json};
@@ -595,37 +596,80 @@ impl ThreadSpawnProjector {
             .submitted_turn_id
             .clone()
             .unwrap_or_else(|| format!("thread-spawn-{}", request_event.id));
-        let receipt = self
-            .host
-            .kernel_control()
-            .spawn_child_with_witness(
-                parent.context(),
-                payload
-                    .task_name
-                    .clone()
-                    .or_else(|| Some(payload.correlation_id.clone())),
-                TurnInput::text(payload.initial_submission.clone()),
-                metadata,
-                ThreadSpawnWitness {
-                    parent_turn_id: payload.parent_turn_id.clone(),
-                    correlation_id: Some(payload.correlation_id.clone()),
-                    request_stream_id: Some(request_event.stream_id.clone()),
-                    request_event_id: Some(request_event.id),
-                    submitted_turn_id: Some(submitted_turn_id),
-                },
-            )
-            .await?;
-        if let Some(binding) = agent_binding {
-            self.host
-                .kernel_control()
-                .record_manifest_receipts_for_thread(
-                    parent.context(),
-                    receipt.thread_id,
-                    binding.compile_receipt,
-                    binding.bind_receipt,
-                )
-                .await?;
-        }
+        let placement = agent_binding
+            .as_ref()
+            .map(|binding| {
+                serde_json::from_value::<AgentManifestBindReceipt>(binding.bind_receipt.clone())
+                    .map(|receipt| receipt.placement.unwrap_or_default().target)
+                    .map_err(|err| {
+                        CooldisError::RuntimeFactory(format!(
+                            "thread spawn projector agent_ref bind receipt is invalid: {err}"
+                        ))
+                    })
+            })
+            .transpose()?
+            .unwrap_or(PlacementTarget::Local);
+        let task_name = payload
+            .task_name
+            .clone()
+            .or_else(|| Some(payload.correlation_id.clone()));
+        let witness = ThreadSpawnWitness {
+            parent_turn_id: payload.parent_turn_id.clone(),
+            correlation_id: Some(payload.correlation_id.clone()),
+            request_stream_id: Some(request_event.stream_id.clone()),
+            request_event_id: Some(request_event.id),
+            submitted_turn_id: Some(submitted_turn_id),
+        };
+        let receipt = match placement {
+            PlacementTarget::Local => {
+                let receipt = self
+                    .host
+                    .kernel_control()
+                    .spawn_child_with_witness(
+                        parent.context(),
+                        task_name,
+                        TurnInput::text(payload.initial_submission.clone()),
+                        metadata,
+                        witness,
+                    )
+                    .await?;
+                if let Some(binding) = agent_binding {
+                    self.host
+                        .kernel_control()
+                        .record_manifest_receipts_for_thread(
+                            parent.context(),
+                            receipt.thread_id,
+                            binding.compile_receipt,
+                            binding.bind_receipt,
+                        )
+                        .await?;
+                }
+                receipt
+            }
+            PlacementTarget::Remote => {
+                let (compile_payload, bind_payload) = agent_binding
+                    .map(|binding| (Some(binding.compile_receipt), Some(binding.bind_receipt)))
+                    .unwrap_or_default();
+                self.host
+                    .kernel_control()
+                    .spawn_remote_child_with_witness(
+                        parent.context(),
+                        task_name,
+                        TurnInput::text(payload.initial_submission.clone()),
+                        metadata,
+                        witness,
+                        compile_payload,
+                        bind_payload,
+                    )
+                    .await?
+            }
+            PlacementTarget::Sandbox => {
+                return Err(CooldisError::RuntimeFactory(
+                    "placement target sandbox requires the remote EventStore backend capability, which is not available"
+                        .to_string(),
+                ));
+            }
+        };
         Ok(ThreadSpawnProjected {
             request_event_id: request_event.id,
             child_thread_id: receipt.thread_id,

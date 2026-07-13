@@ -268,6 +268,19 @@ impl CooldisSupervisor {
         Ok(())
     }
 
+    pub async fn set_remote_thread_executor(
+        &self,
+        tenant_id: &str,
+        executor: Option<Arc<dyn crate::daemon::remote_store::placement::RemoteThreadExecutor>>,
+    ) -> CooldisResult<()> {
+        self.tenant(tenant_id)
+            .await?
+            .host
+            .set_remote_thread_executor(executor)
+            .await;
+        Ok(())
+    }
+
     pub(crate) async fn kernel_control(
         &self,
         tenant_id: &str,

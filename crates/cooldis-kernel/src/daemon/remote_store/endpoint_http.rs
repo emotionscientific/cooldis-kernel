@@ -6,7 +6,8 @@
 //! `Authorization` header and is never rendered in diagnostics or `Debug`.
 
 use super::endpoint::{
-    SYNC_LEASE_RENEWAL_SCHEMA_V1, SYNC_PULL_SCHEMA_V1, SqliteSyncEndpoint,
+    SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1, SYNC_LEASE_RENEWAL_SCHEMA_V1, SYNC_PULL_SCHEMA_V1,
+    SqliteSyncEndpoint, SyncIngressQueueAckRequestV1, SyncIngressQueueAcknowledger,
     SyncLeaseRenewalResponseV1, SyncLeaseRenewer, SyncPullRequestV1, SyncPullResponseV1,
     SyncPullSource, SyncPushGate, SyncPushOutcome, SyncPushRejectionReason, SyncPushRequestV1,
 };
@@ -26,7 +27,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 #[cfg(unix)]
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HEADER_COUNT: usize = 128;
@@ -38,6 +39,7 @@ const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(1);
 const PUSH_PATH: &str = "/v1/sync/push";
 const PULL_PATH: &str = "/v1/sync/pull";
 const RENEW_PATH: &str = "/v1/sync/renew";
+const INGRESS_ACK_PATH: &str = "/v1/sync/ingress/ack";
 
 enum SyncListener {
     Tcp(TcpListener),
@@ -346,6 +348,29 @@ where
                 .await?;
             }
         },
+        INGRESS_ACK_PATH => {
+            let ack = match serde_json::from_slice::<SyncIngressQueueAckRequestV1>(&request.body) {
+                Ok(ack) if ack.schema == SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1 => ack,
+                _ => {
+                    write_json(&mut stream, 400, &json!({ "error": "invalid_request" })).await?;
+                    return Ok(());
+                }
+            };
+            match endpoint.acknowledge_ingress(bearer, ack).await {
+                Ok(()) => write_json(&mut stream, 200, &json!({ "acknowledged": true })).await?,
+                Err(CooldisError::History(message)) if message == "sync pull not authorized" => {
+                    write_json(&mut stream, 403, &json!({ "error": "not_authorized" })).await?;
+                }
+                Err(_) => {
+                    write_json(
+                        &mut stream,
+                        503,
+                        &json!({ "error": "endpoint_unavailable" }),
+                    )
+                    .await?;
+                }
+            }
+        }
         _ => write_json(&mut stream, 404, &json!({ "error": "not_found" })).await?,
     }
     Ok(())
@@ -589,17 +614,28 @@ fn protocol_error(message: impl Into<String>) -> CooldisError {
     CooldisError::RuntimeExecution(message.into())
 }
 
-/// Reqwest child-side projection of the daemon sync endpoint.
+/// Child-side projection of the daemon sync endpoint. TCP/TLS origins use
+/// reqwest; Unix listeners use the same bounded HTTP/1.1 wire over a local
+/// socket so placement capability is identical for every served listener.
 #[derive(Clone)]
 pub struct HttpSyncClient {
-    client: reqwest::Client,
-    base_url: String,
+    transport: SyncClientTransport,
+}
+
+#[derive(Clone)]
+enum SyncClientTransport {
+    Network {
+        client: reqwest::Client,
+        base_url: String,
+    },
+    #[cfg(unix)]
+    Unix { path: PathBuf },
 }
 
 impl std::fmt::Debug for HttpSyncClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpSyncClient")
-            .field("base_url", &self.base_url)
+            .field("endpoint", &self.endpoint_label())
             .finish_non_exhaustive()
     }
 }
@@ -607,6 +643,19 @@ impl std::fmt::Debug for HttpSyncClient {
 impl HttpSyncClient {
     pub fn new(base_url: impl Into<String>) -> CooldisResult<Self> {
         let base_url = base_url.into();
+        #[cfg(unix)]
+        if let Some(path) = base_url.strip_prefix("unix://") {
+            if path.is_empty() {
+                return Err(CooldisError::RuntimeFactory(
+                    "sync endpoint Unix URL requires a path".to_string(),
+                ));
+            }
+            return Ok(Self {
+                transport: SyncClientTransport::Unix {
+                    path: PathBuf::from(path),
+                },
+            });
+        }
         let parsed = reqwest::Url::parse(&base_url).map_err(|_| {
             CooldisError::RuntimeFactory("sync endpoint URL is invalid".to_string())
         })?;
@@ -628,9 +677,19 @@ impl HttpSyncClient {
         }
         let base_url = parsed.as_str().trim_end_matches('/').to_string();
         Ok(Self {
-            client: reqwest::Client::new(),
-            base_url,
+            transport: SyncClientTransport::Network {
+                client: reqwest::Client::new(),
+                base_url,
+            },
         })
+    }
+
+    fn endpoint_label(&self) -> String {
+        match &self.transport {
+            SyncClientTransport::Network { base_url, .. } => base_url.clone(),
+            #[cfg(unix)]
+            SyncClientTransport::Unix { path } => format!("unix://{}", path.display()),
+        }
     }
 
     async fn send<T: Serialize + ?Sized>(
@@ -639,25 +698,95 @@ impl HttpSyncClient {
         bearer_token: &str,
         body: &T,
     ) -> CooldisResult<(reqwest::StatusCode, Vec<u8>)> {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.base_url))
-            .bearer_auth(bearer_token)
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| transport_error("request"))?;
-        let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| transport_error("response"))?;
-        Ok((status, bytes.to_vec()))
+        match &self.transport {
+            SyncClientTransport::Network { client, base_url } => {
+                let response = client
+                    .post(format!("{base_url}{path}"))
+                    .bearer_auth(bearer_token)
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(|_| transport_error("request"))?;
+                let status = response.status();
+                let bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|_| transport_error("response"))?;
+                Ok((status, bytes.to_vec()))
+            }
+            #[cfg(unix)]
+            SyncClientTransport::Unix { path: socket } => {
+                send_unix_request(socket, path, bearer_token, body).await
+            }
+        }
     }
 
     fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CooldisResult<T> {
         serde_json::from_slice(bytes).map_err(|_| transport_error("response decode"))
     }
+}
+
+#[cfg(unix)]
+async fn send_unix_request<T: Serialize + ?Sized>(
+    socket: &std::path::Path,
+    path: &str,
+    bearer_token: &str,
+    body: &T,
+) -> CooldisResult<(reqwest::StatusCode, Vec<u8>)> {
+    let body = serde_json::to_vec(body).map_err(|_| transport_error("request encode"))?;
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(|_| transport_error("request"))?;
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|_| transport_error("request"))?;
+    stream
+        .write_all(&body)
+        .await
+        .map_err(|_| transport_error("request"))?;
+    stream
+        .shutdown()
+        .await
+        .map_err(|_| transport_error("request"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|_| transport_error("response"))?;
+    decode_unix_response(&response)
+}
+
+#[cfg(unix)]
+fn decode_unix_response(response: &[u8]) -> CooldisResult<(reqwest::StatusCode, Vec<u8>)> {
+    let header_end = find_bytes(response, b"\r\n\r\n")
+        .map(|index| index + 4)
+        .ok_or_else(|| transport_error("response headers"))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| transport_error("response headers"))?;
+    let mut lines = headers.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .and_then(|status| reqwest::StatusCode::from_u16(status).ok())
+        .ok_or_else(|| transport_error("response status"))?;
+    let content_length = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .ok_or_else(|| transport_error("response content length"))?;
+    let end = header_end
+        .checked_add(content_length)
+        .ok_or_else(|| transport_error("response size"))?;
+    if response.len() != end {
+        return Err(transport_error("response body"));
+    }
+    Ok((status, response[header_end..end].to_vec()))
 }
 
 #[async_trait::async_trait]
@@ -707,6 +836,34 @@ impl SyncPullSource for HttpSyncClient {
             return Err(transport_error("pull schema"));
         }
         Ok(response.records)
+    }
+}
+
+#[async_trait::async_trait]
+impl SyncIngressQueueAcknowledger for HttpSyncClient {
+    async fn acknowledge_ingress(
+        &self,
+        bearer_token: &str,
+        request: SyncIngressQueueAckRequestV1,
+    ) -> CooldisResult<()> {
+        let (status, body) = self.send(INGRESS_ACK_PATH, bearer_token, &request).await?;
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(CooldisError::History(
+                "sync pull not authorized".to_string(),
+            ));
+        }
+        if !status.is_success() {
+            return Err(transport_error("ingress acknowledgement"));
+        }
+        let response = Self::decode::<serde_json::Value>(&body)?;
+        if response
+            .get("acknowledged")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err(transport_error("ingress acknowledgement response"));
+        }
+        Ok(())
     }
 }
 

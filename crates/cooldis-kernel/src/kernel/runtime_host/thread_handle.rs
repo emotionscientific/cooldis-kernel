@@ -66,9 +66,32 @@ impl RuntimeThreadHandle {
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
     ) -> CooldisResult<(EventRecord, EventRecord)> {
+        self.record_manifest_receipts_inner(compile_payload, bind_payload, false)
+            .await
+    }
+
+    /// Records the already-resolved remote bind receipt inside the child
+    /// process that owns the remote execution. This is intentionally
+    /// crate-private: execution surfaces must enter through the placement
+    /// resolver and process executor before reaching this recording seam.
+    pub(crate) async fn record_remote_manifest_receipts(
+        &self,
+        compile_payload: serde_json::Value,
+        bind_payload: serde_json::Value,
+    ) -> CooldisResult<(EventRecord, EventRecord)> {
+        self.record_manifest_receipts_inner(compile_payload, bind_payload, true)
+            .await
+    }
+
+    async fn record_manifest_receipts_inner(
+        &self,
+        compile_payload: serde_json::Value,
+        bind_payload: serde_json::Value,
+        remote_execution_authorized: bool,
+    ) -> CooldisResult<(EventRecord, EventRecord)> {
         let coordinates = self.thread.context.coordinates.clone();
         let stream_id = EventStreamId::for_thread(&coordinates);
-        let placement = bind_payload
+        let mut placement = bind_payload
             .get("placement")
             .cloned()
             .map(serde_json::from_value::<AgentManifestPlacementBinding>)
@@ -79,7 +102,9 @@ impl RuntimeThreadHandle {
                 ))
             })?
             .unwrap_or_default();
-        let placement = resolve_manifest_placement(None, Some(&placement))?;
+        if !remote_execution_authorized {
+            placement = resolve_manifest_placement(None, Some(&placement), false)?;
+        }
         let snapshot_id = bind_payload
             .get("manifest_hash")
             .and_then(serde_json::Value::as_str)

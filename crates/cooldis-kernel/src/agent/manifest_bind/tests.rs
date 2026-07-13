@@ -2165,33 +2165,49 @@ fn placement_resolution_defaults_local_and_rpc_override_wins() {
     };
 
     assert_eq!(
-        resolve_manifest_placement(None, None).unwrap(),
+        resolve_manifest_placement(None, None, false).unwrap(),
         AgentManifestPlacementBinding::default()
     );
     assert_eq!(
-        resolve_manifest_placement(Some(&default), Some(&rpc_override)).unwrap(),
+        resolve_manifest_placement(Some(&default), Some(&rpc_override), false).unwrap(),
         rpc_override
     );
 }
 
 #[test]
-fn placement_resolution_fails_closed_without_remote_event_store() {
-    for (target, target_name) in [
-        (crate::PlacementTarget::Remote, "remote"),
-        (crate::PlacementTarget::Sandbox, "sandbox"),
-    ] {
+fn placement_resolution_opens_remote_only_for_a_served_sync_backend() {
+    let unconfigured_message = "runtime factory failed: placement target remote requires the remote EventStore backend capability, which is not available";
+    for served in [false, true] {
         let requested = AgentManifestPlacementBinding {
-            target: target.clone(),
+            target: crate::PlacementTarget::Remote,
             executor_ref: Some("executor://future".to_string()),
             config: BTreeMap::new(),
         };
+        match served {
+            true => assert_eq!(
+                resolve_manifest_placement(Some(&requested), None, served).unwrap(),
+                requested
+            ),
+            false => assert_eq!(
+                resolve_manifest_placement(Some(&requested), None, served)
+                    .unwrap_err()
+                    .to_string(),
+                unconfigured_message
+            ),
+        }
+    }
 
-        let err = resolve_manifest_placement(Some(&requested), None).unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains(&format!("placement target {target_name} requires"))
+    let sandbox = AgentManifestPlacementBinding {
+        target: crate::PlacementTarget::Sandbox,
+        executor_ref: Some("executor://future".to_string()),
+        config: BTreeMap::new(),
+    };
+    for served in [false, true] {
+        assert_eq!(
+            resolve_manifest_placement(Some(&sandbox), None, served)
+                .unwrap_err()
+                .to_string(),
+            "runtime factory failed: placement target sandbox requires the remote EventStore backend capability, which is not available"
         );
-        assert!(err.to_string().contains("remote EventStore backend"));
     }
 }

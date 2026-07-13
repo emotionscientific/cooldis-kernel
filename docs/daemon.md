@@ -13,7 +13,8 @@ runtime_home = ".cooldis/runtime"
 state_home = ".cooldis/state"
 
 [daemon.runtime.placement]
-# Optional. Absent means local.
+# Optional. Absent means local. Keep the daemon default local when root
+# threads are started through thread/start; select remote on thread/spawn.
 target = "local"
 
 [daemon.app_server]
@@ -101,17 +102,21 @@ Common route keys:
 `daemon.runtime.placement` is the default manifest-bind placement. It accepts
 `target = "local" | "remote" | "sandbox"`, optional `executor_ref`, and an
 optional executor-specific `config` table. An additive app-server bind override
-takes precedence over this default. Until the remote EventStore backend lands,
-`remote` and `sandbox` fail closed at bind with
-`requires the remote EventStore backend capability`; absent placement resolves
-to local.
+takes precedence over this default. `remote` opens only after the configured
+`daemon.sync` listener has successfully bound and the generation-local process
+executor is installed. With no served sync listener it retains the byte-stable
+`requires the remote EventStore backend capability` error. `sandbox` remains
+fail-closed everywhere. This slice executes remote bindings only through
+`thread/spawn`; `thread/start`, daemon-route binding, and `thread/rebindFork`
+reject a remote binding instead of falling back to local execution.
 
 ## Store-primary sync endpoint
 
 `daemon.sync` enables the daemon-owned door to its EventStore. It is disabled
 when `listen` is absent, which preserves local-only daemon behavior. When
-enabled, the daemon serves authenticated HTTP push, verified-cursor pull, and
-lease renewal routes over the configured socket. TCP listeners use the same
+enabled, the daemon serves authenticated HTTP push, verified-cursor pull,
+queue-delivery acknowledgement, and lease renewal routes over the configured
+socket. TCP listeners use the same
 address parser as the app-server (`ws://HOST:PORT[/rpc]`); the sync service
 itself is ordinary HTTP and logs its effective `http://` address. Unix socket
 listeners use `unix://PATH`; relative socket paths resolve against the config
@@ -128,6 +133,51 @@ proxy or private tunnel terminating on the daemon host. Bearer credentials are
 minted with stream leases by the dispatch path; there is no static bearer-token
 config field. Tokens belong only in the HTTP `Authorization: Bearer ...` header
 and must not appear in URLs or logs.
+
+### Enable remote placement end to end
+
+Keep the app-server and sync listeners local to the daemon, configure the
+provider credentials exactly as for a local run, then select `remote` on the
+manifest-bound child spawn:
+
+```toml
+[daemon.app_server]
+listen = "unix://.cooldis/run/cooldis.sock"
+
+[daemon.sync]
+listen = "ws://127.0.0.1:9443"
+lease_ttl_secs = 60
+
+[daemon.provider]
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-4.1-mini"
+```
+
+```json
+{
+  "method": "thread/spawn",
+  "params": {
+    "threadId": "<local-parent-thread-id>",
+    "taskName": "remote-worker",
+    "message": "run remotely",
+    "agentRef": "agent://cooldis/default@latest",
+    "placement": { "target": "remote" },
+    "dispatchId": "stable-submit-identity"
+  }
+}
+```
+
+The daemon grants two independent exact-prefix authorities at dispatch: one
+credential can pull and acknowledge only `sync-ingress:<child-id>`, and the
+other can push only `thread:<child-id>`. The one-time bearer values cross to
+the child over its inherited stdin pipe; they are never written to config,
+command-line arguments, URLs, or logs. Provider credentials follow the normal
+daemon provider flow and are inherited by the child process. The child owns a
+separate local state root, admits queue rows through its durable ingress lane,
+and pushes its stream back through `daemon.sync`. The parent folds the returned
+stream and the existing handle-ingress adapter turns its first terminal event
+into the parent turn.
 
 Every push follows credential, prefix-scope, credential/lease binding, then
 atomic lease-and-sequence fencing. Rejections are durably witnessed in redacted

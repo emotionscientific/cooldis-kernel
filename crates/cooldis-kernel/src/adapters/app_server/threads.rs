@@ -1,6 +1,9 @@
 use super::connection::*;
 use super::subscriptions::wait_for_initial_thread_status;
 use super::*;
+use crate::{PlacementTarget, ThreadCoordinates};
+
+const THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA: &str = "cooldis.remote_placement_projection";
 
 #[derive(Default)]
 pub(super) struct AppServerState {
@@ -91,7 +94,12 @@ impl CooldisAppServer {
             .await
             .map_err(metadata_store_error)?;
         for record in records {
-            if !is_loadable_lifecycle_status(record.status) {
+            if !is_loadable_lifecycle_status(record.status)
+                || record
+                    .metadata
+                    .get(THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA)
+                    .is_some_and(|value| value == "true")
+            {
                 continue;
             }
             let thread_id = record.coordinates.thread_id.to_string();
@@ -157,6 +165,10 @@ impl CooldisAppServer {
         if record.coordinates.tenant_id != self.inner.tenant_id
             || record.coordinates.user_id != self.inner.user_id
             || !is_loadable_lifecycle_status(record.status)
+            || record
+                .metadata
+                .get(THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA)
+                .is_some_and(|value| value == "true")
         {
             return Err(thread_not_found(thread_id));
         }
@@ -261,6 +273,7 @@ impl CooldisAppServer {
             &overrides,
             None,
             placement.as_ref(),
+            self.remote_event_store_served(),
         )
         .await?;
         record_bound_agent_receipts(handle, &bound).await.map(Some)
@@ -296,6 +309,7 @@ impl CooldisAppServer {
                 None,
             )
             .await?;
+        require_local_binding_surface("daemon route", &bound)?;
         kernel_thread_spawn_agent_binding(
             &bound,
             &self.inner.cwd,
@@ -329,6 +343,7 @@ impl CooldisAppServer {
             overrides,
             Some(&self.inner.default_placement),
             placement_override,
+            self.remote_event_store_served(),
         )
         .await
     }
@@ -501,6 +516,89 @@ impl CooldisAppServer {
             .ok_or_else(|| thread_not_found(thread_id))?;
         Ok(thread_json(thread, include_turns))
     }
+
+    pub(super) async fn register_remote_thread_projection(
+        &self,
+        parent: &RuntimeThreadHandle,
+        receipt: &crate::AgentProcessSpawnReceipt,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let parent_context = parent.context();
+        let child_context = ThreadContext::with_topology_and_metadata(
+            ThreadCoordinates {
+                tenant_id: parent_context.coordinates.tenant_id.clone(),
+                user_id: parent_context.coordinates.user_id.clone(),
+                session_id: parent_context.coordinates.session_id.clone(),
+                thread_id: receipt.thread_id,
+            },
+            ThreadTopology::spawned_from(parent_context.coordinates.thread_id),
+            BTreeMap::from([
+                ("agent_process_v1".to_string(), "true".to_string()),
+                (
+                    THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA.to_string(),
+                    "true".to_string(),
+                ),
+            ]),
+        );
+        let lifecycle = ThreadLifecycleRecord::new(
+            &child_context,
+            receipt.status.into(),
+            child_context.metadata.clone(),
+        );
+        self.inner
+            .metadata_store
+            .upsert_thread_lifecycle(lifecycle)
+            .await
+            .map_err(metadata_store_jsonrpc_error)?;
+        let now = now_ms();
+        let state = AppServerThreadState {
+            thread_id: receipt.thread_id.to_string(),
+            session_id: child_context.coordinates.session_id,
+            parent_thread_id: child_context.parent_thread_id.map(|id| id.to_string()),
+            topology: child_context.topology,
+            cwd: self.inner.cwd.clone(),
+            model_provider: self.inner.model_provider.clone(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            status: receipt.status,
+            preview: String::new(),
+            ephemeral: false,
+            name: receipt.task_name.clone(),
+            thinking: None,
+            turns: BTreeMap::new(),
+            active_turn_id: Some(receipt.submitted_turn_id.clone()),
+        };
+        let thread_id = receipt.thread_id.to_string();
+        self.inner
+            .state
+            .write()
+            .await
+            .threads
+            .insert(thread_id.clone(), state);
+        self.thread_json_by_id(&thread_id, false).await
+    }
+}
+
+pub(super) fn require_local_binding_surface(
+    surface: &str,
+    bound: &AgentManifestBoundThread,
+) -> CooldisResult<()> {
+    let target = bound
+        .bind_receipt
+        .placement
+        .as_ref()
+        .map(|placement| placement.target.clone())
+        .unwrap_or(PlacementTarget::Local);
+    if target != PlacementTarget::Local {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "{surface} does not execute placement target {}; remote placement is supported by thread/spawn",
+            match target {
+                PlacementTarget::Local => "local",
+                PlacementTarget::Remote => "remote",
+                PlacementTarget::Sandbox => "sandbox",
+            }
+        )));
+    }
+    Ok(())
 }
 
 impl AppServerTurnState {
@@ -1468,6 +1566,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) skill_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
     pub(super) default_placement: AgentManifestPlacementBinding,
+    pub(super) remote_event_store_served: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct ThreadOperationCatalog {
@@ -1542,6 +1641,7 @@ pub(super) struct AppServerThreadSpawnAgentResolver {
     cwd: PathBuf,
     provider_surface: AgentManifestProviderSurface,
     default_placement: AgentManifestPlacementBinding,
+    remote_event_store_served: Arc<std::sync::atomic::AtomicBool>,
     placement_override: Option<AgentManifestPlacementBinding>,
 }
 
@@ -1575,6 +1675,8 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             &AgentManifestBindOverrides::default(),
             Some(&self.default_placement),
             self.placement_override.as_ref(),
+            self.remote_event_store_served
+                .load(std::sync::atomic::Ordering::Acquire),
         )
         .await?;
         kernel_thread_spawn_agent_binding(
@@ -1639,6 +1741,7 @@ impl CooldisAppServer {
             cwd: self.inner.cwd.clone(),
             provider_surface: self.agent_manifest_provider_surface().await?,
             default_placement: self.inner.default_placement.clone(),
+            remote_event_store_served: Arc::clone(&self.inner.remote_event_store_served),
             placement_override,
         })
     }
@@ -1660,6 +1763,7 @@ impl CapsuleBindingRuntimeFactory {
             cwd,
             provider_surface: provider_surface_for_runtime_config(&self.config),
             default_placement: self.default_placement.clone(),
+            remote_event_store_served: Arc::clone(&self.remote_event_store_served),
             placement_override: None,
         })
     }

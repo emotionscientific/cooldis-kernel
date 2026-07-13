@@ -12,7 +12,10 @@
 //! after each pull before folding the new revision — otherwise the tail
 //! reads a stale tail forever while records sit committed behind it.
 
-use crate::{CooldisResult, EventRecord, EventStreamId, StreamCursorV1};
+use crate::{
+    CooldisError, CooldisResult, EventRecord, EventStore, EventStreamId, SqliteSessionStore,
+    StreamCursorV1,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -48,4 +51,51 @@ pub trait RemoteStreamTail: Send + Sync {
     /// cursor to poll from next. An empty page returns the cursor
     /// unchanged.
     async fn poll(&self, position: &RemoteStreamTailCursor) -> CooldisResult<RemoteStreamTailPage>;
+}
+
+/// Parent-local SQLite tail.
+///
+/// Each poll delegates to a fresh store connection. No connection or read
+/// transaction is retained across polls, so a revision committed by the sync
+/// endpoint after the previous poll cannot remain hidden behind that poll's
+/// snapshot.
+#[derive(Clone)]
+pub struct SqliteRemoteStreamTail {
+    store: SqliteSessionStore,
+}
+
+impl SqliteRemoteStreamTail {
+    pub fn new(store: SqliteSessionStore) -> Self {
+        Self { store }
+    }
+}
+
+impl std::fmt::Debug for SqliteRemoteStreamTail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteRemoteStreamTail")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl RemoteStreamTail for SqliteRemoteStreamTail {
+    async fn poll(&self, position: &RemoteStreamTailCursor) -> CooldisResult<RemoteStreamTailPage> {
+        let records = match position.cursor.as_ref() {
+            Some(cursor) => {
+                self.store
+                    .read_events_after_cursor(&position.stream_id, cursor)
+                    .await
+            }
+            None => self.store.read_events(&position.stream_id, None).await,
+        }
+        .map_err(|error| CooldisError::History(error.to_string()))?;
+        let next = records
+            .last()
+            .map(|record| RemoteStreamTailCursor {
+                stream_id: position.stream_id.clone(),
+                cursor: Some(record.cursor_v1()),
+            })
+            .unwrap_or_else(|| position.clone());
+        Ok(RemoteStreamTailPage { records, next })
+    }
 }

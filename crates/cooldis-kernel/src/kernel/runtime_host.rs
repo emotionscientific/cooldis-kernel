@@ -239,6 +239,8 @@ struct RuntimeHostInner {
     lifecycle_sink: RwLock<Option<Arc<dyn ThreadLifecycleSink>>>,
     process_handle_ingress: RwLock<Option<Arc<dyn ProcessHandleIngressSink>>>,
     process_handle_dispatcher: RwLock<Option<ProcessHandleDispatcher>>,
+    remote_thread_executor:
+        RwLock<Option<Arc<dyn crate::daemon::remote_store::placement::RemoteThreadExecutor>>>,
 }
 
 struct RuntimeThread {
@@ -443,6 +445,7 @@ impl RuntimeHost {
                 lifecycle_sink: RwLock::new(None),
                 process_handle_ingress: RwLock::new(None),
                 process_handle_dispatcher: RwLock::new(None),
+                remote_thread_executor: RwLock::new(None),
             }),
         }
     }
@@ -471,6 +474,19 @@ impl RuntimeHost {
 
     async fn process_handle_dispatcher(&self) -> Option<ProcessHandleDispatcher> {
         self.inner.process_handle_dispatcher.read().await.clone()
+    }
+
+    pub async fn set_remote_thread_executor(
+        &self,
+        executor: Option<Arc<dyn crate::daemon::remote_store::placement::RemoteThreadExecutor>>,
+    ) {
+        *self.inner.remote_thread_executor.write().await = executor;
+    }
+
+    pub(crate) async fn remote_thread_executor(
+        &self,
+    ) -> Option<Arc<dyn crate::daemon::remote_store::placement::RemoteThreadExecutor>> {
+        self.inner.remote_thread_executor.read().await.clone()
     }
 
     async fn lifecycle_sink(&self) -> Option<Arc<dyn ThreadLifecycleSink>> {
