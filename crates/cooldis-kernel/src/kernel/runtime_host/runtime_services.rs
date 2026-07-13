@@ -259,6 +259,27 @@ impl RuntimeServices {
             .await
     }
 
+    pub(crate) async fn append_thread_events(
+        &self,
+        coordinates: &ThreadCoordinates,
+        records: Vec<NewEventRecord>,
+    ) -> CooldisResult<Vec<EventRecord>> {
+        let expected = records.len();
+        let appended = self
+            .runtime_store
+            .append_events(&EventStreamId::for_thread(coordinates), records)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        if appended.len() != expected {
+            return Err(CooldisError::History(format!(
+                "event batch append returned {} of {expected} records",
+                appended.len()
+            )));
+        }
+        self.run_bound_couplings(appended.clone()).await?;
+        Ok(appended)
+    }
+
     pub async fn append_control_event(
         &self,
         coordinates: &ThreadCoordinates,

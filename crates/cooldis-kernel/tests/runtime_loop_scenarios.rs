@@ -793,7 +793,7 @@ async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() 
 }
 
 #[tokio::test]
-async fn cancel_settling_during_tool_execution_cancels_at_boundary_and_keeps_thread_reusable() {
+async fn cancel_during_tool_execution_cancels_in_flight_batch_and_keeps_thread_reusable() {
     let client = Arc::new(ScriptedProviderClient::with_responses(vec![
         response_tool_call("cancel_boundary_echo", json!({"input": "original"})),
         response_text("reply after boundary cancel"),
@@ -816,10 +816,12 @@ async fn cancel_settling_during_tool_execution_cancels_at_boundary_and_keeps_thr
     let thread_id = thread.context().coordinates.thread_id;
     let cancel =
         tokio::spawn(async move { cancel_host.cancel(thread_id, "cancel at boundary").await });
-    wait_for_queued_commands(&thread, 1).await;
-    tool.release();
 
-    cancel.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(1), cancel)
+        .await
+        .expect("turn cancellation should not wait for the in-flight tool")
+        .unwrap()
+        .unwrap();
     collect_until_cancelled(&mut events, "cancel at boundary").await;
     assert_eq!(thread.status(), ThreadStatus::Idle);
 
@@ -1459,19 +1461,6 @@ async fn wait_for_requests(client: &ScriptedProviderClient, expected: usize) {
     panic!(
         "timed out waiting for {expected} provider request(s); saw {}",
         client.requests().len()
-    );
-}
-
-async fn wait_for_queued_commands(thread: &cooldis::RuntimeThreadHandle, expected: usize) {
-    for _ in 0..30 {
-        if thread.queued_command_count() >= expected {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!(
-        "timed out waiting for {expected} queued command(s); saw {}",
-        thread.queued_command_count()
     );
 }
 

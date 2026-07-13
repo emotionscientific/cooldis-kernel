@@ -3714,6 +3714,7 @@ model_ref = "model://echo"
 [runtime]
 default_cwd = "."
 streaming = false
+max_tool_rounds = 64
 "#,
     )
     .unwrap();
@@ -3809,6 +3810,13 @@ streaming = false
             .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
             .map(|hash| hash.starts_with("sha256:")),
         Some(true)
+    );
+    assert_eq!(
+        child_record
+            .metadata
+            .get(THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA)
+            .map(String::as_str),
+        Some("64")
     );
 
     let events = app
@@ -5891,9 +5899,10 @@ model_ref = "model://local_offline/echo"
 [runtime]
 default_cwd = "."
 streaming = false
+max_tool_rounds = 64
 
 [runtime.overrides]
-allow = ["default_cwd"]
+allow = ["default_cwd", "max_tool_rounds"]
 "#,
     )
     .unwrap();
@@ -5967,6 +5976,10 @@ streaming = false
         .as_deref(),
         Some(cwd_string(&workspace.join("outside-manifest")).as_str())
     );
+    assert_eq!(
+        lifecycle.metadata[THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA],
+        "64"
+    );
     let session_store = SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
@@ -5978,6 +5991,10 @@ streaming = false
     assert_eq!(
         bind.payload["effective_runtime"]["default_cwd"].as_str(),
         Some(cwd_string(&workspace.join("outside-manifest")).as_str())
+    );
+    assert_eq!(
+        bind.payload["effective_runtime"]["max_tool_rounds"],
+        json!(64)
     );
 
     let no_cwd_err = app
@@ -5998,6 +6015,52 @@ streaming = false
             .contains("runtime override \"default_cwd\" is not allowlisted"),
         "{}",
         no_cwd_err.message
+    );
+
+    let rebind = app
+        .dispatch_request(
+            &connection,
+            "thread/rebindFork",
+            Some(json!({
+                "threadId": thread_id.to_string(),
+                "agentRef": "agent://closed-runner@latest",
+                "runtimeOverrides": {"maxToolRounds": "unlimited"},
+            })),
+        )
+        .await
+        .unwrap();
+    let rebound_id = ThreadId::parse_str(rebind["thread"]["id"].as_str().unwrap()).unwrap();
+    let rebound = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(rebound_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rebound.metadata[THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA],
+        "unlimited"
+    );
+
+    let rebind_override_err = app
+        .dispatch_request(
+            &connection,
+            "thread/rebindFork",
+            Some(json!({
+                "threadId": thread_id.to_string(),
+                "agentRef": "agent://closed-no-cwd@latest",
+                "runtimeOverrides": {"maxToolRounds": "unlimited"},
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(rebind_override_err.code, -32602);
+    assert!(
+        rebind_override_err
+            .message
+            .contains("runtime override \"max_tool_rounds\" is not allowlisted"),
+        "{}",
+        rebind_override_err.message
     );
 
     let capsule_err = app
@@ -6045,7 +6108,7 @@ streaming = false
             .await
             .unwrap()
             .len(),
-        1
+        2
     );
     let _ = std::fs::remove_dir_all(root);
 }

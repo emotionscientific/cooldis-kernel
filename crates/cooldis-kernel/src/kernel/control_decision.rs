@@ -19,6 +19,10 @@ pub struct ToolCallRequestedPayload {
     pub snapshot_id: String,
     pub tool_name: String,
     pub arguments: JsonValue,
+    /// Kernel-derived resource holds for this invocation. Empty when decoding
+    /// events written before hold scheduling existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<JsonValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,6 +60,10 @@ pub struct ToolCallCompletedPayload {
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Zero-based completion order observed by the batch executor. Event and
+    /// history append order remains model call order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_order: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -826,6 +834,57 @@ mod tests {
         assert_eq!(rejected.admissible, None);
     }
 
+    #[test]
+    fn tool_request_holds_and_completion_finish_order_are_decode_compatible() {
+        let legacy_request: ToolCallRequestedPayload = serde_json::from_value(json!({
+            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+            "snapshot_id": "snapshot-a",
+            "tool_name": "thread_submit",
+            "arguments": {"task_name": "worker-a"}
+        }))
+        .unwrap();
+        assert!(legacy_request.holds.is_empty());
+
+        #[derive(Deserialize)]
+        struct LegacyToolCallRequestedPayload {
+            subject: ToolCallSubject,
+            snapshot_id: String,
+            tool_name: String,
+            arguments: JsonValue,
+        }
+
+        let new_request = serde_json::to_value(ToolCallRequestedPayload {
+            subject: legacy_request.subject.clone(),
+            snapshot_id: legacy_request.snapshot_id.clone(),
+            tool_name: legacy_request.tool_name.clone(),
+            arguments: legacy_request.arguments.clone(),
+            holds: vec![json!({
+                "key": {"kind": "kernel_thread", "task_name": "worker-a"},
+                "access": "exclusive"
+            })],
+        })
+        .unwrap();
+        let decoded_by_old_reader: LegacyToolCallRequestedPayload =
+            serde_json::from_value(new_request).unwrap();
+        assert_eq!(decoded_by_old_reader.subject, legacy_request.subject);
+        assert_eq!(decoded_by_old_reader.snapshot_id, "snapshot-a");
+        assert_eq!(decoded_by_old_reader.tool_name, "thread_submit");
+        assert_eq!(
+            decoded_by_old_reader.arguments,
+            json!({"task_name": "worker-a"})
+        );
+
+        let legacy_completion: ToolCallCompletedPayload = serde_json::from_value(json!({
+            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+            "snapshot_id": "snapshot-a",
+            "tool_name": "thread_submit",
+            "success": true,
+            "duration_ms": 4
+        }))
+        .unwrap();
+        assert_eq!(legacy_completion.finish_order, None);
+    }
+
     #[tokio::test]
     async fn tool_decision_accepts_fresh_allow_fact() {
         let fixture = ToolDecisionFixture::new().await;
@@ -1245,6 +1304,7 @@ mod tests {
                             snapshot_id: snapshot_id.clone(),
                             tool_name: "bash".to_string(),
                             arguments: json!({"cmd": "rm -rf /"}),
+                            holds: Vec::new(),
                         })
                         .unwrap(),
                     )],

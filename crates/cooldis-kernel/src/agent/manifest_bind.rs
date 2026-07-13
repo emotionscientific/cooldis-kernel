@@ -13,10 +13,10 @@ use crate::agent::manifest::{AgentAliasResolutionReceipt, PublishedAgentRecord};
 use crate::agent::manifest_schema::{
     AgentManifestBudgetRest, AgentManifestBudgetShare, AgentManifestContextPipeline,
     AgentManifestCoupling, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
-    AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestModelProfile,
-    AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
-    AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey, AgentManifestSchema,
-    AgentManifestTool, AgentManifestToolSurface, AgentManifestWorkspaceMode,
+    AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestMaxToolRounds,
+    AgentManifestModelProfile, AgentManifestProtocolToolImport, AgentManifestResource,
+    AgentManifestResourceKind, AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey,
+    AgentManifestSchema, AgentManifestTool, AgentManifestToolSurface, AgentManifestWorkspaceMode,
     AgentManifestWorkspaceRequirement, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::agent::tool_universe::{
@@ -71,6 +71,12 @@ pub struct AgentManifestBindOverrides {
     pub cancellation_grace_ms: Option<u64>,
     #[serde(
         default,
+        alias = "maxToolRounds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_tool_rounds: Option<AgentManifestMaxToolRounds>,
+    #[serde(
+        default,
         alias = "compactionAutoAtTextBytes",
         alias = "compaction.auto_at_text_bytes"
     )]
@@ -83,6 +89,7 @@ impl AgentManifestBindOverrides {
             && self.streaming.is_none()
             && self.turn_timeout_ms.is_none()
             && self.cancellation_grace_ms.is_none()
+            && self.max_tool_rounds.is_none()
             && self.compaction_auto_at_text_bytes.is_none()
     }
 }
@@ -1511,6 +1518,7 @@ fn override_key_name(key: AgentManifestRuntimeOverrideKey) -> &'static str {
         AgentManifestRuntimeOverrideKey::Streaming => "streaming",
         AgentManifestRuntimeOverrideKey::TurnTimeoutMs => "turn_timeout_ms",
         AgentManifestRuntimeOverrideKey::CancellationGraceMs => "cancellation_grace_ms",
+        AgentManifestRuntimeOverrideKey::MaxToolRounds => "max_tool_rounds",
         AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes => {
             "compaction.auto_at_text_bytes"
         }
@@ -1535,6 +1543,18 @@ fn validate_optional_positive_u64(label: &str, value: Option<u64>) -> CooldisRes
     if value == Some(0) {
         return Err(CooldisError::RuntimeFactory(format!(
             "runtime override {label:?} must be > 0"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_tool_round_budget(
+    label: &str,
+    value: Option<AgentManifestMaxToolRounds>,
+) -> CooldisResult<()> {
+    if value == Some(AgentManifestMaxToolRounds::Limited(0)) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "runtime override {label:?} must be > 0 or \"unlimited\""
         )));
     }
     Ok(())
@@ -1871,6 +1891,7 @@ pub fn apply_runtime_overrides(
 ) -> CooldisResult<(AgentManifestRuntimeDefaults, Vec<String>)> {
     validate_optional_positive_u64("turn_timeout_ms", overrides.turn_timeout_ms)?;
     validate_optional_positive_u64("cancellation_grace_ms", overrides.cancellation_grace_ms)?;
+    validate_tool_round_budget("max_tool_rounds", overrides.max_tool_rounds)?;
     validate_optional_positive_u64(
         "compaction.auto_at_text_bytes",
         overrides.compaction_auto_at_text_bytes,
@@ -1900,6 +1921,11 @@ pub fn apply_runtime_overrides(
             AgentManifestRuntimeOverrideKey::CancellationGraceMs,
         )?;
         effective.cancellation_grace_ms = Some(value);
+        overridden_keys.push(key.to_string());
+    }
+    if let Some(value) = overrides.max_tool_rounds {
+        let key = require_override_key(&allowlist, AgentManifestRuntimeOverrideKey::MaxToolRounds)?;
+        effective.max_tool_rounds = Some(value);
         overridden_keys.push(key.to_string());
     }
     if let Some(value) = overrides.compaction_auto_at_text_bytes {

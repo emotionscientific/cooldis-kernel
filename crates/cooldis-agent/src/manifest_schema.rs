@@ -14,7 +14,7 @@ use crate::tool_ref::PinnedToolRef;
 use crate::{CooldisAgentError as CooldisError, CooldisResult};
 use cooldis_operations::validate_record_name;
 use serde::de::{self, DeserializeOwned, Deserializer};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -383,6 +383,11 @@ impl AgentManifestSchema {
         if self.runtime.cancellation_grace_ms == Some(0) {
             return Err(CooldisError::RuntimeFactory(
                 "runtime.cancellation_grace_ms must be > 0".to_string(),
+            ));
+        }
+        if self.runtime.max_tool_rounds == Some(AgentManifestMaxToolRounds::Limited(0)) {
+            return Err(CooldisError::RuntimeFactory(
+                "runtime.max_tool_rounds must be > 0 or \"unlimited\"".to_string(),
             ));
         }
         if self.runtime.compaction.auto_at_text_bytes == Some(0) {
@@ -868,6 +873,11 @@ pub struct AgentManifestRuntimeDefaults {
     pub turn_timeout_ms: Option<u64>,
     #[serde(default)]
     pub cancellation_grace_ms: Option<u64>,
+    /// Maximum model/tool batches in one turn. `None` means the manifest
+    /// omitted the field and the kernel default applies; `Unlimited` is an
+    /// explicit opt-in that still leaves the other turn budgets in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_rounds: Option<AgentManifestMaxToolRounds>,
     #[serde(default)]
     pub compaction: AgentManifestCompactionDefaults,
     #[serde(default)]
@@ -881,9 +891,76 @@ impl Default for AgentManifestRuntimeDefaults {
             streaming: default_runtime_streaming(),
             turn_timeout_ms: None,
             cancellation_grace_ms: None,
+            max_tool_rounds: None,
             compaction: AgentManifestCompactionDefaults::default(),
             overrides: AgentManifestRuntimeOverridePolicy::default(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentManifestMaxToolRounds {
+    Limited(usize),
+    Unlimited,
+}
+
+impl Serialize for AgentManifestMaxToolRounds {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Limited(rounds) => serializer.serialize_u64(*rounds as u64),
+            Self::Unlimited => serializer.serialize_str("unlimited"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentManifestMaxToolRounds {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MaxToolRoundsVisitor;
+
+        impl de::Visitor<'_> for MaxToolRoundsVisitor {
+            type Value = AgentManifestMaxToolRounds;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a non-negative integer or the string \"unlimited\"")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                usize::try_from(value)
+                    .map(AgentManifestMaxToolRounds::Limited)
+                    .map_err(|_| E::custom("max_tool_rounds does not fit this platform"))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                u64::try_from(value)
+                    .map_err(|_| E::custom("max_tool_rounds cannot be negative"))
+                    .and_then(|value| self.visit_u64(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value == "unlimited" {
+                    Ok(AgentManifestMaxToolRounds::Unlimited)
+                } else {
+                    Err(E::unknown_variant(value, &["unlimited"]))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(MaxToolRoundsVisitor)
     }
 }
 
@@ -923,6 +1000,8 @@ pub enum AgentManifestRuntimeOverrideKey {
     TurnTimeoutMs,
     #[serde(rename = "cancellation_grace_ms")]
     CancellationGraceMs,
+    #[serde(rename = "max_tool_rounds")]
+    MaxToolRounds,
     #[serde(rename = "compaction.auto_at_text_bytes")]
     CompactionAutoAtTextBytes,
 }

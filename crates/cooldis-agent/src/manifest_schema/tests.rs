@@ -96,6 +96,7 @@ max_tool_calls_per_turn = 4
 [runtime]
 default_cwd = "workspace"
 streaming = true
+max_tool_rounds = 64
 turn_timeout_ms = 1000
 cancellation_grace_ms = 100
 
@@ -427,4 +428,33 @@ fn runtime_numeric_fields_must_be_positive() {
     let err = parse(&valid_manifest().replace("turn_timeout_ms = 1000", "turn_timeout_ms = 0"))
         .unwrap_err();
     assert!(err.to_string().contains("turn_timeout_ms must be > 0"));
+
+    let err = parse(&valid_manifest().replace("max_tool_rounds = 64", "max_tool_rounds = 0"))
+        .unwrap_err();
+    assert!(err.to_string().contains("max_tool_rounds must be > 0"));
+}
+
+#[test]
+fn runtime_tool_round_budget_supports_finite_unlimited_and_absent() {
+    let finite = parse(&valid_manifest()).unwrap();
+    assert_eq!(
+        finite.runtime.max_tool_rounds,
+        Some(AgentManifestMaxToolRounds::Limited(64))
+    );
+
+    let unlimited =
+        parse(&valid_manifest().replace("max_tool_rounds = 64", "max_tool_rounds = \"unlimited\""))
+            .unwrap();
+    assert_eq!(
+        unlimited.runtime.max_tool_rounds,
+        Some(AgentManifestMaxToolRounds::Unlimited)
+    );
+
+    let absent = parse(&valid_manifest().replace("max_tool_rounds = 64\n", "")).unwrap();
+    assert_eq!(absent.runtime.max_tool_rounds, None);
+
+    let err =
+        parse(&valid_manifest().replace("max_tool_rounds = 64", "max_tool_rounds = \"forever\""))
+            .unwrap_err();
+    assert!(err.to_string().contains("max_tool_rounds"));
 }

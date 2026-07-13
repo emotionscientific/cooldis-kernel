@@ -339,6 +339,10 @@ manifest. Legacy explicit parameters lower as follows:
   error.
 - `cwd` lowers to `runtimeOverrides.defaultCwd` and is checked against the
   bound manifest's runtime override allowlist.
+- `runtimeOverrides.maxToolRounds` accepts a positive integer or
+  `"unlimited"` and is checked against the manifest's `max_tool_rounds`
+  override allowlist entry. With no manifest value or override, the provider
+  loop keeps its default cap of eight batches per turn.
 - non-empty `capsuleBindings.operationNames` is rejected. Operations must be
   declared by the manifest and pass through publish/bind receipts, not injected
   at start time.

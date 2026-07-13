@@ -5,20 +5,25 @@ use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindReceipt,
     AgentManifestCouplingBinding, AgentManifestCouplingBudget, AgentManifestRuntimeDefaults,
     AgentToolRouter, CanonicalStopReason, CanonicalUsage, CommandHookHandler, CouplingRole,
-    EventProvenance, EventStore, EventStreamId, HookEventName, HookHandler, HookHandlerOutput,
-    HookHandlerSpec, HookRequest, HookRunStatus, InMemorySessionStore, KernelOperationRegistration,
-    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, NewEventRecord,
+    EventProvenance, EventRecord, EventSequence, EventStore, EventStreamId, HistoryResult,
+    HookEventName, HookHandler, HookHandlerOutput, HookHandlerSpec, HookRequest, HookRunStatus,
+    InMemorySessionStore, KernelOperationRegistration, KernelThreadSpawnAgentBinding,
+    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationRecord,
     ObservationStore, OperationRegistration, OperationRegistry, OperationToolAlias,
-    ProviderCapabilityRecord, ProviderContextPolicy, RuntimeEvent, RuntimeHost, SessionEntry,
-    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadJoinedPayload,
-    ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology, ToolCallDecisionOutcomePayload,
-    ToolCallDecisionPayload, ToolCallSubject, ToolCallSuspendedPayload, TurnContextSnapshot,
-    WasmRuntimeArtifact, cooldis_threads_kernel_package,
+    ProviderCapabilityRecord, ProviderContextPolicy, RuntimeEvent, RuntimeExecutionPolicy,
+    RuntimeHost, SessionContext, SessionEntry, SessionEntryId, SessionEntryKind, SessionStore,
+    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadBaseRef, ThreadCoordinates,
+    ThreadJoinedPayload, ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology,
+    ToolCallDecisionOutcomePayload, ToolCallDecisionPayload, ToolCallSubject,
+    ToolCallSuspendedPayload, TurnContextSnapshot, WasmRuntimeArtifact,
+    cooldis_threads_kernel_package,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 
 #[derive(Default)]
@@ -71,6 +76,221 @@ struct WitnessCheckingEchoProvider {
     store: Arc<InMemorySessionStore>,
     expected_command_sha256: String,
     seen_arguments: Mutex<Vec<Value>>,
+}
+
+struct FinishSecondFirstToolProvider {
+    second_finished: Notify,
+}
+
+struct SerialBlockingToolProvider {
+    tool_name: &'static str,
+    started: mpsc::UnboundedSender<String>,
+    release_first: Notify,
+}
+
+struct PendingCancellationToolProvider {
+    started: mpsc::UnboundedSender<String>,
+    dropped: mpsc::UnboundedSender<String>,
+    active: Arc<AtomicUsize>,
+}
+
+struct ImmediateThreadToolProvider;
+
+struct IsolatedFailureToolProvider;
+
+struct DropCallWitness {
+    call_id: String,
+    dropped: mpsc::UnboundedSender<String>,
+    active: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
+struct AppendPause {
+    entered: AtomicBool,
+    entered_notify: Notify,
+    released: AtomicBool,
+    release_notify: Notify,
+}
+
+impl AppendPause {
+    async fn arrive_and_wait(&self) {
+        self.entered.store(true, Ordering::SeqCst);
+        self.entered_notify.notify_waiters();
+        while !self.released.load(Ordering::SeqCst) {
+            self.release_notify.notified().await;
+        }
+    }
+
+    async fn wait_until_entered(&self) {
+        while !self.entered.load(Ordering::SeqCst) {
+            self.entered_notify.notified().await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
+    }
+}
+
+#[derive(Clone)]
+struct PausingRuntimeStore {
+    inner: InMemorySessionStore,
+    pause_kind: EventKind,
+    pause_once: Arc<AtomicBool>,
+    pause: Arc<AppendPause>,
+}
+
+impl PausingRuntimeStore {
+    fn after_first_append_of(pause_kind: EventKind) -> Self {
+        Self {
+            inner: InMemorySessionStore::new(),
+            pause_kind,
+            pause_once: Arc::new(AtomicBool::new(true)),
+            pause: Arc::new(AppendPause::default()),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionStore for PausingRuntimeStore {
+    async fn append(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        self.inner.append(coordinates, parent_entry_id, kind).await
+    }
+
+    async fn append_with_provenance(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: EventProvenance,
+    ) -> HistoryResult<SessionEntry> {
+        self.inner
+            .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
+            .await
+    }
+
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> HistoryResult<SessionEntry> {
+        self.inner
+            .append_turn_input(coordinates, turn_id, kind)
+            .await
+    }
+
+    async fn active_leaf(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> HistoryResult<Option<SessionEntryId>> {
+        self.inner.active_leaf(coordinates).await
+    }
+
+    async fn select_branch(
+        &self,
+        coordinates: &ThreadCoordinates,
+        leaf_entry_id: Option<SessionEntryId>,
+    ) -> HistoryResult<()> {
+        self.inner.select_branch(coordinates, leaf_entry_id).await
+    }
+
+    async fn build_context(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> HistoryResult<SessionContext> {
+        self.inner.build_context(coordinates).await
+    }
+
+    async fn clone_branch(
+        &self,
+        source_coordinates: &ThreadCoordinates,
+        source_leaf: Option<SessionEntryId>,
+        target_coordinates: &ThreadCoordinates,
+    ) -> HistoryResult<Option<SessionEntryId>> {
+        self.inner
+            .clone_branch(source_coordinates, source_leaf, target_coordinates)
+            .await
+    }
+
+    async fn fork_by_reference(
+        &self,
+        source_coordinates: &ThreadCoordinates,
+        target_coordinates: &ThreadCoordinates,
+        base: ThreadBaseRef,
+    ) -> HistoryResult<()> {
+        self.inner
+            .fork_by_reference(source_coordinates, target_coordinates, base)
+            .await
+    }
+}
+
+#[async_trait]
+impl EventStore for PausingRuntimeStore {
+    async fn append_events(
+        &self,
+        stream_id: &EventStreamId,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        let should_pause = records.iter().any(|record| record.kind == self.pause_kind)
+            && self.pause_once.swap(false, Ordering::SeqCst);
+        let appended = self.inner.append_events(stream_id, records).await?;
+        if should_pause {
+            self.pause.arrive_and_wait().await;
+        }
+        Ok(appended)
+    }
+
+    async fn append_events_fenced(
+        &self,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        self.inner
+            .append_events_fenced(stream_id, expected_next_sequence, records)
+            .await
+    }
+
+    async fn read_events(
+        &self,
+        stream_id: &EventStreamId,
+        from_sequence: Option<EventSequence>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        self.inner.read_events(stream_id, from_sequence).await
+    }
+}
+
+#[async_trait]
+// lexicon-allow: observation_store - deterministic test store implements the existing history trait.
+impl ObservationStore for PausingRuntimeStore {
+    async fn append_observation(
+        &self,
+        record: NewObservationRecord,
+    ) -> HistoryResult<ObservationRecord> {
+        self.inner.append_observation(record).await
+    }
+
+    async fn list_observations(
+        &self,
+        scope: &ThreadCoordinates,
+        kind: Option<&str>,
+    ) -> HistoryResult<Vec<ObservationRecord>> {
+        self.inner.list_observations(scope, kind).await
+    }
+}
+
+impl Drop for DropCallWitness {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        let _ = self.dropped.send(self.call_id.clone());
+    }
 }
 
 struct StaticThreadSpawnAgentResolver;
@@ -379,6 +599,144 @@ impl AgentKernelToolProvider for TurnContextRecordingKernelToolProvider {
     }
 }
 
+#[async_trait]
+impl AgentKernelToolProvider for FinishSecondFirstToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            "thread_submit",
+            "Deterministic hold-scheduler test tool.",
+            serde_json::json!({"type": "object"}),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        match call.arguments["slot"].as_str() {
+            Some("first") => self.second_finished.notified().await,
+            Some("second") => self.second_finished.notify_one(),
+            other => panic!("unexpected finish-order slot: {other:?}"),
+        }
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            call.arguments["slot"].as_str().unwrap(),
+            false,
+        )))
+    }
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for SerialBlockingToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            self.tool_name,
+            "Deterministic serialization test tool.",
+            serde_json::json!({"type": "object"}),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        let slot = call.arguments["slot"].as_str().unwrap().to_string();
+        self.started.send(slot.clone()).unwrap();
+        if slot == "first" {
+            self.release_first.notified().await;
+        }
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            slot,
+            false,
+        )))
+    }
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for PendingCancellationToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            "thread_submit",
+            "Pending cancellation test tool.",
+            serde_json::json!({"type": "object"}),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        let _drop_witness = DropCallWitness {
+            call_id: call.call_id.clone(),
+            dropped: self.dropped.clone(),
+            active: Arc::clone(&self.active),
+        };
+        self.started.send(call.call_id).unwrap();
+        std::future::pending::<()>().await;
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for ImmediateThreadToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        ["thread_submit", "thread_status"]
+            .into_iter()
+            .map(|name| {
+                ToolDefinition::new(
+                    name,
+                    "Immediate suspension-batch test tool.",
+                    serde_json::json!({"type": "object"}),
+                )
+            })
+            .collect()
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name.clone(),
+            format!("{} completed", call.tool_name),
+            false,
+        )))
+    }
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for IsolatedFailureToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            "thread_submit",
+            "Per-call failure isolation test tool.",
+            serde_json::json!({"type": "object"}),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        if call.arguments["fail"].as_bool() == Some(true) {
+            return Err(CooldisError::RuntimeExecution(
+                "expected call failure".to_string(),
+            ));
+        }
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            "sibling completed",
+            false,
+        )))
+    }
+}
+
 fn response_text(text: &str) -> crate::ProviderResponse {
     crate::ProviderResponse {
         content: vec![CanonicalContent::text(text)],
@@ -410,6 +768,31 @@ fn response_tool_call_named_with_id(
         usage: CanonicalUsage::default(),
         stop_reason: CanonicalStopReason::ToolUse,
     }
+}
+
+fn response_tool_calls(calls: Vec<(&str, &str, Value)>) -> crate::ProviderResponse {
+    crate::ProviderResponse {
+        content: calls
+            .into_iter()
+            .map(|(call_id, name, arguments)| CanonicalContent::tool_call(call_id, name, arguments))
+            .collect(),
+        usage: CanonicalUsage::default(),
+        stop_reason: CanonicalStopReason::ToolUse,
+    }
+}
+
+fn tool_round_responses(rounds: usize) -> Vec<crate::ProviderResponse> {
+    let mut responses = (0..rounds)
+        .map(|round| {
+            response_tool_call_named_with_id(
+                &format!("call-{round}"),
+                "echo_search",
+                serde_json::json!({"input": format!("round-{round}")}),
+            )
+        })
+        .collect::<Vec<_>>();
+    responses.push(response_text("final reply"));
+    responses
 }
 
 fn runtime_factory(client: Arc<dyn ProviderClient>) -> Arc<CanonicalProviderRuntimeFactory> {
@@ -1806,6 +2189,1263 @@ async fn runtime_executes_registry_tool_call_and_continues_with_tool_result() {
 }
 
 #[tokio::test]
+async fn default_tool_round_budget_still_fails_after_eight_completed_batches() {
+    let registry = echo_registry("echo").await;
+    let client = Arc::new(RecordingClient::with_responses(tool_round_responses(9)));
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "round-default"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "loop")
+        .await
+        .unwrap();
+    assert_failed_with_runtime_events(&mut events, "tool router exceeded 8 rounds").await;
+    assert_eq!(client.requests().len(), 9);
+}
+
+#[tokio::test]
+async fn manifest_round_budget_of_sixty_four_allows_nine_tool_batches() {
+    let registry = echo_registry("echo").await;
+    let client = Arc::new(RecordingClient::with_responses(tool_round_responses(9)));
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let thread = host
+        .start_thread_with_topology_and_metadata(
+            ThreadCoordinates::new("tenant_a", "user_1", "round-64"),
+            ThreadTopology::root(),
+            BTreeMap::from([(
+                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+                "64".to_string(),
+            )]),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "loop")
+        .await
+        .unwrap();
+    assert_output(&mut events, "final reply").await;
+    assert_eq!(client.requests().len(), 10);
+}
+
+#[tokio::test]
+async fn explicit_unlimited_manifest_round_budget_allows_more_than_the_default() {
+    let registry = echo_registry("echo").await;
+    let client = Arc::new(RecordingClient::with_responses(tool_round_responses(12)));
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let thread = host
+        .start_thread_with_topology_and_metadata(
+            ThreadCoordinates::new("tenant_a", "user_1", "round-unlimited"),
+            ThreadTopology::root(),
+            BTreeMap::from([(
+                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+                "unlimited".to_string(),
+            )]),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "loop")
+        .await
+        .unwrap();
+    assert_output(&mut events, "final reply").await;
+    assert_eq!(client.requests().len(), 13);
+}
+
+#[tokio::test]
+async fn persisted_round_accounting_rejects_a_request_without_an_assistant_source() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "round-provenance");
+    let malformed_request = || {
+        NewEventRecord::discharged(
+            coordinates.clone(),
+            EventKind::ToolCallRequested,
+            serde_json::to_value(ToolCallRequestedPayload {
+                subject: ToolCallSubject {
+                    turn_id: "turn-1".to_string(),
+                    call_id: "call-1".to_string(),
+                },
+                snapshot_id: "unbound".to_string(),
+                tool_name: "thread_status".to_string(),
+                arguments: serde_json::json!({"task_name": "worker-a"}),
+                holds: Vec::new(),
+            })
+            .unwrap(),
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                discharged_by: Some("test:malformed-round".to_string()),
+                function: Some("tool_request/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        )
+    };
+    store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![malformed_request()],
+        )
+        .await
+        .unwrap();
+    let turn_submitted = store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "turn-1"}),
+            )],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    assert_eq!(
+        persisted_tool_rounds_for_turn(&services, &coordinates, "turn-1", turn_submitted.sequence,)
+            .await
+            .unwrap(),
+        0,
+        "malformed events before the active turn bound must not affect accounting"
+    );
+    store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![malformed_request()],
+        )
+        .await
+        .unwrap();
+
+    let err =
+        persisted_tool_rounds_for_turn(&services, &coordinates, "turn-1", turn_submitted.sequence)
+            .await
+            .unwrap_err();
+    assert!(err.to_string().contains("has no assistant source event"));
+}
+
+#[tokio::test]
+async fn persisted_round_accounting_rejects_a_cross_turn_assistant_source() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "round-cross-turn");
+    let old_assistant = store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::SessionEntryAppended,
+                serde_json::json!({
+                    "entry_id": SessionEntryId::new().to_string(),
+                    "entry_kind": "message",
+                }),
+            )],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let turn_submitted = store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "turn-1"}),
+            )],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::ToolCallRequested,
+                serde_json::to_value(ToolCallRequestedPayload {
+                    subject: ToolCallSubject {
+                        turn_id: "turn-1".to_string(),
+                        call_id: "call-1".to_string(),
+                    },
+                    snapshot_id: "unbound".to_string(),
+                    tool_name: "thread_status".to_string(),
+                    arguments: serde_json::json!({"task_name": "worker-a"}),
+                    holds: Vec::new(),
+                })
+                .unwrap(),
+                EventProvenance {
+                    source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                    source_event_ids: vec![old_assistant.id],
+                    discharged_by: Some("test:cross-turn-round".to_string()),
+                    function: Some("tool_request/v1".to_string()),
+                    ..EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+
+    let err =
+        persisted_tool_rounds_for_turn(&services, &coordinates, "turn-1", turn_submitted.sequence)
+            .await
+            .unwrap_err();
+    assert!(err.to_string().contains("outside the active turn"));
+}
+
+#[tokio::test]
+async fn independent_thread_holds_overlap_results_append_in_call_order_and_finish_is_witnessed() {
+    let tool_provider = Arc::new(FinishSecondFirstToolProvider {
+        second_finished: Notify::new(),
+    });
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_calls(vec![
+            (
+                "call-first",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a", "slot": "first"}),
+            ),
+            (
+                "call-second",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-b", "slot": "second"}),
+            ),
+        ]),
+        response_text("final reply"),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client;
+    let mut config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config.max_tokens = 128;
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "hold-overlap"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "parallel")
+        .await
+        .unwrap();
+    assert_output(&mut events, "final reply").await;
+
+    let session = thread.session_context().await.unwrap();
+    let result_ids = session
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            CanonicalMessage::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(result_ids, vec!["call-first", "call-second"]);
+
+    let records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let requests = records
+        .iter()
+        .filter(|event| event.kind == EventKind::ToolCallRequested)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].payload["holds"],
+        serde_json::json!([
+            {
+                "key": {"kind": "kernel_thread", "task_name": "worker-a"},
+                "access": "exclusive"
+            },
+            {"key": {"kind": "global"}, "access": "shared"}
+        ])
+    );
+    let completed = records
+        .iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 2);
+    assert_eq!(completed[0].payload["subject"]["call_id"], "call-first");
+    assert_eq!(completed[0].payload["finish_order"], 1);
+    assert_eq!(completed[1].payload["subject"]["call_id"], "call-second");
+    assert_eq!(completed[1].payload["finish_order"], 0);
+}
+
+#[tokio::test]
+async fn duplicate_model_tool_call_ids_fail_before_the_batch_is_witnessed() {
+    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+        vec![
+            (
+                "duplicate-call",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+            (
+                "duplicate-call",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+        ],
+    )]));
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "duplicate-tool-call-id"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "duplicate ids",
+    )
+    .await
+    .unwrap();
+    assert_failed_with_runtime_events(&mut events, "duplicate tool call id \"duplicate-call\"")
+        .await;
+
+    let records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        records
+            .iter()
+            .all(|event| event.kind != EventKind::ToolCallRequested),
+        "an ambiguous batch must fail before request ids become durable"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
+    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+        vec![
+            (
+                "call-first",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+            (
+                "call-second",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-b"}),
+            ),
+        ],
+    )]));
+    let store = Arc::new(PausingRuntimeStore::after_first_append_of(
+        EventKind::ToolCallCompleted,
+    ));
+    let pause = Arc::clone(&store.pause);
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-tool-commit"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "commit both results",
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(2), pause.wait_until_entered())
+        .await
+        .expect("first completion append did not reach the pause");
+
+    host.cancel(
+        thread.context().coordinates.thread_id,
+        "cancel during commit",
+    )
+    .await
+    .unwrap();
+    assert!(
+        timeout(Duration::from_millis(100), async {
+            loop {
+                if let ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "terminal cancellation must not overtake the buffered result commit"
+    );
+
+    pause.release();
+    assert_cancelled(&mut events, "cancel during commit").await;
+    let records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let completed = records
+        .iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .map(|event| event.payload["subject"]["call_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(completed, vec!["call-first", "call-second"]);
+}
+
+#[tokio::test]
+async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() {
+    let registry = echo_registry("echo").await;
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named("echo_search", serde_json::json!({"input": "cooldis"})),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client;
+    let store = Arc::new(PausingRuntimeStore::after_first_append_of(
+        EventKind::TurnWaiting,
+    ));
+    let pause = Arc::clone(&store.pause);
+    let host = RuntimeHost::with_session_store(
+        runtime_factory_with_registry(provider_client, registry),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-tool-wait"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    append_tool_controller_bind_receipt(&store.inner, &thread.context().coordinates, "echo_search")
+        .await;
+    append_witnessed_tool_suspension(
+        &store.inner,
+        &thread.context().coordinates,
+        "snapshot-controller",
+        "turn-1",
+        "call_1|fc_1",
+        "approval-1",
+    )
+    .await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "wait")
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(2), pause.wait_until_entered())
+        .await
+        .expect("turn.waiting append did not reach the pause");
+    host.cancel(
+        thread.context().coordinates.thread_id,
+        "cancel during suspended commit",
+    )
+    .await
+    .unwrap();
+    assert!(
+        timeout(Duration::from_millis(100), async {
+            loop {
+                if let ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "terminal cancellation must not overtake the suspended boundary commit"
+    );
+
+    pause.release();
+    assert_cancelled(&mut events, "cancel during suspended commit").await;
+    let control_records = store
+        .read_events(
+            &EventStreamId::new(format!(
+                "control:{}",
+                thread.context().coordinates.thread_id
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        control_records
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnWaiting)
+            .count(),
+        1
+    );
+    let thread_records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        thread_records
+            .iter()
+            .all(|event| event.kind != EventKind::ToolCallCompleted)
+    );
+}
+
+#[tokio::test]
+async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnesses() {
+    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+        vec![
+            (
+                "call-first",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+            (
+                "call-second",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-b"}),
+            ),
+        ],
+    )]));
+    let store = Arc::new(PausingRuntimeStore::after_first_append_of(
+        EventKind::ToolCallRequested,
+    ));
+    let pause = Arc::clone(&store.pause);
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-request-append"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "cancel request append",
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(2), pause.wait_until_entered())
+        .await
+        .expect("request batch append did not reach the pause");
+    host.cancel(
+        thread.context().coordinates.thread_id,
+        "cancel request append",
+    )
+    .await
+    .unwrap();
+    assert_cancelled(&mut events, "cancel request append").await;
+
+    let records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|event| event.kind == EventKind::ToolCallRequested)
+            .count(),
+        2
+    );
+    assert!(
+        records
+            .iter()
+            .all(|event| event.kind != EventKind::ToolCallCompleted)
+    );
+}
+
+#[tokio::test]
+async fn conflicting_thread_holds_serialize_in_model_call_order() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let tool_provider = Arc::new(SerialBlockingToolProvider {
+        tool_name: "thread_submit",
+        started: started_tx,
+        release_first: Notify::new(),
+    });
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider.clone()),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_calls(vec![
+            (
+                "call-first",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a", "slot": "first"}),
+            ),
+            (
+                "call-second",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a", "slot": "second"}),
+            ),
+        ]),
+        response_text("final reply"),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client;
+    let mut config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config.max_tokens = 128;
+    let host = RuntimeHost::new(Arc::new(
+        CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+    ));
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "hold-serialize"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "serialize",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "first"
+    );
+    assert!(started_rx.try_recv().is_err());
+    tool_provider.release_first.notify_one();
+    assert_eq!(
+        timeout(Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "second"
+    );
+    assert_output(&mut events, "final reply").await;
+}
+
+#[tokio::test]
+async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let tool_provider = Arc::new(SerialBlockingToolProvider {
+        tool_name: "bash",
+        started: started_tx,
+        release_first: Notify::new(),
+    });
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider.clone()),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_calls(vec![
+            (
+                "call-first",
+                "bash",
+                serde_json::json!({"command": "first", "slot": "first"}),
+            ),
+            (
+                "call-second",
+                "bash",
+                serde_json::json!({"command": "second", "slot": "second"}),
+            ),
+        ]),
+        response_text("final reply"),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client;
+    let mut config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config.max_tokens = 128;
+    let host = RuntimeHost::new(Arc::new(
+        CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+    ));
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "bash-hold-serialize"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "serialize bash",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "first"
+    );
+    assert!(started_rx.try_recv().is_err());
+    tool_provider.release_first.notify_one();
+    assert_eq!(
+        timeout(Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "second"
+    );
+    assert_output(&mut events, "final reply").await;
+}
+
+#[tokio::test]
+async fn suspended_batch_finishes_and_appends_other_members_before_turn_waits() {
+    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+        vec![
+            (
+                "call-wait",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+            (
+                "call-finish",
+                "thread_status",
+                serde_json::json!({"task_name": "worker-b"}),
+            ),
+        ],
+    )]));
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let mut config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config.max_tokens = 128;
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "hold-suspension"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    append_tool_controller_bind_receipt(&store, &thread.context().coordinates, "thread_submit")
+        .await;
+    append_witnessed_tool_suspension(
+        &store,
+        &thread.context().coordinates,
+        "snapshot-controller",
+        "turn-1",
+        "call-wait",
+        "approval-1",
+    )
+    .await;
+    let mut status = thread.subscribe_status();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "mixed batch",
+    )
+    .await
+    .unwrap();
+    wait_for_thread_event(
+        &store,
+        &thread.context().coordinates,
+        EventKind::TurnWaiting,
+    )
+    .await;
+    wait_for_status(&mut status, crate::ThreadStatus::Idle).await;
+
+    assert_eq!(client.requests().len(), 1);
+    let session = thread.session_context().await.unwrap();
+    assert!(session.messages.iter().any(|message| {
+        matches!(
+            message,
+            CanonicalMessage::ToolResult {
+                tool_call_id,
+                is_error: false,
+                ..
+            } if tool_call_id == "call-finish"
+        )
+    }));
+    assert!(session.messages.iter().all(|message| {
+        !matches!(
+            message,
+            CanonicalMessage::ToolResult { tool_call_id, .. } if tool_call_id == "call-wait"
+        )
+    }));
+}
+
+#[tokio::test]
+async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
+    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_calls(vec![
+            (
+                "call-first",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+            (
+                "call-second",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-b"}),
+            ),
+        ]),
+        response_text("all suspended calls resumed"),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                provider_client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "all-tools-suspended"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    append_tool_controller_bind_receipt(&store, &thread.context().coordinates, "thread_submit")
+        .await;
+    for (call_id, approval_id) in [
+        ("call-first", "approval-first"),
+        ("call-second", "approval-second"),
+    ] {
+        append_witnessed_tool_suspension(
+            &store,
+            &thread.context().coordinates,
+            "snapshot-controller",
+            "turn-1",
+            call_id,
+            approval_id,
+        )
+        .await;
+    }
+    let mut status = thread.subscribe_status();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "suspend both calls",
+    )
+    .await
+    .unwrap();
+    wait_for_thread_event(
+        &store,
+        &thread.context().coordinates,
+        EventKind::TurnWaiting,
+    )
+    .await;
+    wait_for_status(&mut status, crate::ThreadStatus::Idle).await;
+    for call_id in ["call-first", "call-second"] {
+        append_witnessed_tool_decision(
+            &store,
+            &thread.context().coordinates,
+            "snapshot-controller",
+            "turn-1",
+            call_id,
+            ToolCallDecisionOutcomePayload::Allow,
+        )
+        .await;
+    }
+
+    host.resume_tool_call(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "call-first",
+    )
+    .await
+    .unwrap();
+    wait_for_tool_call_completion(
+        &store,
+        &thread.context().coordinates,
+        "turn-1",
+        "call-first",
+    )
+    .await;
+    wait_for_status(&mut status, crate::ThreadStatus::Idle).await;
+    assert_eq!(
+        client.requests().len(),
+        1,
+        "the round barrier must remain closed while a sibling has no result"
+    );
+
+    host.resume_tool_call(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "call-second",
+    )
+    .await
+    .unwrap();
+    assert_output(&mut events, "all suspended calls resumed").await;
+    assert_eq!(client.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn failed_tool_call_does_not_cancel_independent_sibling() {
+    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(IsolatedFailureToolProvider);
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_calls(vec![
+            (
+                "call-fail",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a", "fail": true}),
+            ),
+            (
+                "call-ok",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-b"}),
+            ),
+        ]),
+        response_text("final reply"),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client;
+    let mut config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config.max_tokens = 128;
+    let host = RuntimeHost::new(Arc::new(
+        CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+    ));
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "hold-failure-isolation"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "mixed result",
+    )
+    .await
+    .unwrap();
+    assert_output(&mut events, "final reply").await;
+
+    let results = thread
+        .session_context()
+        .await
+        .unwrap()
+        .messages
+        .into_iter()
+        .filter_map(|message| match message {
+            CanonicalMessage::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } => Some((tool_call_id, is_error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results,
+        vec![
+            ("call-fail".to_string(), true),
+            ("call-ok".to_string(), false)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
+    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(IsolatedFailureToolProvider);
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_calls(vec![
+            (
+                "call-fail",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a", "fail": true}),
+            ),
+            (
+                "call-after",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+        ]),
+        response_text("final reply"),
+    ]));
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "hold-error-release"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "release failed hold",
+    )
+    .await
+    .unwrap();
+    assert_output(&mut events, "final reply").await;
+
+    let session = thread.session_context().await.unwrap();
+    let results = session
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            CanonicalMessage::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } => Some((tool_call_id.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results, vec![("call-fail", true), ("call-after", false)]);
+}
+
+#[tokio::test]
+async fn turn_cancellation_drops_every_independent_in_flight_tool_call() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (dropped_tx, mut dropped_rx) = mpsc::unbounded_channel();
+    let active = Arc::new(AtomicUsize::new(0));
+    let tool_provider = Arc::new(PendingCancellationToolProvider {
+        started: started_tx,
+        dropped: dropped_tx,
+        active: Arc::clone(&active),
+    });
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+        vec![
+            (
+                "call-first",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-a"}),
+            ),
+            (
+                "call-second",
+                "thread_submit",
+                serde_json::json!({"task_name": "worker-b"}),
+            ),
+        ],
+    )]));
+    let provider_client: Arc<dyn ProviderClient> = client;
+    let mut config =
+        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config.max_tokens = 128;
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread_with_topology_and_metadata(
+            ThreadCoordinates::new("tenant_a", "user_1", "hold-cancel"),
+            ThreadTopology::root(),
+            BTreeMap::from([(
+                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+                "unlimited".to_string(),
+            )]),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "cancel batch",
+    )
+    .await
+    .unwrap();
+    let mut started = vec![
+        timeout(Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        timeout(Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    ];
+    started.sort();
+    assert_eq!(started, vec!["call-first", "call-second"]);
+    assert_eq!(active.load(Ordering::SeqCst), 2);
+
+    host.cancel(thread.context().coordinates.thread_id, "stop batch")
+        .await
+        .unwrap();
+    assert_cancelled(&mut events, "stop batch").await;
+    let mut dropped = vec![
+        timeout(Duration::from_secs(2), dropped_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        timeout(Duration::from_secs(2), dropped_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    ];
+    dropped.sort();
+    assert_eq!(dropped, vec!["call-first", "call-second"]);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+
+    let records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let requests = records
+        .iter()
+        .filter(|event| event.kind == EventKind::ToolCallRequested)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|event| !event.payload["holds"].is_null())
+    );
+    assert!(
+        records
+            .iter()
+            .all(|event| event.kind != EventKind::ToolCallCompleted)
+    );
+}
+
+#[tokio::test]
 async fn runtime_persists_tool_request_and_completion_facts() {
     let registry = echo_registry("echo").await;
     let client = Arc::new(RecordingClient::with_responses(vec![
@@ -2120,11 +3760,19 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
         )
         .await
         .unwrap();
-    assert!(
-        records
-            .iter()
-            .any(|event| event.kind == EventKind::ToolCallCompleted)
+    let request = records
+        .iter()
+        .find(|event| event.kind == EventKind::ToolCallRequested)
+        .expect("resumed call request");
+    assert_eq!(
+        request.payload["holds"],
+        serde_json::json!([{"key": {"kind": "global"}, "access": "exclusive"}])
     );
+    let completion = records
+        .iter()
+        .find(|event| event.kind == EventKind::ToolCallCompleted)
+        .expect("resumed call completion");
+    assert_eq!(completion.payload["finish_order"], 0);
     assert!(
         records
             .iter()
@@ -2160,6 +3808,94 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
         client.requests().len(),
         2,
         "duplicate resume must not invoke or continue the tool twice"
+    );
+}
+
+#[tokio::test]
+async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
+    let registry = echo_registry("echo").await;
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named_with_id(
+            "call-wait",
+            "echo_search",
+            serde_json::json!({"input": "first"}),
+        ),
+        response_tool_call_named_with_id(
+            "call-over-budget",
+            "echo_search",
+            serde_json::json!({"input": "second"}),
+        ),
+    ]));
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        runtime_factory_with_registry(provider_client, registry),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread_with_topology_and_metadata(
+            ThreadCoordinates::new("tenant_a", "user_1", "resume-round-budget"),
+            ThreadTopology::root(),
+            BTreeMap::from([(
+                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+                "1".to_string(),
+            )]),
+        )
+        .await
+        .unwrap();
+    append_tool_controller_bind_receipt(&store, &thread.context().coordinates, "echo_search").await;
+    append_witnessed_tool_suspension(
+        &store,
+        &thread.context().coordinates,
+        "snapshot-controller",
+        "turn-1",
+        "call-wait",
+        "approval-1",
+    )
+    .await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "use echo")
+        .await
+        .unwrap();
+    wait_for_thread_event(
+        &store,
+        &thread.context().coordinates,
+        EventKind::TurnWaiting,
+    )
+    .await;
+    append_witnessed_tool_decision(
+        &store,
+        &thread.context().coordinates,
+        "snapshot-controller",
+        "turn-1",
+        "call-wait",
+        ToolCallDecisionOutcomePayload::Allow,
+    )
+    .await;
+    host.resume_tool_call(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "call-wait",
+    )
+    .await
+    .unwrap();
+
+    assert_failed_with_runtime_events(&mut events, "tool router exceeded 1 rounds").await;
+    assert_eq!(client.requests().len(), 2);
+    let records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|event| event.kind == EventKind::ToolCallRequested)
+            .count(),
+        1
     );
 }
 
@@ -3214,6 +4950,33 @@ async fn wait_for_thread_event(
             "timed out waiting for thread event kind {kind}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_tool_call_completion(
+    store: &InMemorySessionStore,
+    coordinates: &ThreadCoordinates,
+    turn_id: &str,
+    call_id: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let records = store
+            .read_events(&EventStreamId::for_thread(coordinates), None)
+            .await
+            .unwrap();
+        if records.iter().any(|event| {
+            event.kind == EventKind::ToolCallCompleted
+                && event.payload["subject"]["turn_id"].as_str() == Some(turn_id)
+                && event.payload["subject"]["call_id"].as_str() == Some(call_id)
+        }) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for tool completion {turn_id}/{call_id}"
+        );
+        tokio::task::yield_now().await;
     }
 }
 

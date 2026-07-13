@@ -127,6 +127,8 @@ const THREAD_AGENT_RUNTIME_OVERRIDES_METADATA: &str = "cooldis.agent.runtime_ove
 const THREAD_AGENT_PLACEMENT_METADATA: &str = "cooldis.agent.placement";
 pub(crate) const THREAD_AGENT_WORKSPACE_METADATA: &str = "cooldis.agent.workspace";
 const THREAD_AGENT_RUNTIME_STREAMING_METADATA: &str = "cooldis.agent.runtime.streaming";
+const THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA: &str =
+    crate::adapters::provider_runtime::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA;
 const THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA: &str =
     "cooldis.agent.runtime.compaction.auto_at_text_bytes";
 const THREAD_AGENT_OPERATION_BINDINGS_METADATA: &str = "cooldis.agent.operation_bindings";

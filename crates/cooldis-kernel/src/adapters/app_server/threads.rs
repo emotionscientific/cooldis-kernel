@@ -1331,6 +1331,16 @@ pub(super) fn append_bound_agent_metadata(
         THREAD_AGENT_RUNTIME_STREAMING_METADATA.to_string(),
         bound.bind_receipt.effective_runtime.streaming.to_string(),
     );
+    if let Some(max_tool_rounds) = bound.bind_receipt.effective_runtime.max_tool_rounds {
+        let value = match max_tool_rounds {
+            crate::AgentManifestMaxToolRounds::Limited(rounds) => rounds.to_string(),
+            crate::AgentManifestMaxToolRounds::Unlimited => "unlimited".to_string(),
+        };
+        metadata.insert(
+            THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+            value,
+        );
+    }
     if let Some(auto_at_text_bytes) = bound
         .bind_receipt
         .effective_runtime

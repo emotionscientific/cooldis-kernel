@@ -221,6 +221,8 @@ request time, fail closed.
 [runtime]
 default_cwd = "workspace"      # default
 streaming = true               # default
+# max_tool_rounds = 64          # default when omitted: 8
+# max_tool_rounds = "unlimited" # explicit opt-in; other budgets still apply
 # optional: turn_timeout_ms, cancellation_grace_ms,
 #           compaction = { auto_at_text_bytes = 200000 }
 
@@ -229,7 +231,8 @@ allow = ["default_cwd"]        # deny-by-default allowlist
 ```
 
 Override keys a `thread/start` caller may pass: `default_cwd`, `streaming`,
-`turn_timeout_ms`, `cancellation_grace_ms`, `compaction.auto_at_text_bytes`.
+`turn_timeout_ms`, `cancellation_grace_ms`, `max_tool_rounds`,
+`compaction.auto_at_text_bytes`.
 Anything not allowlisted is fixed by the manifest; a start that tries to
 override it is rejected.
 

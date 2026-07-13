@@ -29,6 +29,7 @@ fn defaults_with_allow(
     AgentManifestRuntimeDefaults {
         default_cwd: "workspace".to_string(),
         streaming: true,
+        max_tool_rounds: Some(AgentManifestMaxToolRounds::Limited(8)),
         turn_timeout_ms: Some(1000),
         cancellation_grace_ms: None,
         compaction: AgentManifestCompactionDefaults {
@@ -57,11 +58,13 @@ fn runtime_overrides_apply_when_allowlisted() {
     let defaults = defaults_with_allow(vec![
         AgentManifestRuntimeOverrideKey::DefaultCwd,
         AgentManifestRuntimeOverrideKey::Streaming,
+        AgentManifestRuntimeOverrideKey::MaxToolRounds,
         AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes,
     ]);
     let overrides = AgentManifestBindOverrides {
         default_cwd: Some("repo".to_string()),
         streaming: Some(false),
+        max_tool_rounds: Some(AgentManifestMaxToolRounds::Unlimited),
         compaction_auto_at_text_bytes: Some(2048),
         ..AgentManifestBindOverrides::default()
     };
@@ -70,14 +73,50 @@ fn runtime_overrides_apply_when_allowlisted() {
 
     assert_eq!(effective.default_cwd, "repo");
     assert!(!effective.streaming);
+    assert_eq!(
+        effective.max_tool_rounds,
+        Some(AgentManifestMaxToolRounds::Unlimited)
+    );
     assert_eq!(effective.compaction.auto_at_text_bytes, Some(2048));
     assert_eq!(
         overridden_keys,
         vec![
             "default_cwd".to_string(),
             "streaming".to_string(),
+            "max_tool_rounds".to_string(),
             "compaction.auto_at_text_bytes".to_string(),
         ]
+    );
+}
+
+#[test]
+fn runtime_tool_round_override_is_allowlisted_and_validated() {
+    let defaults = defaults_with_allow(vec![AgentManifestRuntimeOverrideKey::MaxToolRounds]);
+    let finite = AgentManifestBindOverrides {
+        max_tool_rounds: Some(AgentManifestMaxToolRounds::Limited(64)),
+        ..AgentManifestBindOverrides::default()
+    };
+
+    let (effective, overridden_keys) = apply_runtime_overrides(&defaults, &finite).unwrap();
+    assert_eq!(
+        effective.max_tool_rounds,
+        Some(AgentManifestMaxToolRounds::Limited(64))
+    );
+    assert_eq!(overridden_keys, vec!["max_tool_rounds".to_string()]);
+
+    let invalid = AgentManifestBindOverrides {
+        max_tool_rounds: Some(AgentManifestMaxToolRounds::Limited(0)),
+        ..AgentManifestBindOverrides::default()
+    };
+    let err = apply_runtime_overrides(&defaults, &invalid).unwrap_err();
+    assert!(err.to_string().contains("max_tool_rounds"));
+    assert!(err.to_string().contains("must be > 0"));
+
+    let camel_case: AgentManifestBindOverrides =
+        serde_json::from_value(serde_json::json!({"maxToolRounds": "unlimited"})).unwrap();
+    assert_eq!(
+        camel_case.max_tool_rounds,
+        Some(AgentManifestMaxToolRounds::Unlimited)
     );
 }
 

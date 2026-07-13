@@ -528,7 +528,18 @@ target = ".#agent-tools"
 [runtime]
 default_cwd = "workspace"
 streaming = true
+max_tool_rounds = 64
 ```
+
+`max_tool_rounds` limits model/tool batches per turn. When omitted, the
+runtime default is `8`, preserving the existing tool-loop behavior. A positive
+integer raises or lowers the cap; `max_tool_rounds = "unlimited"` is the
+explicit opt-in sentinel for no round cap. Unlimited rounds remain bounded by
+the turn's time, token, byte, and cancellation budgets. Reaching a finite cap
+fails the turn; it never truncates tool results silently.
+
+`max_tool_rounds` is also a deny-by-default runtime override key. A caller may
+set it only when `[runtime.overrides].allow` contains `"max_tool_rounds"`.
 
 ## Boundary Summary
 
