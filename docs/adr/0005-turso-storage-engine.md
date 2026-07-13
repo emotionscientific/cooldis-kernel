@@ -111,6 +111,33 @@ behind a single engine-owner crate.
    egress state) and `cooldis-io-pgqrs` (dedupe) for exactly this file,
    annotated in both manifests; wave 3 migrates only sites with
    engine-exclusive files.
+9. **Paused-time test harnesses must await durable receipts, not runtime
+   status** (EMO-425 finding, 2026-07-12). The async-native store paths
+   run engine IO on spawned tasks (including the cancellation shields from
+   wave 2), and tokio's paused clock does not serialize those non-timer
+   boundaries: a store write can still be in flight while the thread that
+   requested it already reports an idle status and an empty queue. The
+   initial EMO-425 investigation exposed one same-seed scenario drift
+   mechanism here: the harness could read transcript state during a window
+   the engine had not yet made durable.
+   Rule: any paused-time harness that reads durable state after driving an
+   operation through an async store must wait on an operation-specific
+   durable receipt or witnessed event for that operation; thread status
+   plus queue depth is never a persistence witness. The scenario harness
+   enforces this for turn-input persistence; new harness operations must
+   name their receipt before relying on quiescence.
+10. **Scenario protocol clocks must not advance while async engine work owns
+    a queue lease** (EMO-425 follow-up, 2026-07-12). A bounded scheduler-yield
+    loop is not evidence that a Turso-backed worker has finished: under host
+    load, the worker can remain inside real engine IO after the yield budget
+    expires. Dropping its join handle allowed the next empty drain to return;
+    the harness then explicitly advanced its queue tick by one visibility
+    timeout, expiring the first worker's still-live lease and admitting a
+    concurrent redelivery. Rule: a paused-time crash harness must retain and
+    join every worker it starts. It may advance a queue clock only after no
+    earlier attempt remains live and the current failed or empty attempt has
+    returned; while an operation-specific cut receipt is pending, it must await
+    that receipt without deriving protocol time from scheduler progress.
 
 ## Migration plan
 

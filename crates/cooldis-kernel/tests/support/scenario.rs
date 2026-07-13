@@ -26,8 +26,8 @@ use super::kernel_test::{
     LocalOfflineProviderClient, NewEventRecord, NewObservationRecord, ObservationRecord,
     ObservationStore, ProviderApi, ProviderCapabilityRecord, ProviderClient, ProviderRequest,
     ProviderResponse, ProviderResult, RuntimeHost, RuntimeStore, SessionContext, SessionEntry,
-    SessionEntryId, SessionEntryKind, SessionStore, StreamCursorV1, ThreadBaseRef,
-    ThreadCoordinates, ThreadId, ThreadStatus, TurnSubmissionMode,
+    SessionEntryId, SessionEntryKind, SessionStore, StreamCursorV1, ThreadBaseRef, ThreadCommand,
+    ThreadCoordinates, ThreadEvent, ThreadId, ThreadStatus, TurnSubmissionMode,
 };
 use super::simulated_io::{
     CrashSurvival, IO_SYNC, IO_WRITE, IoFaultPlan, IoTranscriptEntry, SimulatedIo,
@@ -46,6 +46,9 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+const SCENARIO_ASYNC_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const SCENARIO_ASYNC_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
 
 struct ScenarioRunRoot {
     path: PathBuf,
@@ -70,6 +73,14 @@ impl Drop for ScenarioRunRoot {
 struct DynRuntimeStore {
     inner: Arc<dyn RuntimeStore>,
     canonical_timestamp_ms: i64,
+    control: Arc<ScenarioStoreControl>,
+}
+
+#[derive(Default)]
+struct ScenarioStoreControl {
+    pause_next_turn_input: std::sync::atomic::AtomicBool,
+    turn_input_started: tokio::sync::Notify,
+    release_turn_input: tokio::sync::Notify,
 }
 
 impl DynRuntimeStore {
@@ -138,6 +149,14 @@ impl SessionStore for DynRuntimeStore {
         turn_id: &str,
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry> {
+        if self
+            .control
+            .pause_next_turn_input
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.control.turn_input_started.notify_one();
+            self.control.release_turn_input.notified().await;
+        }
         self.inner
             .append_turn_input(coordinates, turn_id, self.kind(kind))
             .await
@@ -276,7 +295,7 @@ impl ProviderClient for ScenarioProvider {
             .pause_next_complete
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            self.complete_started.notify_waiters();
+            self.complete_started.notify_one();
             std::future::pending::<()>().await;
         }
         self.inner.complete(request).await
@@ -319,6 +338,9 @@ struct ScenarioQueuedMessage {
 struct ScenarioQueue {
     messages: tokio::sync::Mutex<Vec<ScenarioQueuedMessage>>,
     tick: Arc<std::sync::atomic::AtomicU64>,
+    pause_before_next_complete: std::sync::atomic::AtomicBool,
+    before_complete_started: tokio::sync::Notify,
+    release_before_complete: tokio::sync::Notify,
     pause_next_complete: std::sync::atomic::AtomicBool,
     complete_started: tokio::sync::Notify,
 }
@@ -328,6 +350,9 @@ impl ScenarioQueue {
         Self {
             messages: tokio::sync::Mutex::new(Vec::new()),
             tick,
+            pause_before_next_complete: std::sync::atomic::AtomicBool::new(false),
+            before_complete_started: tokio::sync::Notify::new(),
+            release_before_complete: tokio::sync::Notify::new(),
             pause_next_complete: std::sync::atomic::AtomicBool::new(false),
             complete_started: tokio::sync::Notify::new(),
         }
@@ -340,6 +365,16 @@ impl ScenarioQueue {
             .iter()
             .filter(|message| !message.completed)
             .count()
+    }
+
+    async fn lease_attempts(&self) -> Vec<u32> {
+        self.messages
+            .lock()
+            .await
+            .iter()
+            .filter(|message| !message.completed)
+            .map(|message| message.attempt)
+            .collect()
     }
 }
 
@@ -396,10 +431,17 @@ impl IngressQueueStore for ScenarioQueue {
 
     async fn complete_ingress(&self, message_id: &str) -> IoResult<()> {
         if self
+            .pause_before_next_complete
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.before_complete_started.notify_one();
+            self.release_before_complete.notified().await;
+        }
+        if self
             .pause_next_complete
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            self.complete_started.notify_waiters();
+            self.complete_started.notify_one();
             std::future::pending::<()>().await;
         }
         if let Some(message) = self
@@ -602,6 +644,7 @@ struct ScenarioHarness {
     probes: Arc<Mutex<QueueProbeLog>>,
     probe_cursor: usize,
     tick: Arc<std::sync::atomic::AtomicU64>,
+    store_control: Arc<ScenarioStoreControl>,
     runtime_store: Arc<dyn RuntimeStore>,
     raw_store: super::kernel_test::SqliteSessionStore,
     provider: Arc<ScenarioProvider>,
@@ -676,6 +719,8 @@ impl ScenarioHarness {
 
         let decorated_slot = Arc::new(Mutex::new(None::<Arc<dyn RuntimeStore>>));
         let decorated_capture = Arc::clone(&decorated_slot);
+        let store_control = Arc::new(ScenarioStoreControl::default());
+        let store_control_capture = Arc::clone(&store_control);
         let store_plan = clone_plan(&plan);
         let server = super::scenario_app_server(config, Arc::clone(&runtime_factory), move |raw| {
             let canonical_timestamp_ms = store_plan.seed as i64;
@@ -683,6 +728,7 @@ impl ScenarioHarness {
                 Arc::new(DynRuntimeStore {
                     inner: raw,
                     canonical_timestamp_ms,
+                    control: store_control_capture,
                 }),
                 Arc::new(EmptyIngressQueue),
                 Arc::new(LocalOfflineProviderClient::new(
@@ -729,6 +775,7 @@ impl ScenarioHarness {
             probes,
             probe_cursor: 0,
             tick,
+            store_control,
             runtime_store,
             raw_store,
             provider: provider_control,
@@ -1009,17 +1056,109 @@ impl ScenarioHarness {
     }
 
     async fn wait_for_idle(&self, coordinates: &ThreadCoordinates) {
-        for _ in 0..128 {
-            match self.server.supervisor().get_thread_at(coordinates).await {
-                Ok(handle)
-                    if matches!(handle.status(), ThreadStatus::Idle | ThreadStatus::Stopped)
-                        && handle.queued_command_count() == 0 =>
+        let Ok(handle) = self.server.supervisor().get_thread_at(coordinates).await else {
+            return;
+        };
+        let mut status = handle.subscribe_status();
+        let started = std::time::Instant::now();
+        loop {
+            if matches!(
+                *status.borrow(),
+                ThreadStatus::Idle | ThreadStatus::Stopped | ThreadStatus::Failed
+            ) && handle.queued_command_count() == 0
+            {
+                return;
+            }
+            assert!(
+                started.elapsed() < SCENARIO_ASYNC_WAIT_TIMEOUT,
+                "scenario thread {coordinates:?} did not become quiescent within {SCENARIO_ASYNC_WAIT_TIMEOUT:?}; status={:?}, queued_commands={}",
+                *status.borrow(),
+                handle.queued_command_count(),
+            );
+            tokio::select! {
+                biased;
+                changed = status.changed() => {
+                    assert!(
+                        changed.is_ok(),
+                        "scenario thread {coordinates:?} closed its status channel before becoming quiescent"
+                    );
+                }
+                _ = tokio::time::sleep(SCENARIO_ASYNC_RECHECK_INTERVAL) => {}
+            }
+        }
+    }
+
+    async fn wait_for_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
+        turn_id: &str,
+    ) {
+        loop {
+            match events.recv().await {
+                Ok(ThreadEvent::CanonicalMirror { entry, .. })
+                    if entry.turn_id.as_deref() == Some(turn_id) =>
                 {
                     return;
                 }
-                _ => tokio::task::yield_now().await,
+                Ok(ThreadEvent::Failed { .. }) => {
+                    self.require_durable_turn_input(coordinates, turn_id, "failed")
+                        .await;
+                    return;
+                }
+                Ok(ThreadEvent::Stopped { .. }) => {
+                    self.require_durable_turn_input(coordinates, turn_id, "stopped")
+                        .await;
+                    return;
+                }
+                Ok(ThreadEvent::Cancelled { .. }) => {
+                    self.require_durable_turn_input(coordinates, turn_id, "cancelled")
+                        .await;
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if self.turn_input_is_durable(coordinates, turn_id).await {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    self.require_durable_turn_input(coordinates, turn_id, "event channel closed")
+                        .await;
+                    return;
+                }
+                Ok(_) => {}
             }
         }
+    }
+
+    async fn turn_input_is_durable(&self, coordinates: &ThreadCoordinates, turn_id: &str) -> bool {
+        let stream_id = EventStreamId::for_thread(coordinates);
+        self.raw_store
+            .read_events(&stream_id, None)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "read durable scenario stream {stream_id} for thread {coordinates:?} and turn {turn_id:?}: {error}"
+                )
+            })
+            .into_iter()
+            .any(|event| {
+                event.kind == EventKind::SessionEntryAppended
+                    && event.payload.get("turn_id").and_then(serde_json::Value::as_str)
+                        == Some(turn_id)
+            })
+    }
+
+    async fn require_durable_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        terminal: &str,
+    ) {
+        assert!(
+            self.turn_input_is_durable(coordinates, turn_id).await,
+            "scenario thread {coordinates:?} {terminal} before steer input {turn_id:?} became durable"
+        );
     }
 
     async fn append_placement(
@@ -1300,18 +1439,32 @@ impl ScenarioHarness {
             }
             ScenarioOp::Steer => {
                 if let Some(coordinates) = self.bound_coordinates(self.current_root) {
+                    let Ok(handle) = self.server.supervisor().get_thread_at(&coordinates).await
+                    else {
+                        return;
+                    };
+                    let mut events = handle.subscribe_events();
                     self.envelope_index += 1;
-                    let _ = self
+                    let turn_id =
+                        format!("scenario-steer-{}-{}", self.plan.seed, self.envelope_index);
+                    // Idle steer deliberately stays Idle while it persists the
+                    // rejected input. The async store may yield after dequeuing,
+                    // so status plus queue depth cannot witness quiescence here.
+                    if self
                         .server
                         .supervisor()
                         .submit_to_with_mode(
                             &coordinates,
-                            format!("scenario-steer-{}-{}", self.plan.seed, self.envelope_index),
+                            turn_id.clone(),
                             "steer",
                             TurnSubmissionMode::Steer,
                         )
-                        .await;
-                    self.wait_for_idle(&coordinates).await;
+                        .await
+                        .is_ok()
+                    {
+                        self.wait_for_turn_input(&coordinates, &mut events, &turn_id)
+                            .await;
+                    }
                 }
             }
             ScenarioOp::Cancel => {
@@ -1737,37 +1890,57 @@ impl CrashCutHost for ScenarioHarness {
                 let coordinates = self
                     .queue_cut_envelope("observe_only", "queue-complete-cut")
                     .await;
-                loop {
+                let wait_started = std::time::Instant::now();
+                'attempts: loop {
                     self.queue_inner
                         .pause_next_complete
                         .store(true, std::sync::atomic::Ordering::SeqCst);
-                    let drain = self.spawn_cut_worker("scenario-complete-cut");
-                    for _ in 0..512 {
-                        if !self
-                            .queue_inner
-                            .pause_next_complete
-                            .load(std::sync::atomic::Ordering::SeqCst)
-                        {
+                    let queue_inner = Arc::clone(&self.queue_inner);
+                    let complete_started = queue_inner.complete_started.notified();
+                    tokio::pin!(complete_started);
+                    let mut drain = self.spawn_cut_worker("scenario-complete-cut");
+                    loop {
+                        if wait_started.elapsed() >= SCENARIO_ASYNC_WAIT_TIMEOUT {
                             drain.abort();
                             let _ = drain.await;
-                            self.runtime_generation += 1;
-                            self.append_placement(&coordinates, "active", None).await;
-                            self.coordinates.push(coordinates.clone());
-                            break;
+                            let attempts = queue_inner.lease_attempts().await;
+                            panic!(
+                                "scenario queue completion cut did not reach its receipt or terminate within {SCENARIO_ASYNC_WAIT_TIMEOUT:?}; tick={}, attempts={attempts:?}",
+                                self.tick.load(std::sync::atomic::Ordering::SeqCst),
+                            );
                         }
-                        if drain.is_finished() {
-                            let _ = drain.await;
-                            self.tick.fetch_add(30, std::sync::atomic::Ordering::SeqCst);
-                            break;
+                        tokio::select! {
+                            _ = &mut complete_started => {
+                                drain.abort();
+                                let _ = drain.await;
+                                self.runtime_generation += 1;
+                                self.append_placement(&coordinates, "active", None).await;
+                                self.coordinates.push(coordinates.clone());
+                                break 'attempts;
+                            }
+                            result = &mut drain => {
+                                match result {
+                                    Ok(_) => {
+                                        // A planned queue/store failure or an empty
+                                        // drain may end an attempt before it reaches
+                                        // the completion cut. Expire only that joined
+                                        // attempt; real IO latency must not advance
+                                        // queue time while the lease is live.
+                                        self.tick.fetch_add(
+                                            30,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        panic!(
+                                            "scenario queue completion worker terminated abnormally before its receipt: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                            _ = tokio::time::sleep(SCENARIO_ASYNC_RECHECK_INTERVAL) => {}
                         }
-                        tokio::task::yield_now().await;
-                    }
-                    if self
-                        .coordinates
-                        .iter()
-                        .any(|known| known.thread_id == coordinates.thread_id)
-                    {
-                        break;
                     }
                 }
             }
@@ -2978,6 +3151,219 @@ mod tests {
                 "fresh sweep seed {seed} drifted between same-seed runs"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scenario_steer_waits_for_persisted_input_when_idle_cannot_signal_completion() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let seed = 0x4250_0001;
+        let scenario = no_fault_scenario(seed, vec![ScenarioOp::StartThread]);
+        let run_root = ScenarioRunRoot::new(seed);
+        let mut harness = ScenarioHarness::build(
+            run_root.path.clone(),
+            clone_plan(&scenario.plan),
+            true,
+            None,
+        )
+        .await;
+        harness.execute(ScenarioOp::StartThread).await;
+
+        let control = Arc::clone(&harness.store_control);
+        control
+            .pause_next_turn_input
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let steer = tokio::spawn(async move {
+            harness.execute(ScenarioOp::Steer).await;
+            harness
+        });
+        control.turn_input_started.notified().await;
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !steer.is_finished(),
+            "scenario advanced while the idle steer input was not durable"
+        );
+
+        control.release_turn_input.notify_one();
+        let harness = steer.await.expect("join forced steer interleaving");
+        harness.server.supervisor().shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_complete_cut_does_not_advance_clock_while_lease_processing_is_in_flight() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let seed = 0x4250_0004;
+        let scenario = no_fault_scenario(seed, Vec::new());
+        let run_root = ScenarioRunRoot::new(seed);
+        let mut harness = ScenarioHarness::build(
+            run_root.path.clone(),
+            clone_plan(&scenario.plan),
+            true,
+            None,
+        )
+        .await;
+        let queue = Arc::clone(&harness.queue_inner);
+        let tick = Arc::clone(&harness.tick);
+        let starting_tick = tick.load(std::sync::atomic::Ordering::SeqCst);
+        queue
+            .pause_before_next_complete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let cut = tokio::spawn(async move {
+            harness.run_to_cut(CrashCutSeam::QueueCompleteBarrier).await;
+            harness
+        });
+        queue.before_complete_started.notified().await;
+        for _ in 0..4_096 {
+            if tick.load(std::sync::atomic::Ordering::SeqCst) != starting_tick {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            queue.lease_attempts().await,
+            vec![1],
+            "scenario redelivered a message whose first lease was still in store IO"
+        );
+        assert_eq!(
+            tick.load(std::sync::atomic::Ordering::SeqCst),
+            starting_tick,
+            "scenario queue clock advanced while a leased message was still in store IO"
+        );
+
+        queue.release_before_complete.notify_one();
+        let harness = cut.await.expect("join forced queue lease interleaving");
+        harness.server.supervisor().shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scenario_wait_for_idle_rechecks_queue_depth_without_status_edge() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let seed = 0x4250_0002;
+        let scenario = no_fault_scenario(seed, vec![ScenarioOp::StartThread]);
+        let run_root = ScenarioRunRoot::new(seed);
+        let mut harness = ScenarioHarness::build(
+            run_root.path.clone(),
+            clone_plan(&scenario.plan),
+            true,
+            None,
+        )
+        .await;
+        harness.execute(ScenarioOp::StartThread).await;
+        let coordinates = harness
+            .bound_coordinates(harness.current_root)
+            .expect("started scenario root remains bound");
+        let handle = harness
+            .server
+            .supervisor()
+            .get_thread_at(&coordinates)
+            .await
+            .expect("started scenario root remains resident");
+
+        let control = Arc::clone(&harness.store_control);
+        control
+            .pause_next_turn_input
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        harness
+            .server
+            .supervisor()
+            .submit_to_with_mode(
+                &coordinates,
+                format!("scenario-steer-{seed}-1"),
+                "steer",
+                TurnSubmissionMode::Steer,
+            )
+            .await
+            .expect("submit paused idle steer");
+        control.turn_input_started.notified().await;
+        handle
+            .send(ThreadCommand::CancelTurn {
+                watchdog_token_id: u64::MAX,
+                reason: "scenario no-op cancel".to_string(),
+            })
+            .await
+            .expect("queue no-op cancel behind paused steer");
+        assert_eq!(handle.queued_command_count(), 1);
+
+        let waiting = tokio::spawn(async move {
+            harness.wait_for_idle(&coordinates).await;
+            harness
+        });
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !waiting.is_finished(),
+            "wait returned before the queue drained"
+        );
+
+        control.release_turn_input.notify_one();
+        let started = std::time::Instant::now();
+        while !waiting.is_finished() && started.elapsed() < std::time::Duration::from_secs(5) {
+            tokio::time::sleep(SCENARIO_ASYNC_RECHECK_INTERVAL).await;
+        }
+        assert!(
+            waiting.is_finished(),
+            "wait did not re-check after a queue drain without a status edge"
+        );
+        let harness = waiting.await.expect("join queue-depth wait regression");
+        harness.server.supervisor().shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scenario_turn_input_wait_recovers_from_lag_and_terminal_after_durability() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let seed = 0x4250_0003;
+        let scenario = no_fault_scenario(seed, vec![ScenarioOp::StartThread]);
+        let run_root = ScenarioRunRoot::new(seed);
+        let mut harness = ScenarioHarness::build(
+            run_root.path.clone(),
+            clone_plan(&scenario.plan),
+            true,
+            None,
+        )
+        .await;
+        harness.execute(ScenarioOp::StartThread).await;
+        harness.execute(ScenarioOp::Steer).await;
+        let coordinates = harness
+            .bound_coordinates(harness.current_root)
+            .expect("started scenario root remains bound");
+        let turn_id = format!("scenario-steer-{seed}-{}", harness.envelope_index);
+
+        let (lagged_tx, mut lagged_events) = tokio::sync::broadcast::channel(1);
+        for text in ["first", "second"] {
+            lagged_tx
+                .send(ThreadEvent::Output {
+                    thread_id: coordinates.thread_id,
+                    text: text.to_string(),
+                })
+                .expect("send synthetic lag event");
+        }
+        harness
+            .wait_for_turn_input(&coordinates, &mut lagged_events, &turn_id)
+            .await;
+
+        let (terminal_tx, mut terminal_events) = tokio::sync::broadcast::channel(1);
+        terminal_tx
+            .send(ThreadEvent::Failed {
+                thread_id: coordinates.thread_id,
+                message: "synthetic terminal after durability".to_string(),
+            })
+            .expect("send synthetic terminal event");
+        harness
+            .wait_for_turn_input(&coordinates, &mut terminal_events, &turn_id)
+            .await;
+
+        harness.server.supervisor().shutdown_all().await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
