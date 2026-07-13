@@ -4108,6 +4108,160 @@ async fn policy_bound_content_hash_for_config(config: serde_json::Value) -> Stri
     policy.payload["content_hash"].as_str().unwrap().to_string()
 }
 
+#[tokio::test]
+async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
+    let store = Arc::new(
+        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
+            "append_events",
+            2,
+            "a second manifest append must not occur",
+        ),
+    );
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "placement-atomic"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({
+                "ref_uri": "agent://placement@0.1.0",
+                "manifest_hash": "snapshot-placement",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "ref_uri": "agent://placement@0.1.0",
+                "manifest_hash": "snapshot-placement",
+                "placement": {"target": "local"}
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(store.call_count("append_events"), 1);
+    let events = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::ManifestBindCompleted)
+            .count(),
+        1
+    );
+    let placement_events = events
+        .iter()
+        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .collect::<Vec<_>>();
+    assert_eq!(placement_events.len(), 1);
+    assert_eq!(placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(placement_events[0].payload["placement"], "local");
+    assert_eq!(
+        placement_events[0].payload["snapshot_id"],
+        "snapshot-placement"
+    );
+}
+
+#[tokio::test]
+async fn failed_manifest_batch_leaves_no_bind_receipt_without_placement_witness() {
+    let store = Arc::new(
+        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
+            "append_events",
+            1,
+            "manifest batch failed",
+        ),
+    );
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "placement-failed"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    let err = thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-placement"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-placement",
+                "placement": {"target": "local"}
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("manifest batch failed"));
+
+    let events = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != EventKind::ManifestBindCompleted)
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != EventKind::PlacementDecision)
+    );
+}
+
+#[tokio::test]
+async fn manifest_receipt_append_fails_closed_for_non_local_placement() {
+    let store = Arc::new(FaultingRuntimeStore::new(Arc::new(
+        InMemorySessionStore::new(),
+    )));
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "placement-fail-closed"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    let err = thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-placement"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-placement",
+                "placement": {"target": "remote"}
+            }),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("placement target remote"));
+    assert!(err.to_string().contains("remote EventStore backend"));
+    assert_eq!(store.call_count("append_events"), 0);
+    let events = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event.kind,
+            EventKind::ManifestBindCompleted | EventKind::PlacementDecision
+        )
+    }));
+}
+
 async fn assert_runtime_kind(
     events: &mut broadcast::Receiver<ThreadEvent>,
     predicate: impl Fn(&RuntimeEventKind) -> bool,

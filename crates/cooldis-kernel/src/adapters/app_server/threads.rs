@@ -212,6 +212,18 @@ impl CooldisAppServer {
             })
             .transpose()?
             .unwrap_or_default();
+        let placement = metadata
+            .get(THREAD_AGENT_PLACEMENT_METADATA)
+            .map(|value| match serde_json::from_str::<AgentManifestPlacementBinding>(value) {
+                Ok(placement) => placement,
+                Err(err) => {
+                    eprintln!(
+                        "cooldis app-server defaulted invalid stored manifest placement to local for thread {}: {err}",
+                        handle.context().coordinates.thread_id
+                    );
+                    AgentManifestPlacementBinding::default()
+                }
+            });
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         if &record.manifest_hash != expected_hash {
@@ -236,7 +248,7 @@ impl CooldisAppServer {
             .get(THREAD_AGENT_MODEL_PROFILE_ID_METADATA)
             .map(|profile_id| AgentManifestModelProfileSelection::profile_id(profile_id.clone()))
             .unwrap_or_default();
-        let bound = bind_published_agent_record(
+        let bound = bind_published_agent_record_with_placement(
             &record,
             alias,
             &provider_surface,
@@ -247,6 +259,8 @@ impl CooldisAppServer {
             Some(&tool_universe_discoverer),
             &model_selection,
             &overrides,
+            None,
+            placement.as_ref(),
         )
         .await?;
         record_bound_agent_receipts(handle, &bound).await.map(Some)
@@ -279,6 +293,7 @@ impl CooldisAppServer {
                 agent_ref,
                 &AgentManifestModelProfileSelection::default(),
                 &AgentManifestBindOverrides::default(),
+                None,
             )
             .await?;
         kernel_thread_spawn_agent_binding(
@@ -294,13 +309,14 @@ impl CooldisAppServer {
         agent_ref: &str,
         model_selection: &AgentManifestModelProfileSelection,
         overrides: &AgentManifestBindOverrides,
+        placement_override: Option<&AgentManifestPlacementBinding>,
     ) -> CooldisResult<AgentManifestBoundThread> {
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let provider_surface = self.agent_manifest_provider_surface().await?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
-        bind_published_agent_record(
+        bind_published_agent_record_with_placement(
             &record,
             alias,
             &provider_surface,
@@ -311,6 +327,8 @@ impl CooldisAppServer {
             Some(&tool_universe_discoverer),
             model_selection,
             overrides,
+            Some(&self.inner.default_placement),
+            placement_override,
         )
         .await
     }
@@ -1106,6 +1124,15 @@ pub(super) fn append_bound_agent_metadata(
         THREAD_AGENT_MODEL_ID_METADATA.to_string(),
         bound.bind_receipt.model_id.clone(),
     );
+    if let Some(placement) = &bound.bind_receipt.placement {
+        let encoded = serde_json::to_string(placement).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest placement binding: {err}"),
+            )
+        })?;
+        metadata.insert(THREAD_AGENT_PLACEMENT_METADATA.to_string(), encoded);
+    }
     if let Some(instruction) = manifest_tool_use_system_instruction(bound) {
         metadata.insert(
             THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
@@ -1440,6 +1467,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) blob_registry_root: Option<PathBuf>,
     pub(super) skill_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
+    pub(super) default_placement: AgentManifestPlacementBinding,
 }
 
 struct ThreadOperationCatalog {
@@ -1513,6 +1541,8 @@ pub(super) struct AppServerThreadSpawnAgentResolver {
     secret_store_path: Option<PathBuf>,
     cwd: PathBuf,
     provider_surface: AgentManifestProviderSurface,
+    default_placement: AgentManifestPlacementBinding,
+    placement_override: Option<AgentManifestPlacementBinding>,
 }
 
 #[async_trait::async_trait]
@@ -1526,7 +1556,7 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
-        let bound = bind_published_agent_record(
+        let bound = bind_published_agent_record_with_placement(
             &record,
             alias,
             &self.provider_surface,
@@ -1539,6 +1569,8 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
                 .map(|discoverer| discoverer as &dyn crate::ToolUniverseDiscoverer),
             &AgentManifestModelProfileSelection::default(),
             &AgentManifestBindOverrides::default(),
+            Some(&self.default_placement),
+            self.placement_override.as_ref(),
         )
         .await?;
         kernel_thread_spawn_agent_binding(
@@ -1591,6 +1623,7 @@ impl AppServerThreadSpawnAgentResolver {
 impl CooldisAppServer {
     pub(super) async fn app_server_thread_spawn_agent_resolver(
         &self,
+        placement_override: Option<AgentManifestPlacementBinding>,
     ) -> CooldisResult<AppServerThreadSpawnAgentResolver> {
         Ok(AppServerThreadSpawnAgentResolver {
             agent_registry_root: self.inner.agent_registry_root.clone(),
@@ -1601,6 +1634,8 @@ impl CooldisAppServer {
             secret_store_path: Some(self.inner.user_metadata_store_path.clone()),
             cwd: self.inner.cwd.clone(),
             provider_surface: self.agent_manifest_provider_surface().await?,
+            default_placement: self.inner.default_placement.clone(),
+            placement_override,
         })
     }
 }
@@ -1620,6 +1655,8 @@ impl CapsuleBindingRuntimeFactory {
             secret_store_path: self.secret_store_path.clone(),
             cwd,
             provider_surface: provider_surface_for_runtime_config(&self.config),
+            default_placement: self.default_placement.clone(),
+            placement_override: None,
         })
     }
 

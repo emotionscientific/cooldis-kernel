@@ -20,6 +20,11 @@ cwd = "work"
 runtime_home = ".cooldis/runtime"
 state_home = ".cooldis/state"
 
+[daemon.runtime.placement]
+target = "remote"
+executor_ref = "executor://cluster/default"
+config = { region = "us-west" }
+
 [daemon.app_server]
 listen = "unix:///tmp/cooldis-test.sock"
 
@@ -51,6 +56,13 @@ agent_ref = "agent://karl-dev@latest"
         loaded.config.runtime.runtime_home,
         Some(root.join(".cooldis/runtime"))
     );
+    let placement = loaded.config.runtime.placement.as_ref().unwrap();
+    assert_eq!(placement.target, crate::PlacementTarget::Remote);
+    assert_eq!(
+        placement.executor_ref.as_deref(),
+        Some("executor://cluster/default")
+    );
+    assert_eq!(placement.config["region"], serde_json::json!("us-west"));
     assert_eq!(loaded.config.provider.env_file, Some(root.join(".env")));
     assert_eq!(
         loaded.config.io.ingress.persistence.mode,
@@ -277,6 +289,10 @@ fn layered_toml_config_preserves_earlier_values_until_overridden() {
 [daemon.runtime]
 state_home = "user-state"
 
+[daemon.runtime.placement]
+target = "sandbox"
+executor_ref = "executor://user-sandbox"
+
 [daemon.provider]
 provider = "openai_compatible"
 model = "user-model"
@@ -302,6 +318,9 @@ model = "project-model"
         r#"
 [daemon.runtime]
 cwd = "explicit-work"
+
+[daemon.runtime.placement]
+target = "local"
 
 [daemon.provider]
 stream = true
@@ -332,6 +351,10 @@ stream = true
         Some(user_root.join("user-state"))
     );
     assert_eq!(
+        loaded.config.runtime.placement,
+        Some(AgentManifestPlacementBinding::default())
+    );
+    assert_eq!(
         loaded.config.registries.agents,
         Some(project_root.join(".cooldis/agents"))
     );
@@ -345,6 +368,51 @@ stream = true
     );
     assert_eq!(loaded.config.provider.stream, Some(true));
     assert_eq!(loaded.path.as_deref(), Some(explicit_config.as_path()));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn layered_placement_target_only_survives_higher_layer_omission() {
+    let root = temp_root("layered-placement-omission");
+    let lower_root = root.join("lower");
+    let higher_root = root.join("higher");
+    std::fs::create_dir_all(&lower_root).unwrap();
+    std::fs::create_dir_all(&higher_root).unwrap();
+    let lower_config = lower_root.join("config.toml");
+    let higher_config = higher_root.join("config.toml");
+    std::fs::write(
+        &lower_config,
+        r#"
+[daemon.runtime.placement]
+target = "sandbox"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &higher_config,
+        r#"
+[daemon.runtime]
+cwd = "workspace"
+"#,
+    )
+    .unwrap();
+
+    let loaded =
+        load_cooldis_daemon_config_layers(&[lower_config, higher_config], root.clone()).unwrap();
+
+    assert_eq!(
+        loaded.config.runtime.placement,
+        Some(AgentManifestPlacementBinding {
+            target: crate::PlacementTarget::Sandbox,
+            executor_ref: None,
+            config: BTreeMap::new(),
+        })
+    );
+    assert_eq!(
+        loaded.config.runtime.cwd,
+        Some(higher_root.join("workspace"))
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

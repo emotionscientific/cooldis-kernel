@@ -5,9 +5,11 @@ use super::{
     ThreadCheckpointLineage, ThreadCommand, ThreadEvent,
 };
 use crate::agent::manifest_bind::{
-    BoundCouplingSet, MANIFEST_BINDER_DISCHARGED_BY, MANIFEST_BINDER_FUNCTION,
-    MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION, coupling_set_content_hash,
+    AgentManifestPlacementBinding, BoundCouplingSet, MANIFEST_BINDER_DISCHARGED_BY,
+    MANIFEST_BINDER_FUNCTION, MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION,
+    coupling_set_content_hash, resolve_manifest_placement,
 };
+use crate::kernel::control_decision::{PlacementDecisionPayload, PlacementSubject};
 use crate::kernel::history::{
     EventKind, EventProvenance, EventRecord, EventSequence, EventStreamId, NewEventRecord,
     PolicyBoundPayload, PolicyKind, SessionContext, SessionEntry, SessionEntryKind, StreamCursorV1,
@@ -66,6 +68,29 @@ impl RuntimeThreadHandle {
     ) -> CooldisResult<(EventRecord, EventRecord)> {
         let coordinates = self.thread.context.coordinates.clone();
         let stream_id = EventStreamId::for_thread(&coordinates);
+        let placement = bind_payload
+            .get("placement")
+            .cloned()
+            .map(serde_json::from_value::<AgentManifestPlacementBinding>)
+            .transpose()
+            .map_err(|err| {
+                CooldisError::History(format!(
+                    "manifest bind placement payload codec failed: {err}"
+                ))
+            })?
+            .unwrap_or_default();
+        let placement = resolve_manifest_placement(None, Some(&placement))?;
+        let snapshot_id = bind_payload
+            .get("manifest_hash")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                CooldisError::History(
+                    "manifest bind receipt is missing manifest_hash for placement witness"
+                        .to_string(),
+                )
+            })?
+            .to_string();
         let compile_event = NewEventRecord::discharged(
             coordinates.clone(),
             EventKind::ManifestCompileCompleted,
@@ -89,7 +114,25 @@ impl RuntimeThreadHandle {
                 ..EventProvenance::default()
             },
         );
-        let mut records = vec![compile_event, bind_event];
+        let placement_payload = serde_json::to_value(PlacementDecisionPayload {
+            subject: PlacementSubject {
+                invocation_id: bind_event.id.to_string(),
+            },
+            snapshot_id,
+            placement: placement.target,
+        })
+        .map_err(|err| {
+            CooldisError::History(format!("placement decision payload codec failed: {err}"))
+        })?;
+        let placement_event = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::PlacementDecision,
+            placement_payload,
+        );
+        // Receipt and witness share one atomic store append. This closes the
+        // crash/race window: callers never receive a bind receipt unless its
+        // effective placement fact committed in the same batch.
+        let mut records = vec![compile_event, bind_event, placement_event];
         if let Some(raw_coupling_set) = self
             .thread
             .context
@@ -139,7 +182,7 @@ impl RuntimeThreadHandle {
             .append_events(&stream_id, records)
             .await
             .map_err(|err| CooldisError::History(err.to_string()))?;
-        if events.len() < 2 {
+        if events.len() < 3 {
             return Err(CooldisError::History(format!(
                 "manifest receipt append returned {} record(s)",
                 events.len()

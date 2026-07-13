@@ -2228,7 +2228,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
     let session_store = SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     let compile = event_by_kind(&events, crate::EventKind::ManifestCompileCompleted);
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(compile.origin, EventOrigin::Discharged);
@@ -2264,6 +2264,174 @@ async fn ref_less_thread_start_binds_default_manifest() {
             .message
             .contains("runtime override \"streaming\" is not allowlisted")
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_once() {
+    use crate::EventStore;
+
+    let root = unique_test_root("app-server-placement-override");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+        "cooldis-placement-override-{}.sock",
+        Uuid::now_v7()
+    )));
+    let mut config = CooldisAppServerConfig::local(listen, &workspace);
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    config.default_placement = AgentManifestPlacementBinding {
+        target: crate::PlacementTarget::Sandbox,
+        executor_ref: Some("executor://sandbox/default".to_string()),
+        config: BTreeMap::new(),
+    };
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let rejected = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap_err();
+    assert!(rejected.message.contains("remote EventStore backend"));
+
+    let started = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({"placement": {"target": "local"}})),
+        )
+        .await
+        .unwrap();
+    let thread_id = ThreadId::parse_str(started["thread"]["id"].as_str().unwrap()).unwrap();
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
+    let events = session_store
+        .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+        .await
+        .unwrap();
+    let bind = event_by_kind(&events, EventKind::ManifestBindCompleted);
+    assert_eq!(bind.payload["placement"]["target"], "local");
+    let placement_events = events
+        .iter()
+        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .collect::<Vec<_>>();
+    assert_eq!(placement_events.len(), 1);
+    assert_eq!(placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(placement_events[0].payload["placement"], "local");
+    assert_eq!(
+        placement_events[0].payload["snapshot_id"],
+        bind.payload["manifest_hash"]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_once() {
+    use crate::EventStore;
+
+    let root = unique_test_root("app-server-spawn-placement-override");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+        "cooldis-spawn-placement-override-{}.sock",
+        Uuid::now_v7()
+    )));
+    let mut config = CooldisAppServerConfig::local(listen, &workspace);
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    config.default_placement = AgentManifestPlacementBinding {
+        target: crate::PlacementTarget::Sandbox,
+        executor_ref: Some("executor://sandbox/default".to_string()),
+        config: BTreeMap::new(),
+    };
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+    let started = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({"placement": {"target": "local"}})),
+        )
+        .await
+        .unwrap();
+    let parent_thread_id = started["thread"]["id"].as_str().unwrap();
+
+    let rejected = app
+        .dispatch_request(
+            &connection,
+            "thread/spawn",
+            Some(json!({
+                "threadId": parent_thread_id,
+                "taskName": "worker",
+                "message": "placement without a manifest bind",
+                "placement": {"target": "local"}
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code, -32602);
+    assert_eq!(
+        rejected.message,
+        "placement requires agentRef on thread/spawn"
+    );
+
+    let spawned = app
+        .dispatch_request(
+            &connection,
+            "thread/spawn",
+            Some(json!({
+                "threadId": parent_thread_id,
+                "taskName": "worker",
+                "message": "placement with a manifest bind",
+                "agentRef": default_manifest::DEFAULT_AGENT_REF,
+                "placement": {"target": "local"}
+            })),
+        )
+        .await
+        .unwrap();
+    let child_id = ThreadId::parse_str(spawned["thread"]["id"].as_str().unwrap()).unwrap();
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
+    let events = session_store
+        .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+        .await
+        .unwrap();
+    let bind = event_by_kind(&events, EventKind::ManifestBindCompleted);
+    assert_eq!(bind.payload["placement"]["target"], "local");
+    let placement_events = events
+        .iter()
+        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .collect::<Vec<_>>();
+    assert_eq!(placement_events.len(), 1);
+    assert_eq!(placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(placement_events[0].payload["placement"], "local");
+    assert_eq!(
+        placement_events[0].payload["snapshot_id"],
+        bind.payload["manifest_hash"]
+    );
+
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -4036,7 +4204,7 @@ allow = ["streaming"]
     let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
     let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     let compile = event_by_kind(&events, crate::EventKind::ManifestCompileCompleted);
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(compile.origin, crate::EventOrigin::Discharged);
@@ -4062,6 +4230,18 @@ allow = ["streaming"]
     assert_eq!(
         bind.payload["overridden_keys"].as_array().unwrap(),
         &vec![json!("streaming")]
+    );
+    assert_eq!(bind.payload["placement"]["target"], "local");
+    let placement_events = events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
+        .collect::<Vec<_>>();
+    assert_eq!(placement_events.len(), 1);
+    assert_eq!(placement_events[0].origin, crate::EventOrigin::Witnessed);
+    assert_eq!(placement_events[0].payload["placement"], "local");
+    assert_eq!(
+        placement_events[0].payload["snapshot_id"],
+        record.manifest_hash
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -5102,7 +5282,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .await
         .unwrap();
     let empty_events = empty_page["data"].as_array().unwrap();
-    assert_eq!(empty_events.len(), 3);
+    assert_eq!(empty_events.len(), 4);
     assert_eq!(
         empty_events[0]["kind"].as_str(),
         Some("session.entry.appended")
@@ -5115,6 +5295,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         empty_events[2]["kind"].as_str(),
         Some("manifest.bind.completed")
     );
+    assert_eq!(empty_events[3]["kind"].as_str(), Some("placement.decision"));
     assert_eq!(empty_page["cursor"], Value::Null);
 
     let bulk_thread_id = ThreadId::parse_str(&empty_thread_id).unwrap();
@@ -6519,6 +6700,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
             Some(json!({
                 "threadId": source_thread_id,
                 "agentRef": default_manifest::DEFAULT_AGENT_REF,
+                "placement": {"target": "local"},
                 "reason": "manifest_update",
             })),
         )
@@ -6595,6 +6777,23 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         )
         .await
         .unwrap();
+    let child_bind_events = child_events
+        .iter()
+        .filter(|event| event.kind == EventKind::ManifestBindCompleted)
+        .collect::<Vec<_>>();
+    assert_eq!(child_bind_events.len(), 1);
+    assert_eq!(child_bind_events[0].payload["placement"]["target"], "local");
+    let child_placement_events = child_events
+        .iter()
+        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .collect::<Vec<_>>();
+    assert_eq!(child_placement_events.len(), 1);
+    assert_eq!(child_placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(child_placement_events[0].payload["placement"], "local");
+    assert_eq!(
+        child_placement_events[0].payload["snapshot_id"],
+        child_bind_events[0].payload["manifest_hash"]
+    );
     assert!(!child_events.iter().any(|event| {
         event.payload.get("entry_id").and_then(Value::as_str)
             == Some(source_entry.entry_id.to_string().as_str())
@@ -6781,6 +6980,148 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
         loaded_after_resume["data"].as_array().unwrap()[0].as_str(),
         Some(thread_id.as_str())
     );
+}
+
+#[tokio::test]
+async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
+    use crate::EventStore;
+
+    let root = unique_test_root("app-server-placement-reload");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let config_for = |default_placement| {
+        let listen = AppServerListenAddr::Unix(
+            std::env::temp_dir().join(format!("cooldis-placement-reload-{}.sock", Uuid::now_v7())),
+        );
+        let mut config = CooldisAppServerConfig::local(listen, &workspace);
+        config.runtime_home = root.join("runtime");
+        config.state_home = root.join("state");
+        config.agent_registry_root = root.join("agents");
+        config.default_placement = default_placement;
+        config
+    };
+    let first = CooldisAppServer::new_local(config_for(AgentManifestPlacementBinding::default()))
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(first.clone());
+    initialize_for_test(&connection).await;
+
+    let absent = first
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let corrupt = first
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let absent_id = ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
+    let corrupt_id = ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
+    let mut absent_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(absent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut corrupt_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(corrupt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    absent_lifecycle
+        .metadata
+        .remove(THREAD_AGENT_PLACEMENT_METADATA);
+    corrupt_lifecycle.metadata.insert(
+        THREAD_AGENT_PLACEMENT_METADATA.to_string(),
+        "not-json".to_string(),
+    );
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(absent_lifecycle.clone())
+        .await
+        .unwrap();
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(corrupt_lifecycle.clone())
+        .await
+        .unwrap();
+    first
+        .inner
+        .supervisor
+        .shutdown_thread_at(&absent_lifecycle.coordinates)
+        .await
+        .unwrap();
+    first
+        .inner
+        .supervisor
+        .shutdown_thread_at(&corrupt_lifecycle.coordinates)
+        .await
+        .unwrap();
+    drop(connection);
+    drop(first);
+
+    let restarted = CooldisAppServer::new_local(config_for(AgentManifestPlacementBinding {
+        target: crate::PlacementTarget::Sandbox,
+        executor_ref: Some("executor://new-daemon-default".to_string()),
+        config: BTreeMap::new(),
+    }))
+    .await
+    .unwrap();
+    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone());
+    initialize_for_test(&restarted_connection).await;
+    let loaded = restarted
+        .dispatch_request(&restarted_connection, "thread/loaded/list", Some(json!({})))
+        .await
+        .unwrap();
+    let loaded_ids = loaded["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        loaded_ids,
+        BTreeSet::from([
+            absent["thread"]["id"].as_str().unwrap(),
+            corrupt["thread"]["id"].as_str().unwrap()
+        ])
+    );
+
+    let session_store = SqliteSessionStore::open(&restarted.inner.session_store_path)
+        .await
+        .unwrap();
+    for lifecycle in [&absent_lifecycle, &corrupt_lifecycle] {
+        let events = session_store
+            .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+            .await
+            .unwrap();
+        let bind_events = events
+            .iter()
+            .filter(|event| event.kind == EventKind::ManifestBindCompleted)
+            .collect::<Vec<_>>();
+        assert_eq!(bind_events.len(), 2);
+        assert!(
+            bind_events
+                .iter()
+                .all(|event| event.payload["placement"]["target"] == "local")
+        );
+        let placement_events = events
+            .iter()
+            .filter(|event| event.kind == EventKind::PlacementDecision)
+            .collect::<Vec<_>>();
+        assert_eq!(placement_events.len(), 2);
+        assert!(
+            placement_events
+                .iter()
+                .all(|event| event.payload["placement"] == "local")
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -10093,6 +10434,7 @@ where
         None,
         None,
         None,
+        config.default_placement.clone(),
     );
     CooldisAppServer::with_runtime_factory(config, factory)
         .await

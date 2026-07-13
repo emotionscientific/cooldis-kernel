@@ -1,4 +1,6 @@
-use crate::{AgentRecordRef, AppServerListenAddr, CooldisError, CooldisResult};
+use crate::{
+    AgentManifestPlacementBinding, AgentRecordRef, AppServerListenAddr, CooldisError, CooldisResult,
+};
 use cooldis_io_core::{IngressPersistenceConfig, IngressPersistenceMode};
 use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -143,6 +145,10 @@ pub struct CooldisRuntimeConfig {
     pub runtime_home: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_home: Option<PathBuf>,
+    /// Default placement applied to manifest binds unless an operator bind
+    /// surface supplies an override. Absent means local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<AgentManifestPlacementBinding>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -843,6 +849,7 @@ struct RuntimePresence {
     cwd: bool,
     runtime_home: bool,
     state_home: bool,
+    placement: bool,
 }
 
 #[derive(Default)]
@@ -892,6 +899,7 @@ fn daemon_config_presence(text: &str) -> CooldisResult<DaemonConfigPresence> {
             cwd: section_has_key(table, "runtime", "cwd"),
             runtime_home: section_has_key(table, "runtime", "runtime_home"),
             state_home: section_has_key(table, "runtime", "state_home"),
+            placement: section_has_key(table, "runtime", "placement"),
         },
         app_server: AppServerPresence {
             listen: section_has_key(table, "app_server", "listen"),
@@ -946,6 +954,9 @@ fn merge_daemon_config_layer(
     }
     if presence.runtime.state_home {
         config.runtime.state_home = layer.runtime.state_home.take();
+    }
+    if presence.runtime.placement {
+        config.runtime.placement = layer.runtime.placement.take();
     }
     if presence.app_server.listen {
         config.app_server.listen = layer.app_server.listen;

@@ -212,7 +212,45 @@ pub async fn bind_published_agent_record(
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
 ) -> CooldisResult<AgentManifestBoundThread> {
+    bind_published_agent_record_with_placement(
+        record,
+        alias,
+        provider_surface,
+        operation_registry_root,
+        blob_registry_root,
+        skill_registry_root,
+        configured_mcp_server_refs,
+        tool_universe_discoverer,
+        model_selection,
+        overrides,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Compile and bind a published manifest while resolving deployment placement.
+///
+/// `placement_override` is an operator-surface bind override and takes
+/// precedence over `default_placement`. Placement is intentionally separate
+/// from manifest runtime overrides: manifests are portable and cannot allow,
+/// deny, or select their deployment target.
+pub async fn bind_published_agent_record_with_placement(
+    record: &PublishedAgentRecord,
+    alias: Option<AgentAliasResolutionReceipt>,
+    provider_surface: &AgentManifestProviderSurface,
+    operation_registry_root: Option<&Path>,
+    blob_registry_root: Option<&Path>,
+    skill_registry_root: Option<&Path>,
+    configured_mcp_server_refs: &BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    model_selection: &AgentManifestModelProfileSelection,
+    overrides: &AgentManifestBindOverrides,
+    default_placement: Option<&AgentManifestPlacementBinding>,
+    placement_override: Option<&AgentManifestPlacementBinding>,
+) -> CooldisResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
+    let placement = resolve_manifest_placement(default_placement, placement_override)?;
     let selected = select_manifest_model_profile(&manifest, model_selection)?;
     let profile = selected.profile;
     let provider_id = selected.provider_id;
@@ -288,9 +326,7 @@ pub async fn bind_published_agent_record(
         granted: bound_tools.granted,
         effective_runtime,
         overridden_keys,
-        // Placement resolution lands with the ADR 0006 implementation
-        // ticket; until then every bind is local and the field stays absent.
-        placement: None,
+        placement: Some(placement),
     };
     Ok(AgentManifestBoundThread {
         manifest,
@@ -1543,7 +1579,7 @@ pub struct AgentManifestBindReceipt {
 /// daemon config supplies deployment defaults and operator surfaces may
 /// override at bind time. ADR 0006 requires the resolved binding target to be
 /// witnessed with the existing `placement.decision` event.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentManifestPlacementBinding {
     pub target: PlacementTarget,
     /// Which registered executor serves a non-local target.
@@ -1552,6 +1588,42 @@ pub struct AgentManifestPlacementBinding {
     /// Executor-specific configuration, opaque to the bind layer.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub config: BTreeMap<String, JsonValue>,
+}
+
+impl Default for AgentManifestPlacementBinding {
+    fn default() -> Self {
+        Self {
+            target: PlacementTarget::Local,
+            executor_ref: None,
+            config: BTreeMap::new(),
+        }
+    }
+}
+
+/// Resolve daemon placement defaults and an optional operator bind override.
+///
+/// Non-local placement requires a remote EventStore backend so the conductor
+/// and executor share durable lifecycle truth. That capability is not yet
+/// available, so remote and sandbox targets fail closed at bind time.
+pub fn resolve_manifest_placement(
+    default_placement: Option<&AgentManifestPlacementBinding>,
+    placement_override: Option<&AgentManifestPlacementBinding>,
+) -> CooldisResult<AgentManifestPlacementBinding> {
+    let resolved = placement_override
+        .or(default_placement)
+        .cloned()
+        .unwrap_or_default();
+    if resolved.target != PlacementTarget::Local {
+        let target = match resolved.target {
+            PlacementTarget::Local => "local",
+            PlacementTarget::Remote => "remote",
+            PlacementTarget::Sandbox => "sandbox",
+        };
+        return Err(CooldisError::RuntimeFactory(format!(
+            "placement target {target} requires the remote EventStore backend capability, which is not available"
+        )));
+    }
+    Ok(resolved)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

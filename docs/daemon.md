@@ -12,6 +12,10 @@ cwd = "."
 runtime_home = ".cooldis/runtime"
 state_home = ".cooldis/state"
 
+[daemon.runtime.placement]
+# Optional. Absent means local.
+target = "local"
+
 [daemon.app_server]
 # Optional. The default uses XDG_RUNTIME_DIR when available, otherwise a
 # user-scoped state directory such as ~/Library/Application Support/cooldis/run
@@ -86,6 +90,14 @@ Common route keys:
 | `threading` | Scope selector such as `per_conversation`, `per_actor`, or `route_single_thread`. |
 | `agent_ref` | Optional published manifest ref, for example `agent://karl-dev@latest`. The daemon requires an `agent://` ref and fails startup if the ref does not resolve in the effective `daemon.registries.agents` root. Publish missing refs with `cooldis agent publish`. |
 | `egress_retry` | Per-route delivery retry limits for projected assistant output. |
+
+`daemon.runtime.placement` is the default manifest-bind placement. It accepts
+`target = "local" | "remote" | "sandbox"`, optional `executor_ref`, and an
+optional executor-specific `config` table. An additive app-server bind override
+takes precedence over this default. Until the remote EventStore backend lands,
+`remote` and `sandbox` fail closed at bind with
+`requires the remote EventStore backend capability`; absent placement resolves
+to local.
 
 `content_policies` applies only to envelopes whose content is
 `Event { kind, .. }`; plain text, commands, and metadata use the route's

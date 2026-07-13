@@ -1,5 +1,5 @@
 use super::*;
-use crate::CooldisDaemonConfig;
+use crate::{AgentManifestPlacementBinding, CooldisDaemonConfig};
 
 #[test]
 fn turso_cross_process_lock_match_accepts_only_refused_open_shapes() {
@@ -439,6 +439,32 @@ fn daemon_app_server_config_from_loaded_keeps_registry_defaults_when_unset() {
     assert_eq!(
         app_config.agent_registry_root,
         PathBuf::from(".cooldis/agents")
+    );
+    assert_eq!(
+        app_config.default_placement,
+        AgentManifestPlacementBinding::default()
+    );
+}
+
+#[test]
+fn daemon_app_server_config_from_loaded_applies_placement_default() {
+    let mut daemon_config = CooldisDaemonConfig::default();
+    daemon_config.runtime.placement = Some(AgentManifestPlacementBinding {
+        target: crate::PlacementTarget::Remote,
+        executor_ref: Some("executor://cluster/default".to_string()),
+        config: BTreeMap::new(),
+    });
+
+    let app_config =
+        daemon_app_server_config_from_loaded(&loaded_daemon_config(daemon_config)).unwrap();
+
+    assert_eq!(
+        app_config.default_placement,
+        AgentManifestPlacementBinding {
+            target: crate::PlacementTarget::Remote,
+            executor_ref: Some("executor://cluster/default".to_string()),
+            config: BTreeMap::new(),
+        }
     );
 }
 

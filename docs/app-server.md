@@ -220,8 +220,10 @@ turn completion notifications.
 ## Thread Handle Dispatch
 
 `thread/spawn` accepts `{ "threadId", "taskName", "message", "agentRef"?,
-"dispatchId"? }`. The optional `dispatchId` is generated when omitted. A retry
-with the same identity folds the parent control stream and returns the original
+"placement"?, "dispatchId"? }`. Because placement attaches to a manifest bind,
+`placement` requires `agentRef`; supplying placement without it is invalid
+params. The optional `dispatchId` is generated when omitted. A retry with the
+same identity folds the parent control stream and returns the original
 `{ "handle": { "kind": "thread", "id": "..." }, "dispatchId": "..." }`
 alongside the child thread fields; it does not append another spawn request or
 start another child. The durable request continues to carry that identity in
@@ -270,6 +272,14 @@ metadata. Relative agent registry roots and operation registry roots are
 resolved against the configured runtime `cwd`, matching the root reported by
 `config/read`.
 
+`thread/start` also accepts an optional operator placement binding:
+`{"placement":{"target":"local","executor_ref":null,"config":{}}}`. The
+same additive `placement` parameter is accepted by manifest-binding
+`thread/spawn` and `thread/rebindFork` calls. It overrides
+`daemon.runtime.placement`; existing callers that omit it keep using the daemon
+default. The model-visible `thread_spawn` tool remains
+`{task_name, message, agent_ref}` and cannot select placement.
+
 At startup the app-server also publishes a kernel-synthesized default manifest
 as `agent://cooldis/default@latest`. Its envelope is the configured provider,
 model, working directory, and streaming support. If capsule bindings are
@@ -294,10 +304,15 @@ manifest. Legacy explicit parameters lower as follows:
   declared by the manifest and pass through publish/bind receipts, not injected
   at start time.
 
-Manifest-backed starts emit `manifest.compile.completed` followed by
-`manifest.bind.completed` on the thread event stream before the first turn. Both
+Manifest-backed starts atomically emit `manifest.compile.completed`,
+`manifest.bind.completed`, and exactly one witnessed `placement.decision` on
+the thread event stream before the first turn. The placement fact is derived
+from the same effective binding stored on the bind receipt, including defaulted
+local, so the receipt cannot commit without its witness. The compile and bind
 events are discharged and include provenance. An `@latest` start includes the
-alias resolution receipt in the compile event payload.
+alias resolution receipt in the compile event payload. Until the remote
+EventStore backend lands, a resolved `remote` or `sandbox` target fails closed
+at bind with an error naming that missing capability.
 
 ## Thinking Config
 

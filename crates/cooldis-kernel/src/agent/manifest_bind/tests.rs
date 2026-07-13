@@ -2150,3 +2150,48 @@ fn bind_receipt_placement_tolerates_future_wire_fields() {
         })
     );
 }
+
+#[test]
+fn placement_resolution_defaults_local_and_rpc_override_wins() {
+    let default = AgentManifestPlacementBinding {
+        target: crate::PlacementTarget::Sandbox,
+        executor_ref: Some("executor://sandbox/default".to_string()),
+        config: BTreeMap::from([("pool".to_string(), serde_json::json!("ci"))]),
+    };
+    let rpc_override = AgentManifestPlacementBinding {
+        target: crate::PlacementTarget::Local,
+        executor_ref: None,
+        config: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        resolve_manifest_placement(None, None).unwrap(),
+        AgentManifestPlacementBinding::default()
+    );
+    assert_eq!(
+        resolve_manifest_placement(Some(&default), Some(&rpc_override)).unwrap(),
+        rpc_override
+    );
+}
+
+#[test]
+fn placement_resolution_fails_closed_without_remote_event_store() {
+    for (target, target_name) in [
+        (crate::PlacementTarget::Remote, "remote"),
+        (crate::PlacementTarget::Sandbox, "sandbox"),
+    ] {
+        let requested = AgentManifestPlacementBinding {
+            target: target.clone(),
+            executor_ref: Some("executor://future".to_string()),
+            config: BTreeMap::new(),
+        };
+
+        let err = resolve_manifest_placement(Some(&requested), None).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains(&format!("placement target {target_name} requires"))
+        );
+        assert!(err.to_string().contains("remote EventStore backend"));
+    }
+}

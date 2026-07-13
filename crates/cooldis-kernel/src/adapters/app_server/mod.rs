@@ -1,25 +1,26 @@
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindOverrides,
     AgentManifestBoundThread, AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestProviderSurface, AgentManifestSkillPackageBinding, AgentRecordRef, AgentRuntime,
-    AgentRuntimeFactory, AgentToolRouter, AnthropicBedrockMessagesAdapter,
-    AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage, CanonicalProviderRuntimeConfig,
-    CanonicalProviderRuntimeFactory, CanonicalStopReason, CanonicalUsage,
-    CapsuleBindingResolutionRequest, CapsuleBindingScope, CooldisError, CooldisResult,
-    CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence, EventStore, EventStreamId,
-    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, LlmProviderAuthContext,
-    LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue, LlmProviderRecord,
-    LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry, LocalPluginCatalog,
-    LocalPluginCatalogRecord, LocalSkillRegistry, MandateCatchUpPolicy, MandateSchedulePayload,
-    McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, McpToolUniverseDiscoverer,
-    MountedToolUniverse, OPENAI_COMPATIBLE_DEFAULT_MODEL, OpenAIChatCompletionsAdapter,
-    OpenAIReasoningSummary, OpenAIResponsesAdapter, OperationRegistry, OperationToolAlias,
-    ProviderAbiProjection, ProviderApi, ProviderAuth, ProviderCapabilityRecord, ProviderClient,
-    ProviderEndpoint, ProviderHttpClient, ProviderRequest, ProviderRequestMode, ProviderResponse,
-    ProviderResult, ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind,
-    RuntimeStore, RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind,
-    SecretStoreError, SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry,
-    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, SystemBlock,
+    AgentManifestPlacementBinding, AgentManifestProviderSurface, AgentManifestSkillPackageBinding,
+    AgentRecordRef, AgentRuntime, AgentRuntimeFactory, AgentToolRouter,
+    AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage,
+    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CanonicalStopReason,
+    CanonicalUsage, CapsuleBindingResolutionRequest, CapsuleBindingScope, CooldisError,
+    CooldisResult, CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence, EventStore,
+    EventStreamId, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
+    LlmProviderAuthContext, LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue,
+    LlmProviderRecord, LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry,
+    LocalPluginCatalog, LocalPluginCatalogRecord, LocalSkillRegistry, MandateCatchUpPolicy,
+    MandateSchedulePayload, McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport,
+    McpToolUniverseDiscoverer, MountedToolUniverse, OPENAI_COMPATIBLE_DEFAULT_MODEL,
+    OpenAIChatCompletionsAdapter, OpenAIReasoningSummary, OpenAIResponsesAdapter,
+    OperationRegistry, OperationToolAlias, ProviderAbiProjection, ProviderApi, ProviderAuth,
+    ProviderCapabilityRecord, ProviderClient, ProviderEndpoint, ProviderHttpClient,
+    ProviderRequest, ProviderRequestMode, ProviderResponse, ProviderResult,
+    ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind, RuntimeStore,
+    RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind, SecretStoreError,
+    SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry, SqliteMetadataStore,
+    SqliteSecretStore, SqliteSessionStore, SystemBlock,
     THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_PACKAGES_METADATA,
     THREAD_BOUND_COUPLING_SET_METADATA, THREAD_OPERATION_REGISTRY_ROOT_METADATA,
     TenantRegistration, TenantRuntimeContext, ThinkingConfig, ThinkingEffort, ThreadBaseRef,
@@ -27,11 +28,11 @@ use crate::{
     ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus, ThreadMetadataStore,
     ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding, ToolUniverseCaller,
     ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent, TurnInput,
-    TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualFile, bind_published_agent_record,
-    default_blob_registry_root_for_agent_registry_root, ensure_cooldis_notify_published,
-    ensure_cooldis_process_published, ensure_cooldis_schedule_published,
-    ensure_cooldis_threads_published, resolve_llm_provider_auth, seed_default_llm_providers,
-    stream_schema_registry_v1,
+    TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualFile,
+    bind_published_agent_record_with_placement, default_blob_registry_root_for_agent_registry_root,
+    ensure_cooldis_notify_published, ensure_cooldis_process_published,
+    ensure_cooldis_schedule_published, ensure_cooldis_threads_published, resolve_llm_provider_auth,
+    seed_default_llm_providers, stream_schema_registry_v1,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cooldis_process::{
@@ -113,6 +114,7 @@ const THREAD_AGENT_PROVIDER_ID_METADATA: &str = "cooldis.agent.provider_id";
 const THREAD_AGENT_MODEL_ID_METADATA: &str = "cooldis.agent.model_id";
 const THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA: &str = "cooldis.agent.system_instruction";
 const THREAD_AGENT_RUNTIME_OVERRIDES_METADATA: &str = "cooldis.agent.runtime_overrides";
+const THREAD_AGENT_PLACEMENT_METADATA: &str = "cooldis.agent.placement";
 const THREAD_AGENT_RUNTIME_STREAMING_METADATA: &str = "cooldis.agent.runtime.streaming";
 const THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA: &str =
     "cooldis.agent.runtime.compaction.auto_at_text_bytes";
@@ -188,6 +190,8 @@ pub struct CooldisAppServerConfig {
     pub agent_registry_root: PathBuf,
     pub blob_registry_root: PathBuf,
     pub skill_registry_root: PathBuf,
+    /// Deployment placement used when a bind surface does not override it.
+    pub default_placement: AgentManifestPlacementBinding,
     pub console_assets: Option<ConsoleAssetConfig>,
 }
 
@@ -210,6 +214,7 @@ impl CooldisAppServerConfig {
             agent_registry_root: PathBuf::from(DEFAULT_AGENT_REGISTRY_ROOT),
             blob_registry_root: PathBuf::from(DEFAULT_BLOB_REGISTRY_ROOT),
             skill_registry_root: PathBuf::from(DEFAULT_SKILL_REGISTRY_ROOT),
+            default_placement: AgentManifestPlacementBinding::default(),
             console_assets: None,
         }
     }
@@ -467,6 +472,7 @@ struct CooldisAppServerInner {
     agent_registry_root: PathBuf,
     blob_registry_root: PathBuf,
     skill_registry_root: PathBuf,
+    default_placement: AgentManifestPlacementBinding,
     console_assets: Option<ConsoleAssetConfig>,
     cwd: PathBuf,
     codex_home: PathBuf,
@@ -676,6 +682,7 @@ impl CooldisAppServer {
                 agent_registry_root: config.agent_registry_root,
                 blob_registry_root: config.blob_registry_root,
                 skill_registry_root: config.skill_registry_root,
+                default_placement: config.default_placement,
                 console_assets: config.console_assets,
                 cwd: config.cwd,
                 codex_home,
@@ -1436,6 +1443,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         None,
+        AgentManifestPlacementBinding::default(),
     )
 }
 
@@ -1460,6 +1468,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
         Some(config.blob_registry_root.clone()),
         Some(config.skill_registry_root.clone()),
         Some(config.cwd.clone()),
+        config.default_placement.clone(),
     )
 }
 
@@ -1476,6 +1485,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     blob_registry_root: Option<PathBuf>,
     skill_registry_root: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    default_placement: AgentManifestPlacementBinding,
 ) -> Arc<dyn crate::AgentRuntimeFactory> {
     // lexicon-allow: capsule - existing app-server runtime factory name
     Arc::new(threads::CapsuleBindingRuntimeFactory {
@@ -1491,6 +1501,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         blob_registry_root,
         skill_registry_root,
         cwd,
+        default_placement,
     })
 }
 

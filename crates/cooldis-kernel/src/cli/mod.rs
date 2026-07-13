@@ -1508,6 +1508,7 @@ fn daemon_app_server_config_from_loaded(
     if let Some(state_home) = loaded.config.runtime.state_home.clone() {
         config.state_home = state_home;
     }
+    config.default_placement = loaded.config.runtime.placement.clone().unwrap_or_default();
     if let Some(operations) = loaded.config.registries.operations.clone() {
         let operations = daemon_app_server_registry_root(operations)?;
         // lexicon-allow: capsule - existing app-server config field
@@ -1583,6 +1584,7 @@ fn resolve_console_app_server_config(
     if let Some(state_home) = loaded.config.runtime.state_home.clone() {
         config.state_home = state_home;
     }
+    config.default_placement = loaded.config.runtime.placement.clone().unwrap_or_default();
     if options.cwd_explicit {
         config.cwd = env.selected_cwd;
     } else if let Some(cwd) = loaded.config.runtime.cwd.clone() {

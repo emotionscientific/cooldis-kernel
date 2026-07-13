@@ -132,6 +132,8 @@ pub(super) struct ThreadStartParams {
     pub(super) agent_ref: Option<String>,
     #[serde(default)]
     pub(super) runtime_overrides: Option<AgentManifestBindOverrides>,
+    #[serde(default)]
+    pub(super) placement: Option<AgentManifestPlacementBinding>,
     #[serde(default, deserialize_with = "deserialize_optional_thinking")]
     pub(super) thinking: Option<ThinkingConfig>,
 }
@@ -144,6 +146,8 @@ pub(super) struct ThreadSpawnParams {
     pub(super) message: String,
     #[serde(default)]
     pub(super) agent_ref: Option<String>,
+    #[serde(default)]
+    pub(super) placement: Option<AgentManifestPlacementBinding>,
     #[serde(default)]
     pub(super) dispatch_id: Option<String>,
 }
@@ -411,6 +415,8 @@ pub(super) struct ThreadRebindForkParams {
     pub(super) model_profile_id: Option<String>,
     #[serde(default)]
     pub(super) runtime_overrides: Option<AgentManifestBindOverrides>,
+    #[serde(default)]
+    pub(super) placement: Option<AgentManifestPlacementBinding>,
     #[serde(default)]
     pub(super) reason: ThreadForkReason,
 }
@@ -2276,9 +2282,14 @@ impl CooldisAppServer {
             params.model_provider.clone(),
             params.model.clone(),
         );
-        self.bind_app_server_agent_ref(agent_ref, &model_selection, &overrides)
-            .await
-            .map_err(thread_start_bind_error)
+        self.bind_app_server_agent_ref(
+            agent_ref,
+            &model_selection,
+            &overrides,
+            params.placement.as_ref(),
+        )
+        .await
+        .map_err(thread_start_bind_error)
     }
 
     pub(super) async fn bind_rebind_fork_agent(
@@ -2286,12 +2297,13 @@ impl CooldisAppServer {
         agent_ref: &str,
         model_profile_id: Option<&str>,
         overrides: Option<&AgentManifestBindOverrides>,
+        placement: Option<&AgentManifestPlacementBinding>,
     ) -> Result<AgentManifestBoundThread, JsonRpcErrorError> {
         let model_selection = model_profile_id
             .map(AgentManifestModelProfileSelection::profile_id)
             .unwrap_or_default();
         let overrides = overrides.cloned().unwrap_or_default();
-        self.bind_app_server_agent_ref(agent_ref, &model_selection, &overrides)
+        self.bind_app_server_agent_ref(agent_ref, &model_selection, &overrides, placement)
             .await
             .map_err(thread_start_bind_error)
     }
@@ -2743,6 +2755,7 @@ impl CooldisAppServer {
                 &params.agent_ref,
                 params.model_profile_id.as_deref(),
                 params.runtime_overrides.as_ref(),
+                params.placement.as_ref(),
             )
             .await?;
         let cwd = resolve_cwd(
@@ -3059,6 +3072,12 @@ impl CooldisAppServer {
         connection: &ConnectionState,
         params: ThreadSpawnParams,
     ) -> Result<Value, JsonRpcErrorError> {
+        if params.placement.is_some() && params.agent_ref.is_none() {
+            return Err(jsonrpc_error(
+                -32602,
+                "placement requires agentRef on thread/spawn",
+            ));
+        }
         let parent = self.handle_for_thread(&params.thread_id).await?;
         let dispatch_id = cooldis_runtime_contracts::DispatchId::new(
             params
@@ -3067,7 +3086,7 @@ impl CooldisAppServer {
         );
         let resolver = if params.agent_ref.is_some() {
             Some(Arc::new(
-                self.app_server_thread_spawn_agent_resolver()
+                self.app_server_thread_spawn_agent_resolver(params.placement.clone())
                     .await
                     .map_err(internal_error)?,
             ) as Arc<dyn KernelThreadSpawnAgentResolver>)
