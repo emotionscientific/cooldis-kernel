@@ -692,7 +692,7 @@ dependencies = [
  "cooldis-history",
  "crc32fast",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "reqwest",
  "serde",
  "serde_json",
