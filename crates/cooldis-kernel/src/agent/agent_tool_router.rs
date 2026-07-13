@@ -8,6 +8,8 @@ use cooldis_process::{CooldisProcessBackend, CooldisProcessId};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct AgentToolRouter {
@@ -45,6 +47,55 @@ pub enum AgentKernelToolOutcome {
     Pending(AgentKernelPendingToolCall),
 }
 
+/// Grace applied when the manifest binds no `runtime.cancellation_grace_ms`.
+pub const DEFAULT_TOOL_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
+
+/// Cancellation contract handed to every tool invocation.
+///
+/// `token` is a child of the turn cancellation token (the same family the
+/// provider request race uses); an interrupt fires it. `grace` is the bound
+/// manifest cancellation grace: it starts counting when the token fires, not
+/// when the call starts. An invocation that has not settled within grace of
+/// the token firing is abandoned via the spawn-shield discipline — the
+/// detached invocation settles its own terminal record.
+#[derive(Clone, Debug)]
+pub struct ToolInvocationCancellation {
+    token: CancellationToken,
+    grace: Duration,
+}
+
+impl ToolInvocationCancellation {
+    pub fn new(token: CancellationToken, grace: Duration) -> Self {
+        Self { token, grace }
+    }
+
+    /// A contract whose token never fires, for paths that must run a call to
+    /// settlement regardless of turn state (e.g. resumed witnessed calls).
+    pub fn never() -> Self {
+        Self::new(CancellationToken::new(), DEFAULT_TOOL_CANCELLATION_GRACE)
+    }
+
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    pub fn grace(&self) -> Duration {
+        self.grace
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// Resolves with the witnessed outcome the executor must record if the
+    /// invocation itself never observes the token: waits for the token, then
+    /// for grace. Callers select this against the running invocation.
+    pub async fn cancelled_then_grace_elapsed(&self) {
+        self.token.cancelled().await;
+        tokio::time::sleep(self.grace).await;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationToolAlias {
     pub tool_name: String,
@@ -68,6 +119,22 @@ pub trait AgentKernelToolProvider: Send + Sync + 'static {
         self.invoke_tool_call(call)
             .await
             .map(AgentKernelToolOutcome::Completed)
+    }
+
+    /// Cancellation-aware invocation. The default delegates to
+    /// `invoke_tool_call_outcome` and never observes the token: the executor
+    /// enforces grace and abandonment outside this call, so a provider that
+    /// cannot stop early stays correct — it is merely abandoned at grace
+    /// instead of acknowledging. Providers that can stop work early (process-
+    /// backed tools) override this, kill whatever they spawned when the token
+    /// fires, and return promptly with the partial result.
+    async fn invoke_tool_call_cancellable(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+    ) -> CooldisResult<AgentKernelToolOutcome> {
+        let _ = cancellation;
+        self.invoke_tool_call_outcome(call).await
     }
 }
 

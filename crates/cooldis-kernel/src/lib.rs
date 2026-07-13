@@ -293,7 +293,8 @@ pub use agent::agent_process::{
 };
 pub use agent::agent_tool_router::{
     AgentKernelPendingToolCall, AgentKernelToolCall, AgentKernelToolOutcome,
-    AgentKernelToolProvider, AgentToolRouter, OperationToolAlias, RoutedAgentToolCall,
+    AgentKernelToolProvider, AgentToolRouter, DEFAULT_TOOL_CANCELLATION_GRACE,
+    OperationToolAlias, RoutedAgentToolCall, ToolInvocationCancellation,
 };
 pub use agent::contracts::{
     AGENT_CONTRACT_KIND, AGENT_CONTRACT_SOURCE_FORMAT, AGENT_CONTRACT_VERSION,
@@ -458,7 +459,8 @@ pub use kernel::control_decision::{
     ApprovalResolvedPayload, ApprovalSubject, MandateCatchUpPolicy, MandateRevokedPayload,
     MandateSchedulePayload, MandateStartedPayload, MandateSubject, PendingToolCallSuspension,
     PlacementDecision, PlacementDecisionPayload, PlacementDecisionRequest, PlacementSubject,
-    PlacementTarget, ToolCallCompletedPayload, ToolCallDecision, ToolCallDecisionOutcomePayload,
+    PlacementTarget, ToolCallCancellation, ToolCallCompletedPayload, ToolCallDecision,
+    ToolCallDecisionOutcomePayload,
     ToolCallDecisionPayload, ToolCallRequestedPayload, ToolCallSubject, ToolCallSuspendedPayload,
     ToolControllerBinding, ToolDecisionRequest, TurnContinuationAcceptedPayload,
     TurnContinuationDecision, TurnContinuationDecisionRequest, TurnContinuationRejectedPayload,

@@ -4062,6 +4062,7 @@ async fn append_tool_result_message(
                     success,
                     duration_ms,
                     finish_order,
+                    cancellation: None,
                 })
                 .map_err(|err| {
                     CooldisError::History(format!("tool completion payload codec failed: {err}"))

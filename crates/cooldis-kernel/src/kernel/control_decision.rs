@@ -64,6 +64,23 @@ pub struct ToolCallCompletedPayload {
     /// history append order remains model call order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_order: Option<u64>,
+    /// How the call ended relative to an external interrupt. Absent means the
+    /// call ran to completion without an interrupt reaching it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<ToolCallCancellation>,
+}
+
+/// Witnessed cancellation outcome for a tool call reached by an interrupt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallCancellation {
+    /// The invocation observed the cancellation token and settled within the
+    /// cancellation grace.
+    CancelledAcknowledged,
+    /// The invocation did not settle within the cancellation grace and was
+    /// abandoned; this terminal record was settled by the detached invocation
+    /// itself, never by the turn loop that stopped waiting.
+    CancelledExceededGrace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -883,6 +900,27 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy_completion.finish_order, None);
+        assert_eq!(legacy_completion.cancellation, None);
+
+        let cancelled = serde_json::to_value(ToolCallCompletedPayload {
+            cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
+            ..legacy_completion.clone()
+        })
+        .unwrap();
+        assert_eq!(cancelled["cancellation"], json!("cancelled_exceeded_grace"));
+
+        #[derive(Deserialize)]
+        struct LegacyToolCallCompletedPayload {
+            subject: ToolCallSubject,
+            success: bool,
+        }
+        let decoded_by_old_reader: LegacyToolCallCompletedPayload =
+            serde_json::from_value(cancelled).unwrap();
+        assert_eq!(decoded_by_old_reader.subject, legacy_completion.subject);
+        assert!(decoded_by_old_reader.success);
+
+        let completed_normally = serde_json::to_value(legacy_completion).unwrap();
+        assert!(completed_normally.get("cancellation").is_none());
     }
 
     #[tokio::test]
