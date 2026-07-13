@@ -31,10 +31,11 @@ the frozen event-kind vocabulary), ADR 0003 (the durable ingress outcome
 protocol — claim/settle), and ADR 0005 (the storage engine whose sync
 protocol carries the remote lane).
 
-Vocabulary note: per the crank docket's held item D-12, the word for what a
-handle reaches is **terminal outcome**, never "settle" — `settle` remains
-scoped to ingress-envelope outcomes (ADR 0003) unless the anchor widens it.
-Section "D-12 evaluation" below is the requested input to that ruling.
+Vocabulary note: the word for what a handle reaches is **terminal
+outcome**, never "settle" — `settle` is scoped to ingress-envelope outcomes
+(ADR 0003). This was held as crank docket item D-12 and ruled 2026-07-12:
+the recommendation in "D-12 evaluation" below was ratified, `settle` is not
+widened, and the item re-opens only on the evidence named there.
 
 ## Decision
 
@@ -309,9 +310,9 @@ not ratification-gated vocabulary. If implementation surfaces a genuine need
 for a witnessed process-terminal kind on a stream, it queues for the docket
 per the frozen-vocabulary rule; the design as specified does not need one.
 
-### D-12 evaluation (input to the anchor's ruling)
+### D-12 evaluation (ratified 2026-07-12)
 
-D-12 asks whether a handle's terminal outcome should be a `settle` — i.e.
+D-12 asked whether a handle's terminal outcome should be a `settle` — i.e.
 whether the claim/settle machinery gains a second, non-ingress subject. The
 pre-registered flip conditions, evaluated against this design:
 
