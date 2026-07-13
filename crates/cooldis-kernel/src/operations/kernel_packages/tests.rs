@@ -486,6 +486,7 @@ fn cooldis_process_package_schemas_accept_operation_receipts() {
         PROCESS_EXEC_OPERATION,
         json!({
             "operation": "cooldis.process_exec",
+            "dispatch_id": "process-dispatch-1",
             "process_id": process_id,
             "status": "running",
             "backend": "host",

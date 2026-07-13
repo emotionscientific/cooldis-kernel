@@ -1,3 +1,12 @@
+//! Instance-local async process registry.
+//!
+//! Entries owned by a durable dispatcher opt into terminal retention and are
+//! removed only by `acknowledge_terminal` after outcome ingress settles.
+//! Other callers consume terminal entries through `start`/`poll`/`write`/
+//! `terminate`; abandoned non-dispatched terminals remain eligible for idle
+//! cleanup. Expired running entries are always cancelled in place so their
+//! final backend event remains observable before either cleanup policy runs.
+
 use crate::{
     CooldisProcessBackend, CooldisProcessError, CooldisProcessEvent, CooldisProcessEventKind,
     CooldisProcessExitStatus, CooldisProcessHandle, CooldisProcessId, CooldisProcessOutput,
@@ -55,6 +64,8 @@ struct ProcessEntry {
     deadline: ExecutionDeadline,
     idle_timeout: Duration,
     last_used: Instant,
+    termination_reason: Option<String>,
+    retain_terminal_until_acknowledged: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -76,17 +87,20 @@ impl AsyncProcessOwner {
 
 #[derive(Clone, Debug)]
 pub struct AsyncProcessStartRequest {
+    pub process_id: Option<CooldisProcessId>,
     pub owner: AsyncProcessOwner,
     pub invocation: LiveProcessInvocation,
     pub deadline: ExecutionDeadline,
     pub idle_timeout: Option<Duration>,
     pub output_cap_bytes: usize,
     pub yield_time: Duration,
+    pub retain_terminal_until_acknowledged: bool,
 }
 
 impl AsyncProcessStartRequest {
     pub fn host_command(command: Vec<String>, cwd: PathBuf) -> Self {
         Self {
+            process_id: None,
             owner: AsyncProcessOwner::default(),
             invocation: LiveProcessInvocation::HostCommand {
                 command,
@@ -98,11 +112,13 @@ impl AsyncProcessStartRequest {
             idle_timeout: None,
             output_cap_bytes: 1024 * 1024,
             yield_time: DEFAULT_YIELD_TIME,
+            retain_terminal_until_acknowledged: false,
         }
     }
 
     pub fn virtual_bash_script(script: impl Into<String>) -> Self {
         Self {
+            process_id: None,
             owner: AsyncProcessOwner::default(),
             invocation: LiveProcessInvocation::VirtualBashScript {
                 script: script.into(),
@@ -111,11 +127,17 @@ impl AsyncProcessStartRequest {
             idle_timeout: None,
             output_cap_bytes: 1024 * 1024,
             yield_time: DEFAULT_YIELD_TIME,
+            retain_terminal_until_acknowledged: false,
         }
     }
 
     pub fn with_owner(mut self, owner: AsyncProcessOwner) -> Self {
         self.owner = owner;
+        self
+    }
+
+    pub fn with_process_id(mut self, process_id: CooldisProcessId) -> Self {
+        self.process_id = Some(process_id);
         self
     }
 
@@ -136,6 +158,13 @@ impl AsyncProcessStartRequest {
 
     pub fn with_yield_time(mut self, yield_time: Duration) -> Self {
         self.yield_time = yield_time;
+        self
+    }
+
+    /// Retains terminal state until its durable owning surface explicitly
+    /// acknowledges outcome settlement.
+    pub fn retain_terminal_until_acknowledged(mut self) -> Self {
+        self.retain_terminal_until_acknowledged = true;
         self
     }
 
@@ -268,7 +297,11 @@ impl AsyncExecutionManager {
         request: AsyncProcessStartRequest,
     ) -> CooldisProcessResult<AsyncProcessOutcome> {
         self.cleanup_expired().await;
-        let process = CooldisProcessHandle::new(backend.backend_kind(), request.invocation.label());
+        let process = CooldisProcessHandle::with_process_id(
+            request.process_id.unwrap_or_default(),
+            backend.backend_kind(),
+            request.invocation.label(),
+        );
         let process_id = process.process_id();
         let cancellation = CancellationToken::new();
         let spawn = backend
@@ -302,6 +335,8 @@ impl AsyncExecutionManager {
                         .idle_timeout
                         .unwrap_or(self.inner.config.idle_timeout),
                     last_used: Instant::now(),
+                    termination_reason: None,
+                    retain_terminal_until_acknowledged: request.retain_terminal_until_acknowledged,
                 },
             );
         }
@@ -351,7 +386,7 @@ impl AsyncExecutionManager {
     pub async fn terminate(
         &self,
         process_id: CooldisProcessId,
-        _reason: impl Into<String>,
+        reason: impl Into<String>,
         yield_time: Duration,
         max_output_bytes: usize,
     ) -> CooldisProcessResult<AsyncProcessOutcome> {
@@ -361,6 +396,7 @@ impl AsyncExecutionManager {
                 .get_mut(&process_id)
                 .ok_or_else(|| process_error(format!("process {process_id} was not found")))?;
             entry.last_used = Instant::now();
+            entry.termination_reason = Some(reason.into());
             entry.cancellation.clone()
         };
         cancellation.cancel();
@@ -379,6 +415,45 @@ impl AsyncExecutionManager {
             .ok_or_else(|| process_error(format!("process {process_id} was not found")))
     }
 
+    /// Returns the current fold of a live registry entry without consuming
+    /// terminal state. Owning surfaces use this for dispatch-id retries.
+    pub async fn snapshot(
+        &self,
+        process_id: CooldisProcessId,
+        max_output_bytes: usize,
+    ) -> CooldisProcessResult<AsyncProcessOutcome> {
+        let (process, termination_reason) = {
+            let entries = self.inner.entries.lock().await;
+            let entry = entries
+                .get(&process_id)
+                .ok_or_else(|| process_error(format!("process {process_id} was not found")))?;
+            (entry.process.clone(), entry.termination_reason.clone())
+        };
+        let mut snapshot = snapshot_from_process(&process, max_output_bytes);
+        apply_termination_reason(&mut snapshot, termination_reason.as_deref());
+        Ok(AsyncProcessOutcome { snapshot })
+    }
+
+    /// Removes a terminal registry entry only after the owning surface has
+    /// received a durable acknowledgement for its outcome ingress. Running
+    /// entries fail closed and remain registered.
+    pub async fn acknowledge_terminal(
+        &self,
+        process_id: CooldisProcessId,
+    ) -> CooldisProcessResult<bool> {
+        let mut entries = self.inner.entries.lock().await;
+        let Some(entry) = entries.get(&process_id) else {
+            return Ok(false);
+        };
+        if entry.process.output().terminal.is_none() {
+            return Err(process_error(format!(
+                "process {process_id} is not terminal"
+            )));
+        }
+        entries.remove(&process_id);
+        Ok(true)
+    }
+
     async fn touch(&self, process_id: CooldisProcessId) -> CooldisProcessResult<()> {
         let mut entries = self.inner.entries.lock().await;
         let entry = entries
@@ -394,19 +469,34 @@ impl AsyncExecutionManager {
         yield_time: Duration,
         max_output_bytes: usize,
     ) -> CooldisProcessResult<AsyncProcessOutcome> {
-        let process = {
+        let (process, retain_terminal_until_acknowledged) = {
             let entries = self.inner.entries.lock().await;
             entries
                 .get(&process_id)
-                .map(|entry| entry.process.clone())
+                .map(|entry| {
+                    (
+                        entry.process.clone(),
+                        entry.retain_terminal_until_acknowledged,
+                    )
+                })
                 .ok_or_else(|| process_error(format!("process {process_id} was not found")))?
         };
         let mut events = process.subscribe();
         let deadline = Instant::now() + yield_time;
         loop {
-            let snapshot = snapshot_from_process(&process, max_output_bytes);
+            let mut snapshot = snapshot_from_process(&process, max_output_bytes);
+            let termination_reason = self
+                .inner
+                .entries
+                .lock()
+                .await
+                .get(&process_id)
+                .and_then(|entry| entry.termination_reason.clone());
+            apply_termination_reason(&mut snapshot, termination_reason.as_deref());
             if snapshot.status != ProcessSnapshotStatus::Running || Instant::now() >= deadline {
-                if snapshot.status != ProcessSnapshotStatus::Running {
+                if snapshot.status != ProcessSnapshotStatus::Running
+                    && !retain_terminal_until_acknowledged
+                {
                     self.inner.entries.lock().await.remove(&process_id);
                 }
                 return Ok(AsyncProcessOutcome { snapshot });
@@ -430,12 +520,11 @@ impl AsyncExecutionManager {
             let _ = &entry.owner;
             let _ = &entry.join;
             if output.terminal.is_some() {
-                if idle_expired {
+                if idle_expired && !entry.retain_terminal_until_acknowledged {
                     remove.push(*process_id);
                 }
             } else if idle_expired || deadline_expired {
                 entry.cancellation.cancel();
-                remove.push(*process_id);
             }
         }
         drop(entries);
@@ -722,7 +811,7 @@ fn snapshot_from_process(
     let (stderr, stderr_truncated_by_snapshot) =
         cap_snapshot_bytes(output.stderr, max_output_bytes);
     AsyncProcessSnapshot {
-        process_id: (status == ProcessSnapshotStatus::Running).then_some(process.process_id()),
+        process_id: Some(process.process_id()),
         backend: process.backend().clone(),
         label: process.label().to_string(),
         status,
@@ -732,6 +821,25 @@ fn snapshot_from_process(
         stdout_truncated: output.stdout_truncated || stdout_truncated_by_snapshot,
         stderr_truncated: output.stderr_truncated || stderr_truncated_by_snapshot,
         events: process.events(),
+    }
+}
+
+fn apply_termination_reason(snapshot: &mut AsyncProcessSnapshot, reason: Option<&str>) {
+    if snapshot.status != ProcessSnapshotStatus::Cancelled {
+        return;
+    }
+    let Some(reason) = reason else {
+        return;
+    };
+    if let Some(event) = snapshot
+        .events
+        .iter_mut()
+        .rev()
+        .find(|event| matches!(event.kind, CooldisProcessEventKind::Cancelled { .. }))
+    {
+        event.kind = CooldisProcessEventKind::Cancelled {
+            reason: reason.to_string(),
+        };
     }
 }
 

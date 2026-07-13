@@ -867,6 +867,7 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
                 external_conversation_id: Some("chat-1".to_string()),
                 external_actor_id: Some("actor-1".to_string()),
                 external_message_id: Some("message-1".to_string()),
+                content: None,
                 envelope_digest: "sha256:ingress".to_string(),
             })
             .unwrap(),
@@ -1601,6 +1602,19 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
     registry
         .validate(DEBUG_THREAD_EXPORT_SCHEMA_V1, &debug_export_with_extra)
         .unwrap();
+}
+
+#[test]
+fn legacy_ingress_received_payload_decodes_without_witnessed_content() {
+    let raw = serde_json::json!({
+        "route_id": "legacy-route",
+        "dedupe_key": "legacy:dispatch",
+        "envelope_digest": "sha256:legacy"
+    });
+
+    let decoded: IoIngressReceivedPayload = serde_json::from_value(raw).unwrap();
+
+    assert!(decoded.content.is_none());
 }
 
 #[tokio::test]

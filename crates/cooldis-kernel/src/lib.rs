@@ -225,6 +225,7 @@ pub mod kernel {
     pub mod coupling_scheduler;
     pub mod history;
     pub mod mandate_lifecycle;
+    pub mod process_handle_dispatch;
     pub mod provider_store;
     pub mod runtime_host;
     pub mod secret_store;
@@ -508,16 +509,16 @@ pub use kernel::runtime_host::{
     AgentProcessCheckpointReceipt, AgentProcessChildRef, AgentProcessChildrenReceipt,
     AgentProcessLifecycleReceipt, AgentProcessSpawnReceipt, AgentProcessStatusReceipt,
     AgentProcessSubmitReceipt, AgentProcessWaitReceipt, AgentRuntime, AgentRuntimeFactory,
-    CooldisError, CooldisResult, RuntimeApprovalDecision, RuntimeEvent, RuntimeEventId,
-    RuntimeEventKind, RuntimeExecutionPolicy, RuntimeHost, RuntimeHostLifecycleSnapshot,
-    RuntimeHostSnapshot, RuntimeKernelControl, RuntimeModelRequestErrorClass,
-    RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
-    RuntimeServices, RuntimeTerminalState, RuntimeThreadHandle, RuntimeToolLogLevel, RuntimeUsage,
-    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
-    THREAD_OPERATION_REGISTRY_ROOT_METADATA, THREAD_SPAWN_GRANTED_METADATA,
-    THREAD_SPAWN_INPUTS_HASH_METADATA, ThreadCheckpoint, ThreadCheckpointId,
-    ThreadCheckpointLineage, ThreadCommand, ThreadContext, ThreadCoordinates, ThreadEvent,
-    ThreadId, ThreadInitiationSource, ThreadInteractionKind, ThreadLifecycleRecord,
+    CooldisError, CooldisResult, ProcessHandleIngressSink, RuntimeApprovalDecision, RuntimeEvent,
+    RuntimeEventId, RuntimeEventKind, RuntimeExecutionPolicy, RuntimeHost,
+    RuntimeHostLifecycleSnapshot, RuntimeHostSnapshot, RuntimeKernelControl,
+    RuntimeModelRequestErrorClass, RuntimeModelRequestMode, RuntimeModelRequestPurpose,
+    RuntimePermissionDecision, RuntimeServices, RuntimeTerminalState, RuntimeThreadHandle,
+    RuntimeToolLogLevel, RuntimeUsage, THREAD_AGENT_MANIFEST_HASH_METADATA,
+    THREAD_BOUND_COUPLING_SET_METADATA, THREAD_OPERATION_REGISTRY_ROOT_METADATA,
+    THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA, ThreadCheckpoint,
+    ThreadCheckpointId, ThreadCheckpointLineage, ThreadCommand, ThreadContext, ThreadCoordinates,
+    ThreadEvent, ThreadId, ThreadInitiationSource, ThreadInteractionKind, ThreadLifecycleRecord,
     ThreadLifecycleSink, ThreadLifecycleStatus, ThreadLineage, ThreadScope, ThreadSignal,
     ThreadSignalId, ThreadSignalKind, ThreadSpawnAttribution, ThreadSpawnWitness, ThreadStatus,
     ThreadTopology, TurnBudget, TurnContent, TurnContext, TurnContextSnapshot, TurnInput,

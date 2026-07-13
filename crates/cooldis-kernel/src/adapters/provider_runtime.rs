@@ -493,9 +493,18 @@ impl CanonicalProviderRuntime {
             .as_ref()
             .map(|config| config.cwd.clone())
             .unwrap_or_else(default_process_dispatcher_cwd);
-        let process_dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
-            KernelProcessOperationProvider::new(context.clone(), process_cwd),
-        );
+        let process_handle_dispatcher = services.process_handle_ingress().map(|ingress| {
+            crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new(
+                services.runtime_store(),
+                ingress,
+            )
+        });
+        let mut process_provider =
+            KernelProcessOperationProvider::new(context.clone(), process_cwd);
+        if let Some(dispatcher) = process_handle_dispatcher.clone() {
+            process_provider = process_provider.with_process_dispatcher(dispatcher);
+        }
+        let process_dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(process_provider);
         let _ = router
             .operation_registry()
             .set_kernel_dispatcher(COOLDIS_PROCESS_PACKAGE, Arc::clone(&process_dispatcher))
@@ -521,8 +530,11 @@ impl CanonicalProviderRuntime {
                 .await;
         }
         if let Some(config) = &self.bash_tool_config {
-            router =
-                router.with_kernel_tool_provider(Arc::new(BashToolProvider::new(config.clone())));
+            let mut provider = BashToolProvider::new(config.clone());
+            if let Some(dispatcher) = process_handle_dispatcher {
+                provider = provider.with_process_dispatcher(dispatcher);
+            }
+            router = router.with_kernel_tool_provider(Arc::new(provider));
         }
         self.tool_router = Some(Arc::new(router));
     }

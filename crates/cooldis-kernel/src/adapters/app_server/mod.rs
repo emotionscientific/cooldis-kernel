@@ -1,3 +1,6 @@
+use crate::ProcessHandleIngressSink;
+use crate::daemon::daemon_io::CooldisDaemonIoBridge;
+use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindOverrides,
     AgentManifestBoundThread, AgentManifestModelProfileSelection, AgentManifestOperationBinding,
@@ -35,6 +38,7 @@ use crate::{
     seed_default_llm_providers, stream_schema_registry_v1,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use cooldis_io_core::IngressEnvelope;
 use cooldis_process::{
     AsyncExecutionManager, AsyncProcessOwner, AsyncProcessSnapshot, AsyncProcessStartRequest,
     CooldisProcessId, ExecutionDeadline, HostBashLiveBackend,
@@ -55,7 +59,7 @@ use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, OnceCell, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -482,8 +486,29 @@ struct CooldisAppServerInner {
     metadata_store: SqliteMetadataStore,
     user_metadata_store: SqliteMetadataStore,
     process_manager: AsyncExecutionManager,
+    process_dispatcher: OnceCell<ProcessHandleDispatcher>,
     subscriptions: Mutex<AppServerSubscriptions>,
     state: RwLock<AppServerState>,
+}
+
+struct AppServerProcessHandleIngress {
+    app: Weak<CooldisAppServerInner>,
+}
+
+#[async_trait::async_trait]
+impl ProcessHandleIngressSink for AppServerProcessHandleIngress {
+    async fn submit_process_handle_envelope(&self, envelope: IngressEnvelope) -> CooldisResult<()> {
+        let inner = self.app.upgrade().ok_or_else(|| {
+            CooldisError::RuntimeExecution(
+                "app-server stopped before process handle ingress settled".to_string(),
+            )
+        })?;
+        CooldisDaemonIoBridge::from_app_server(&CooldisAppServer { inner })
+            .submit_durable_handle_envelope(envelope)
+            .await
+            .map(|_| ())
+            .map_err(|err| CooldisError::RuntimeExecution(err.to_string()))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -692,10 +717,35 @@ impl CooldisAppServer {
                 metadata_store,
                 user_metadata_store,
                 process_manager: AsyncExecutionManager::default(),
+                process_dispatcher: OnceCell::new(),
                 subscriptions: Mutex::new(AppServerSubscriptions::default()),
                 state: RwLock::new(AppServerState::default()),
             }),
         };
+        let process_ingress: Arc<dyn ProcessHandleIngressSink> =
+            Arc::new(AppServerProcessHandleIngress {
+                app: Arc::downgrade(&app.inner),
+            });
+        let runtime_store = app
+            .inner
+            .supervisor
+            .runtime_store(&app.inner.tenant_id)
+            .await?;
+        app.inner
+            .process_dispatcher
+            .set(ProcessHandleDispatcher::new(
+                runtime_store,
+                Arc::clone(&process_ingress),
+            ))
+            .map_err(|_| {
+                CooldisError::RuntimeFactory(
+                    "app-server process dispatcher initialized twice".to_string(),
+                )
+            })?;
+        app.inner
+            .supervisor
+            .set_process_handle_ingress(&app.inner.tenant_id, Some(process_ingress))
+            .await?;
         app.inner
             .supervisor
             .set_thread_lifecycle_sink(

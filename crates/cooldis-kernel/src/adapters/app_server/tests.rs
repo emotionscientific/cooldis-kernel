@@ -163,7 +163,7 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
             &connection,
             "turn/start",
             Some(json!({
-                "threadId": thread_id,
+                "threadId": thread_id.clone(),
                 "input": [{ "type": "text", "text": "admission rpc", "text_elements": [] }],
             })),
         )
@@ -9423,6 +9423,11 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone());
     initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
 
     let started = app
         .dispatch_request(
@@ -9434,6 +9439,7 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
                 "streamStdoutStderr": true,
                 "yieldTimeMs": 5,
                 "timeoutMs": 2000,
+                "threadId": thread_id,
             })),
         )
         .await
@@ -9471,6 +9477,44 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
     assert_eq!(terminated["status"].as_str(), Some("cancelled"));
     assert_eq!(terminated["exitCode"].as_i64(), Some(130));
 
+    let coordinates = app.coordinates_for_thread(&thread_id).await.unwrap();
+    let store = app
+        .inner
+        .supervisor
+        .runtime_store(&app.inner.tenant_id)
+        .await
+        .unwrap();
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let context = store.build_context(&coordinates).await.unwrap();
+            let text = context
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    CanonicalMessage::User { content, .. } => Some(
+                        content
+                            .iter()
+                            .filter_map(|content| match content {
+                                CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(""),
+                    ),
+                    _ => None,
+                })
+                .find(|text| text.contains(cooldis_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND));
+            if let Some(text) = text {
+                break text;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("cancelled process outcome should reach its consumer");
+    assert!(delivered.contains("cancelled"), "{delivered}");
+    assert!(delivered.contains("test complete"), "{delivered}");
+
     let resize_err = app
         .dispatch_request(
             &connection,
@@ -9488,6 +9532,11 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone());
     initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
 
     let started = app
         .dispatch_request(
@@ -9498,6 +9547,7 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
                 "streamStdoutStderr": true,
                 "yieldTimeMs": 5,
                 "timeoutMs": 2000,
+                "threadId": thread_id,
             })),
         )
         .await
@@ -9517,9 +9567,183 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
         .await
         .unwrap();
     assert_eq!(completed["status"].as_str(), Some("completed"));
-    assert_eq!(completed["processId"].as_str(), None);
+    assert_eq!(completed["processId"].as_str(), Some(process_id.as_str()));
     assert_eq!(completed["stdout"].as_str(), Some("done"));
     assert_eq!(completed["exitCode"].as_i64(), Some(0));
+}
+
+#[tokio::test]
+async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
+    use cooldis_io_core::{
+        ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoSource,
+    };
+    use cooldis_runtime_contracts::{
+        DispatchId, HANDLE_DISPATCH_CONTENT_KIND, HANDLE_OUTCOME_CONTENT_KIND, HandleId,
+        HandleTerminalEnvelope, HandleTerminalOutcome,
+    };
+
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let marker = std::env::temp_dir().join(format!("cooldis-process-dispatch-{}", Uuid::now_v7()));
+    let dispatch_id = format!("process-dispatch-{}", Uuid::now_v7());
+    let params = json!({
+        "command": [
+            "/bin/sh",
+            "-c",
+            format!("sleep 0.15; printf x >> '{}'; printf done", marker.display()),
+        ],
+        "streamStdoutStderr": true,
+        "yieldTimeMs": 1,
+        "timeoutMs": 2000,
+        "threadId": thread_id,
+        "dispatchId": dispatch_id,
+    });
+
+    let first = app
+        .dispatch_request(&connection, "command/exec", Some(params.clone()))
+        .await
+        .unwrap();
+    let second = app
+        .dispatch_request(&connection, "command/exec", Some(params))
+        .await
+        .unwrap();
+    assert_eq!(first["processId"], second["processId"]);
+    assert_eq!(first["dispatchId"], second["dispatchId"]);
+    let process_id = first["processId"].as_str().unwrap().to_string();
+
+    let coordinates = app.coordinates_for_thread(&thread_id).await.unwrap();
+    let store = app
+        .inner
+        .supervisor
+        .runtime_store(&app.inner.tenant_id)
+        .await
+        .unwrap();
+    let (events, thread_events) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let events = store
+                .read_events(&crate::control_stream_id(&coordinates), None)
+                .await
+                .unwrap();
+            let outcomes = events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::IoIngressReceived
+                        && event.payload.get("route_id").and_then(Value::as_str)
+                            == Some(HANDLE_OUTCOME_CONTENT_KIND)
+                })
+                .count();
+            let thread_events = store
+                .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+                .await
+                .unwrap();
+            let turns = thread_events
+                .iter()
+                .filter(|event| event.kind == EventKind::TurnSubmitted)
+                .count();
+            if outcomes == 1 && turns == 1 {
+                break (events, thread_events);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("process outcome ingress should settle");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::IoIngressReceived
+                    && event.payload.get("route_id").and_then(Value::as_str)
+                        == Some(HANDLE_DISPATCH_CONTENT_KIND)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        thread_events
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        1
+    );
+
+    let terminal = HandleTerminalEnvelope {
+        dispatch_id: DispatchId::new(dispatch_id.clone()),
+        handle: HandleId::process(process_id),
+        outcome: HandleTerminalOutcome::Completed,
+        outcome_reason: Some("exit status 0".to_string()),
+        result: None,
+        result_schema_id: None,
+        artifact_refs: Vec::new(),
+        usage: None,
+        retryable: false,
+    };
+    let mut duplicate = IngressEnvelope::new(
+        IoSource::new("cooldis.handle", "process"),
+        IoConversation::new(format!("thread:{thread_id}"), ConversationKind::System),
+        IngressContent::Event {
+            kind: HANDLE_OUTCOME_CONTENT_KIND.to_string(),
+            payload: serde_json::to_value(terminal).unwrap(),
+        },
+        1,
+    )
+    .with_dedupe_key(IoDedupeKey::new(HANDLE_OUTCOME_CONTENT_KIND, dispatch_id))
+    .with_metadata("cooldis_route_id", HANDLE_OUTCOME_CONTENT_KIND)
+    .with_metadata("cooldis_route_policy", "queue_per_conversation");
+    duplicate.id = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::IoIngressReceived
+                && event.payload.get("route_id").and_then(Value::as_str)
+                    == Some(HANDLE_OUTCOME_CONTENT_KIND)
+        })
+        .and_then(|event| event.payload.get("ingress_message_id"))
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+    let bridge = CooldisDaemonIoBridge::from_app_server(&app);
+    bridge
+        .submit_durable_handle_envelope(duplicate.clone())
+        .await
+        .unwrap();
+    bridge
+        .submit_durable_handle_envelope(duplicate)
+        .await
+        .unwrap();
+
+    let events = store
+        .read_events(&crate::control_stream_id(&coordinates), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::IoIngressReceived
+                    && event.payload.get("route_id").and_then(Value::as_str)
+                        == Some(HANDLE_OUTCOME_CONTENT_KIND)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .count(),
+        1
+    );
+    std::fs::remove_file(marker).unwrap();
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@ use super::{CooldisResult, RuntimeEvent, RuntimeServices, RuntimeThreadHandle, T
 use crate::CompactionTrigger;
 use crate::kernel::history::{SessionEntry, SessionEntryId};
 use async_trait::async_trait;
+use cooldis_io_core::IngressEnvelope;
 use cooldis_runtime_contracts::{
     ThreadCheckpointId, ThreadContext, ThreadCoordinates, ThreadId, ThreadLifecycleRecord,
     ThreadSignal, ThreadStatus, TurnSubmissionMode,
@@ -122,6 +123,16 @@ pub trait AgentRuntimeFactory: Send + Sync + 'static {
 #[async_trait]
 pub trait ThreadLifecycleSink: Send + Sync + 'static {
     async fn thread_started(&self, handle: RuntimeThreadHandle) -> CooldisResult<()>;
+}
+
+/// Owning-surface ingress for durable process dispatch and settlement facts.
+///
+/// Implementations acknowledge only after ADR 0003 has durably settled the
+/// envelope. Process managers retain terminal entries until this boundary
+/// succeeds, so cancellation or a transient bridge failure can be retried.
+#[async_trait]
+pub trait ProcessHandleIngressSink: Send + Sync + 'static {
+    async fn submit_process_handle_envelope(&self, envelope: IngressEnvelope) -> CooldisResult<()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

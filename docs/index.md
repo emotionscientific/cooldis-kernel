@@ -31,6 +31,8 @@ allowed to exercise.
 - Run the agent through a governed runtime instead of a one-off app server.
 - Inspect events, tool calls, receipts, and artifacts.
 - Resume work from durable records.
+- Start idempotent process handles whose terminal outcomes re-enter the owning
+  thread through durable ingress.
 - Publish the same declared agent shape toward managed placement when the cloud
   path is ready.
 

@@ -1,3 +1,4 @@
+use crate::kernel::process_handle_dispatch::{ProcessHandleDispatcher, command_digest};
 use crate::{
     ActiveMandate, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
     COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult,
@@ -328,6 +329,7 @@ pub struct KernelProcessOperationProvider {
     live_backend: Arc<dyn LiveProcessBackend>,
     default_cwd: PathBuf,
     default_output_cap_bytes: usize,
+    process_dispatcher: Option<ProcessHandleDispatcher>,
 }
 
 impl KernelProcessOperationProvider {
@@ -338,6 +340,7 @@ impl KernelProcessOperationProvider {
             live_backend: Arc::new(HostBashLiveBackend),
             default_cwd: default_cwd.into(),
             default_output_cap_bytes: DEFAULT_PROCESS_OUTPUT_CAP_BYTES,
+            process_dispatcher: None,
         }
     }
 
@@ -351,10 +354,31 @@ impl KernelProcessOperationProvider {
         self
     }
 
+    pub fn with_process_dispatcher(mut self, dispatcher: ProcessHandleDispatcher) -> Self {
+        self.process_dispatcher = Some(dispatcher);
+        self
+    }
+
     async fn invoke_json(&self, operation_name: &str, arguments: Value) -> CooldisResult<Value> {
+        self.invoke_json_with_dispatch(operation_name, arguments, None)
+            .await
+    }
+
+    async fn invoke_json_with_dispatch(
+        &self,
+        operation_name: &str,
+        arguments: Value,
+        injected_dispatch_id: Option<DispatchId>,
+    ) -> CooldisResult<Value> {
         let value = match operation_name {
             PROCESS_EXEC_OPERATION => {
                 let args: ProcessExecArgs = decode_process_args(operation_name, arguments)?;
+                let explicit_dispatch_id = args.dispatch_id.clone();
+                let command_bytes = serde_json::to_vec(&args.command).map_err(|err| {
+                    CooldisError::RuntimeExecution(format!(
+                        "encode process command for dispatch digest: {err}"
+                    ))
+                })?;
                 if args.command.is_empty() {
                     return Err(CooldisError::RuntimeExecution(format!(
                         "operation {COOLDIS_PROCESS_PACKAGE}/{operation_name} requires a non-empty command argv"
@@ -379,15 +403,34 @@ impl KernelProcessOperationProvider {
                     .with_deadline(ExecutionDeadline::from_now(timeout))
                     .with_yield_time(yield_time)
                     .with_output_cap_bytes(output_cap);
-                let outcome = self
-                    .process_manager
-                    .start(Arc::clone(&self.live_backend), request)
+                let dispatch_id = injected_dispatch_id
+                    .or_else(|| explicit_dispatch_id.map(DispatchId::new))
+                    .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
+                let dispatcher = self.process_dispatcher.as_ref().ok_or_else(|| {
+                    CooldisError::RuntimeExecution(
+                        "process_exec requires the durable process dispatch ingress lane"
+                            .to_string(),
+                    )
+                })?;
+                let outcome = dispatcher
+                    .dispatch_start(
+                        &self.caller.coordinates,
+                        dispatch_id.clone(),
+                        command_digest(&command_bytes),
+                        self.process_manager.clone(),
+                        Arc::clone(&self.live_backend),
+                        request,
+                    )
                     .await?;
-                process_snapshot_output_json("cooldis.process_exec", &outcome.snapshot)
+                let mut value =
+                    process_snapshot_output_json("cooldis.process_exec", &outcome.snapshot);
+                value["dispatch_id"] = json!(dispatch_id.to_string());
+                value
             }
             PROCESS_POLL_OPERATION => {
                 let args: ProcessHandleArgs = decode_process_args(operation_name, arguments)?;
                 let process_id = parse_process_id(&args.process_id, "process_id")?;
+                self.require_process_handle(process_id).await?;
                 let outcome = self
                     .process_manager
                     .poll(
@@ -401,6 +444,7 @@ impl KernelProcessOperationProvider {
             PROCESS_WRITE_OPERATION => {
                 let args: ProcessWriteArgs = decode_process_args(operation_name, arguments)?;
                 let process_id = parse_process_id(&args.process_id, "process_id")?;
+                self.require_process_handle(process_id).await?;
                 let bytes = STANDARD.decode(args.delta_base64).map_err(|err| {
                     CooldisError::RuntimeExecution(format!(
                         "operation {COOLDIS_PROCESS_PACKAGE}/{operation_name} requires valid base64 delta_base64: {err}"
@@ -420,6 +464,7 @@ impl KernelProcessOperationProvider {
             PROCESS_TERMINATE_OPERATION => {
                 let args: ProcessTerminateArgs = decode_process_args(operation_name, arguments)?;
                 let process_id = parse_process_id(&args.process_id, "process_id")?;
+                self.require_process_handle(process_id).await?;
                 let outcome = self
                     .process_manager
                     .terminate(
@@ -448,6 +493,20 @@ impl KernelProcessOperationProvider {
             call_id: None,
             surface: Some(surface.to_string()),
         }
+    }
+
+    async fn require_process_handle(&self, process_id: CooldisProcessId) -> CooldisResult<()> {
+        self.process_dispatcher
+            .as_ref()
+            .ok_or_else(|| {
+                CooldisError::RuntimeExecution(
+                    "process handle verbs require the durable process dispatch ingress lane"
+                        .to_string(),
+                )
+            })?
+            .require_live_handle(process_id, Some(&self.caller.coordinates))
+            .await
+            .map(|_| ())
     }
 
     fn effective_default_cwd(&self) -> PathBuf {
@@ -611,6 +670,24 @@ impl KernelOperationDispatcher for KernelProcessOperationProvider {
             .map_err(operations_runtime_error)?;
         serde_json::to_vec(&value).map_err(operations_runtime_error)
     }
+
+    async fn invoke_kernel_operation_with_metadata(
+        &self,
+        operation_name: &str,
+        input: Vec<u8>,
+        metadata: BTreeMap<String, Value>,
+    ) -> cooldis_operations::CooldisResult<Vec<u8>> {
+        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let dispatch_id = metadata
+            .get("cooldis.tool_call_id")
+            .and_then(Value::as_str)
+            .map(DispatchId::new);
+        let value = self
+            .invoke_json_with_dispatch(operation_name, arguments, dispatch_id)
+            .await
+            .map_err(operations_runtime_error)?;
+        serde_json::to_vec(&value).map_err(operations_runtime_error)
+    }
 }
 
 #[async_trait]
@@ -714,6 +791,8 @@ struct ProcessExecArgs {
     yield_time_ms: Option<u64>,
     #[serde(default)]
     output_bytes_cap: Option<usize>,
+    #[serde(default)]
+    dispatch_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

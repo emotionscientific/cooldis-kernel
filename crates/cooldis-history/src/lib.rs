@@ -703,6 +703,10 @@ pub struct IoIngressReceivedPayload {
     pub external_actor_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_message_id: Option<String>,
+    /// Selected ingress content whose payload is itself a durable fold
+    /// source. Absent on legacy and ordinary ingress witnesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Value>,
     pub envelope_digest: String,
 }
 

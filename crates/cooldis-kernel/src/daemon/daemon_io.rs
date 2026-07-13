@@ -29,7 +29,10 @@ use cooldis_io_core::{
     ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
-use cooldis_runtime_contracts::{HANDLE_OUTCOME_CONTENT_KIND, HandleTerminalEnvelope};
+use cooldis_runtime_contracts::{
+    HANDLE_DISPATCH_CONTENT_KIND, HANDLE_OUTCOME_CONTENT_KIND, HandleDispatchEnvelope, HandleKind,
+    HandleTerminalEnvelope,
+};
 use futures_util::future::BoxFuture;
 use regex::{Captures, Regex};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -1488,6 +1491,16 @@ impl CooldisDaemonIoBridge {
             .await
     }
 
+    /// Submits a handle fact through the durable queue-equivalent claim and
+    /// settlement path. The returned receipt means the ingress witness is
+    /// committed, not merely accepted by an in-memory adapter.
+    pub(crate) async fn submit_durable_handle_envelope(
+        &self,
+        envelope: IngressEnvelope,
+    ) -> IoResult<KernelIoReceipt> {
+        self.submit_queued_envelope(envelope, 1).await
+    }
+
     async fn submit_queued_envelope(
         &self,
         envelope: IngressEnvelope,
@@ -1740,6 +1753,12 @@ impl CooldisDaemonIoBridge {
     async fn resolve_target(&self, envelope: &IngressEnvelope) -> IoResult<ResolvedIoTarget> {
         if matches!(
             &envelope.content,
+            IngressContent::Event { kind, .. } if kind == HANDLE_DISPATCH_CONTENT_KIND
+        ) {
+            return self.resolve_handle_dispatch_target(envelope);
+        }
+        if matches!(
+            &envelope.content,
             IngressContent::Event { kind, .. } if kind == HANDLE_OUTCOME_CONTENT_KIND
         ) {
             return self.resolve_handle_outcome_target(envelope).await;
@@ -1790,6 +1809,48 @@ impl CooldisDaemonIoBridge {
         Ok(target)
     }
 
+    fn resolve_handle_dispatch_target(
+        &self,
+        envelope: &IngressEnvelope,
+    ) -> IoResult<ResolvedIoTarget> {
+        let IngressContent::Event { payload, .. } = &envelope.content else {
+            unreachable!("handle dispatch kind was checked above");
+        };
+        let dispatch = serde_json::from_value::<HandleDispatchEnvelope>(payload.clone())
+            .map_err(|err| IoError::Bridge(format!("invalid handle dispatch payload: {err}")))?;
+        if dispatch.handle.kind != HandleKind::Process {
+            return Err(IoError::Bridge(
+                "handle dispatch ingress currently requires kind process".to_string(),
+            ));
+        }
+        if dispatch.consumer.tenant_id != self.tenant_id
+            || dispatch.consumer.user_id != self.user_id
+        {
+            return Err(IoError::Bridge(format!(
+                "handle dispatch {} consumer is outside this daemon scope",
+                dispatch.dispatch_id
+            )));
+        }
+        let mut target = ResolvedIoTarget::new(
+            ThreadAddress::new(
+                dispatch.consumer.tenant_id.clone(),
+                dispatch.consumer.user_id.clone(),
+                dispatch.consumer.session_id.clone(),
+            )
+            .with_thread_id(dispatch.consumer.thread_id.to_string()),
+        )
+        .with_provider_policy(ProviderPolicy::new(
+            self.model_provider.clone(),
+            self.model.clone(),
+        ));
+        target.create_thread_if_missing = false;
+        target.metadata.insert(
+            "cooldis_source_scope".to_string(),
+            envelope.source.stable_scope(),
+        );
+        Ok(target)
+    }
+
     /// Resolves settlement ingress from the durable spawn-time handle
     /// binding. Envelope conversation metadata is deliberately not authority:
     /// a restart re-folds the original request/spawn records and targets that
@@ -1817,35 +1878,99 @@ impl CooldisDaemonIoBridge {
                 .read_events(&control_stream_id(&coordinates), None)
                 .await
                 .map_err(cooldis_history_error)?;
-            if !events.iter().any(|event| {
-                event.kind == EventKind::ThreadSpawned
-                    && event
-                        .payload
-                        .get("correlation_id")
-                        .and_then(JsonValue::as_str)
-                        == Some(terminal.dispatch_id.as_str())
-            }) {
-                continue;
-            }
-            for binding in fold_thread_handle_bindings(&events).map_err(cooldis_bridge_error)? {
-                if binding.dispatch_id != terminal.dispatch_id {
-                    continue;
+            match terminal.handle.kind {
+                HandleKind::Thread => {
+                    if !events.iter().any(|event| {
+                        event.kind == EventKind::ThreadSpawned
+                            && event
+                                .payload
+                                .get("correlation_id")
+                                .and_then(JsonValue::as_str)
+                                == Some(terminal.dispatch_id.as_str())
+                    }) {
+                        continue;
+                    }
+                    for binding in
+                        fold_thread_handle_bindings(&events).map_err(cooldis_bridge_error)?
+                    {
+                        if binding.dispatch_id != terminal.dispatch_id {
+                            continue;
+                        }
+                        if binding.handle != terminal.handle {
+                            return Err(IoError::Bridge(format!(
+                                "handle outcome {} does not match its durable spawn binding",
+                                terminal.dispatch_id
+                            )));
+                        }
+                        if let Some(existing) = &resolved
+                            && existing != &binding.consumer
+                        {
+                            return Err(IoError::Bridge(format!(
+                                "handle outcome {} resolves to multiple consumer threads",
+                                terminal.dispatch_id
+                            )));
+                        }
+                        resolved = Some(binding.consumer);
+                    }
                 }
-                if binding.handle != terminal.handle {
-                    return Err(IoError::Bridge(format!(
-                        "handle outcome {} does not match its durable spawn binding",
-                        terminal.dispatch_id
-                    )));
+                HandleKind::Process => {
+                    for event in events
+                        .iter()
+                        .filter(|event| event.kind == EventKind::IoIngressReceived)
+                    {
+                        if event
+                            .payload
+                            .pointer("/content/payload/dispatch_id")
+                            .and_then(JsonValue::as_str)
+                            != Some(terminal.dispatch_id.as_str())
+                        {
+                            continue;
+                        }
+                        let witness = serde_json::from_value::<IoIngressReceivedPayload>(
+                            event.payload.clone(),
+                        )
+                        .map_err(|err| {
+                            IoError::Bridge(format!("invalid ingress witness payload: {err}"))
+                        })?;
+                        let Some(content) = witness.content else {
+                            continue;
+                        };
+                        let content =
+                            serde_json::from_value::<IngressContent>(content).map_err(|err| {
+                                IoError::Bridge(format!("invalid witnessed content: {err}"))
+                            })?;
+                        let IngressContent::Event { kind, payload } = content else {
+                            continue;
+                        };
+                        if kind != HANDLE_DISPATCH_CONTENT_KIND {
+                            continue;
+                        }
+                        let binding = serde_json::from_value::<HandleDispatchEnvelope>(payload)
+                            .map_err(|err| {
+                                IoError::Bridge(format!(
+                                    "invalid process dispatch witness payload: {err}"
+                                ))
+                            })?;
+                        if binding.dispatch_id != terminal.dispatch_id {
+                            continue;
+                        }
+                        if binding.handle != terminal.handle {
+                            return Err(IoError::Bridge(format!(
+                                "process outcome {} does not match its durable dispatch binding",
+                                terminal.dispatch_id
+                            )));
+                        }
+                        if let Some(existing) = &resolved
+                            && existing != &binding.consumer
+                        {
+                            return Err(IoError::Bridge(format!(
+                                "process outcome {} resolves to multiple consumer threads",
+                                terminal.dispatch_id
+                            )));
+                        }
+                        resolved = Some(binding.consumer);
+                    }
                 }
-                if let Some(existing) = &resolved
-                    && existing != &binding.consumer
-                {
-                    return Err(IoError::Bridge(format!(
-                        "handle outcome {} resolves to multiple consumer threads",
-                        terminal.dispatch_id
-                    )));
-                }
-                resolved = Some(binding.consumer);
             }
         }
         let coordinates = resolved.ok_or_else(|| {
@@ -3431,6 +3556,7 @@ impl CooldisDaemonIoBridge {
                 .as_ref()
                 .map(|actor| actor.external_actor_id.clone()),
             external_message_id: envelope.metadata.get("telegram_message_id").cloned(),
+            content: witnessed_ingress_content(envelope)?,
             envelope_digest: ingress_envelope_digest(envelope)?,
         })
         .map_err(|err| IoError::Bridge(format!("encode ingress receipt payload: {err}")))?;
@@ -6279,6 +6405,7 @@ fn ingress_received_control_record(
             .as_ref()
             .map(|actor| actor.external_actor_id.clone()),
         external_message_id: external_message_id(envelope),
+        content: witnessed_ingress_content(envelope)?,
         envelope_digest: canonical_json_hash(&envelope_value).map_err(cooldis_bridge_error)?,
     };
     let mut value = serde_json::to_value(payload).map_err(|err| {
@@ -6306,6 +6433,17 @@ fn ingress_received_control_record(
         EventKind::IoIngressReceived,
         value,
     ))
+}
+
+fn witnessed_ingress_content(envelope: &IngressEnvelope) -> IoResult<Option<JsonValue>> {
+    match &envelope.content {
+        IngressContent::Event { kind, .. } if kind == HANDLE_DISPATCH_CONTENT_KIND => {
+            serde_json::to_value(&envelope.content)
+                .map(Some)
+                .map_err(|err| IoError::Bridge(format!("encode witnessed ingress content: {err}")))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn event_admission_decision(decision: &AdmissionDecision) -> EventAdmissionDecision {

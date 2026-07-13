@@ -7,7 +7,9 @@ use super::context_read_plan::{
 };
 use super::runtime_utils::unix_timestamp_ms;
 use super::turn::{TurnWatchdogHandle, TurnWatchdogToken};
-use super::{CooldisError, CooldisResult, RuntimeKernelControl, TurnInput};
+use super::{
+    CooldisError, CooldisResult, ProcessHandleIngressSink, RuntimeKernelControl, TurnInput,
+};
 use crate::agent::manifest_bind::BoundCouplingSet;
 use crate::kernel::coupling_executor_registry::{
     CouplingExecutorRegistry, registered_coupling_executor_supports_template,
@@ -72,6 +74,7 @@ pub struct RuntimeServices {
     runtime_store: Arc<dyn RuntimeStore>,
     execution_policy: RuntimeExecutionPolicy,
     kernel_control: Option<RuntimeKernelControl>,
+    process_handle_ingress: Option<Arc<dyn ProcessHandleIngressSink>>,
     bound_coupling_set: Option<BoundCouplingSet>,
     operation_registry_root: Option<PathBuf>,
     turn_watchdog_sequence: Arc<AtomicU64>,
@@ -86,6 +89,7 @@ impl RuntimeServices {
             runtime_store,
             execution_policy,
             kernel_control: None,
+            process_handle_ingress: None,
             bound_coupling_set: None,
             operation_registry_root: None,
             turn_watchdog_sequence: Arc::new(AtomicU64::new(0)),
@@ -95,6 +99,18 @@ impl RuntimeServices {
     pub fn with_kernel_control(mut self, kernel_control: RuntimeKernelControl) -> Self {
         self.kernel_control = Some(kernel_control);
         self
+    }
+
+    pub fn with_process_handle_ingress(
+        mut self,
+        sink: Option<Arc<dyn ProcessHandleIngressSink>>,
+    ) -> Self {
+        self.process_handle_ingress = sink;
+        self
+    }
+
+    pub fn process_handle_ingress(&self) -> Option<Arc<dyn ProcessHandleIngressSink>> {
+        self.process_handle_ingress.clone()
     }
 
     pub fn with_bound_coupling_set(mut self, coupling_set: BoundCouplingSet) -> Self {

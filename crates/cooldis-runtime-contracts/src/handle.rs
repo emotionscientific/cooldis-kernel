@@ -14,7 +14,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::{RuntimeTerminalState, RuntimeUsage, ThreadId};
+use crate::{RuntimeTerminalState, RuntimeUsage, ThreadCoordinates, ThreadId};
+
+/// Ingress content kind carrying a [`HandleDispatchEnvelope`]. Dispatch
+/// ingress is observed and settled before a process backend starts; unlike a
+/// terminal outcome it never wakes the consumer thread.
+pub const HANDLE_DISPATCH_CONTENT_KIND: &str = "cooldis.handle.dispatch/1";
 
 /// Ingress content kind carrying a [`HandleTerminalEnvelope`]. This is a
 /// content kind, not a stream event kind: the envelope rides
@@ -78,6 +83,20 @@ impl HandleId {
             id: process_id.into(),
         }
     }
+}
+
+/// Durable process-dispatch fact carried as observe-only ingress.
+///
+/// The process id is allocated before backend startup, so this record is the
+/// serialization point for idempotent dispatch. It intentionally contains no
+/// terminal fact: process termination is first made durable by the separate
+/// [`HandleTerminalEnvelope`] ingress witness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HandleDispatchEnvelope {
+    pub dispatch_id: DispatchId,
+    pub handle: HandleId,
+    pub consumer: ThreadCoordinates,
+    pub command_digest: String,
 }
 
 /// The closed outcome vocabulary of a handle. Deliberately three-valued:
@@ -188,6 +207,35 @@ mod tests {
         );
         let decoded: HandleTerminalEnvelope = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn process_dispatch_envelope_wire_shape_is_pinned() {
+        let raw = serde_json::json!({
+            "dispatch_id": "toolu_process_420",
+            "handle": {
+                "kind": "process",
+                "id": "018f0000-0000-7000-8000-000000000420"
+            },
+            "consumer": {
+                "tenant_id": "tenant-a",
+                "user_id": "user-a",
+                "session_id": "session-a",
+                "thread_id": "018f0000-0000-7000-8000-000000000419"
+            },
+            "command_digest": "sha256:dispatch-command"
+        });
+        let decoded: HandleDispatchEnvelope = serde_json::from_value(raw.clone()).unwrap();
+
+        assert_eq!(decoded.dispatch_id, DispatchId::new("toolu_process_420"));
+        assert_eq!(
+            decoded.handle,
+            HandleId::process("018f0000-0000-7000-8000-000000000420")
+        );
+        assert_eq!(decoded.consumer.tenant_id, "tenant-a");
+        assert_eq!(decoded.command_digest, "sha256:dispatch-command");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), raw);
+        assert_eq!(HANDLE_DISPATCH_CONTENT_KIND, "cooldis.handle.dispatch/1");
     }
 
     #[test]

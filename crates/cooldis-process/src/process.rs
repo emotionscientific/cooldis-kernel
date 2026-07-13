@@ -300,9 +300,20 @@ struct CooldisProcessLogInner {
 
 impl CooldisProcessHandle {
     pub fn new(backend: CooldisProcessBackend, label: impl Into<String>) -> Self {
+        Self::with_process_id(CooldisProcessId::new(), backend, label)
+    }
+
+    /// Constructs a process handle around an id allocated before backend
+    /// startup. The kernel uses this to durably witness dispatch identity
+    /// before allowing the external process effect.
+    pub fn with_process_id(
+        process_id: CooldisProcessId,
+        backend: CooldisProcessBackend,
+        label: impl Into<String>,
+    ) -> Self {
         let (live_tx, _) = broadcast::channel(1024);
         Self {
-            process_id: CooldisProcessId::new(),
+            process_id,
             backend,
             label: label.into(),
             inner: Arc::new(CooldisProcessLogInner {

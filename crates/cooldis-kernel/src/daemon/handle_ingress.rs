@@ -7,6 +7,14 @@
 //! `HandleTerminalEnvelope`, submits it to the ingress queue, and leaves
 //! dedupe, admission, claim, settlement, and parent-turn execution to ADR
 //! 0003's existing protocol.
+//!
+//! Processes use the symmetric contract without this central scanner. Their
+//! manager registry is owned by the surface that started the backend, so that
+//! owning surface witnesses `cooldis.handle.dispatch/1` before start, observes
+//! the manager's terminal snapshot, and submits `cooldis.handle.outcome/1`
+//! directly. It retains the terminal manager entry until ingress settlement is
+//! acknowledged. A daemon restart cannot reattach an orphaned host process;
+//! EMO-426 owns convergence of a dispatch witness with no outcome witness.
 
 use crate::kernel::thread_spawn_projector::fold_thread_handle_bindings;
 use crate::{

@@ -270,7 +270,8 @@ async fn router_invokes_kernel_process_operation_alias() {
         receipt["stdout"].as_str().unwrap().trim(),
         cwd.display().to_string()
     );
-    assert!(receipt.get("process_id").is_none());
+    assert!(receipt["process_id"].as_str().is_some());
+    assert_eq!(receipt["dispatch_id"], "call_1");
 }
 
 #[tokio::test]
@@ -541,8 +542,15 @@ async fn router_with_kernel_process_operation(cwd: PathBuf) -> AgentToolRouter {
     let registry = Arc::new(OperationRegistry::new());
     let package = cooldis_process_kernel_package();
     let context = ThreadContext::root(ThreadCoordinates::new("tenant", "user", "session"));
-    let dispatcher: Arc<dyn KernelOperationDispatcher> =
-        Arc::new(KernelProcessOperationProvider::new(context, cwd));
+    let store: Arc<dyn crate::RuntimeStore> = Arc::new(crate::InMemorySessionStore::new());
+    let process_dispatcher = crate::kernel::process_handle_dispatch::test_process_dispatcher(
+        store,
+        context.coordinates.clone(),
+    );
+    let dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
+        KernelProcessOperationProvider::new(context, cwd)
+            .with_process_dispatcher(process_dispatcher),
+    );
     let mut registration =
         KernelOperationRegistration::new(COOLDIS_PROCESS_PACKAGE, package.manifest.clone())
             .with_capability_grants(package.capability_grants.clone())

@@ -339,7 +339,13 @@ async fn kernel_process_operations_exec_and_poll_host_command() {
         )
         .await
         .unwrap();
-    let provider = KernelProcessOperationProvider::new(root.context().clone(), temp_cwd("exec"));
+    let provider = KernelProcessOperationProvider::new(root.context().clone(), temp_cwd("exec"))
+        .with_process_dispatcher(
+            crate::kernel::process_handle_dispatch::test_process_dispatcher(
+                host.runtime_store(),
+                root.context().coordinates.clone(),
+            ),
+        );
 
     let started = provider
         .invoke_json(
@@ -362,7 +368,7 @@ async fn kernel_process_operations_exec_and_poll_host_command() {
         .invoke_json(
             PROCESS_POLL_OPERATION,
             json!({
-                "process_id": process_id,
+                "process_id": process_id.clone(),
                 "yield_time_ms": 1_000,
                 "output_bytes_cap": 4_096
             }),
@@ -374,7 +380,7 @@ async fn kernel_process_operations_exec_and_poll_host_command() {
     assert_eq!(polled["status"], "completed");
     assert_eq!(polled["exit_code"], 0);
     assert_eq!(polled["stdout"], "done");
-    assert!(polled.get("process_id").is_none());
+    assert_eq!(polled["process_id"], process_id);
     assert!(polled["event_count"].as_u64().unwrap() >= 2);
 
     host.shutdown_all().await.unwrap();
@@ -390,7 +396,13 @@ async fn kernel_process_operations_write_and_terminate_host_process() {
         )
         .await
         .unwrap();
-    let provider = KernelProcessOperationProvider::new(root.context().clone(), temp_cwd("stdin"));
+    let provider = KernelProcessOperationProvider::new(root.context().clone(), temp_cwd("stdin"))
+        .with_process_dispatcher(
+            crate::kernel::process_handle_dispatch::test_process_dispatcher(
+                host.runtime_store(),
+                root.context().coordinates.clone(),
+            ),
+        );
 
     let started = provider
         .invoke_json(
@@ -412,7 +424,7 @@ async fn kernel_process_operations_write_and_terminate_host_process() {
         .invoke_json(
             PROCESS_WRITE_OPERATION,
             json!({
-                "process_id": process_id,
+                "process_id": process_id.clone(),
                 "delta_base64": base64::Engine::encode(&STANDARD, "hello\n"),
                 "yield_time_ms": 500,
                 "output_bytes_cap": 4_096
@@ -438,7 +450,7 @@ async fn kernel_process_operations_write_and_terminate_host_process() {
         .unwrap();
     assert_eq!(terminated["operation"], "cooldis.process_terminate");
     assert_eq!(terminated["status"], "cancelled");
-    assert!(terminated.get("process_id").is_none());
+    assert_eq!(terminated["process_id"], process_id);
 
     host.shutdown_all().await.unwrap();
 }

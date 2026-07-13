@@ -129,7 +129,8 @@ async fn async_manager_yields_running_handle_then_poll_completes_host_command() 
     )
     .with_deadline(ExecutionDeadline::from_now(Duration::from_secs(1)))
     .with_yield_time(Duration::from_millis(5))
-    .with_output_cap_bytes(1024);
+    .with_output_cap_bytes(1024)
+    .retain_terminal_until_acknowledged();
 
     let started = manager.start(backend, request).await.unwrap();
     assert_eq!(started.snapshot.status, ProcessSnapshotStatus::Running);
@@ -140,13 +141,48 @@ async fn async_manager_yields_running_handle_then_poll_completes_host_command() 
         .await
         .unwrap();
     assert_eq!(completed.snapshot.status, ProcessSnapshotStatus::Completed);
-    assert_eq!(completed.snapshot.process_id, None);
+    assert_eq!(completed.snapshot.process_id, Some(process_id));
     assert_eq!(String::from_utf8_lossy(&completed.snapshot.stdout), "done");
     assert_eq!(completed.snapshot.exit_code, Some(0));
+
+    let repeated = manager.snapshot(process_id, 1024).await.unwrap();
+    assert_eq!(repeated.snapshot, completed.snapshot);
+    assert!(manager.acknowledge_terminal(process_id).await.unwrap());
+    assert!(manager.snapshot(process_id, 1024).await.is_err());
 }
 
 #[tokio::test]
-async fn async_manager_keeps_completed_handle_until_owner_polls() {
+async fn async_manager_uses_preallocated_process_id() {
+    let manager = AsyncExecutionManager::default();
+    let process_id = CooldisProcessId::new();
+    let request = AsyncProcessStartRequest::host_command(
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 0.05".to_string(),
+        ],
+        std::env::current_dir().unwrap(),
+    )
+    .with_process_id(process_id)
+    .with_deadline(ExecutionDeadline::from_now(Duration::from_secs(1)))
+    .with_yield_time(Duration::from_millis(1))
+    .retain_terminal_until_acknowledged();
+
+    let started = manager
+        .start(Arc::new(HostBashLiveBackend), request)
+        .await
+        .unwrap();
+
+    assert_eq!(started.snapshot.process_id, Some(process_id));
+    manager
+        .terminate(process_id, "test cleanup", Duration::from_secs(1), 1024)
+        .await
+        .unwrap();
+    assert!(manager.acknowledge_terminal(process_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn async_manager_keeps_completed_handle_until_owner_acknowledges() {
     let manager = AsyncExecutionManager::default();
     let backend = Arc::new(HostBashLiveBackend::default());
     let first_request = AsyncProcessStartRequest::host_command(
@@ -159,7 +195,8 @@ async fn async_manager_keeps_completed_handle_until_owner_polls() {
     )
     .with_deadline(ExecutionDeadline::from_now(Duration::from_secs(1)))
     .with_yield_time(Duration::from_millis(5))
-    .with_output_cap_bytes(1024);
+    .with_output_cap_bytes(1024)
+    .retain_terminal_until_acknowledged();
 
     let first_started = manager.start(backend.clone(), first_request).await.unwrap();
     let first_id = first_started
@@ -206,7 +243,8 @@ async fn async_manager_writes_to_stdin_capable_host_command() {
     .pipe_stdin(true)
     .with_deadline(ExecutionDeadline::from_now(Duration::from_secs(2)))
     .with_yield_time(Duration::from_millis(5))
-    .with_output_cap_bytes(1024);
+    .with_output_cap_bytes(1024)
+    .retain_terminal_until_acknowledged();
 
     let started = manager.start(backend, request).await.unwrap();
     let process_id = started.snapshot.process_id.expect("running process id");
@@ -228,6 +266,13 @@ async fn async_manager_writes_to_stdin_capable_host_command() {
         .await
         .unwrap();
     assert_eq!(terminated.snapshot.status, ProcessSnapshotStatus::Cancelled);
+    assert!(terminated.snapshot.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            CooldisProcessEventKind::Cancelled { reason } if reason == "test complete"
+        )
+    }));
+    assert!(manager.acknowledge_terminal(process_id).await.unwrap());
 }
 
 #[tokio::test]
@@ -252,6 +297,8 @@ async fn async_manager_records_timeout_and_output_truncation() {
         .unwrap();
     assert_eq!(timed_out.snapshot.status, ProcessSnapshotStatus::TimedOut);
     assert_eq!(timed_out.snapshot.exit_code, Some(124));
+    let timed_out_id = timed_out.snapshot.process_id.unwrap();
+    assert!(manager.snapshot(timed_out_id, 1024).await.is_err());
 
     let truncation_request = AsyncProcessStartRequest::host_command(
         vec![

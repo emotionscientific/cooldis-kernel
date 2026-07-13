@@ -642,6 +642,12 @@ pub(super) struct CommandExecParams {
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) env: Option<HashMap<String, Option<String>>>,
+    #[serde(default)]
+    pub(super) dispatch_id: Option<String>,
+    /// Consumer of a handle-returning streaming execution. Buffered
+    /// command/exec does not create a handle and does not require this field.
+    #[serde(default)]
+    pub(super) thread_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
@@ -3048,6 +3054,7 @@ impl CooldisAppServer {
             external_conversation_id: None,
             external_actor_id: None,
             external_message_id: None,
+            content: None,
             envelope_digest,
         };
         let mut value = serde_json::to_value(payload).map_err(json_codec_error)?;
@@ -3371,6 +3378,7 @@ impl CooldisAppServer {
     ) -> Result<Value, JsonRpcErrorError> {
         if let Some(process_id) = params.process_id.as_deref() {
             let process_id = parse_command_process_id(process_id)?;
+            self.require_command_process_handle(process_id).await?;
             let outcome = self
                 .inner
                 .process_manager
@@ -3466,6 +3474,20 @@ impl CooldisAppServer {
         &self,
         params: CommandExecParams,
     ) -> Result<Value, JsonRpcErrorError> {
+        let thread_id = params.thread_id.as_deref().ok_or_else(|| {
+            jsonrpc_error(
+                -32602,
+                "streaming command/exec requires threadId for process handle settlement",
+            )
+        })?;
+        let consumer = self.coordinates_for_thread(thread_id).await?;
+        let dispatch_id = cooldis_runtime_contracts::DispatchId::new(
+            params
+                .dispatch_id
+                .clone()
+                .unwrap_or_else(|| Uuid::now_v7().to_string()),
+        );
+        let command_bytes = serde_json::to_vec(&params.command).map_err(json_codec_error)?;
         let cwd = params
             .cwd
             .as_deref()
@@ -3491,13 +3513,25 @@ impl CooldisAppServer {
             .with_deadline(ExecutionDeadline::from_now(timeout))
             .with_yield_time(command_yield_time(params.yield_time_ms))
             .with_output_cap_bytes(command_process_output_cap(&params));
-        let outcome = self
-            .inner
-            .process_manager
-            .start(Arc::new(HostBashLiveBackend), request)
+        let dispatcher = self.inner.process_dispatcher.get().ok_or_else(|| {
+            internal_error(CooldisError::RuntimeExecution(
+                "app-server process dispatcher is not initialized".to_string(),
+            ))
+        })?;
+        let outcome = dispatcher
+            .dispatch_start(
+                &consumer,
+                dispatch_id.clone(),
+                crate::kernel::process_handle_dispatch::command_digest(&command_bytes),
+                self.inner.process_manager.clone(),
+                Arc::new(HostBashLiveBackend),
+                request,
+            )
             .await
-            .map_err(command_exec_process_error)?;
-        Ok(command_process_snapshot_json(&outcome.snapshot))
+            .map_err(|err| jsonrpc_error(-32000, format!("command/exec failed: {err}")))?;
+        let mut value = command_process_snapshot_json(&outcome.snapshot);
+        value["dispatchId"] = json!(dispatch_id.to_string());
+        Ok(value)
     }
 
     pub(super) async fn command_exec_write(
@@ -3505,6 +3539,7 @@ impl CooldisAppServer {
         params: CommandExecWriteParams,
     ) -> Result<Value, JsonRpcErrorError> {
         let process_id = parse_command_process_id(&params.process_id)?;
+        self.require_command_process_handle(process_id).await?;
         let bytes = STANDARD.decode(params.delta_base64).map_err(|err| {
             jsonrpc_error(
                 -32602,
@@ -3530,6 +3565,7 @@ impl CooldisAppServer {
         params: CommandExecTerminateParams,
     ) -> Result<Value, JsonRpcErrorError> {
         let process_id = parse_command_process_id(&params.process_id)?;
+        self.require_command_process_handle(process_id).await?;
         let outcome = self
             .inner
             .process_manager
@@ -3558,6 +3594,24 @@ impl CooldisAppServer {
                 params.process_id
             ),
         ))
+    }
+
+    async fn require_command_process_handle(
+        &self,
+        process_id: CooldisProcessId,
+    ) -> Result<(), JsonRpcErrorError> {
+        self.inner
+            .process_dispatcher
+            .get()
+            .ok_or_else(|| {
+                internal_error(CooldisError::RuntimeExecution(
+                    "app-server process dispatcher is not initialized".to_string(),
+                ))
+            })?
+            .require_live_handle(process_id, None)
+            .await
+            .map(|_| ())
+            .map_err(internal_error)
     }
 
     pub(super) async fn get_conversation_summary(

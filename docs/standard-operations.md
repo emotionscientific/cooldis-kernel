@@ -143,8 +143,16 @@ registry root is configured. It publishes four process-handle operations:
 | `process_terminate` | `process.control` | Terminate a process handle. |
 
 The contract uses the same process snapshot vocabulary as the app-server
-`command/exec` surface: process id while running, status, backend, label,
+`command/exec` surface: stable process id, status, backend, label,
 exit code when known, stdout/stderr, truncation flags, and event count.
+
+`process_exec` accepts an optional `dispatch_id` and generates one when absent.
+The durable observe-only dispatch witness is settled before backend startup;
+retrying that identity returns its original live handle, while a witness whose
+live registry entry is gone fails closed. Poll and wait projections read that
+same manager snapshot, whose terminal entry remains until outcome ingress is
+acknowledged. App-server streaming `command/exec` uses camelCase `dispatchId`
+and `threadId` to bind the handle settlement consumer.
 
 V1 intentionally does not add `cooldis-process` to the default manifest and
 `load_all_active_when_unbound` skips it. Host process authority must be declared

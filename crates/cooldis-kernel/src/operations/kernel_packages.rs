@@ -803,7 +803,8 @@ fn process_exec_input_schema() -> Value {
             "output_bytes_cap": {
                 "type": "integer",
                 "description": "Maximum stdout/stderr bytes retained for this snapshot."
-            }
+            },
+            "dispatch_id": string_schema("Optional idempotency identity; generated when absent.")
         }),
         &["command"],
     )
@@ -930,7 +931,8 @@ fn process_snapshot_output_schema(operation: &str) -> Value {
                 "enum": [operation],
                 "description": "Receipt operation name."
             },
-            "process_id": string_schema("Running process id, omitted once the process reaches a terminal state."),
+            "process_id": string_schema("Stable process id retained through terminal acknowledgement."),
+            "dispatch_id": string_schema("Dispatch identity, present on process_exec receipts."),
             "status": process_status_schema("Current process status."),
             "backend": string_schema("Process backend kind."),
             "label": string_schema("Human-readable process label."),

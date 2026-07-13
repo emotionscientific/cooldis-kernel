@@ -2,6 +2,7 @@ use crate::capabilities::vfs::{CooldisVfs, ObjectStoreMountConfig};
 use crate::kernel::history::{
     CanonicalContent, CanonicalMessage, CanonicalStopReason, ProviderApi,
 };
+use crate::kernel::process_handle_dispatch::{ProcessHandleDispatcher, command_digest};
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentRuntime, AgentRuntimeFactory, CooldisError,
     CooldisResult, OperationRegistry, RuntimeEventKind, RuntimeServices, RuntimeTerminalState,
@@ -10,6 +11,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use cooldis_runtime_contracts::DispatchId;
 pub use cooldis_vbash::{
     BASH_TOOL, BashExecutionPolicy, BashkitExecutionConfig, BashkitExecutionHarness,
     BashkitLiveBackend, CommandRoute, CommandRoutingPolicy, VbashOperationRegistry, VirtualFile,
@@ -268,6 +270,7 @@ pub struct BashToolProvider {
     harness: Mutex<Option<BashkitExecutionHarness>>,
     process_manager: AsyncExecutionManager,
     live_backend: Arc<dyn LiveProcessBackend>,
+    process_dispatcher: Option<ProcessHandleDispatcher>,
 }
 
 impl BashToolProvider {
@@ -279,7 +282,13 @@ impl BashToolProvider {
             harness: Mutex::new(None),
             process_manager: AsyncExecutionManager::default(),
             live_backend,
+            process_dispatcher: None,
         }
+    }
+
+    pub fn with_process_dispatcher(mut self, dispatcher: ProcessHandleDispatcher) -> Self {
+        self.process_dispatcher = Some(dispatcher);
+        self
     }
 }
 
@@ -440,12 +449,14 @@ impl BashToolProvider {
         })?;
         let output_cap = process_output_cap(args.output_bytes_cap, self.config.max_output_bytes);
         let yield_time = process_yield_time(args.yield_time_ms);
+        let mut dispatch_id = None;
         let outcome = if let Some(process_id) = args.process_id {
             let process_id = process_id.parse::<CooldisProcessId>().map_err(|err| {
                 CooldisError::RuntimeExecution(format!(
                     "tool {PROCESS_EXEC_TOOL:?} requires a valid Cooldis process_id: {err}"
                 ))
             })?;
+            self.require_process_handle(process_id).await?;
             self.process_manager
                 .poll(process_id, yield_time, output_cap)
                 .await?
@@ -455,10 +466,25 @@ impl BashToolProvider {
                     "tool {PROCESS_EXEC_TOOL:?} requires command or process_id"
                 ))
             })?;
+            let consumer = turn_context
+                .as_ref()
+                .map(|context| context.coordinates.clone())
+                .ok_or_else(|| {
+                    CooldisError::RuntimeExecution(
+                        "process_exec requires a turn context for durable consumer binding"
+                            .to_string(),
+                    )
+                })?;
+            let dispatcher = self.process_dispatcher.as_ref().ok_or_else(|| {
+                CooldisError::RuntimeExecution(
+                    "process_exec requires the durable process dispatch ingress lane".to_string(),
+                )
+            })?;
             let timeout = args
                 .timeout_ms
                 .map(Duration::from_millis)
                 .unwrap_or(self.config.execution_timeout);
+            let digest = command_digest(command.as_bytes());
             let request = AsyncProcessStartRequest::virtual_bash_script(command)
                 .with_owner(process_tool_owner(
                     &turn_context,
@@ -468,13 +494,26 @@ impl BashToolProvider {
                 .with_deadline(ExecutionDeadline::from_now(timeout))
                 .with_yield_time(yield_time)
                 .with_output_cap_bytes(output_cap);
-            self.process_manager
-                .start(Arc::clone(&self.live_backend), request)
-                .await?
+            let id = DispatchId::new(call_id.clone());
+            let outcome = dispatcher
+                .dispatch_start(
+                    &consumer,
+                    id.clone(),
+                    digest,
+                    self.process_manager.clone(),
+                    Arc::clone(&self.live_backend),
+                    request,
+                )
+                .await?;
+            dispatch_id = Some(id);
+            outcome
         };
         let is_error = process_snapshot_is_error(&outcome.snapshot);
-        let output_json = serde_json::to_string(&process_snapshot_json(&outcome.snapshot))
-            .map_err(execution_error)?;
+        let mut output = process_snapshot_json(&outcome.snapshot);
+        if let Some(dispatch_id) = dispatch_id {
+            output["dispatch_id"] = json!(dispatch_id.to_string());
+        }
+        let output_json = serde_json::to_string(&output).map_err(execution_error)?;
         Ok(CanonicalMessage::tool_result(
             call_id,
             tool_name,
@@ -499,6 +538,7 @@ impl BashToolProvider {
                 "tool {WRITE_STDIN_TOOL:?} requires a valid Cooldis process_id: {err}"
             ))
         })?;
+        self.require_process_handle(process_id).await?;
         let bytes = STANDARD.decode(args.delta_base64).map_err(|err| {
             CooldisError::RuntimeExecution(format!(
                 "tool {WRITE_STDIN_TOOL:?} requires valid base64 delta_base64: {err}"
@@ -537,6 +577,22 @@ impl BashToolProvider {
                 ))
             }
         }
+    }
+}
+
+impl BashToolProvider {
+    async fn require_process_handle(&self, process_id: CooldisProcessId) -> CooldisResult<()> {
+        self.process_dispatcher
+            .as_ref()
+            .ok_or_else(|| {
+                CooldisError::RuntimeExecution(
+                    "process handle verbs require the durable process dispatch ingress lane"
+                        .to_string(),
+                )
+            })?
+            .require_live_handle(process_id, None)
+            .await
+            .map(|_| ())
     }
 }
 

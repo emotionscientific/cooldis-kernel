@@ -242,6 +242,19 @@ impl CooldisSupervisor {
         Ok(())
     }
 
+    pub async fn set_process_handle_ingress(
+        &self,
+        tenant_id: &str,
+        sink: Option<Arc<dyn crate::ProcessHandleIngressSink>>,
+    ) -> CooldisResult<()> {
+        self.tenant(tenant_id)
+            .await?
+            .host
+            .set_process_handle_ingress(sink)
+            .await;
+        Ok(())
+    }
+
     pub(crate) async fn kernel_control(
         &self,
         tenant_id: &str,

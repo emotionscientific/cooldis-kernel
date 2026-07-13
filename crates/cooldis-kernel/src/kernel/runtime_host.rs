@@ -44,9 +44,9 @@ use loop_continuation::{
     latest_turn_continue_request, turn_submitted_event,
 };
 pub use runtime_api::{
-    AgentRuntime, AgentRuntimeFactory, RuntimeHostLifecycleSnapshot, RuntimeHostSnapshot,
-    ThreadCheckpoint, ThreadCheckpointLineage, ThreadCommand, ThreadEvent, ThreadLifecycleSink,
-    ThreadSnapshot,
+    AgentRuntime, AgentRuntimeFactory, ProcessHandleIngressSink, RuntimeHostLifecycleSnapshot,
+    RuntimeHostSnapshot, ThreadCheckpoint, ThreadCheckpointLineage, ThreadCommand, ThreadEvent,
+    ThreadLifecycleSink, ThreadSnapshot,
 };
 pub use runtime_events::{RuntimeEvent, RuntimeEventKind, emit_runtime_event};
 pub use runtime_services::{RuntimeExecutionPolicy, RuntimeServices};
@@ -235,6 +235,7 @@ struct RuntimeHostInner {
     thread_start_reservations: StdMutex<HashMap<ThreadId, ThreadStartReservationState>>,
     checkpoints: Mutex<HashMap<ThreadCheckpointId, ThreadCheckpoint>>,
     lifecycle_sink: RwLock<Option<Arc<dyn ThreadLifecycleSink>>>,
+    process_handle_ingress: RwLock<Option<Arc<dyn ProcessHandleIngressSink>>>,
 }
 
 struct RuntimeThread {
@@ -437,12 +438,24 @@ impl RuntimeHost {
                 thread_start_reservations: StdMutex::new(HashMap::new()),
                 checkpoints: Mutex::new(HashMap::new()),
                 lifecycle_sink: RwLock::new(None),
+                process_handle_ingress: RwLock::new(None),
             }),
         }
     }
 
     pub async fn set_lifecycle_sink(&self, sink: Option<Arc<dyn ThreadLifecycleSink>>) {
         *self.inner.lifecycle_sink.write().await = sink;
+    }
+
+    pub async fn set_process_handle_ingress(
+        &self,
+        sink: Option<Arc<dyn ProcessHandleIngressSink>>,
+    ) {
+        *self.inner.process_handle_ingress.write().await = sink;
+    }
+
+    async fn process_handle_ingress(&self) -> Option<Arc<dyn ProcessHandleIngressSink>> {
+        self.inner.process_handle_ingress.read().await.clone()
     }
 
     async fn lifecycle_sink(&self) -> Option<Arc<dyn ThreadLifecycleSink>> {
@@ -623,7 +636,8 @@ impl RuntimeHost {
             Arc::clone(&self.inner.runtime_store),
             self.inner.execution_policy.clone(),
         )
-        .with_kernel_control(self.kernel_control());
+        .with_kernel_control(self.kernel_control())
+        .with_process_handle_ingress(self.process_handle_ingress().await);
         if let Some(coupling_set) = bound_coupling_set_from_metadata(&context.metadata)? {
             services = services.with_bound_coupling_set(coupling_set);
         }

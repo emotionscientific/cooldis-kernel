@@ -39,6 +39,27 @@ fn wat_guest(wat: impl AsRef<str>) -> Vec<u8> {
     wat::parse_str(wat.as_ref()).expect("test WAT fixture should compile to wasm")
 }
 
+fn process_test_provider() -> (BashToolProvider, TurnContextSnapshot) {
+    let store: Arc<dyn crate::RuntimeStore> = Arc::new(crate::InMemorySessionStore::new());
+    let coordinates = ThreadCoordinates::new("tenant", "user", "process-tool-session");
+    let dispatcher = crate::kernel::process_handle_dispatch::test_process_dispatcher(
+        Arc::clone(&store),
+        coordinates.clone(),
+    );
+    let context = crate::TurnContext::new(
+        crate::ThreadContext::root(coordinates),
+        "process-tool-turn",
+        &crate::TurnInput::text("process tool test"),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .snapshot();
+    (
+        BashToolProvider::new(VirtualBashRuntimeConfig::default())
+            .with_process_dispatcher(dispatcher),
+        context,
+    )
+}
+
 fn tool_result_json(message: CanonicalMessage) -> (serde_json::Value, bool) {
     let CanonicalMessage::ToolResult {
         content, is_error, ..
@@ -892,7 +913,7 @@ async fn bash_tool_provider_exposes_process_handle_tools() {
 
 #[tokio::test]
 async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
-    let provider = BashToolProvider::new(VirtualBashRuntimeConfig::default());
+    let (provider, turn_context) = process_test_provider();
 
     let started = provider
         .invoke_tool_call(AgentKernelToolCall {
@@ -904,7 +925,7 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
                 "timeout_ms": 1000,
                 "output_bytes_cap": 1024
             }),
-            turn_context: None,
+            turn_context: Some(turn_context),
         })
         .await
         .unwrap()
@@ -919,7 +940,7 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
             call_id: "call_process_poll".to_string(),
             tool_name: PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
-                "process_id": process_id,
+                "process_id": process_id.clone(),
                 "yield_time_ms": 1000,
                 "output_bytes_cap": 1024
             }),
@@ -932,12 +953,12 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
     assert!(!is_error, "{completed}");
     assert_eq!(completed["status"].as_str(), Some("completed"));
     assert!(completed["stdout"].as_str().unwrap().contains("done"));
-    assert_eq!(completed["process_id"].as_str(), None);
+    assert_eq!(completed["process_id"].as_str(), Some(process_id.as_str()));
 }
 
 #[tokio::test]
 async fn write_stdin_tool_reports_unsupported_for_virtual_bash_handle() {
-    let provider = BashToolProvider::new(VirtualBashRuntimeConfig::default());
+    let (provider, turn_context) = process_test_provider();
     let started = provider
         .invoke_tool_call(AgentKernelToolCall {
             call_id: "call_process_start".to_string(),
@@ -948,7 +969,7 @@ async fn write_stdin_tool_reports_unsupported_for_virtual_bash_handle() {
                 "timeout_ms": 1000,
                 "output_bytes_cap": 1024
             }),
-            turn_context: None,
+            turn_context: Some(turn_context),
         })
         .await
         .unwrap()
