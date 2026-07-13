@@ -6,7 +6,7 @@ use crate::{
     RuntimeThreadHandle, STD_SUPERVISOR_SPAWN_TEMPLATE_ID, THREAD_AGENT_MANIFEST_HASH_METADATA,
     THREAD_BOUND_COUPLING_SET_METADATA, THREAD_SPAWN_GRANTED_METADATA,
     THREAD_SPAWN_INPUTS_HASH_METADATA, THREADS_SPAWN_CAPABILITY, ThreadCoordinates, ThreadId,
-    ThreadSpawnRequestedPayload, ThreadSpawnWitness, TurnInput,
+    ThreadSpawnRequestedPayload, ThreadSpawnWitness, ThreadSpawnedPayload, TurnInput,
 };
 use cooldis_runtime_contracts::{DispatchId, HandleId};
 use serde_json::{Value as JsonValue, json};
@@ -873,6 +873,21 @@ pub struct ThreadSpawnDispatchFold {
     pub claimed: bool,
 }
 
+/// Durable spawn-time binding for a thread handle.
+///
+/// The binding is a fold, not a second record: the original
+/// `thread.spawn.requested` anchors the consumer control stream and dispatch
+/// identity, while its witnessed `thread.spawned` decision supplies the
+/// minted child handle. Terminal ingress resolution uses this carrier after
+/// restart and never depends on a live subscription to the child.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ThreadHandleBinding {
+    pub spawned_event_id: EventRecordId,
+    pub consumer: ThreadCoordinates,
+    pub dispatch_id: DispatchId,
+    pub handle: HandleId,
+}
+
 /// Folds the durable records for one dispatch identity. The original
 /// non-claim `thread.spawn.requested` record anchors the fold; spawned and
 /// failure decisions join by its existing `correlation_id` wire value. Raw
@@ -937,6 +952,82 @@ pub fn fold_thread_spawn_dispatch(
         failure_reason,
         claimed,
     })
+}
+
+/// Folds all valid thread-handle bindings witnessed on one consumer control
+/// stream. Conflicting records fail closed so settlement cannot be routed to
+/// an ambiguous consumer or handle.
+pub(crate) fn fold_thread_handle_bindings(
+    events: &[EventRecord],
+) -> CooldisResult<Vec<ThreadHandleBinding>> {
+    let mut bindings = BTreeMap::<String, ThreadHandleBinding>::new();
+    for spawned in events
+        .iter()
+        .filter(|event| event.kind == EventKind::ThreadSpawned)
+    {
+        let Some(correlation_id) = spawned
+            .payload
+            .get("correlation_id")
+            .and_then(JsonValue::as_str)
+        else {
+            continue;
+        };
+        let spawned_payload = serde_json::from_value::<ThreadSpawnedPayload>(
+            spawned.payload.clone(),
+        )
+        .map_err(|err| {
+            CooldisError::History(format!(
+                "thread handle binding spawned payload decode failed: {err}"
+            ))
+        })?;
+        if spawned_payload.parent_thread_id != spawned.coordinates.thread_id {
+            return Err(CooldisError::History(format!(
+                "thread handle binding parent {} does not match consumer stream {}",
+                spawned_payload.parent_thread_id, spawned.coordinates.thread_id
+            )));
+        }
+        let request = events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::ThreadSpawnRequested && !is_spawn_request_claim(event)
+            })
+            .find_map(|event| {
+                let payload =
+                    serde_json::from_value::<ThreadSpawnRequestedPayload>(event.payload.clone())
+                        .ok()?;
+                (payload.correlation_id == correlation_id).then_some((event, payload))
+            })
+            .ok_or_else(|| {
+                CooldisError::History(format!(
+                    "thread handle binding {correlation_id} is missing its spawn request"
+                ))
+            })?;
+        if request.1.parent_thread_id != spawned.coordinates.thread_id {
+            return Err(CooldisError::History(format!(
+                "thread handle binding request parent {} does not match consumer stream {}",
+                request.1.parent_thread_id, spawned.coordinates.thread_id
+            )));
+        }
+        if !spawned.provenance.source_event_ids.contains(&request.0.id) {
+            return Err(CooldisError::History(format!(
+                "thread handle binding {correlation_id} spawned receipt is missing request provenance"
+            )));
+        }
+        let binding = ThreadHandleBinding {
+            spawned_event_id: spawned.id,
+            consumer: spawned.coordinates.clone(),
+            dispatch_id: DispatchId::new(correlation_id),
+            handle: HandleId::thread(spawned_payload.child_thread_id),
+        };
+        if let Some(existing) = bindings.insert(correlation_id.to_string(), binding.clone())
+            && existing != binding
+        {
+            return Err(CooldisError::History(format!(
+                "thread handle binding {correlation_id} has conflicting spawned receipts"
+            )));
+        }
+    }
+    Ok(bindings.into_values().collect())
 }
 
 fn parent_allows_supervisor_spawn(metadata: &BTreeMap<String, String>) -> CooldisResult<bool> {

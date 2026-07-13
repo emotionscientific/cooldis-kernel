@@ -3,6 +3,7 @@ use crate::kernel::admission::{
     AdmissionGateContext, admission_decided_record, append_admission_decided,
 };
 use crate::kernel::runtime_host::ReservedTurnSubmission;
+use crate::kernel::thread_spawn_projector::fold_thread_handle_bindings;
 use crate::{
     AdmissionDecidedPayload, AdmissionDecision as EventAdmissionDecision, CLOCK_TICK_ROUTE_KIND,
     CanonicalContent, CanonicalMessage, CooldisAppServer, CooldisCoalesceBurstsConfig,
@@ -28,6 +29,7 @@ use cooldis_io_core::{
     ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
+use cooldis_runtime_contracts::{HANDLE_OUTCOME_CONTENT_KIND, HandleTerminalEnvelope};
 use futures_util::future::BoxFuture;
 use regex::{Captures, Regex};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -1736,6 +1738,12 @@ impl CooldisDaemonIoBridge {
     }
 
     async fn resolve_target(&self, envelope: &IngressEnvelope) -> IoResult<ResolvedIoTarget> {
+        if matches!(
+            &envelope.content,
+            IngressContent::Event { kind, .. } if kind == HANDLE_OUTCOME_CONTENT_KIND
+        ) {
+            return self.resolve_handle_outcome_target(envelope).await;
+        }
         let threading = envelope
             .metadata
             .get("cooldis_route_threading")
@@ -1779,6 +1787,90 @@ impl CooldisDaemonIoBridge {
                 .metadata
                 .insert(ROUTE_AGENT_REF_METADATA.to_string(), agent_ref.clone());
         }
+        Ok(target)
+    }
+
+    /// Resolves settlement ingress from the durable spawn-time handle
+    /// binding. Envelope conversation metadata is deliberately not authority:
+    /// a restart re-folds the original request/spawn records and targets that
+    /// consumer thread.
+    async fn resolve_handle_outcome_target(
+        &self,
+        envelope: &IngressEnvelope,
+    ) -> IoResult<ResolvedIoTarget> {
+        let IngressContent::Event { payload, .. } = &envelope.content else {
+            unreachable!("handle outcome kind was checked above");
+        };
+        let terminal = serde_json::from_value::<HandleTerminalEnvelope>(payload.clone())
+            .map_err(|err| IoError::Bridge(format!("invalid handle outcome payload: {err}")))?;
+        let store = self.ingress_event_store().await?;
+        let mut resolved = None;
+        for coordinates in store
+            .list_control_stream_coordinates()
+            .await
+            .map_err(cooldis_history_error)?
+        {
+            if coordinates.tenant_id != self.tenant_id || coordinates.user_id != self.user_id {
+                continue;
+            }
+            let events = store
+                .read_events(&control_stream_id(&coordinates), None)
+                .await
+                .map_err(cooldis_history_error)?;
+            if !events.iter().any(|event| {
+                event.kind == EventKind::ThreadSpawned
+                    && event
+                        .payload
+                        .get("correlation_id")
+                        .and_then(JsonValue::as_str)
+                        == Some(terminal.dispatch_id.as_str())
+            }) {
+                continue;
+            }
+            for binding in fold_thread_handle_bindings(&events).map_err(cooldis_bridge_error)? {
+                if binding.dispatch_id != terminal.dispatch_id {
+                    continue;
+                }
+                if binding.handle != terminal.handle {
+                    return Err(IoError::Bridge(format!(
+                        "handle outcome {} does not match its durable spawn binding",
+                        terminal.dispatch_id
+                    )));
+                }
+                if let Some(existing) = &resolved
+                    && existing != &binding.consumer
+                {
+                    return Err(IoError::Bridge(format!(
+                        "handle outcome {} resolves to multiple consumer threads",
+                        terminal.dispatch_id
+                    )));
+                }
+                resolved = Some(binding.consumer);
+            }
+        }
+        let coordinates = resolved.ok_or_else(|| {
+            IoError::Bridge(format!(
+                "handle outcome {} has no durable spawn binding",
+                terminal.dispatch_id
+            ))
+        })?;
+        let mut target = ResolvedIoTarget::new(
+            ThreadAddress::new(
+                coordinates.tenant_id.clone(),
+                coordinates.user_id.clone(),
+                coordinates.session_id.clone(),
+            )
+            .with_thread_id(coordinates.thread_id.to_string()),
+        )
+        .with_provider_policy(ProviderPolicy::new(
+            self.model_provider.clone(),
+            self.model.clone(),
+        ));
+        target.create_thread_if_missing = false;
+        target.metadata.insert(
+            "cooldis_source_scope".to_string(),
+            envelope.source.stable_scope(),
+        );
         Ok(target)
     }
 

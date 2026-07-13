@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::handle_ingress::ThreadHandleIngressAdapter;
 use crate::test_support::FaultingIngressQueue;
 use crate::{
     APP_SERVER_LOCAL_MODEL,
@@ -52,6 +53,10 @@ use cooldis_io_core::{
     IoProtocolAdapter, IoProtocolCapabilities, IoSource, IoTarget,
 };
 use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig, sqlite_dsn};
+use cooldis_runtime_contracts::{
+    DispatchId, HANDLE_OUTCOME_CONTENT_KIND, HandleTerminalEnvelope, HandleTerminalOutcome,
+    RuntimeUsage,
+};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -65,9 +70,28 @@ struct CaptureSink {
     envelopes: Arc<TokioMutex<Vec<IngressEnvelope>>>,
 }
 
+struct FailFirstCaptureSink {
+    attempts: AtomicUsize,
+    envelopes: TokioMutex<Vec<IngressEnvelope>>,
+}
+
 #[async_trait]
 impl IngressSink for CaptureSink {
     async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        let ack = IngressAck::accepted(&envelope);
+        self.envelopes.lock().await.push(envelope);
+        Ok(ack)
+    }
+}
+
+#[async_trait]
+impl IngressSink for FailFirstCaptureSink {
+    async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(IoError::Queue(
+                "forced first settlement failure".to_string(),
+            ));
+        }
         let ack = IngressAck::accepted(&envelope);
         self.envelopes.lock().await.push(envelope);
         Ok(ack)
@@ -650,6 +674,8 @@ struct RecordingRouteProviderClient {
     requests: StdMutex<Vec<ProviderRequest>>,
 }
 
+struct FailingRouteProviderClient;
+
 impl RecordingRouteProviderClient {
     fn requests(&self) -> Vec<ProviderRequest> {
         self.requests.lock().unwrap().clone()
@@ -703,6 +729,15 @@ impl ProviderClient for BlockingRouteProviderClient {
             },
             stop_reason: CanonicalStopReason::EndTurn,
         })
+    }
+}
+
+#[async_trait]
+impl ProviderClient for FailingRouteProviderClient {
+    async fn complete(&self, _request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        Err(crate::ProviderError::Decode(
+            "forced child provider failure".to_string(),
+        ))
     }
 }
 
@@ -1502,6 +1537,585 @@ async fn wait_for_assistant_text(bridge: &CooldisDaemonIoBridge, thread_id: &str
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn completed_thread_handle_fixture(
+    name: &str,
+) -> (
+    PathBuf,
+    CooldisAppServer,
+    CooldisDaemonIoBridge,
+    ThreadCoordinates,
+    crate::AgentProcessSpawnReceipt,
+) {
+    thread_handle_fixture(
+        name,
+        Arc::new(RecordingRouteProviderClient::default()),
+        true,
+    )
+    .await
+}
+
+async fn thread_handle_fixture(
+    name: &str,
+    client: Arc<dyn ProviderClient>,
+    await_joined: bool,
+) -> (
+    PathBuf,
+    CooldisAppServer,
+    CooldisDaemonIoBridge,
+    ThreadCoordinates,
+    crate::AgentProcessSpawnReceipt,
+) {
+    let fixture_root = test_root(name);
+    let server = test_server_with_provider_at_root(&fixture_root, client).await;
+    let bridge = CooldisDaemonIoBridge::from_app_server(&server);
+    let parent = server
+        .supervisor()
+        .start_thread(ThreadStartRequest {
+            tenant_id: server.tenant_id().to_string(),
+            user_id: server.user_id().to_string(),
+            session_id: format!("handle-settlement-{}", uuid::Uuid::now_v7()),
+            topology: ThreadTopology::root(),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+    let parent_coordinates = parent.context().coordinates.clone();
+    let control = server
+        .supervisor()
+        .kernel_control(server.tenant_id())
+        .await
+        .unwrap();
+    let dispatch = control
+        .dispatch_thread_spawn(
+            parent.context(),
+            DispatchId::new(format!("{name}-dispatch")),
+            "worker".to_string(),
+            "finish the child task".to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    if await_joined {
+        let store = SqliteSessionStore::open(server.session_store_path())
+            .await
+            .unwrap();
+        wait_for_thread_joined(&store, &parent_coordinates).await;
+    }
+    (fixture_root, server, bridge, parent_coordinates, dispatch)
+}
+
+async fn wait_for_thread_joined(store: &SqliteSessionStore, parent: &ThreadCoordinates) {
+    wait_for_thread_joined_count(store, parent, 1).await;
+}
+
+async fn wait_for_thread_joined_count(
+    store: &SqliteSessionStore,
+    parent: &ThreadCoordinates,
+    expected: usize,
+) {
+    let control_stream = control_stream_id(parent);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let events = store.read_events(&control_stream, None).await.unwrap();
+            if events
+                .iter()
+                .filter(|event| event.kind == EventKind::ThreadJoined)
+                .count()
+                >= expected
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("children did not durably reach thread.joined");
+}
+
+async fn handle_outcome_parent_inputs(
+    store: &SqliteSessionStore,
+    coordinates: &ThreadCoordinates,
+) -> Vec<String> {
+    store
+        .build_context(coordinates)
+        .await
+        .unwrap()
+        .messages
+        .into_iter()
+        .filter_map(|message| match message {
+            crate::CanonicalMessage::User { content, .. } => Some(
+                content
+                    .into_iter()
+                    .filter_map(|content| match content {
+                        CanonicalContent::Text { text, .. } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .filter(|text| text.contains(HANDLE_OUTCOME_CONTENT_KIND))
+        .collect()
+}
+
+#[tokio::test]
+async fn completed_child_is_pushed_once_to_parent_with_dispatch_result_and_usage() {
+    let (fixture_root, server, bridge, parent_coordinates, dispatch) =
+        completed_thread_handle_fixture("handle-outcome-complete").await;
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .unwrap();
+    let capture = Arc::new(CaptureSink {
+        envelopes: Arc::new(TokioMutex::new(Vec::new())),
+    });
+    let capture_adapter = ThreadHandleIngressAdapter::new(
+        store.clone(),
+        capture.clone() as Arc<dyn IngressSink>,
+        &parent_coordinates.tenant_id,
+        &parent_coordinates.user_id,
+    );
+
+    assert_eq!(capture_adapter.enqueue_ready_once().await.unwrap(), 1);
+    let captured = capture.envelopes.lock().await.clone();
+    assert_eq!(captured.len(), 1);
+    let envelope = &captured[0];
+    assert_eq!(
+        envelope.dedupe_key,
+        Some(IoDedupeKey::new(
+            HANDLE_OUTCOME_CONTENT_KIND,
+            dispatch.dispatch_id.to_string(),
+        ))
+    );
+    let IngressContent::Event { kind, payload } = &envelope.content else {
+        panic!("handle outcome must use event ingress content");
+    };
+    assert_eq!(kind, HANDLE_OUTCOME_CONTENT_KIND);
+    let terminal: HandleTerminalEnvelope = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(terminal.dispatch_id, dispatch.dispatch_id);
+    assert_eq!(terminal.handle, dispatch.handle);
+    assert_eq!(terminal.outcome, HandleTerminalOutcome::Completed);
+    assert_eq!(terminal.result, Some(json!("daemon route ok")));
+    assert_eq!(
+        terminal.usage,
+        Some(RuntimeUsage {
+            input_tokens: 1,
+            output_tokens: 3,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        })
+    );
+    assert!(terminal.outcome_reason.is_none());
+    assert!(terminal.artifact_refs.is_empty());
+    assert!(!terminal.retryable);
+    assert_eq!(capture_adapter.enqueue_ready_once().await.unwrap(), 0);
+    assert_eq!(capture.envelopes.lock().await.len(), 1);
+
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(
+            fixture_root.join("handle-ingress.sqlite"),
+            "handle-outcome-complete",
+        ))
+        .await
+        .unwrap(),
+    );
+    let adapter = ThreadHandleIngressAdapter::new(
+        store.clone(),
+        queue.clone() as Arc<dyn IngressSink>,
+        &parent_coordinates.tenant_id,
+        &parent_coordinates.user_id,
+    );
+    let control = server
+        .supervisor()
+        .kernel_control(server.tenant_id())
+        .await
+        .unwrap();
+    let caller = server
+        .supervisor()
+        .get_thread_at(&parent_coordinates)
+        .await
+        .unwrap();
+    let wait = control.wait_thread(caller.context(), dispatch.thread_id, Some(5_000));
+    let delivery = async {
+        let (first, duplicate) =
+            tokio::join!(adapter.enqueue_ready_once(), adapter.enqueue_ready_once(),);
+        assert_eq!(first.unwrap() + duplicate.unwrap(), 1);
+        let worker = CooldisDaemonQueueWorker::new(
+            queue.clone(),
+            bridge,
+            "handle-outcome-complete-worker",
+            30,
+        );
+        assert_eq!(worker.drain_once().await.unwrap(), 1);
+        assert_eq!(adapter.enqueue_ready_once().await.unwrap(), 0);
+    };
+    let (wait, ()) = tokio::join!(wait, delivery);
+    let wait = wait.unwrap();
+    assert!(!wait.timed_out);
+    assert_eq!(wait.latest_output.as_deref(), Some("daemon route ok"));
+    assert_eq!(
+        handle_outcome_parent_inputs(&store, &parent_coordinates)
+            .await
+            .len(),
+        1
+    );
+    let control_events = store
+        .read_events(&control_stream_id(&parent_coordinates), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressClaimed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressSettled)
+            .count(),
+        1
+    );
+
+    server.supervisor().shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn poisoned_control_stream_does_not_block_healthy_handle_settlement() {
+    let (fixture_root, server, bridge, healthy_parent, healthy_dispatch) =
+        completed_thread_handle_fixture("handle-outcome-poison-isolation").await;
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .unwrap();
+    let poisoned = server
+        .supervisor()
+        .start_thread(ThreadStartRequest {
+            tenant_id: server.tenant_id().to_string(),
+            user_id: server.user_id().to_string(),
+            session_id: format!("poisoned-handle-stream-{}", uuid::Uuid::now_v7()),
+            topology: ThreadTopology::root(),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+    let poisoned_coordinates = poisoned.context().coordinates.clone();
+    store
+        .append_events(
+            &control_stream_id(&poisoned_coordinates),
+            vec![NewEventRecord::discharged(
+                poisoned_coordinates.clone(),
+                EventKind::ThreadSpawned,
+                json!({
+                    "schema": EventKind::ThreadSpawned.payload_schema_id(),
+                    "correlation_id": "poisoned-spawn-payload",
+                    "parent_thread_id": poisoned_coordinates.thread_id.to_string()
+                }),
+                EventProvenance {
+                    source_event_ids: vec![crate::EventRecordId::new()],
+                    discharged_by: Some("test:poisoned-handle-stream".to_string()),
+                    function: Some("poisoned_handle_stream/v1".to_string()),
+                    ..EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+
+    let capture = Arc::new(CaptureSink {
+        envelopes: Arc::new(TokioMutex::new(Vec::new())),
+    });
+    let adapter = ThreadHandleIngressAdapter::new(
+        store,
+        capture.clone() as Arc<dyn IngressSink>,
+        &healthy_parent.tenant_id,
+        &healthy_parent.user_id,
+    );
+
+    assert_eq!(adapter.enqueue_ready_once().await.unwrap(), 1);
+    let captured = capture.envelopes.lock().await;
+    assert_eq!(captured.len(), 1);
+    let IngressContent::Event { payload, .. } = &captured[0].content else {
+        panic!("healthy settlement must use event ingress content");
+    };
+    let terminal: HandleTerminalEnvelope = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(terminal.dispatch_id, healthy_dispatch.dispatch_id);
+
+    drop(captured);
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(
+            fixture_root.join("poison-isolation-ingress.sqlite"),
+            "handle-outcome-poison-isolation",
+        ))
+        .await
+        .unwrap(),
+    );
+    let queue_adapter = ThreadHandleIngressAdapter::new(
+        SqliteSessionStore::open(server.session_store_path())
+            .await
+            .unwrap(),
+        queue.clone() as Arc<dyn IngressSink>,
+        &healthy_parent.tenant_id,
+        &healthy_parent.user_id,
+    );
+    assert_eq!(queue_adapter.enqueue_ready_once().await.unwrap(), 1);
+    let worker =
+        CooldisDaemonQueueWorker::new(queue, bridge, "handle-outcome-poison-isolation-worker", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    let delivery_store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .unwrap();
+    assert_eq!(
+        handle_outcome_parent_inputs(&delivery_store, &healthy_parent)
+            .await
+            .len(),
+        1
+    );
+    server.supervisor().shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_settlement_submit_does_not_block_or_repeat_healthy_peer() {
+    let (_fixture_root, server, _bridge, parent_coordinates, first_dispatch) =
+        completed_thread_handle_fixture("handle-outcome-submit-isolation").await;
+    let parent = server
+        .supervisor()
+        .get_thread_at(&parent_coordinates)
+        .await
+        .unwrap();
+    let control = server
+        .supervisor()
+        .kernel_control(server.tenant_id())
+        .await
+        .unwrap();
+    let second_dispatch = control
+        .dispatch_thread_spawn(
+            parent.context(),
+            DispatchId::new("handle-outcome-submit-isolation-second"),
+            "worker-two".to_string(),
+            "finish the second child task".to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .unwrap();
+    wait_for_thread_joined_count(&store, &parent_coordinates, 2).await;
+    let sink = Arc::new(FailFirstCaptureSink {
+        attempts: AtomicUsize::new(0),
+        envelopes: TokioMutex::new(Vec::new()),
+    });
+    let adapter = ThreadHandleIngressAdapter::new(
+        store,
+        sink.clone() as Arc<dyn IngressSink>,
+        &parent_coordinates.tenant_id,
+        &parent_coordinates.user_id,
+    );
+
+    assert_eq!(adapter.enqueue_ready_once().await.unwrap(), 1);
+    assert_eq!(sink.envelopes.lock().await.len(), 1);
+    assert_eq!(adapter.enqueue_ready_once().await.unwrap(), 1);
+    let envelopes = sink.envelopes.lock().await;
+    assert_eq!(envelopes.len(), 2);
+    let dispatches = envelopes
+        .iter()
+        .map(|envelope| {
+            let IngressContent::Event { payload, .. } = &envelope.content else {
+                panic!("handle outcome must use event ingress content");
+            };
+            serde_json::from_value::<HandleTerminalEnvelope>(payload.clone())
+                .unwrap()
+                .dispatch_id
+                .to_string()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        dispatches,
+        HashSet::from([
+            first_dispatch.dispatch_id.to_string(),
+            second_dispatch.dispatch_id.to_string(),
+        ])
+    );
+
+    drop(envelopes);
+    server.supervisor().shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
+    let (_fixture_root, failed_server, _bridge, failed_parent, failed_dispatch) =
+        thread_handle_fixture(
+            "handle-outcome-failed",
+            Arc::new(FailingRouteProviderClient),
+            true,
+        )
+        .await;
+    let failed_store = SqliteSessionStore::open(failed_server.session_store_path())
+        .await
+        .unwrap();
+    let failed_capture = Arc::new(CaptureSink {
+        envelopes: Arc::new(TokioMutex::new(Vec::new())),
+    });
+    let failed_adapter = ThreadHandleIngressAdapter::new(
+        failed_store,
+        failed_capture.clone() as Arc<dyn IngressSink>,
+        &failed_parent.tenant_id,
+        &failed_parent.user_id,
+    );
+    assert_eq!(failed_adapter.enqueue_ready_once().await.unwrap(), 1);
+    let failed_envelopes = failed_capture.envelopes.lock().await;
+    let IngressContent::Event {
+        payload: failed_payload,
+        ..
+    } = &failed_envelopes[0].content
+    else {
+        panic!("failed handle outcome must be event content");
+    };
+    let failed: HandleTerminalEnvelope = serde_json::from_value(failed_payload.clone()).unwrap();
+    assert_eq!(failed.dispatch_id, failed_dispatch.dispatch_id);
+    assert_eq!(failed.outcome, HandleTerminalOutcome::Failed);
+    assert!(
+        failed
+            .outcome_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("forced child provider failure"))
+    );
+    assert!(failed.retryable);
+    drop(failed_envelopes);
+    failed_server.supervisor().shutdown_all().await.unwrap();
+
+    let blocking = Arc::new(BlockingRouteProviderClient::default());
+    let (_fixture_root, cancelled_server, _bridge, cancelled_parent, cancelled_dispatch) =
+        thread_handle_fixture(
+            "handle-outcome-cancelled",
+            blocking.clone() as Arc<dyn ProviderClient>,
+            false,
+        )
+        .await;
+    blocking.wait_for_requests(1).await;
+    let supervisor = cancelled_server.supervisor();
+    let cancelled_child = cancelled_server
+        .supervisor()
+        .get_thread(cancelled_server.tenant_id(), cancelled_dispatch.thread_id)
+        .await
+        .unwrap();
+    let mut cancelled_events = cancelled_child.subscribe_events();
+    let cancelled_store = SqliteSessionStore::open(cancelled_server.session_store_path())
+        .await
+        .unwrap();
+    let cancel = supervisor.cancel(
+        cancelled_server.tenant_id(),
+        cancelled_dispatch.thread_id,
+        "parent cancelled child".to_string(),
+    );
+    let observe_cancelled = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                cancelled_events.recv().await.unwrap(),
+                ThreadEvent::Cancelled { .. }
+            ) {
+                break;
+            }
+        }
+        assert!(
+            cancelled_store
+                .read_events(&control_stream_id(&cancelled_parent), None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == EventKind::ThreadJoined),
+            "a visible child cancellation must already have a durable terminal join"
+        );
+    });
+    let (cancel, observed) = tokio::join!(cancel, observe_cancelled);
+    cancel.unwrap();
+    observed.expect("child did not publish its cancellation");
+    wait_for_thread_joined(&cancelled_store, &cancelled_parent).await;
+    let cancelled_capture = Arc::new(CaptureSink {
+        envelopes: Arc::new(TokioMutex::new(Vec::new())),
+    });
+    let cancelled_adapter = ThreadHandleIngressAdapter::new(
+        cancelled_store,
+        cancelled_capture.clone() as Arc<dyn IngressSink>,
+        &cancelled_parent.tenant_id,
+        &cancelled_parent.user_id,
+    );
+    assert_eq!(cancelled_adapter.enqueue_ready_once().await.unwrap(), 1);
+    let cancelled_envelopes = cancelled_capture.envelopes.lock().await;
+    let IngressContent::Event {
+        payload: cancelled_payload,
+        ..
+    } = &cancelled_envelopes[0].content
+    else {
+        panic!("cancelled handle outcome must be event content");
+    };
+    let cancelled: HandleTerminalEnvelope =
+        serde_json::from_value(cancelled_payload.clone()).unwrap();
+    assert_eq!(cancelled.dispatch_id, cancelled_dispatch.dispatch_id);
+    assert_eq!(cancelled.outcome, HandleTerminalOutcome::Cancelled);
+    assert_eq!(
+        cancelled.outcome_reason.as_deref(),
+        Some("parent cancelled child")
+    );
+    assert!(!cancelled.retryable);
+    drop(cancelled_envelopes);
+    blocking.release();
+    cancelled_server.supervisor().shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_before_emission_fault_recovers_to_one_parent_turn() {
+    let (fixture_root, server, bridge, parent_coordinates, _dispatch) =
+        completed_thread_handle_fixture("handle-outcome-crash-window").await;
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .unwrap();
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(
+            fixture_root.join("handle-crash-window.sqlite"),
+            "handle-outcome-crash-window",
+        ))
+        .await
+        .unwrap(),
+    );
+    let faulting = Arc::new(FaultingIngressQueue::new(queue.clone()).fail_nth(
+        "submit",
+        1,
+        "process cut after terminal observation before ingress emission",
+    ));
+    let cut_adapter = ThreadHandleIngressAdapter::new(
+        store.clone(),
+        faulting as Arc<dyn IngressSink>,
+        &parent_coordinates.tenant_id,
+        &parent_coordinates.user_id,
+    );
+
+    assert_eq!(cut_adapter.enqueue_ready_once().await.unwrap(), 0);
+    drop(cut_adapter);
+
+    let recovered = ThreadHandleIngressAdapter::new(
+        store.clone(),
+        queue.clone() as Arc<dyn IngressSink>,
+        &parent_coordinates.tenant_id,
+        &parent_coordinates.user_id,
+    );
+    assert_eq!(recovered.enqueue_ready_once().await.unwrap(), 1);
+    assert_eq!(recovered.enqueue_ready_once().await.unwrap(), 0);
+    let worker = CooldisDaemonQueueWorker::new(queue, bridge, "handle-outcome-recovery-worker", 30);
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert_eq!(
+        handle_outcome_parent_inputs(&store, &parent_coordinates)
+            .await
+            .len(),
+        1
+    );
+
+    server.supervisor().shutdown_all().await.unwrap();
 }
 
 async fn egress_receipts(

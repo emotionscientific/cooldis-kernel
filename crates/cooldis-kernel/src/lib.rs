@@ -212,6 +212,7 @@ pub mod daemon {
     pub mod clock_route;
     pub mod daemon_config;
     pub mod daemon_io;
+    pub(crate) mod handle_ingress;
 }
 
 pub mod kernel {

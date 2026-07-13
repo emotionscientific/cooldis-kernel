@@ -1,3 +1,4 @@
+use crate::daemon::handle_ingress::ThreadHandleIngressAdapter;
 use crate::{
     APP_SERVER_ANTHROPIC_BEDROCK_MODEL, APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
     APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
@@ -1809,6 +1810,7 @@ async fn start_daemon_io(
             }
         }
     }
+    start_thread_handle_ingress(&io.ingress, server, &bridge, &mut tasks).await?;
 
     if !io.routes.is_empty() {
         eprintln!(
@@ -1818,6 +1820,43 @@ async fn start_daemon_io(
         );
     }
     Ok(tasks)
+}
+
+/// Starts the push-first settlement lane independently of external route
+/// policy. Handle outcomes always require the durable queue even when an
+/// operator has explicitly made a protocol route best-effort direct.
+async fn start_thread_handle_ingress(
+    ingress: &CooldisIngressConfig,
+    server: &CooldisAppServer,
+    bridge: &CooldisDaemonIoBridge,
+    tasks: &mut Vec<JoinHandle<()>>,
+) -> CooldisResult<()> {
+    let queue_name = ingress
+        .persistence
+        .queue_name
+        .clone()
+        .unwrap_or_else(|| "cooldis-ingress".to_string());
+    let queue_config = PgqrsQueueConfig::new(ingress.effective_queue_dsn(), queue_name)
+        .with_default_visibility_timeout_secs(ingress.persistence.visibility_timeout_secs);
+    let queue = Arc::new(
+        PgqrsIngressQueue::connect(queue_config)
+            .await
+            .map_err(io_error)?,
+    );
+    let worker = CooldisDaemonQueueWorker::new(
+        queue.clone(),
+        bridge.clone(),
+        "thread-handle-outcome-worker",
+        ingress.persistence.visibility_timeout_secs,
+    );
+    tasks.push(tokio::spawn(worker.run()));
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?;
+    tasks.push(tokio::spawn(
+        ThreadHandleIngressAdapter::new(store, queue, server.tenant_id(), server.user_id()).run(),
+    ));
+    Ok(())
 }
 
 async fn route_sink_for_ingress(

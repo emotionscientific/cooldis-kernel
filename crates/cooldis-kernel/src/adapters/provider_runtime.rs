@@ -31,7 +31,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -1626,6 +1626,10 @@ async fn run_provider_turn(
         let mut cancelled_reason = None;
         let mut shutdown_after_turn = false;
         let mut failed = false;
+        let mut failure_code = None;
+        let mut failure_reason = None;
+        let mut emit_failure_signal = false;
+        let mut terminal_join_recorded = false;
         let mut continue_after_tools = false;
         let mut suspended_after_tools = false;
         let mut last_assistant_text = None;
@@ -1641,9 +1645,19 @@ async fn run_provider_turn(
         let result = loop {
             tokio::select! {
                 result = &mut turn => break result,
-                _ = runtime_cancellation.cancelled() => {
+                _ = runtime_cancellation.cancelled(), if cancelled_reason.is_none() => {
+                    let reason = "runtime cancellation requested".to_string();
                     turn_cancellation.cancel();
-                    cancelled_reason = Some("runtime cancellation requested".to_string());
+                    append_terminal_join_until_recorded(
+                        services,
+                        &turn_context.thread,
+                        ThreadTerminalState::Cancelled,
+                        Some(reason.clone()),
+                        Some(turn_source_event_id),
+                    )
+                    .await;
+                    terminal_join_recorded = true;
+                    cancelled_reason = Some(reason);
                 }
                 command = commands.recv() => {
                     match command {
@@ -1653,15 +1667,19 @@ async fn run_provider_turn(
                                 thread_id,
                                 signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
                             });
-                            emit_runtime_event(
-                                events,
-                                coordinates,
-                                RuntimeEventKind::Cancelled {
-                                    reason: reason.clone(),
-                                },
-                            );
                             turn_cancellation.cancel();
-                            cancelled_reason = Some(reason);
+                            if cancelled_reason.is_none() {
+                                append_terminal_join_until_recorded(
+                                    services,
+                                    &turn_context.thread,
+                                    ThreadTerminalState::Cancelled,
+                                    Some(reason.clone()),
+                                    Some(turn_source_event_id),
+                                )
+                                .await;
+                                terminal_join_recorded = true;
+                                cancelled_reason = Some(reason);
+                            }
                         }
                         Some(ThreadCommand::CancelTurn {
                             watchdog_token_id,
@@ -1675,15 +1693,19 @@ async fn run_provider_turn(
                                 thread_id,
                                 signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
                             });
-                            emit_runtime_event(
-                                events,
-                                coordinates,
-                                RuntimeEventKind::Cancelled {
-                                    reason: reason.clone(),
-                                },
-                            );
                             turn_cancellation.cancel();
-                            cancelled_reason = Some(reason);
+                            if cancelled_reason.is_none() {
+                                append_terminal_join_until_recorded(
+                                    services,
+                                    &turn_context.thread,
+                                    ThreadTerminalState::Cancelled,
+                                    Some(reason.clone()),
+                                    Some(turn_source_event_id),
+                                )
+                                .await;
+                                terminal_join_recorded = true;
+                                cancelled_reason = Some(reason);
+                            }
                         }
                         Some(ThreadCommand::Shutdown) | None => {
                             let _ = events.send(ThreadEvent::Signal {
@@ -1725,15 +1747,19 @@ async fn run_provider_turn(
                                             });
                                         }
                                         Err(err) => {
-                                            let _ = status.send(ThreadStatus::Failed);
-                                            let _ = events.send(ThreadEvent::Failed {
-                                                thread_id,
-                                                message: err.to_string(),
-                                            });
+                                            failed = true;
+                                            failure_code = Some("history");
+                                            failure_reason = Some(err.to_string());
                                             turn_cancellation.cancel();
-                                            cancelled_reason = Some(
-                                                "steer input persistence failed".to_string(),
-                                            );
+                                            append_terminal_join_until_recorded(
+                                                services,
+                                                &turn_context.thread,
+                                                ThreadTerminalState::Failed,
+                                                failure_reason.clone(),
+                                                Some(turn_source_event_id),
+                                            )
+                                            .await;
+                                            terminal_join_recorded = true;
                                             continue;
                                         }
                                     }
@@ -1759,15 +1785,19 @@ async fn run_provider_turn(
                                         thread_id,
                                         signal: ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
                                     });
-                                    emit_runtime_event(
-                                        events,
-                                        coordinates,
-                                        RuntimeEventKind::Cancelled {
-                                            reason: reason.clone(),
-                                        },
-                                    );
                                     turn_cancellation.cancel();
-                                    cancelled_reason = Some(reason);
+                                    if cancelled_reason.is_none() {
+                                        append_terminal_join_until_recorded(
+                                            services,
+                                            &turn_context.thread,
+                                            ThreadTerminalState::Cancelled,
+                                            Some(reason.clone()),
+                                            Some(turn_source_event_id),
+                                        )
+                                        .await;
+                                        terminal_join_recorded = true;
+                                        cancelled_reason = Some(reason);
+                                    }
                                     pending_commands.push_front(ThreadCommand::Submit {
                                         turn_id,
                                         input,
@@ -1788,7 +1818,23 @@ async fn run_provider_turn(
         };
 
         if let Some(reason) = cancelled_reason {
-            let _ = status.send(ThreadStatus::Idle);
+            if !terminal_join_recorded {
+                append_terminal_join_until_recorded(
+                    services,
+                    &turn_context.thread,
+                    ThreadTerminalState::Cancelled,
+                    Some(reason.clone()),
+                    Some(turn_source_event_id),
+                )
+                .await;
+            }
+            emit_runtime_event(
+                events,
+                coordinates,
+                RuntimeEventKind::Cancelled {
+                    reason: reason.clone(),
+                },
+            );
             emit_runtime_event(
                 events,
                 coordinates,
@@ -1797,7 +1843,9 @@ async fn run_provider_turn(
                 },
             );
             let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
-        } else {
+            let _ = status.send(ThreadStatus::Idle);
+            return false;
+        } else if !failed {
             match result {
                 Ok(message) => {
                     let text = text_from_message(&message);
@@ -1844,16 +1892,11 @@ async fn run_provider_turn(
                             if runtime.tool_router.is_some() && !tool_calls.is_empty() {
                                 if tool_rounds >= MAX_TOOL_ROUTER_ROUNDS {
                                     failed = true;
-                                    fail_provider_turn(
-                                        coordinates,
-                                        thread_id,
-                                        events,
-                                        status,
-                                        "tool_router",
-                                        format!(
-                                            "tool router exceeded {MAX_TOOL_ROUTER_ROUNDS} rounds"
-                                        ),
+                                    failure_code = Some("tool_router");
+                                    let reason = format!(
+                                        "tool router exceeded {MAX_TOOL_ROUTER_ROUNDS} rounds"
                                     );
+                                    failure_reason = Some(reason);
                                 } else {
                                     match append_tool_results(
                                         runtime,
@@ -1878,14 +1921,8 @@ async fn run_provider_turn(
                                         },
                                         Err(err) => {
                                             failed = true;
-                                            fail_provider_turn(
-                                                coordinates,
-                                                thread_id,
-                                                events,
-                                                status,
-                                                "tool_router",
-                                                err.to_string(),
-                                            );
+                                            failure_code = Some("tool_router");
+                                            failure_reason = Some(err.to_string());
                                         }
                                     }
                                 }
@@ -1893,31 +1930,25 @@ async fn run_provider_turn(
                         }
                         Err(err) => {
                             failed = true;
-                            fail_provider_turn(
-                                coordinates,
-                                thread_id,
-                                events,
-                                status,
-                                "history",
-                                err.to_string(),
-                            );
+                            failure_code = Some("history");
+                            failure_reason = Some(err.to_string());
                         }
                     }
                 }
                 Err(err) => {
                     failed = true;
-                    let _ = events.send(ThreadEvent::Signal {
-                        thread_id,
-                        signal: ThreadSignal::failed(coordinates, err.to_string()),
-                    });
-                    fail_provider_turn(
-                        coordinates,
-                        thread_id,
-                        events,
-                        status,
-                        "runtime_execution",
-                        err.to_string(),
-                    );
+                    failure_code = Some("runtime_execution");
+                    failure_reason = Some(err.to_string());
+                    emit_failure_signal = true;
+                    append_terminal_join_until_recorded(
+                        services,
+                        &turn_context.thread,
+                        ThreadTerminalState::Failed,
+                        failure_reason.clone(),
+                        Some(turn_source_event_id),
+                    )
+                    .await;
+                    terminal_join_recorded = true;
                 }
             }
         }
@@ -1935,6 +1966,32 @@ async fn run_provider_turn(
             return true;
         }
         if failed {
+            let reason = failure_reason
+                .unwrap_or_else(|| "provider turn failed without reason detail".to_string());
+            if !terminal_join_recorded {
+                append_terminal_join_until_recorded(
+                    services,
+                    &turn_context.thread,
+                    ThreadTerminalState::Failed,
+                    Some(reason.clone()),
+                    Some(turn_source_event_id),
+                )
+                .await;
+            }
+            if emit_failure_signal {
+                let _ = events.send(ThreadEvent::Signal {
+                    thread_id,
+                    signal: ThreadSignal::failed(coordinates, reason.clone()),
+                });
+            }
+            fail_provider_turn(
+                coordinates,
+                thread_id,
+                events,
+                status,
+                failure_code.unwrap_or("runtime_execution"),
+                reason,
+            );
             return true;
         }
         if suspended_after_tools {
@@ -1954,27 +2011,38 @@ async fn run_provider_turn(
         )
         .await
         {
+            let reason = err.to_string();
+            append_terminal_join_until_recorded(
+                services,
+                &turn_context.thread,
+                ThreadTerminalState::Failed,
+                Some(reason.clone()),
+                Some(turn_source_event_id),
+            )
+            .await;
             fail_provider_turn(
                 coordinates,
                 thread_id,
                 events,
                 status,
                 "hook_pipeline",
-                err.to_string(),
+                reason,
             );
             return true;
         }
         if let Err(err) =
             append_turn_completed_event(services, &turn_context.thread, &turn_id).await
         {
-            fail_provider_turn(
-                coordinates,
-                thread_id,
-                events,
-                status,
-                "history",
-                err.to_string(),
-            );
+            let reason = err.to_string();
+            append_terminal_join_until_recorded(
+                services,
+                &turn_context.thread,
+                ThreadTerminalState::Failed,
+                Some(reason.clone()),
+                Some(turn_source_event_id),
+            )
+            .await;
+            fail_provider_turn(coordinates, thread_id, events, status, "history", reason);
             return true;
         }
         emit_runtime_event(
@@ -2007,6 +2075,35 @@ fn fail_provider_turn(
         },
     );
     let _ = events.send(ThreadEvent::Failed { thread_id, message });
+}
+
+async fn append_terminal_join_until_recorded(
+    services: &RuntimeServices,
+    context: &ThreadContext,
+    terminal_state: ThreadTerminalState,
+    reason: Option<String>,
+    source_event_id: Option<EventRecordId>,
+) {
+    loop {
+        match services
+            .append_thread_joined_event_if_spawned(
+                context,
+                terminal_state,
+                reason.clone(),
+                source_event_id,
+            )
+            .await
+        {
+            Ok(_) => return,
+            Err(err) => {
+                eprintln!(
+                    "cooldis provider runtime could not persist {terminal_state:?} thread.joined for {}: {err}; retrying",
+                    context.coordinates.thread_id,
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
