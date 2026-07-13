@@ -31,7 +31,7 @@ pub(super) const DEFAULT_AGENT_NAME: &str = "default";
 /// Namespace marking kernel-synthesized records (D1).
 pub(super) const DEFAULT_AGENT_NAMESPACE: &str = "cooldis";
 /// The ref a ref-less `thread/start` binds (alias resolution via `@latest`).
-pub(super) const DEFAULT_AGENT_REF: &str = "agent://cooldis/default@latest";
+pub(crate) const DEFAULT_AGENT_REF: &str = "agent://cooldis/default@latest";
 const DEFAULT_MANIFEST_LOCK_ATTEMPTS: usize = 250;
 const DEFAULT_MANIFEST_LOCK_SLEEP: Duration = Duration::from_millis(20);
 

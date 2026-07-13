@@ -23,6 +23,9 @@ use crate::kernel::runtime_host::{
     THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
     THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA,
 };
+use crate::kernel::thread_spawn_projector::{
+    ThreadTaskNameResolutionReceipt, fold_thread_task_name_resolution,
+};
 use cooldis_runtime_contracts::{
     DispatchId, HandleId, RuntimeEventId, ThreadCheckpointId, ThreadContext, ThreadCoordinates,
     ThreadId, ThreadInteractionKind, ThreadLifecycleStatus, ThreadSignalId, ThreadStatus,
@@ -296,6 +299,13 @@ impl RuntimeKernelControl {
         agent_resolver: Option<Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
     ) -> CooldisResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
+        let child_agent_ref = agent_ref
+            .or_else(|| {
+                agent_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.default_agent_ref(caller))
+            })
+            .unwrap_or_else(|| "unbound".to_string());
         let mut projector = crate::ThreadSpawnProjector::new(host);
         if let Some(agent_resolver) = agent_resolver {
             projector = projector.with_agent_resolver(agent_resolver);
@@ -309,7 +319,7 @@ impl RuntimeKernelControl {
                     parent_turn_id: None,
                     task_name: Some(task_name.clone()),
                     submitted_turn_id: Some(submitted_turn_id.clone()),
-                    child_agent_ref: agent_ref.unwrap_or_else(|| "unbound".to_string()),
+                    child_agent_ref,
                     initial_submission: message,
                     correlation_id: dispatch_id.to_string(),
                     block_parent: false,
@@ -332,6 +342,33 @@ impl RuntimeKernelControl {
             handle: dispatched.handle,
             dispatch_id: dispatched.dispatch_id,
         })
+    }
+
+    /// Resolve a child handle from the caller's model-facing `task_name` by
+    /// folding the caller's durable control-stream spawn records. The returned
+    /// runtime receipt carries the raw handle for kernel dispatch; callers must
+    /// keep that identity out of model-visible projections.
+    pub async fn resolve_child_task_name(
+        &self,
+        caller: &ThreadContext,
+        task_name: &str,
+    ) -> CooldisResult<ThreadTaskNameResolutionReceipt> {
+        if task_name.trim().is_empty() {
+            return Err(CooldisError::RuntimeExecution(
+                "thread task_name must not be empty".to_string(),
+            ));
+        }
+        let parent = self
+            .scoped_thread(caller, caller.coordinates.thread_id)
+            .await?;
+        let events = parent.read_control_events().await?;
+        fold_thread_task_name_resolution(&events, &caller.coordinates, task_name)?.ok_or_else(
+            || {
+                CooldisError::RuntimeExecution(format!(
+                    "thread task_name {task_name:?} was not found under this parent"
+                ))
+            },
+        )
     }
 
     pub async fn spawn_child_with_witness(

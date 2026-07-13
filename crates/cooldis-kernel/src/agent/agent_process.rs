@@ -68,6 +68,7 @@ impl KernelThreadOperationProvider {
         let value = match operation_name {
             THREAD_SPAWN_OPERATION => {
                 let args: ThreadSpawnArgs = decode_args(operation_name, arguments)?;
+                require_non_empty(&args.task_name, "task_name")?;
                 let dispatch_id = injected_dispatch_id
                     .or_else(|| args.dispatch_id.map(DispatchId::new))
                     .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
@@ -76,84 +77,146 @@ impl KernelThreadOperationProvider {
                     .dispatch_thread_spawn(
                         &self.caller,
                         dispatch_id,
-                        args.task_name,
+                        args.task_name.clone(),
                         args.message,
                         args.agent_ref,
                         self.agent_resolver.clone(),
                     )
-                    .await?;
-                let mut value = serde_json::to_value(receipt).map_err(json_error)?;
-                value["operation"] = json!("cooldis.thread_spawn");
-                value
+                    .await
+                    .map_err(|err| model_thread_spawn_error(&args.task_name, err))?;
+                json!({
+                    "operation": "cooldis.thread_spawn",
+                    "task_name": args.task_name,
+                    "status": receipt.status,
+                })
             }
             THREAD_SUBMIT_OPERATION => {
                 let args: ThreadSubmitArgs = decode_args(operation_name, arguments)?;
-                let target_thread_id = parse_thread_id(&args.target_thread_id, "target_thread_id")?;
+                let resolution = self
+                    .control
+                    .resolve_child_task_name(&self.caller, &args.task_name)
+                    .await
+                    .map_err(|err| {
+                        model_task_resolution_error(operation_name, &args.task_name, err)
+                    })?;
+                let target_thread_id =
+                    resolved_thread_id(operation_name, &args.task_name, &resolution.handle.id)?;
                 let dispatch_id = injected_dispatch_id
                     .or_else(|| args.dispatch_id.map(DispatchId::new))
                     .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
-                let mut value = serde_json::to_value(
-                    self.control
-                        .submit_to_thread_with_dispatch(
-                            &self.caller,
-                            target_thread_id,
-                            dispatch_id,
-                            TurnInput::text(args.message),
+                let receipt = self
+                    .control
+                    .submit_to_thread_with_dispatch(
+                        &self.caller,
+                        target_thread_id,
+                        dispatch_id,
+                        TurnInput::text(args.message),
+                    )
+                    .await
+                    .map_err(|err| {
+                        model_task_dispatch_error(
+                            operation_name,
+                            &args.task_name,
+                            "submit dispatch",
+                            err,
                         )
-                        .await?,
-                )
-                .map_err(json_error)?;
-                value["operation"] = json!("cooldis.thread_submit");
-                value
+                    })?;
+                json!({
+                    "operation": "cooldis.thread_submit",
+                    "task_name": args.task_name,
+                    "status": receipt.status,
+                })
             }
             THREAD_WAIT_OPERATION => {
                 let args: ThreadWaitArgs = decode_args(operation_name, arguments)?;
-                let target_thread_id = parse_thread_id(&args.target_thread_id, "target_thread_id")?;
-                let mut value = serde_json::to_value(
-                    self.control
-                        .wait_thread(&self.caller, target_thread_id, args.timeout_ms)
-                        .await?,
-                )
-                .map_err(json_error)?;
-                value["operation"] = json!("cooldis.thread_wait");
-                value
+                let resolution = self
+                    .control
+                    .resolve_child_task_name(&self.caller, &args.task_name)
+                    .await
+                    .map_err(|err| {
+                        model_task_resolution_error(operation_name, &args.task_name, err)
+                    })?;
+                let target_thread_id =
+                    resolved_thread_id(operation_name, &args.task_name, &resolution.handle.id)?;
+                let receipt = self
+                    .control
+                    .wait_thread(&self.caller, target_thread_id, args.timeout_ms)
+                    .await
+                    .map_err(|err| {
+                        model_task_dispatch_error(
+                            operation_name,
+                            &args.task_name,
+                            "wait dispatch",
+                            err,
+                        )
+                    })?;
+                json!({
+                    "operation": "cooldis.thread_wait",
+                    "task_name": args.task_name,
+                    "status": receipt.status,
+                })
             }
             THREAD_STATUS_OPERATION => {
                 let args: ThreadStatusArgs = decode_args(operation_name, arguments)?;
-                let target_thread_id = optional_target_thread_id(
-                    &self.caller,
-                    args.target_thread_id.as_deref(),
-                    "target_thread_id",
-                )?;
-                let mut value = serde_json::to_value(
-                    self.control
-                        .thread_status(&self.caller, target_thread_id)
-                        .await?,
-                )
-                .map_err(json_error)?;
-                let children = self
+                let resolution = self
                     .control
-                    .children_of(&self.caller, target_thread_id)
-                    .await?;
-                value["operation"] = json!("cooldis.thread_status");
-                value["children"] = serde_json::to_value(children.children).map_err(json_error)?;
-                value
+                    .resolve_child_task_name(&self.caller, &args.task_name)
+                    .await
+                    .map_err(|err| {
+                        model_task_resolution_error(operation_name, &args.task_name, err)
+                    })?;
+                let target_thread_id =
+                    resolved_thread_id(operation_name, &args.task_name, &resolution.handle.id)?;
+                let receipt = self
+                    .control
+                    .thread_status(&self.caller, target_thread_id)
+                    .await
+                    .map_err(|err| {
+                        model_task_dispatch_error(
+                            operation_name,
+                            &args.task_name,
+                            "status dispatch",
+                            err,
+                        )
+                    })?;
+                json!({
+                    "operation": "cooldis.thread_status",
+                    "task_name": args.task_name,
+                    "status": receipt.status,
+                })
             }
             THREAD_CANCEL_OPERATION => {
                 let args: ThreadCancelArgs = decode_args(operation_name, arguments)?;
-                let target_thread_id = parse_thread_id(&args.target_thread_id, "target_thread_id")?;
-                let mut value = serde_json::to_value(
-                    self.control
-                        .cancel_thread(
-                            &self.caller,
-                            target_thread_id,
-                            "thread_cancel operation".to_string(),
+                let resolution = self
+                    .control
+                    .resolve_child_task_name(&self.caller, &args.task_name)
+                    .await
+                    .map_err(|err| {
+                        model_task_resolution_error(operation_name, &args.task_name, err)
+                    })?;
+                let target_thread_id =
+                    resolved_thread_id(operation_name, &args.task_name, &resolution.handle.id)?;
+                let receipt = self
+                    .control
+                    .cancel_thread(
+                        &self.caller,
+                        target_thread_id,
+                        "thread_cancel operation".to_string(),
+                    )
+                    .await
+                    .map_err(|err| {
+                        model_task_dispatch_error(
+                            operation_name,
+                            &args.task_name,
+                            "cancel dispatch",
+                            err,
                         )
-                        .await?,
-                )
-                .map_err(json_error)?;
-                value["operation"] = json!("cooldis.thread_cancel");
-                value
+                    })?;
+                json!({
+                    "operation": "cooldis.thread_cancel",
+                    "task_name": args.task_name,
+                    "status": receipt.status,
+                })
             }
             _ => {
                 return Err(CooldisError::RuntimeExecution(format!(
@@ -470,6 +533,13 @@ pub struct KernelThreadSpawnAgentBinding {
 
 #[async_trait]
 pub trait KernelThreadSpawnAgentResolver: Send + Sync {
+    /// Alias used when the model omits `agent_ref`. Runtime integrations with a
+    /// synthesized default manifest return that alias; lower-level runtimes may
+    /// retain the unbound compatibility path by returning `None`.
+    fn default_agent_ref(&self, _caller: &ThreadContext) -> Option<String> {
+        None
+    }
+
     async fn resolve_agent_ref(
         &self,
         caller: &ThreadContext,
@@ -573,7 +643,7 @@ struct ThreadSpawnArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadSubmitArgs {
-    target_thread_id: String,
+    task_name: String,
     message: String,
     #[serde(default)]
     dispatch_id: Option<String>,
@@ -582,7 +652,7 @@ struct ThreadSubmitArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadWaitArgs {
-    target_thread_id: String,
+    task_name: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
 }
@@ -590,14 +660,13 @@ struct ThreadWaitArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadStatusArgs {
-    #[serde(default)]
-    target_thread_id: Option<String>,
+    task_name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadCancelArgs {
-    target_thread_id: String,
+    task_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -748,6 +817,75 @@ fn require_non_empty(value: &str, field: &str) -> CooldisResult<()> {
     Ok(())
 }
 
+fn resolved_thread_id(
+    operation_name: &str,
+    task_name: &str,
+    handle_id: &str,
+) -> CooldisResult<ThreadId> {
+    ThreadId::parse_str(handle_id).map_err(|err| {
+        model_task_dispatch_error(operation_name, task_name, "resolved handle decode", err)
+    })
+}
+
+fn task_target_unavailable(operation_name: &str, task_name: &str) -> CooldisError {
+    CooldisError::RuntimeExecution(format!(
+        "{operation_name} task_name {task_name:?} target is not available"
+    ))
+}
+
+fn model_task_resolution_error(
+    operation_name: &str,
+    task_name: &str,
+    err: CooldisError,
+) -> CooldisError {
+    let safe_not_found = format!("thread task_name {task_name:?} was not found under this parent");
+    let safe_ambiguity = format!("thread task_name {task_name:?} is ambiguous under this parent");
+    if matches!(
+        &err,
+        CooldisError::RuntimeExecution(message)
+            if message == "thread task_name must not be empty"
+                || message == &safe_not_found
+                || message == &safe_ambiguity
+    ) {
+        err
+    } else {
+        eprintln!(
+            "cooldis model thread operation {operation_name} task_name {task_name:?} resolution failed: {err}"
+        );
+        task_target_unavailable(operation_name, task_name)
+    }
+}
+
+fn model_thread_spawn_error(task_name: &str, err: CooldisError) -> CooldisError {
+    let safe_duplicate = format!(
+        "thread_spawn task_name {task_name:?} is already bound under this parent; retry with the original dispatch or choose a new task_name"
+    );
+    if matches!(
+        &err,
+        CooldisError::RuntimeExecution(message)
+            if message == &safe_duplicate
+    ) {
+        err
+    } else {
+        eprintln!(
+            "cooldis model thread operation thread_spawn task_name {task_name:?} dispatch failed: {err}"
+        );
+        CooldisError::RuntimeExecution(format!("thread_spawn task_name {task_name:?} failed"))
+    }
+}
+
+fn model_task_dispatch_error(
+    operation_name: &str,
+    task_name: &str,
+    phase: &str,
+    err: impl std::fmt::Display,
+) -> CooldisError {
+    eprintln!(
+        "cooldis model thread operation {operation_name} task_name {task_name:?} {phase} failed: {err}"
+    );
+    task_target_unavailable(operation_name, task_name)
+}
+
 fn optional_target_thread_id(
     caller: &ThreadContext,
     value: Option<&str>,
@@ -837,10 +975,6 @@ fn active_mandate_json(mandate: &ActiveMandate) -> Value {
         "input_template": mandate.payload.input_template.clone(),
         "created_at_ms": mandate.event.created_at_ms,
     })
-}
-
-fn json_error(err: serde_json::Error) -> CooldisError {
-    CooldisError::RuntimeExecution(err.to_string())
 }
 
 fn operations_runtime_error(

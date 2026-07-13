@@ -132,6 +132,59 @@ fn thread_spawn_model_input_schema_has_no_dispatch_identity_field() {
 }
 
 #[test]
+fn thread_wait_model_schema_uses_task_name_and_has_no_raw_identity_fields() {
+    let package = cooldis_threads_kernel_package();
+    let operation = package
+        .interface
+        .operations
+        .iter()
+        .find(|operation| operation.name == THREAD_WAIT_OPERATION)
+        .unwrap();
+
+    assert_eq!(
+        operation.input_schema,
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "task_name": {
+                    "type": "string",
+                    "description": "Parent-scoped task name of the child thread."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Optional timeout in milliseconds."
+                }
+            },
+            "required": ["task_name"]
+        })
+    );
+    assert_eq!(
+        operation.output_schema,
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "description": "Receipt operation name."
+                },
+                "task_name": {
+                    "type": "string",
+                    "description": "Parent-scoped task name of the child thread."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["starting", "idle", "running", "cancelling", "stopped", "failed"],
+                    "description": "Current target thread status after waiting."
+                }
+            },
+            "required": ["operation", "task_name", "status"]
+        })
+    );
+}
+
+#[test]
 fn cooldis_schedule_package_declares_three_kernel_operations() {
     let package = cooldis_schedule_kernel_package();
     let operations = package
@@ -381,17 +434,8 @@ fn cooldis_threads_package_schemas_accept_operation_receipts() {
         THREAD_SPAWN_OPERATION,
         json!({
             "operation": "cooldis.thread_spawn",
-            "caller_thread_id": Uuid::now_v7().to_string(),
-            "thread_id": Uuid::now_v7().to_string(),
-            "parent_thread_id": Uuid::now_v7().to_string(),
             "status": "idle",
             "task_name": "worker",
-            "submitted_turn_id": "turn-1",
-            "handle": {
-                "kind": "thread",
-                "id": Uuid::now_v7().to_string()
-            },
-            "dispatch_id": "dispatch-1"
         }),
     );
     validate_operation_output(
@@ -399,12 +443,8 @@ fn cooldis_threads_package_schemas_accept_operation_receipts() {
         THREAD_WAIT_OPERATION,
         json!({
             "operation": "cooldis.thread_wait",
-            "caller_thread_id": Uuid::now_v7().to_string(),
-            "target_thread_id": Uuid::now_v7().to_string(),
             "status": "idle",
-            "timed_out": false,
-            "latest_output": "done",
-            "result_interaction_id": Uuid::now_v7().to_string()
+            "task_name": "worker",
         }),
     );
     validate_operation_output(
@@ -412,12 +452,8 @@ fn cooldis_threads_package_schemas_accept_operation_receipts() {
         THREAD_SUBMIT_OPERATION,
         json!({
             "operation": "cooldis.thread_submit",
-            "caller_thread_id": Uuid::now_v7().to_string(),
-            "target_thread_id": Uuid::now_v7().to_string(),
-            "interaction_id": Uuid::now_v7().to_string(),
             "status": "running",
-            "turn_id": "turn-1",
-            "dispatch_id": "submit-dispatch-1"
+            "task_name": "worker",
         }),
     );
     validate_operation_output(
@@ -425,16 +461,17 @@ fn cooldis_threads_package_schemas_accept_operation_receipts() {
         THREAD_STATUS_OPERATION,
         json!({
             "operation": "cooldis.thread_status",
-            "caller_thread_id": Uuid::now_v7().to_string(),
-            "target_thread_id": Uuid::now_v7().to_string(),
             "status": "running",
-            "children": [
-                {
-                    "thread_id": Uuid::now_v7().to_string(),
-                    "parent_thread_id": Uuid::now_v7().to_string(),
-                    "status": "idle"
-                }
-            ]
+            "task_name": "worker",
+        }),
+    );
+    validate_operation_output(
+        &package,
+        THREAD_CANCEL_OPERATION,
+        json!({
+            "operation": "cooldis.thread_cancel",
+            "status": "stopped",
+            "task_name": "worker",
         }),
     );
 }

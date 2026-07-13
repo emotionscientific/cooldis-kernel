@@ -547,7 +547,7 @@ pub use kernel::supervisor::{
 pub use kernel::thread_spawn_projector::{
     ThreadSpawnDispatchFold, ThreadSpawnDispatchReceipt, ThreadSpawnProjected,
     ThreadSpawnProjectionFailure, ThreadSpawnProjectionReceipt, ThreadSpawnProjector,
-    fold_thread_spawn_dispatch,
+    ThreadTaskNameResolutionReceipt, fold_thread_spawn_dispatch, fold_thread_task_name_resolution,
 };
 pub use kernel::wasm_couplings::WasmCouplingExecutor;
 pub use operations::kernel_packages::{

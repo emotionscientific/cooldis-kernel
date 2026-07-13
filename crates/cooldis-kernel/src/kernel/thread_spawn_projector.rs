@@ -154,6 +154,28 @@ impl ThreadSpawnProjector {
             }
 
             if let Some(folded) = fold_thread_spawn_dispatch(&events, &dispatch_id) {
+                let request_event = events
+                    .iter()
+                    .find(|event| event.id == folded.request_event_id)
+                    .ok_or_else(|| {
+                        CooldisError::History(
+                            "folded thread spawn request is absent from its event slice"
+                                .to_string(),
+                        )
+                    })?;
+                let folded_payload = serde_json::from_value::<ThreadSpawnRequestedPayload>(
+                    request_event.payload.clone(),
+                )
+                .map_err(|err| {
+                    CooldisError::History(format!(
+                        "folded thread spawn request payload decode failed: {err}"
+                    ))
+                })?;
+                if !spawn_request_belongs_to_parent(request_event, &folded_payload, coordinates) {
+                    return Err(CooldisError::History(
+                        "thread spawn dispatch matched an out-of-scope request record".to_string(),
+                    ));
+                }
                 if let Some(handle) = folded.handle {
                     ThreadId::parse_str(&handle.id).map_err(|err| {
                         CooldisError::History(format!(
@@ -188,10 +210,6 @@ impl ThreadSpawnProjector {
                     .await;
                     continue;
                 }
-                let request_event = events
-                    .iter()
-                    .find(|event| event.id == folded.request_event_id)
-                    .expect("folded request event must come from the folded event slice");
                 match self
                     .claim_request(request_event, dispatch_id.as_str(), &events)
                     .await?
@@ -238,6 +256,32 @@ impl ThreadSpawnProjector {
                             task_name: projected.task_name,
                         });
                     }
+                }
+            }
+
+            if let Some(task_name) = payload.task_name.as_deref() {
+                if task_name.trim().is_empty() {
+                    return Err(CooldisError::RuntimeExecution(
+                        "thread_spawn task_name must not be empty".to_string(),
+                    ));
+                }
+                let task_name_is_reserved = events.iter().any(|event| {
+                    if event.kind != EventKind::ThreadSpawnRequested
+                        || is_spawn_request_claim(event)
+                    {
+                        return false;
+                    }
+                    serde_json::from_value::<ThreadSpawnRequestedPayload>(event.payload.clone())
+                        .is_ok_and(|existing| {
+                            spawn_request_belongs_to_parent(event, &existing, coordinates)
+                                && existing.task_name.as_deref() == Some(task_name)
+                                && existing.correlation_id != dispatch_id.as_str()
+                        })
+                });
+                if task_name_is_reserved {
+                    return Err(CooldisError::RuntimeExecution(format!(
+                        "thread_spawn task_name {task_name:?} is already bound under this parent; retry with the original dispatch or choose a new task_name"
+                    )));
                 }
             }
 
@@ -873,6 +917,21 @@ pub struct ThreadSpawnDispatchFold {
     pub claimed: bool,
 }
 
+/// Receipt returned whenever a parent-scoped `task_name` is resolved to its
+/// durable child handle. The resolver folds the existing spawn request and
+/// witnessed spawn decision; it does not consult a registry or an in-memory
+/// alias map. Raw handle identity remains in this runtime receipt and is not
+/// projected into model-visible tool output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadTaskNameResolutionReceipt {
+    pub task_name: String,
+    pub parent_thread_id: ThreadId,
+    pub request_event_id: EventRecordId,
+    pub spawned_event_id: EventRecordId,
+    pub dispatch_id: DispatchId,
+    pub handle: HandleId,
+}
+
 /// Durable spawn-time binding for a thread handle.
 ///
 /// The binding is a fold, not a second record: the original
@@ -952,6 +1011,80 @@ pub fn fold_thread_spawn_dispatch(
         failure_reason,
         claimed,
     })
+}
+
+/// Resolves one model-facing child `task_name` by folding the parent's durable
+/// spawn request and witnessed spawn records. A task name is reserved for the
+/// lifetime of its parent, including after the child reaches terminal state.
+/// Multiple witnessed handles for one name are legacy/corrupt ambiguity and
+/// fail closed rather than preferring a live child over a completed child.
+pub fn fold_thread_task_name_resolution(
+    events: &[EventRecord],
+    parent: &ThreadCoordinates,
+    task_name: &str,
+) -> CooldisResult<Option<ThreadTaskNameResolutionReceipt>> {
+    let mut resolutions = Vec::new();
+    for request in events.iter().filter(|event| {
+        event.kind == EventKind::ThreadSpawnRequested && !is_spawn_request_claim(event)
+    }) {
+        if request.coordinates.thread_id != parent.thread_id
+            || request.coordinates.scope() != parent.scope()
+        {
+            continue;
+        }
+        let payload =
+            serde_json::from_value::<ThreadSpawnRequestedPayload>(request.payload.clone())
+                .map_err(|err| {
+                    CooldisError::History(format!(
+                        "thread task_name resolution spawn request decode failed: {err}"
+                    ))
+                })?;
+        if payload.parent_thread_id != parent.thread_id
+            || payload.task_name.as_deref() != Some(task_name)
+        {
+            continue;
+        }
+        for spawned in events.iter().filter(|event| {
+            event.kind == EventKind::ThreadSpawned
+                && event.coordinates.thread_id == parent.thread_id
+                && event.coordinates.scope() == parent.scope()
+                && event
+                    .payload
+                    .get("correlation_id")
+                    .and_then(JsonValue::as_str)
+                    == Some(payload.correlation_id.as_str())
+                && event.provenance.source_event_ids.contains(&request.id)
+        }) {
+            let spawned_payload = serde_json::from_value::<ThreadSpawnedPayload>(
+                spawned.payload.clone(),
+            )
+            .map_err(|err| {
+                CooldisError::History(format!(
+                    "thread task_name resolution spawned payload decode failed: {err}"
+                ))
+            })?;
+            if spawned_payload.parent_thread_id != parent.thread_id {
+                return Err(CooldisError::History(format!(
+                    "thread task_name {task_name:?} spawned receipt has the wrong parent"
+                )));
+            }
+            resolutions.push(ThreadTaskNameResolutionReceipt {
+                task_name: task_name.to_string(),
+                parent_thread_id: parent.thread_id,
+                request_event_id: request.id,
+                spawned_event_id: spawned.id,
+                dispatch_id: DispatchId::new(payload.correlation_id.clone()),
+                handle: HandleId::thread(spawned_payload.child_thread_id),
+            });
+        }
+    }
+    match resolutions.len() {
+        0 => Ok(None),
+        1 => Ok(resolutions.pop()),
+        _ => Err(CooldisError::RuntimeExecution(format!(
+            "thread task_name {task_name:?} is ambiguous under this parent"
+        ))),
+    }
 }
 
 /// Folds all valid thread-handle bindings witnessed on one consumer control
@@ -1083,6 +1216,16 @@ fn is_spawn_request_claim(event: &EventRecord) -> bool {
     event.kind == EventKind::ThreadSpawnRequested
         && event.provenance.discharged_by.as_deref() == Some(THREAD_SPAWN_PROJECTOR_DISCHARGED_BY)
         && event.provenance.function.as_deref() == Some(THREAD_SPAWN_PROJECTOR_FUNCTION)
+}
+
+fn spawn_request_belongs_to_parent(
+    event: &EventRecord,
+    payload: &ThreadSpawnRequestedPayload,
+    parent: &ThreadCoordinates,
+) -> bool {
+    event.coordinates.thread_id == parent.thread_id
+        && event.coordinates.scope() == parent.scope()
+        && payload.parent_thread_id == parent.thread_id
 }
 
 #[cfg(test)]
@@ -1422,6 +1565,372 @@ mod tests {
         assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
 
         host.shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn duplicate_task_name_folds_same_dispatch_and_rejects_a_new_dispatch() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        let request = |dispatch_id: &str| ThreadSpawnRequestedPayload {
+            parent_thread_id: coordinates.thread_id,
+            parent_turn_id: Some("parent-turn-1".to_string()),
+            task_name: Some("worker".to_string()),
+            submitted_turn_id: Some(format!("thread-spawn-{dispatch_id}")),
+            child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+            initial_submission: "echo worker".to_string(),
+            correlation_id: dispatch_id.to_string(),
+            block_parent: false,
+        };
+        let projector = ThreadSpawnProjector::new(host.clone());
+
+        let first = projector
+            .dispatch_request(&coordinates, request("dispatch-1"))
+            .await
+            .unwrap();
+        let retry = projector
+            .dispatch_request(&coordinates, request("dispatch-1"))
+            .await
+            .unwrap();
+        let err = projector
+            .dispatch_request(&coordinates, request("dispatch-2"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(first, retry);
+        assert_eq!(
+            err.to_string(),
+            "runtime execution failed: thread_spawn task_name \"worker\" is already bound under this parent; retry with the original dispatch or choose a new task_name"
+        );
+        assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
+        let events = store
+            .read_events(
+                &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == EventKind::ThreadSpawnRequested)
+                .filter(|event| !is_spawn_request_claim(event))
+                .count(),
+            1
+        );
+
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn racing_new_dispatches_for_one_task_name_spawn_exactly_one_child() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first = ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(barrier.clone());
+        let second = ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(barrier);
+        let request = |dispatch_id: &str| ThreadSpawnRequestedPayload {
+            parent_thread_id: coordinates.thread_id,
+            parent_turn_id: None,
+            task_name: Some("worker".to_string()),
+            submitted_turn_id: Some(format!("thread-spawn-{dispatch_id}")),
+            child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+            initial_submission: "echo worker".to_string(),
+            correlation_id: dispatch_id.to_string(),
+            block_parent: false,
+        };
+
+        let (first, second) = tokio::join!(
+            first.dispatch_request(&coordinates, request("dispatch-1")),
+            second.dispatch_request(&coordinates, request("dispatch-2")),
+        );
+
+        assert_eq!(
+            [first.is_ok(), second.is_ok()]
+                .into_iter()
+                .filter(|ok| *ok)
+                .count(),
+            1
+        );
+        let error = [first, second].into_iter().find_map(Result::err).unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("thread_spawn task_name \"worker\" is already bound under this parent")
+        );
+        assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
+        let events = store
+            .read_events(
+                &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == EventKind::ThreadSpawnRequested)
+                .filter(|event| !is_spawn_request_claim(event))
+                .count(),
+            1
+        );
+
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_name_reservations_are_scoped_to_the_parent_control_stream() {
+        let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
+        let first_parent = ThreadCoordinates::new("tenant", "user", "session");
+        let second_parent = ThreadCoordinates::new("tenant", "user", "session");
+        for coordinates in [&first_parent, &second_parent] {
+            host.start_thread_with_topology_and_metadata(
+                coordinates.clone(),
+                ThreadTopology::root(),
+                parent_metadata_with_spawn_grant(),
+            )
+            .await
+            .unwrap();
+        }
+        let request =
+            |coordinates: &ThreadCoordinates, dispatch_id: &str| ThreadSpawnRequestedPayload {
+                parent_thread_id: coordinates.thread_id,
+                parent_turn_id: None,
+                task_name: Some("worker".to_string()),
+                submitted_turn_id: Some(format!("thread-spawn-{dispatch_id}")),
+                child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+                initial_submission: "echo worker".to_string(),
+                correlation_id: dispatch_id.to_string(),
+                block_parent: false,
+            };
+
+        let first = ThreadSpawnProjector::new(host.clone())
+            .dispatch_request(&first_parent, request(&first_parent, "dispatch-1"))
+            .await
+            .unwrap();
+        let second = ThreadSpawnProjector::new(host.clone())
+            .dispatch_request(&second_parent, request(&second_parent, "dispatch-2"))
+            .await
+            .unwrap();
+
+        assert_ne!(first.handle, second.handle);
+        assert_eq!(host.children_of(first_parent.thread_id).await.len(), 1);
+        assert_eq!(host.children_of(second_parent.thread_id).await.len(), 1);
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreign_spawn_request_cannot_fold_or_reserve_a_parent_task_name() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        let foreign = ThreadCoordinates::new("other-tenant", "user", "session");
+        let request = |parent: &ThreadCoordinates, dispatch_id: &str| ThreadSpawnRequestedPayload {
+            parent_thread_id: parent.thread_id,
+            parent_turn_id: None,
+            task_name: Some("worker".to_string()),
+            submitted_turn_id: Some(format!("thread-spawn-{dispatch_id}")),
+            child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+            initial_submission: "echo worker".to_string(),
+            correlation_id: dispatch_id.to_string(),
+            block_parent: false,
+        };
+        store
+            .append_events(
+                &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                vec![NewEventRecord::witnessed(
+                    foreign.clone(),
+                    EventKind::ThreadSpawnRequested,
+                    serde_json::to_value(request(&foreign, "dispatch-foreign")).unwrap(),
+                )],
+            )
+            .await
+            .unwrap();
+        let projector = ThreadSpawnProjector::new(host.clone());
+
+        let fold_err = projector
+            .dispatch_request(&coordinates, request(&coordinates, "dispatch-foreign"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(fold_err, CooldisError::History(message) if message == "thread spawn dispatch matched an out-of-scope request record")
+        );
+        let receipt = projector
+            .dispatch_request(&coordinates, request(&coordinates, "dispatch-local"))
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.task_name.as_deref(), Some("worker"));
+        assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[test]
+    fn task_name_resolution_receipt_fails_closed_between_completed_and_live_legacy_handles() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let request = |sequence: i64, dispatch_id: &str| {
+            EventRecord::from_new(
+                stream_id.clone(),
+                EventSequence::new(sequence),
+                NewEventRecord::witnessed(
+                    coordinates.clone(),
+                    EventKind::ThreadSpawnRequested,
+                    serde_json::to_value(ThreadSpawnRequestedPayload {
+                        parent_thread_id: coordinates.thread_id,
+                        parent_turn_id: None,
+                        task_name: Some("worker".to_string()),
+                        submitted_turn_id: None,
+                        child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+                        initial_submission: "work".to_string(),
+                        correlation_id: dispatch_id.to_string(),
+                        block_parent: false,
+                    })
+                    .unwrap(),
+                ),
+            )
+        };
+        let first_request = request(1, "dispatch-1");
+        let first_child = ThreadId::new();
+        let mut first_spawn = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::ThreadSpawned,
+            json!({
+                "parent_thread_id": coordinates.thread_id,
+                "child_thread_id": first_child,
+                "child_manifest_hash": "unbound",
+                "granted": [],
+                "inputs_hash": "sha256:first",
+                "correlation_id": "dispatch-1"
+            }),
+        );
+        first_spawn.provenance.source_event_ids = vec![first_request.id];
+        first_spawn.provenance.source_streams = vec![stream_id.clone()];
+        let first_spawn =
+            EventRecord::from_new(stream_id.clone(), EventSequence::new(2), first_spawn);
+
+        let receipt = fold_thread_task_name_resolution(
+            &[first_request.clone(), first_spawn.clone()],
+            &coordinates,
+            "worker",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(receipt.task_name, "worker");
+        assert_eq!(receipt.request_event_id, first_request.id);
+        assert_eq!(receipt.spawned_event_id, first_spawn.id);
+        assert_eq!(receipt.handle, HandleId::thread(first_child));
+        assert_eq!(receipt.dispatch_id, DispatchId::new("dispatch-1"));
+
+        let conflicting_child = ThreadId::new();
+        let mut conflicting_spawn = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::ThreadSpawned,
+            json!({
+                "parent_thread_id": coordinates.thread_id,
+                "child_thread_id": conflicting_child,
+                "child_manifest_hash": "unbound",
+                "granted": [],
+                "inputs_hash": "sha256:conflicting",
+                "correlation_id": "dispatch-1"
+            }),
+        );
+        conflicting_spawn.provenance.source_event_ids = vec![first_request.id];
+        conflicting_spawn.provenance.source_streams = vec![stream_id.clone()];
+        let conflicting_spawn =
+            EventRecord::from_new(stream_id.clone(), EventSequence::new(3), conflicting_spawn);
+        let err = fold_thread_task_name_resolution(
+            &[
+                first_request.clone(),
+                first_spawn.clone(),
+                conflicting_spawn,
+            ],
+            &coordinates,
+            "worker",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "runtime execution failed: thread task_name \"worker\" is ambiguous under this parent"
+        );
+
+        let completed = EventRecord::from_new(
+            stream_id.clone(),
+            EventSequence::new(4),
+            NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ThreadJoined,
+                json!({
+                    "child_thread_id": first_child,
+                    "spawned_event_id": first_spawn.id,
+                    "terminal_state": "completed"
+                }),
+            ),
+        );
+        let second_request = request(5, "dispatch-2");
+        let second_child = ThreadId::new();
+        let mut second_spawn = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::ThreadSpawned,
+            json!({
+                "parent_thread_id": coordinates.thread_id,
+                "child_thread_id": second_child,
+                "child_manifest_hash": "unbound",
+                "granted": [],
+                "inputs_hash": "sha256:second",
+                "correlation_id": "dispatch-2"
+            }),
+        );
+        second_spawn.provenance.source_event_ids = vec![second_request.id];
+        second_spawn.provenance.source_streams = vec![stream_id.clone()];
+        let second_spawn = EventRecord::from_new(stream_id, EventSequence::new(6), second_spawn);
+        let err = fold_thread_task_name_resolution(
+            &[
+                first_request,
+                first_spawn,
+                completed,
+                second_request,
+                second_spawn,
+            ],
+            &coordinates,
+            "worker",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "runtime execution failed: thread task_name \"worker\" is ambiguous under this parent"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

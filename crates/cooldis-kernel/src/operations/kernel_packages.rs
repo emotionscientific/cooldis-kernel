@@ -631,16 +631,16 @@ fn thread_operation_specs() -> Vec<ThreadOperationSpec> {
         },
         ThreadOperationSpec {
             name: THREAD_WAIT_OPERATION,
-            summary: "Wait for a scoped thread to settle.",
+            summary: "Wait for a child addressed by task name to settle.",
             capabilities: &[THREADS_READ_CAPABILITY],
             input_schema: wait_input_schema,
             output_schema: wait_output_schema,
         },
         ThreadOperationSpec {
             name: THREAD_STATUS_OPERATION,
-            summary: "Report status for self or a scoped thread, including children.",
+            summary: "Report status for a child addressed by task name.",
             capabilities: &[THREADS_READ_CAPABILITY],
-            input_schema: optional_target_input_schema,
+            input_schema: required_task_target_input_schema,
             output_schema: status_output_schema,
         },
         ThreadOperationSpec {
@@ -884,41 +884,41 @@ fn process_terminate_input_schema() -> Value {
 fn target_message_input_schema() -> Value {
     object_schema(
         json!({
-            "target_thread_id": string_schema("Target Cooldis thread id."),
+            "task_name": string_schema("Parent-scoped task name of the child thread."),
             "message": string_schema("User message to submit.")
         }),
-        &["target_thread_id", "message"],
+        &["task_name", "message"],
     )
 }
 
 fn wait_input_schema() -> Value {
     object_schema(
         json!({
-            "target_thread_id": string_schema("Target Cooldis thread id."),
+            "task_name": string_schema("Parent-scoped task name of the child thread."),
             "timeout_ms": {
                 "type": "integer",
                 "description": "Optional timeout in milliseconds."
             }
         }),
-        &["target_thread_id"],
+        &["task_name"],
     )
 }
 
-fn optional_target_input_schema() -> Value {
+fn required_task_target_input_schema() -> Value {
     object_schema(
         json!({
-            "target_thread_id": string_schema("Optional target Cooldis thread id.")
+            "task_name": string_schema("Parent-scoped task name of the child thread.")
         }),
-        &[],
+        &["task_name"],
     )
 }
 
 fn cancel_input_schema() -> Value {
     object_schema(
         json!({
-            "target_thread_id": string_schema("Target Cooldis thread id.")
+            "task_name": string_schema("Parent-scoped task name of the child thread.")
         }),
-        &["target_thread_id"],
+        &["task_name"],
     )
 }
 
@@ -1080,131 +1080,33 @@ fn notify_receipt_output_schema(operation: &str) -> Value {
 }
 
 fn spawn_output_schema() -> Value {
-    object_schema(
-        json!({
-            "operation": string_schema("Receipt operation name."),
-            "caller_thread_id": string_schema("Calling thread id."),
-            "thread_id": string_schema("Created child thread id."),
-            "parent_thread_id": string_schema("Parent thread id."),
-            "status": thread_status_schema("Current child thread status."),
-            "task_name": string_schema("Stable task name, when provided."),
-            "submitted_turn_id": string_schema("Submitted initial turn id."),
-            "handle": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "kind": {"type": "string", "enum": ["thread"]},
-                    "id": {"type": "string"}
-                },
-                "required": ["kind", "id"]
-            },
-            "dispatch_id": string_schema("Identity of the originating dispatch.")
-        }),
-        &[
-            "operation",
-            "caller_thread_id",
-            "thread_id",
-            "parent_thread_id",
-            "status",
-            "submitted_turn_id",
-            "handle",
-            "dispatch_id",
-        ],
-    )
+    task_handle_output_schema("Current child thread status.")
 }
 
 fn submit_output_schema() -> Value {
-    object_schema(
-        json!({
-            "operation": string_schema("Receipt operation name."),
-            "caller_thread_id": string_schema("Calling thread id."),
-            "target_thread_id": string_schema("Target thread id."),
-            "interaction_id": string_schema("Recorded interaction id."),
-            "status": thread_status_schema("Current target thread status."),
-            "turn_id": string_schema("Submitted turn id."),
-            "dispatch_id": string_schema("Identity of the originating submit dispatch.")
-        }),
-        &[
-            "operation",
-            "caller_thread_id",
-            "target_thread_id",
-            "interaction_id",
-            "status",
-            "turn_id",
-            "dispatch_id",
-        ],
-    )
+    task_handle_output_schema("Current target thread status.")
 }
 
 fn wait_output_schema() -> Value {
-    object_schema(
-        json!({
-            "operation": string_schema("Receipt operation name."),
-            "caller_thread_id": string_schema("Calling thread id."),
-            "target_thread_id": string_schema("Target thread id."),
-            "status": thread_status_schema("Current target thread status."),
-            "timed_out": { "type": "boolean" },
-            "latest_output": string_schema("Latest target output, when available."),
-            "result_interaction_id": string_schema("Recorded result interaction id, when available.")
-        }),
-        &[
-            "operation",
-            "caller_thread_id",
-            "target_thread_id",
-            "status",
-            "timed_out",
-        ],
-    )
+    task_handle_output_schema("Current target thread status after waiting.")
 }
 
 fn status_output_schema() -> Value {
-    object_schema(
-        json!({
-            "operation": string_schema("Receipt operation name."),
-            "caller_thread_id": string_schema("Calling thread id."),
-            "target_thread_id": string_schema("Target thread id."),
-            "parent_thread_id": string_schema("Parent thread id, when present."),
-            "status": thread_status_schema("Current target thread status."),
-            "children": {
-                "type": "array",
-                "items": child_schema()
-            }
-        }),
-        &[
-            "operation",
-            "caller_thread_id",
-            "target_thread_id",
-            "status",
-            "children",
-        ],
-    )
+    task_handle_output_schema("Current target thread status.")
 }
 
 fn lifecycle_output_schema() -> Value {
+    task_handle_output_schema("Current target thread lifecycle status.")
+}
+
+fn task_handle_output_schema(status_description: &str) -> Value {
     object_schema(
         json!({
             "operation": string_schema("Receipt operation name."),
-            "caller_thread_id": string_schema("Calling thread id."),
-            "target_thread_id": string_schema("Target thread id."),
-            "status": thread_status_schema("Current target thread lifecycle status.")
+            "task_name": string_schema("Parent-scoped task name of the child thread."),
+            "status": thread_status_schema(status_description)
         }),
-        &[
-            "operation",
-            "caller_thread_id",
-            "target_thread_id",
-            "status",
-        ],
-    )
-}
-
-fn child_schema() -> Value {
-    object_schema(
-        json!({
-            "thread_id": string_schema("Child thread id."),
-            "parent_thread_id": string_schema("Parent thread id."),
-            "status": thread_status_schema("Current child thread status.")
-        }),
-        &["thread_id", "status"],
+        &["operation", "task_name", "status"],
     )
 }
 

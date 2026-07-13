@@ -48,10 +48,10 @@ registry root is configured. It publishes five thread-control operations:
 | Operation | Required Capability | Purpose |
 | --- | --- | --- |
 | `thread_spawn` | `threads.spawn` | Start a supervised child thread and submit its first message. |
-| `thread_submit` | `threads.control` | Submit a user message to a scoped thread. |
-| `thread_wait` | `threads.read` | Wait for a scoped thread to settle. |
-| `thread_status` | `threads.read` | Report status for self or a scoped thread, including children. |
-| `thread_cancel` | `threads.control` | Cancel a scoped thread. |
+| `thread_submit` | `threads.control` | Steer a child addressed by its parent-scoped task name. |
+| `thread_wait` | `threads.read` | Wait for a child addressed by task name to settle. |
+| `thread_status` | `threads.read` | Report status for a child addressed by task name. |
+| `thread_cancel` | `threads.control` | Cancel a child addressed by task name. |
 
 `thread_spawn` input:
 
@@ -63,17 +63,32 @@ registry root is configured. It publishes five thread-control operations:
 }
 ```
 
-`agent_ref` is optional. Without it, the child uses the caller's runtime path.
-Every spawned child is a first-class thread: the app-server registers its
-lifecycle/topology record before the first child turn, `thread/list` includes
-it with `parentThreadId` set to the spawning thread, and `thread/events/list`
-can query the child event stream.
+`agent_ref` is optional. Without it, the app-server resolves the synthesized
+`agent://cooldis/default@latest` alias and records the ordinary alias-resolution,
+compile, and bind receipts on the child. Placement comes from daemon config, so
+the two-field `{task_name, message}` form is complete. Every spawned child is a
+first-class thread: the app-server registers its lifecycle/topology record
+before the first child turn, `thread/list` includes it with `parentThreadId` set
+to the spawning thread, and `thread/events/list` can query the child event
+stream.
+
+Within one parent, `task_name` is a durable reservation. Retrying with the same
+provider tool-call identity folds to the original handle. Reusing the name with
+a different dispatch identity is rejected, including after the first child has
+completed; another parent may independently use the same name. Resolution folds
+the existing `thread.spawn.requested` and `thread.spawned` records and returns an
+internal resolution receipt. It does not use a process-local alias map.
+
+Model-visible results for spawn, submit, wait, status, and cancel contain only
+`operation`, `task_name`, and `status`. Thread ids, handle ids, event ids, turn
+ids, interaction ids, and dispatch ids remain available in runtime receipts and
+the journal, not in these tool results.
 
 `thread_submit` input:
 
 ```json
 {
-  "target_thread_id": "...",
+  "task_name": "worker",
   "message": "continue"
 }
 ```
@@ -82,7 +97,7 @@ can query the child event stream.
 
 ```json
 {
-  "target_thread_id": "...",
+  "task_name": "worker",
   "timeout_ms": 1000
 }
 ```
@@ -91,18 +106,15 @@ can query the child event stream.
 
 ```json
 {
-  "target_thread_id": "..."
+  "task_name": "worker"
 }
 ```
-
-`target_thread_id` is optional for `thread_status`; omitting it reports the
-caller thread and includes a `children` array.
 
 `thread_cancel` input:
 
 ```json
 {
-  "target_thread_id": "..."
+  "task_name": "worker"
 }
 ```
 

@@ -80,6 +80,10 @@ const CHILD_MANIFEST_HASH: &str = "sha256:child-manifest";
 
 #[async_trait]
 impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
+    fn default_agent_ref(&self, _caller: &ThreadContext) -> Option<String> {
+        Some(CHILD_AGENT_REF.to_string())
+    }
+
     async fn resolve_agent_ref(
         &self,
         _caller: &ThreadContext,
@@ -2913,7 +2917,6 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
             serde_json::json!({
                 "task_name": "worker",
                 "message": "echo child-through-tool",
-                "agent_ref": CHILD_AGENT_REF,
                 "dispatch_id": "model-supplied-id-must-not-win",
             }),
         ),
@@ -2956,7 +2959,11 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
                 output,
                 success: true,
                 ..
-            } if call_id == "call_1|fc_1" && output.contains("cooldis.thread_spawn")
+            } if call_id == "call_1|fc_1"
+                && output.contains(r#""operation":"cooldis.thread_spawn""#)
+                && output.contains(r#""task_name":"worker""#)
+                && !output.contains("thread_id")
+                && !output.contains("handle")
         )
     }));
 
@@ -2987,6 +2994,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     let requested_payload: crate::ThreadSpawnRequestedPayload =
         serde_json::from_value(requested.payload.clone()).unwrap();
     assert_eq!(requested_payload.correlation_id, "call_1|fc_1");
+    assert_eq!(requested_payload.child_agent_ref, CHILD_AGENT_REF);
     let spawned = wait_for_control_event(
         store.as_ref(),
         &thread.context().coordinates,

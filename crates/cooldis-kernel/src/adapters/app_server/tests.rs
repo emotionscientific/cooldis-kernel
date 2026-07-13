@@ -10986,14 +10986,13 @@ impl ProviderClient for ThreadSpawnAgentRefClient {
             if latest_user_text(request).as_deref() == Some("cancel worker")
                 && *self.cancel_calls.lock().unwrap() == 0
                 && tool_names(request).contains(&THREAD_CANCEL_OPERATION.to_string())
-                && let Some(child_thread_id) = spawned_thread_id_from_tool_results(request)
             {
                 *self.cancel_calls.lock().unwrap() += 1;
                 return Ok(ProviderResponse {
                     content: vec![CanonicalContent::tool_call(
                         "call_thread_cancel_1",
                         THREAD_CANCEL_OPERATION,
-                        json!({ "target_thread_id": child_thread_id }),
+                        json!({ "task_name": "worker" }),
                     )],
                     usage: CanonicalUsage::default(),
                     stop_reason: CanonicalStopReason::ToolUse,
@@ -12078,25 +12077,6 @@ fn latest_user_text(request: &ProviderRequest) -> Option<String> {
             return None;
         };
         Some(text_from_canonical_content(content))
-    })
-}
-
-fn spawned_thread_id_from_tool_results(request: &ProviderRequest) -> Option<String> {
-    request.messages.iter().rev().find_map(|message| {
-        let CanonicalMessage::ToolResult {
-            tool_name, content, ..
-        } = message
-        else {
-            return None;
-        };
-        if tool_name != THREAD_SPAWN_OPERATION {
-            return None;
-        }
-        let value = serde_json::from_str::<Value>(&text_from_canonical_content(content)).ok()?;
-        value
-            .get("thread_id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
     })
 }
 

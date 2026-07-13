@@ -1547,6 +1547,10 @@ pub(super) struct AppServerThreadSpawnAgentResolver {
 
 #[async_trait::async_trait]
 impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
+    fn default_agent_ref(&self, _caller: &ThreadContext) -> Option<String> {
+        Some(default_manifest::DEFAULT_AGENT_REF.to_string())
+    }
+
     async fn resolve_agent_ref(
         &self,
         _caller: &ThreadContext,

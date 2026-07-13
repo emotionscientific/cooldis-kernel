@@ -4,8 +4,10 @@ use crate::{
     COOLDIS_PROCESS_PACKAGE, KERNEL_RUNTIME_KIND, KernelNotifyOperationProvider,
     KernelOperationDispatcher, KernelOperationRegistration, KernelProcessOperationProvider,
     NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND, OperationRegistration,
-    PROCESS_EXEC_OPERATION, ThreadContext, ThreadCoordinates, TurnInput, WasmRuntimeArtifact,
-    cooldis_notify_kernel_package, cooldis_process_kernel_package,
+    PROCESS_EXEC_OPERATION, RuntimeHost, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
+    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, ThreadContext,
+    ThreadCoordinates, ThreadTopology, TurnInput, VirtualBashRuntimeFactory, WasmRuntimeArtifact,
+    cooldis_notify_kernel_package, cooldis_process_kernel_package, cooldis_threads_kernel_package,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -304,6 +306,216 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
     assert_eq!(receipt["message"], "Ready for review");
 }
 
+#[tokio::test]
+async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() {
+    let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
+    let root = host
+        .start_thread(
+            ThreadCoordinates::new("tenant", "user", "session"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let router = router_with_kernel_thread_operations(&host, root.context().clone()).await;
+
+    let spawn = router
+        .invoke_tool_call(
+            "spawn-call-1",
+            THREAD_SPAWN_OPERATION,
+            json!({"task_name": "worker", "message": "echo first"}),
+        )
+        .await;
+    let retry = router
+        .invoke_tool_call(
+            "spawn-call-1",
+            THREAD_SPAWN_OPERATION,
+            json!({"task_name": "worker", "message": "echo retry"}),
+        )
+        .await;
+    let duplicate = router
+        .invoke_tool_call(
+            "spawn-call-2",
+            THREAD_SPAWN_OPERATION,
+            json!({"task_name": "worker", "message": "echo duplicate"}),
+        )
+        .await;
+    let submit = router
+        .invoke_tool_call(
+            "submit-call-1",
+            THREAD_SUBMIT_OPERATION,
+            json!({"task_name": "worker", "message": "echo steered"}),
+        )
+        .await;
+    let status = router
+        .invoke_tool_call(
+            "status-call-1",
+            THREAD_STATUS_OPERATION,
+            json!({"task_name": "worker"}),
+        )
+        .await;
+    let wait = router
+        .invoke_tool_call(
+            "wait-call-1",
+            THREAD_WAIT_OPERATION,
+            json!({"task_name": "worker", "timeout_ms": 1_000}),
+        )
+        .await;
+
+    let children = host.children_of(root.context().coordinates.thread_id).await;
+    assert_eq!(children.len(), 1);
+    let child_id = children[0].context().coordinates.thread_id.to_string();
+    let parent_id = root.context().coordinates.thread_id.to_string();
+
+    for (message, operation) in [
+        (&spawn, "cooldis.thread_spawn"),
+        (&retry, "cooldis.thread_spawn"),
+        (&submit, "cooldis.thread_submit"),
+        (&wait, "cooldis.thread_wait"),
+        (&status, "cooldis.thread_status"),
+    ] {
+        let CanonicalMessage::ToolResult {
+            is_error: false,
+            content,
+            ..
+        } = message
+        else {
+            panic!("expected successful alias-only tool result: {message:?}");
+        };
+        let text = tool_result_text(content);
+        assert!(!text.contains(&child_id), "child id leaked in {text}");
+        assert!(!text.contains(&parent_id), "parent id leaked in {text}");
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["operation"], operation);
+        assert_eq!(value["task_name"], "worker");
+        assert!(value["status"].is_string());
+        assert_eq!(value.as_object().unwrap().len(), 3);
+    }
+
+    let CanonicalMessage::ToolResult {
+        is_error: true,
+        content,
+        ..
+    } = duplicate
+    else {
+        panic!("expected duplicate task_name tool error");
+    };
+    let duplicate_error = tool_result_text(&content);
+    assert!(duplicate_error.contains("task_name \"worker\" is already bound"));
+    assert!(!duplicate_error.contains(&child_id));
+    assert!(!duplicate_error.contains(&parent_id));
+
+    let missing = router
+        .invoke_tool_call(
+            "status-missing",
+            THREAD_STATUS_OPERATION,
+            json!({"task_name": "missing"}),
+        )
+        .await;
+    let CanonicalMessage::ToolResult {
+        is_error: true,
+        content,
+        ..
+    } = missing
+    else {
+        panic!("expected missing task_name tool error");
+    };
+    let missing_error = tool_result_text(&content);
+    assert!(missing_error.contains("task_name \"missing\" was not found"));
+    assert!(!missing_error.contains(&child_id));
+    assert!(!missing_error.contains(&parent_id));
+
+    let missing_wait = router
+        .invoke_tool_call(
+            "wait-missing",
+            THREAD_WAIT_OPERATION,
+            json!({"task_name": "missing", "timeout_ms": 1}),
+        )
+        .await;
+    let CanonicalMessage::ToolResult {
+        is_error: true,
+        content,
+        ..
+    } = missing_wait
+    else {
+        panic!("expected missing wait task_name tool error");
+    };
+    let missing_wait_error = tool_result_text(&content);
+    assert!(missing_wait_error.contains("task_name \"missing\" was not found"));
+    assert!(!missing_wait_error.contains(&child_id));
+    assert!(!missing_wait_error.contains(&parent_id));
+
+    let rejected_raw_wait = router
+        .invoke_tool_call(
+            "wait-raw-id",
+            THREAD_WAIT_OPERATION,
+            json!({"target_thread_id": child_id, "timeout_ms": 1}),
+        )
+        .await;
+    let CanonicalMessage::ToolResult {
+        is_error: true,
+        content,
+        ..
+    } = rejected_raw_wait
+    else {
+        panic!("expected raw-id wait input to fail decode");
+    };
+    let rejected_raw_wait_error = tool_result_text(&content);
+    assert!(rejected_raw_wait_error.contains("unknown field `target_thread_id`"));
+    assert!(!rejected_raw_wait_error.contains(&child_id));
+    assert!(!rejected_raw_wait_error.contains(&parent_id));
+
+    let cancel = router
+        .invoke_tool_call(
+            "cancel-call-1",
+            THREAD_CANCEL_OPERATION,
+            json!({"task_name": "worker"}),
+        )
+        .await;
+    let CanonicalMessage::ToolResult {
+        is_error: false,
+        content,
+        ..
+    } = cancel
+    else {
+        panic!("expected successful task_name cancellation");
+    };
+    let cancel_text = tool_result_text(&content);
+    assert!(!cancel_text.contains(&child_id));
+    assert!(!cancel_text.contains(&parent_id));
+    assert_eq!(
+        serde_json::from_str::<Value>(&cancel_text).unwrap(),
+        json!({
+            "operation": "cooldis.thread_cancel",
+            "status": "stopped",
+            "task_name": "worker"
+        })
+    );
+
+    let unavailable = router
+        .invoke_tool_call(
+            "status-call-2",
+            THREAD_STATUS_OPERATION,
+            json!({"task_name": "worker"}),
+        )
+        .await;
+    let CanonicalMessage::ToolResult {
+        is_error: true,
+        content,
+        ..
+    } = unavailable
+    else {
+        panic!("expected unavailable task_name tool error");
+    };
+    let unavailable_error = tool_result_text(&content);
+    assert!(
+        unavailable_error.ends_with("thread_status task_name \"worker\" target is not available")
+    );
+    assert!(!unavailable_error.contains(&child_id));
+    assert!(!unavailable_error.contains(&parent_id));
+
+    host.shutdown_all().await.unwrap();
+}
+
 async fn router_with_echo_operation(name: &str) -> AgentToolRouter {
     router_with_operation(name, "echo", "bytes", Vec::new()).await
 }
@@ -376,6 +588,43 @@ async fn router_with_kernel_notify_operation() -> AgentToolRouter {
                 operation_name: CHANNEL_EMIT_OPERATION.to_string(),
             },
         ])
+}
+
+async fn router_with_kernel_thread_operations(
+    host: &RuntimeHost,
+    context: ThreadContext,
+) -> AgentToolRouter {
+    let registry = Arc::new(OperationRegistry::new());
+    let package = cooldis_threads_kernel_package();
+    let dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
+        crate::KernelThreadOperationProvider::new(host.kernel_control(), context),
+    );
+    let mut registration =
+        KernelOperationRegistration::new(crate::COOLDIS_THREADS_PACKAGE, package.manifest.clone())
+            .with_capability_grants(package.capability_grants.clone())
+            .with_dispatcher(dispatcher);
+    registration.metadata.insert(
+        OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        json!(KERNEL_RUNTIME_KIND),
+    );
+    registry.register_kernel(registration).await.unwrap();
+    AgentToolRouter::new(registry)
+        .with_capability_grants(package.capability_grants)
+        .with_tool_aliases(
+            [
+                THREAD_SPAWN_OPERATION,
+                THREAD_SUBMIT_OPERATION,
+                THREAD_WAIT_OPERATION,
+                THREAD_STATUS_OPERATION,
+                THREAD_CANCEL_OPERATION,
+            ]
+            .into_iter()
+            .map(|operation| OperationToolAlias {
+                tool_name: operation.to_string(),
+                registered_name: crate::COOLDIS_THREADS_PACKAGE.to_string(),
+                operation_name: operation.to_string(),
+            }),
+        )
 }
 
 fn temp_cwd(name: &str) -> PathBuf {

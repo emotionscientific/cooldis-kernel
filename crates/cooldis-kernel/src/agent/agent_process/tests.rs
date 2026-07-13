@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn kernel_thread_operations_spawn_wait_and_report_children() {
+async fn kernel_thread_operations_spawn_and_control_child_by_task_name() {
     let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
     let root = host
         .start_thread(
@@ -31,54 +31,39 @@ async fn kernel_thread_operations_spawn_wait_and_report_children() {
         )
         .await
         .unwrap();
-    let child_thread_id =
-        parse_thread_id(spawn["thread_id"].as_str().unwrap(), "thread_id").unwrap();
     assert_eq!(spawn["operation"], "cooldis.thread_spawn");
-    assert_eq!(spawn["handle"]["kind"], "thread");
-    assert_eq!(spawn["handle"]["id"], child_thread_id.to_string());
-    assert!(spawn["dispatch_id"].as_str().is_some());
-    assert_eq!(
-        spawn["parent_thread_id"].as_str().unwrap(),
-        root.context().coordinates.thread_id.to_string()
-    );
+    assert_eq!(spawn["task_name"], "worker");
+    assert_eq!(spawn.as_object().unwrap().len(), 3);
+    let children = host.children_of(root.context().coordinates.thread_id).await;
+    assert_eq!(children.len(), 1);
 
     let wait = provider
         .invoke_json(
             THREAD_WAIT_OPERATION,
             json!({
-                "target_thread_id": child_thread_id.to_string(),
+                "task_name": "worker",
                 "timeout_ms": 1_000,
             }),
         )
         .await
         .unwrap();
     assert_eq!(wait["operation"], "cooldis.thread_wait");
-    assert_eq!(wait["timed_out"], false);
-    assert!(
-        wait["latest_output"]
-            .as_str()
-            .unwrap()
-            .contains("tool-child")
-    );
+    assert_eq!(wait["task_name"], "worker");
+    assert_eq!(wait.as_object().unwrap().len(), 3);
 
     let status = provider
-        .invoke_json(THREAD_STATUS_OPERATION, json!({}))
+        .invoke_json(THREAD_STATUS_OPERATION, json!({"task_name": "worker"}))
         .await
         .unwrap();
     assert_eq!(status["operation"], "cooldis.thread_status");
-    let child_ids = status["children"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|child| child["thread_id"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(child_ids, vec![child_thread_id.to_string()]);
+    assert_eq!(status["task_name"], "worker");
+    assert_eq!(status.as_object().unwrap().len(), 3);
 
     provider
         .invoke_json(
             THREAD_CANCEL_OPERATION,
             json!({
-                "target_thread_id": child_thread_id.to_string(),
+                "task_name": "worker",
             }),
         )
         .await
@@ -87,7 +72,7 @@ async fn kernel_thread_operations_spawn_wait_and_report_children() {
 }
 
 #[tokio::test]
-async fn kernel_thread_operations_reject_cross_session_targets() {
+async fn kernel_thread_operations_decode_errors_do_not_echo_raw_thread_id_values() {
     let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
     let root = host
         .start_thread(
@@ -96,31 +81,56 @@ async fn kernel_thread_operations_reject_cross_session_targets() {
         )
         .await
         .unwrap();
-    let other = host
-        .start_thread(
-            ThreadCoordinates::new("tenant", "user", "session-b"),
-            ThreadTopology::root(),
-        )
-        .await
-        .unwrap();
     let provider =
         KernelThreadOperationProvider::new(host.kernel_control(), root.context().clone());
+    let raw_id = ThreadId::new().to_string();
 
-    let err = provider
-        .invoke_json(
+    for (operation, arguments) in [
+        (
+            THREAD_SPAWN_OPERATION,
+            json!({
+                "task_name": "worker",
+                "message": "work",
+                "target_thread_id": raw_id,
+            }),
+        ),
+        (
+            THREAD_SUBMIT_OPERATION,
+            json!({
+                "task_name": "worker",
+                "message": "work",
+                "target_thread_id": raw_id,
+            }),
+        ),
+        (
+            THREAD_WAIT_OPERATION,
+            json!({
+                "task_name": "worker",
+                "target_thread_id": raw_id,
+            }),
+        ),
+        (
             THREAD_STATUS_OPERATION,
             json!({
-                "target_thread_id": other.context().coordinates.thread_id.to_string(),
+                "task_name": "worker",
+                "target_thread_id": raw_id,
             }),
-        )
-        .await
-        .unwrap_err();
-
-    assert!(matches!(
-        err,
-        CooldisError::ThreadScopeMismatch { thread_id, .. }
-            if thread_id == other.context().coordinates.thread_id
-    ));
+        ),
+        (
+            THREAD_CANCEL_OPERATION,
+            json!({
+                "task_name": "worker",
+                "target_thread_id": raw_id,
+            }),
+        ),
+    ] {
+        let err = provider
+            .invoke_json(operation, arguments)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown field `target_thread_id`"));
+        assert!(!err.to_string().contains(&raw_id));
+    }
     host.shutdown_all().await.unwrap();
 }
 
@@ -136,8 +146,15 @@ async fn retried_thread_submit_dispatch_enqueues_one_turn() {
         .unwrap();
     let provider =
         KernelThreadOperationProvider::new(host.kernel_control(), root.context().clone());
+    provider
+        .invoke_json(
+            THREAD_SPAWN_OPERATION,
+            json!({"task_name": "worker", "message": "echo initial"}),
+        )
+        .await
+        .unwrap();
     let arguments = json!({
-        "target_thread_id": root.context().coordinates.thread_id.to_string(),
+        "task_name": "worker",
         "message": "echo submit-once",
         "dispatch_id": "submit-dispatch-1",
     });
@@ -151,28 +168,42 @@ async fn retried_thread_submit_dispatch_enqueues_one_turn() {
         .await
         .unwrap();
 
-    assert_eq!(first["dispatch_id"], "submit-dispatch-1");
-    assert_eq!(retry["dispatch_id"], "submit-dispatch-1");
-    assert_eq!(first["turn_id"], retry["turn_id"]);
-    assert_eq!(first["interaction_id"], retry["interaction_id"]);
-    tokio::task::yield_now().await;
-    let session = root.session_context().await.unwrap();
-    assert_eq!(
-        session
-            .messages
-            .iter()
-            .filter(|message| matches!(
-                message,
-                crate::CanonicalMessage::User { content, .. }
-                    if content.iter().any(|content| matches!(
-                        content,
-                        crate::CanonicalContent::Text { text, .. }
-                            if text == "echo submit-once"
-                    ))
-            ))
-            .count(),
-        1
-    );
+    assert_eq!(first, retry);
+    assert_eq!(first["operation"], "cooldis.thread_submit");
+    assert_eq!(first["task_name"], "worker");
+    assert_eq!(first.as_object().unwrap().len(), 3);
+    let child = host
+        .children_of(root.context().coordinates.thread_id)
+        .await
+        .pop()
+        .unwrap();
+    let submitted_count = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let session = child.session_context().await.unwrap();
+            let count = session
+                .messages
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        crate::CanonicalMessage::User { content, .. }
+                            if content.iter().any(|content| matches!(
+                                content,
+                                crate::CanonicalContent::Text { text, .. }
+                                    if text == "echo submit-once"
+                            ))
+                    )
+                })
+                .count();
+            if count > 0 {
+                break count;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(submitted_count, 1);
 
     host.shutdown_all().await.unwrap();
 }
