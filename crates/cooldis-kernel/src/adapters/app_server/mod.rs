@@ -5,21 +5,22 @@ use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindOverrides,
     AgentManifestBoundThread, AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestPlacementBinding, AgentManifestProviderSurface, AgentManifestSkillPackageBinding,
-    AgentRecordRef, AgentRuntime, AgentRuntimeFactory, AgentToolRouter,
-    AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage,
-    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CanonicalStopReason,
-    CanonicalUsage, CapsuleBindingResolutionRequest, CapsuleBindingScope, CooldisError,
-    CooldisResult, CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence, EventStore,
-    EventStreamId, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
+    AgentManifestPlacementBinding, AgentManifestProviderSurface,
+    AgentManifestResolvedWorkspaceMount, AgentManifestSkillPackageBinding,
+    AgentManifestWorkspaceBinding, AgentRecordRef, AgentRuntime, AgentRuntimeFactory,
+    AgentToolRouter, AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter, CanonicalContent,
+    CanonicalMessage, CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory,
+    CanonicalStopReason, CanonicalUsage, CapsuleBindingResolutionRequest, CapsuleBindingScope,
+    CooldisError, CooldisResult, CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence,
+    EventStore, EventStreamId, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
     LlmProviderAuthContext, LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue,
     LlmProviderRecord, LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry,
     LocalPluginCatalog, LocalPluginCatalogRecord, LocalSkillRegistry, MandateCatchUpPolicy,
     MandateSchedulePayload, McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport,
     McpToolUniverseDiscoverer, MountedToolUniverse, OPENAI_COMPATIBLE_DEFAULT_MODEL,
     OpenAIChatCompletionsAdapter, OpenAIReasoningSummary, OpenAIResponsesAdapter,
-    OperationRegistry, OperationToolAlias, ProviderAbiProjection, ProviderApi, ProviderAuth,
-    ProviderCapabilityRecord, ProviderClient, ProviderEndpoint, ProviderHttpClient,
+    OperationRegistry, OperationToolAlias, PluginMount, ProviderAbiProjection, ProviderApi,
+    ProviderAuth, ProviderCapabilityRecord, ProviderClient, ProviderEndpoint, ProviderHttpClient,
     ProviderRequest, ProviderRequestMode, ProviderResponse, ProviderResult,
     ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind, RuntimeStore,
     RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind, SecretStoreError,
@@ -82,6 +83,9 @@ pub use connection::{
 use default_manifest::ensure_default_manifest_published;
 use subscriptions::AppServerSubscriptions;
 use threads::{AppServerState, normalize_registry_roots};
+pub(crate) use threads::{
+    active_manifest_receipt_payloads, recover_unwitnessed_workspace_metadata_as_unbound,
+};
 
 pub const APP_SERVER_LOCAL_PROVIDER: &str = "local_offline";
 pub const APP_SERVER_LOCAL_MODEL: &str = "echo";
@@ -121,6 +125,7 @@ const THREAD_AGENT_MODEL_ID_METADATA: &str = "cooldis.agent.model_id";
 const THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA: &str = "cooldis.agent.system_instruction";
 const THREAD_AGENT_RUNTIME_OVERRIDES_METADATA: &str = "cooldis.agent.runtime_overrides";
 const THREAD_AGENT_PLACEMENT_METADATA: &str = "cooldis.agent.placement";
+pub(crate) const THREAD_AGENT_WORKSPACE_METADATA: &str = "cooldis.agent.workspace";
 const THREAD_AGENT_RUNTIME_STREAMING_METADATA: &str = "cooldis.agent.runtime.streaming";
 const THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA: &str =
     "cooldis.agent.runtime.compaction.auto_at_text_bytes";
@@ -198,6 +203,8 @@ pub struct CooldisAppServerConfig {
     pub skill_registry_root: PathBuf,
     /// Deployment placement used when a bind surface does not override it.
     pub default_placement: AgentManifestPlacementBinding,
+    /// Host workspace used when a requiring manifest has no bind override.
+    pub default_workspace: Option<AgentManifestWorkspaceBinding>,
     /// Generation-local capability bit. The daemon flips this only after the
     /// configured sync listener has bound successfully.
     pub remote_event_store_served: Arc<AtomicBool>,
@@ -224,6 +231,7 @@ impl CooldisAppServerConfig {
             blob_registry_root: PathBuf::from(DEFAULT_BLOB_REGISTRY_ROOT),
             skill_registry_root: PathBuf::from(DEFAULT_SKILL_REGISTRY_ROOT),
             default_placement: AgentManifestPlacementBinding::default(),
+            default_workspace: None,
             remote_event_store_served: Arc::new(AtomicBool::new(false)),
             console_assets: None,
         }
@@ -483,6 +491,7 @@ struct CooldisAppServerInner {
     blob_registry_root: PathBuf,
     skill_registry_root: PathBuf,
     default_placement: AgentManifestPlacementBinding,
+    default_workspace: Option<AgentManifestWorkspaceBinding>,
     remote_event_store_served: Arc<AtomicBool>,
     console_assets: Option<ConsoleAssetConfig>,
     cwd: PathBuf,
@@ -715,6 +724,7 @@ impl CooldisAppServer {
                 blob_registry_root: config.blob_registry_root,
                 skill_registry_root: config.skill_registry_root,
                 default_placement: config.default_placement,
+                default_workspace: config.default_workspace,
                 remote_event_store_served: config.remote_event_store_served,
                 console_assets: config.console_assets,
                 cwd: config.cwd,
@@ -1536,6 +1546,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         AgentManifestPlacementBinding::default(),
+        None,
         Arc::new(AtomicBool::new(false)),
     )
 }
@@ -1562,6 +1573,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
         Some(config.skill_registry_root.clone()),
         Some(config.cwd.clone()),
         config.default_placement.clone(),
+        config.default_workspace.clone(),
         Arc::clone(&config.remote_event_store_served),
     )
 }
@@ -1580,6 +1592,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     skill_registry_root: Option<PathBuf>,
     cwd: Option<PathBuf>,
     default_placement: AgentManifestPlacementBinding,
+    default_workspace: Option<AgentManifestWorkspaceBinding>,
     remote_event_store_served: Arc<AtomicBool>,
 ) -> Arc<dyn crate::AgentRuntimeFactory> {
     // lexicon-allow: capsule - existing app-server runtime factory name
@@ -1597,6 +1610,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         skill_registry_root,
         cwd,
         default_placement,
+        default_workspace,
         remote_event_store_served,
     })
 }

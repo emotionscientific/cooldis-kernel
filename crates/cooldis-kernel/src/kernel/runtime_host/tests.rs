@@ -575,6 +575,7 @@ impl AgentRuntime for EchoRuntime {
 struct AdmissionTestStore {
     inner: InMemorySessionStore,
     admission_barrier: Option<Arc<AdmissionAppendBarrier>>,
+    manifest_barrier: Option<Arc<AdmissionAppendBarrier>>,
     select_branch_calls: Arc<AtomicUsize>,
 }
 
@@ -583,6 +584,16 @@ impl AdmissionTestStore {
         Self {
             inner: InMemorySessionStore::new(),
             admission_barrier: Some(admission_barrier),
+            manifest_barrier: None,
+            select_branch_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn blocking_manifest(manifest_barrier: Arc<AdmissionAppendBarrier>) -> Self {
+        Self {
+            inner: InMemorySessionStore::new(),
+            admission_barrier: None,
+            manifest_barrier: Some(manifest_barrier),
             select_branch_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -591,6 +602,7 @@ impl AdmissionTestStore {
         Self {
             inner: InMemorySessionStore::new(),
             admission_barrier: None,
+            manifest_barrier: None,
             select_branch_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -687,6 +699,12 @@ impl EventStore for AdmissionTestStore {
             .iter()
             .any(|record| record.kind == EventKind::AdmissionDecided);
         if appends_admission && let Some(barrier) = &self.admission_barrier {
+            barrier.arrive_and_wait().await;
+        }
+        let appends_manifest_bind = records
+            .iter()
+            .any(|record| record.kind == EventKind::ManifestBindCompleted);
+        if appends_manifest_bind && let Some(barrier) = &self.manifest_barrier {
             barrier.arrive_and_wait().await;
         }
         self.inner.append_events(stream_id, records).await
@@ -4167,6 +4185,122 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
     assert_eq!(
         placement_events[0].payload["snapshot_id"],
         "snapshot-placement"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_manifest_receipt_caller_cannot_leave_a_half_witnessed_workspace() {
+    let barrier = Arc::new(AdmissionAppendBarrier::default());
+    let store = Arc::new(AdmissionTestStore::blocking_manifest(barrier.clone()));
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "workspace-bind-cancelled"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let coordinates = thread.context().coordinates.clone();
+    let recorder = tokio::spawn(async move {
+        thread
+            .record_manifest_receipts(
+                serde_json::json!({
+                    "ref_uri": "agent://workspace@0.1.0",
+                    "manifest_hash": "snapshot-workspace",
+                    "source_hash": "sha256:source"
+                }),
+                serde_json::json!({
+                    "ref_uri": "agent://workspace@0.1.0",
+                    "manifest_hash": "snapshot-workspace",
+                    "placement": {"target": "local"},
+                    "workspace": {
+                        "guest_path": "/work",
+                        "host_path": "/tmp/workspace-bind-cancelled",
+                        "mode": "rw"
+                    }
+                }),
+            )
+            .await
+    });
+
+    barrier.wait_for_entries(1).await;
+    recorder.abort();
+    assert!(recorder.await.unwrap_err().is_cancelled());
+    barrier.release();
+
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let events = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let events = store.read_events(&stream_id, None).await.unwrap();
+            if events
+                .iter()
+                .any(|event| event.kind == EventKind::ManifestBindCompleted)
+            {
+                break events;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shielded manifest append did not finish after caller cancellation");
+    let bind = events
+        .iter()
+        .find(|event| event.kind == EventKind::ManifestBindCompleted)
+        .unwrap();
+    assert_eq!(bind.payload["workspace"]["guest_path"], "/work");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == EventKind::PlacementDecision),
+        "the placement witness must commit in the same append"
+    );
+}
+
+#[tokio::test]
+async fn remote_manifest_receipt_rejects_a_workspace_before_witnessing_it() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "remote-workspace-bind"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let coordinates = thread.context().coordinates.clone();
+
+    let error = thread
+        .record_remote_manifest_receipts(
+            serde_json::json!({
+                "ref_uri": "agent://workspace@0.1.0",
+                "manifest_hash": "snapshot-workspace",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "ref_uri": "agent://workspace@0.1.0",
+                "manifest_hash": "snapshot-workspace",
+                "placement": {
+                    "target": "remote",
+                    "executor_ref": "executor://cluster/default"
+                },
+                "workspace": {
+                    "guest_path": "/work",
+                    "host_path": "/tmp/remote-workspace-bind",
+                    "mode": "rw"
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("require local placement"));
+    assert!(
+        store
+            .read_events(&EventStreamId::for_thread(&coordinates), None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != EventKind::ManifestBindCompleted)
     );
 }
 

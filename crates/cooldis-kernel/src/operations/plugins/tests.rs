@@ -44,6 +44,32 @@ impl SecretResolver for StaticSecretResolver {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn pinned_host_mount_rejects_repointing_after_bind_resolution() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir("plugin-pinned-host-root");
+    let selected = root.join("selected");
+    let original = root.join("original");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&selected).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let witnessed = std::fs::canonicalize(&selected).unwrap();
+    std::fs::rename(&selected, &original).unwrap();
+    symlink(&outside, &selected).unwrap();
+    let vfs = CooldisVfs::new(Arc::new(InMemoryFs::new()));
+
+    let error = mount_plugin_filesystems(
+        &vfs,
+        vec![PluginMount::pinned_host_read_write("/work", witnessed)],
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("witnessed canonical root"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn selected_records_resolve_secrets_from_filtered_manifest() {
     let root = temp_dir("plugin-selected-secret-filter");

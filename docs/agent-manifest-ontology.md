@@ -6,7 +6,7 @@ An agent manifest is a declarative composition of versioned, publishable
 artifacts. It should describe what an agent is allowed to be and do, while the
 thread records what actually happened.
 
-Typed V1 schema note: `crates/cooldis-kernel/src/agent/manifest_schema.rs` is
+Typed V1 schema note: `crates/cooldis-agent/src/manifest_schema.rs` is
 the source of truth for the shipped V1 manifest shape. The registry layer reads
 that typed form and stores publish records; future design notes should map back
 to the Rust schema before changing accepted keys.
@@ -388,6 +388,25 @@ resolved dependency graph
 
 Nix belongs here as an optional builder/provenance backend. It should not be the
 canonical manifest language.
+
+### Workspace Requirement
+
+A manifest may declare one abstract host-workspace requirement without naming a
+machine-local host path:
+
+```toml
+[workspace]
+guest_path = "/work"
+min_mode = "rw" # optional; defaults to "ro"
+```
+
+`guest_path` is an absolute, normalized virtual path. `/` and the `/skills`
+subtree are reserved. `min_mode` is the least authority the agent needs. The operator's
+daemon default or bind-time RPC override supplies the concrete host directory
+and `ro`/`rw` mode on the binding plane. The override wins over the default;
+the bind fails if either side is missing or if an undeclared mount is supplied.
+The effective canonical host path, guest path, and mode live in the bind receipt
+and thread lifecycle metadata, never in the content-addressed manifest.
 
 ### Runtime Defaults
 

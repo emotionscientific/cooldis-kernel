@@ -85,6 +85,53 @@ impl ThreadLifecycleSink for AppServerThreadLifecycleSink {
     }
 }
 
+pub(crate) async fn recover_unwitnessed_workspace_metadata_as_unbound(
+    supervisor: &CooldisSupervisor,
+    record: &mut ThreadLifecycleRecord,
+) -> CooldisResult<()> {
+    let Some(raw) = record.metadata.get(THREAD_AGENT_WORKSPACE_METADATA) else {
+        return Ok(());
+    };
+    let stored = match serde_json::from_str::<AgentManifestResolvedWorkspaceMount>(raw) {
+        Ok(stored) => stored,
+        Err(err) => {
+            eprintln!(
+                "cooldis recovered invalid stored manifest workspace as unbound for thread {}: {err}",
+                record.coordinates.thread_id
+            );
+            record.metadata.remove(THREAD_AGENT_WORKSPACE_METADATA);
+            return Ok(());
+        }
+    };
+    let runtime_store = supervisor
+        .runtime_store(&record.coordinates.tenant_id)
+        .await?;
+    let witnessed = match crate::active_manifest_bind_receipt(
+        runtime_store.as_ref(),
+        &record.coordinates,
+    )
+    .await
+    {
+        Ok(Some((_, receipt))) => receipt.workspace,
+        Ok(None) => None,
+        Err(err) => {
+            eprintln!(
+                "cooldis could not verify stored manifest workspace for thread {}: {err}",
+                record.coordinates.thread_id
+            );
+            None
+        }
+    };
+    if witnessed.as_ref() != Some(&stored) {
+        eprintln!(
+            "cooldis recovered unwitnessed stored manifest workspace as unbound for thread {}",
+            record.coordinates.thread_id
+        );
+        record.metadata.remove(THREAD_AGENT_WORKSPACE_METADATA);
+    }
+    Ok(())
+}
+
 impl CooldisAppServer {
     pub(super) async fn load_threads_from_metadata(&self) -> CooldisResult<()> {
         let records = self
@@ -93,7 +140,9 @@ impl CooldisAppServer {
             .list_thread_lifecycle_for_user(&self.inner.tenant_id, &self.inner.user_id)
             .await
             .map_err(metadata_store_error)?;
-        for record in records {
+        for mut record in records {
+            recover_unwitnessed_workspace_metadata_as_unbound(&self.inner.supervisor, &mut record)
+                .await?;
             if !is_loadable_lifecycle_status(record.status)
                 || record
                     .metadata
@@ -155,13 +204,16 @@ impl CooldisAppServer {
         thread_id: &str,
         parsed: ThreadId,
     ) -> Result<RuntimeThreadHandle, JsonRpcErrorError> {
-        let record = self
+        let mut record = self
             .inner
             .metadata_store
             .get_thread_lifecycle(parsed)
             .await
             .map_err(metadata_store_jsonrpc_error)?
             .ok_or_else(|| thread_not_found(thread_id))?;
+        recover_unwitnessed_workspace_metadata_as_unbound(&self.inner.supervisor, &mut record)
+            .await
+            .map_err(internal_error)?;
         if record.coordinates.tenant_id != self.inner.tenant_id
             || record.coordinates.user_id != self.inner.user_id
             || !is_loadable_lifecycle_status(record.status)
@@ -236,6 +288,23 @@ impl CooldisAppServer {
                     AgentManifestPlacementBinding::default()
                 }
             });
+        let stored_workspace = metadata
+            .get(THREAD_AGENT_WORKSPACE_METADATA)
+            .and_then(|value| {
+                match serde_json::from_str::<AgentManifestResolvedWorkspaceMount>(value) {
+                    Ok(workspace) => Some(workspace),
+                    Err(err) => {
+                        eprintln!(
+                            "cooldis app-server recovered invalid stored manifest workspace as unbound for thread {}: {err}",
+                            handle.context().coordinates.thread_id
+                        );
+                        None
+                    }
+                }
+            });
+        let workspace_binding = stored_workspace
+            .as_ref()
+            .map(AgentManifestResolvedWorkspaceMount::binding);
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         if &record.manifest_hash != expected_hash {
@@ -273,9 +342,17 @@ impl CooldisAppServer {
             &overrides,
             None,
             placement.as_ref(),
+            None,
+            workspace_binding.as_ref(),
             self.remote_event_store_served(),
         )
         .await?;
+        if bound.bind_receipt.workspace != stored_workspace {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored manifest workspace binding drifted for thread {}",
+                handle.context().coordinates.thread_id
+            )));
+        }
         record_bound_agent_receipts(handle, &bound).await.map(Some)
     }
 
@@ -307,6 +384,7 @@ impl CooldisAppServer {
                 &AgentManifestModelProfileSelection::default(),
                 &AgentManifestBindOverrides::default(),
                 None,
+                None,
             )
             .await?;
         require_local_binding_surface("daemon route", &bound)?;
@@ -324,6 +402,7 @@ impl CooldisAppServer {
         model_selection: &AgentManifestModelProfileSelection,
         overrides: &AgentManifestBindOverrides,
         placement_override: Option<&AgentManifestPlacementBinding>,
+        workspace_override: Option<&AgentManifestWorkspaceBinding>,
     ) -> CooldisResult<AgentManifestBoundThread> {
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
@@ -343,6 +422,8 @@ impl CooldisAppServer {
             overrides,
             Some(&self.inner.default_placement),
             placement_override,
+            self.inner.default_workspace.as_ref(),
+            workspace_override,
             self.remote_event_store_served(),
         )
         .await
@@ -1231,6 +1312,15 @@ pub(super) fn append_bound_agent_metadata(
         })?;
         metadata.insert(THREAD_AGENT_PLACEMENT_METADATA.to_string(), encoded);
     }
+    if let Some(workspace) = &bound.bind_receipt.workspace {
+        let encoded = serde_json::to_string(workspace).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest workspace binding: {err}"),
+            )
+        })?;
+        metadata.insert(THREAD_AGENT_WORKSPACE_METADATA.to_string(), encoded);
+    }
     if let Some(instruction) = manifest_tool_use_system_instruction(bound) {
         metadata.insert(
             THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
@@ -1411,6 +1501,97 @@ pub(super) async fn record_bound_agent_receipts(
     Ok(manifest_events)
 }
 
+pub(crate) async fn active_manifest_receipt_payloads(
+    handle: &RuntimeThreadHandle,
+) -> CooldisResult<Option<(Value, Value)>> {
+    let events = handle.read_thread_events(None).await?;
+    let Some(bind) = events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted)
+        .max_by_key(|event| event.sequence.get())
+    else {
+        return Ok(None);
+    };
+    let compile_id = bind.provenance.source_event_ids.first().ok_or_else(|| {
+        CooldisError::History(
+            "active manifest bind receipt does not witness a compile receipt".to_string(),
+        )
+    })?;
+    let compile = events
+        .iter()
+        .find(|event| {
+            event.id == *compile_id && event.kind == crate::EventKind::ManifestCompileCompleted
+        })
+        .ok_or_else(|| {
+            CooldisError::History(
+                "active manifest bind receipt references an unavailable compile receipt"
+                    .to_string(),
+            )
+        })?;
+    Ok(Some((compile.payload.clone(), bind.payload.clone())))
+}
+
+impl CooldisAppServer {
+    pub(super) async fn witness_bound_agent_and_persist_lifecycle(
+        &self,
+        handle: RuntimeThreadHandle,
+        bound: AgentManifestBoundThread,
+    ) -> Result<(), JsonRpcErrorError> {
+        let app = self.clone();
+        self.witness_and_persist_lifecycle(handle, move |handle| async move {
+            record_bound_agent_receipts(&handle, &bound).await?;
+            app.persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(super) async fn witness_manifest_payloads_and_persist_lifecycle(
+        &self,
+        handle: RuntimeThreadHandle,
+        compile_payload: Value,
+        bind_payload: Value,
+    ) -> Result<(), JsonRpcErrorError> {
+        let app = self.clone();
+        self.witness_and_persist_lifecycle(handle, move |handle| async move {
+            handle
+                .record_manifest_receipts(compile_payload, bind_payload)
+                .await?;
+            app.persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(super) async fn witness_and_persist_lifecycle<F, Fut>(
+        &self,
+        handle: RuntimeThreadHandle,
+        operation: F,
+    ) -> Result<(), JsonRpcErrorError>
+    where
+        F: FnOnce(RuntimeThreadHandle) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = CooldisResult<()>> + Send + 'static,
+    {
+        let supervisor = self.inner.supervisor.clone();
+        let coordinates = handle.context().coordinates.clone();
+        tokio::spawn(async move {
+            if let Err(err) = operation(handle.clone()).await {
+                let _ = supervisor.shutdown_thread_at(&coordinates).await;
+                return Err(internal_error(err));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|err| {
+            internal_error(CooldisError::RuntimeFactory(format!(
+                "manifest lifecycle witness task failed: {err}"
+            )))
+        })?
+    }
+}
+
 fn kernel_thread_spawn_agent_binding(
     bound: &AgentManifestBoundThread,
     cwd_root: &Path,
@@ -1523,6 +1704,22 @@ pub(super) fn thread_manifest_operation_bindings(
     })
 }
 
+pub(super) fn thread_manifest_workspace_mount(
+    context: &ThreadContext,
+) -> CooldisResult<Option<AgentManifestResolvedWorkspaceMount>> {
+    context
+        .metadata
+        .get(THREAD_AGENT_WORKSPACE_METADATA)
+        .map(|raw| {
+            serde_json::from_str::<AgentManifestResolvedWorkspaceMount>(raw).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "thread manifest workspace binding is invalid: {err}"
+                ))
+            })
+        })
+        .transpose()
+}
+
 pub(super) fn thread_manifest_tool_universes(
     context: &ThreadContext,
 ) -> CooldisResult<Vec<ToolUniverseBinding>> {
@@ -1566,6 +1763,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) skill_registry_root: Option<PathBuf>,
     pub(super) cwd: Option<PathBuf>,
     pub(super) default_placement: AgentManifestPlacementBinding,
+    pub(super) default_workspace: Option<AgentManifestWorkspaceBinding>,
     pub(super) remote_event_store_served: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1641,8 +1839,10 @@ pub(super) struct AppServerThreadSpawnAgentResolver {
     cwd: PathBuf,
     provider_surface: AgentManifestProviderSurface,
     default_placement: AgentManifestPlacementBinding,
+    default_workspace: Option<AgentManifestWorkspaceBinding>,
     remote_event_store_served: Arc<std::sync::atomic::AtomicBool>,
     placement_override: Option<AgentManifestPlacementBinding>,
+    workspace_override: Option<AgentManifestWorkspaceBinding>,
 }
 
 #[async_trait::async_trait]
@@ -1675,6 +1875,8 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             &AgentManifestBindOverrides::default(),
             Some(&self.default_placement),
             self.placement_override.as_ref(),
+            self.default_workspace.as_ref(),
+            self.workspace_override.as_ref(),
             self.remote_event_store_served
                 .load(std::sync::atomic::Ordering::Acquire),
         )
@@ -1730,6 +1932,7 @@ impl CooldisAppServer {
     pub(super) async fn app_server_thread_spawn_agent_resolver(
         &self,
         placement_override: Option<AgentManifestPlacementBinding>,
+        workspace_override: Option<AgentManifestWorkspaceBinding>,
     ) -> CooldisResult<AppServerThreadSpawnAgentResolver> {
         Ok(AppServerThreadSpawnAgentResolver {
             agent_registry_root: self.inner.agent_registry_root.clone(),
@@ -1741,8 +1944,10 @@ impl CooldisAppServer {
             cwd: self.inner.cwd.clone(),
             provider_surface: self.agent_manifest_provider_surface().await?,
             default_placement: self.inner.default_placement.clone(),
+            default_workspace: self.inner.default_workspace.clone(),
             remote_event_store_served: Arc::clone(&self.inner.remote_event_store_served),
             placement_override,
+            workspace_override,
         })
     }
 }
@@ -1763,8 +1968,10 @@ impl CapsuleBindingRuntimeFactory {
             cwd,
             provider_surface: provider_surface_for_runtime_config(&self.config),
             default_placement: self.default_placement.clone(),
+            default_workspace: self.default_workspace.clone(),
             remote_event_store_served: Arc::clone(&self.remote_event_store_served),
             placement_override: None,
+            workspace_override: None,
         })
     }
 
@@ -1822,17 +2029,27 @@ impl CapsuleBindingRuntimeFactory {
         context: &ThreadContext,
     ) -> CooldisResult<Option<ThreadOperationCatalog>> {
         let manifest_operation_bindings = thread_manifest_operation_bindings(context)?;
-        if manifest_operation_bindings.is_empty() {
+        let workspace = thread_manifest_workspace_mount(context)?;
+        if manifest_operation_bindings.is_empty() && workspace.is_none() {
             return Ok(None);
         }
+        // Workspace-only threads do not read an operation registry, but the
+        // shared catalog remains the single assembly path for their VFS.
         // lexicon-allow: capsule - existing app-server config field
-        let Some(registry_root) = &self.capsule_bindings.registry_root else {
-            // lexicon-allow: capsule - existing app-server config error text
-            return Err(CooldisError::RuntimeFactory(
-                "capsule bindings require a registry root".to_string(), // lexicon-allow: capsule - existing app-server config error text
-            ));
+        let registry_root = match &self.capsule_bindings.registry_root {
+            Some(registry_root) => registry_root.clone(),
+            None if manifest_operation_bindings.is_empty() => {
+                self.cwd.clone().unwrap_or_else(|| PathBuf::from("."))
+            }
+            // lexicon-allow: capsule - existing app-server config field
+            None => {
+                // lexicon-allow: capsule - existing app-server config error text
+                return Err(CooldisError::RuntimeFactory(
+                    "capsule bindings require a registry root".to_string(), // lexicon-allow: capsule - existing app-server config error text
+                ));
+            }
         };
-        let registry = LocalOperationRegistry::new(registry_root);
+        let registry = LocalOperationRegistry::new(&registry_root);
         let mut records = Vec::new();
         let mut tool_aliases = Vec::new();
         for binding in manifest_operation_bindings {
@@ -1868,17 +2085,27 @@ impl CapsuleBindingRuntimeFactory {
             };
             records.push(record);
         }
+        let mounts = workspace
+            .into_iter()
+            .map(|workspace| match workspace.mode {
+                crate::AgentManifestWorkspaceMode::ReadOnly => {
+                    PluginMount::pinned_host_read_only(workspace.guest_path, workspace.host_path)
+                }
+                crate::AgentManifestWorkspaceMode::ReadWrite => {
+                    PluginMount::pinned_host_read_write(workspace.guest_path, workspace.host_path)
+                }
+            })
+            .collect();
         let catalog = if let Some(secret_resolver) = &self.secret_resolver {
             LocalPluginCatalog::load_selected_records_with_secret_resolver(
                 registry_root.clone(),
                 records,
-                Vec::new(),
+                mounts,
                 Arc::clone(secret_resolver),
             )
             .await?
         } else {
-            LocalPluginCatalog::load_selected_records(registry_root.clone(), records, Vec::new())
-                .await?
+            LocalPluginCatalog::load_selected_records(registry_root, records, mounts).await?
         };
         Ok(Some(ThreadOperationCatalog {
             registry: catalog.operation_registry(),

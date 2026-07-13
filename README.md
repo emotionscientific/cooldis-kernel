@@ -79,6 +79,8 @@ The V1 work is focused on runtime primitives:
 - blob resource publication and folder-first prompt lowering;
 - skill-package publication, manifest binding, static indexes, and read-only
   VFS bodies;
+- manifest-declared workspace requirements with operator-bound read-only or
+  read-write host directories mounted through the virtual VFS;
 - custom Wasm coupling execution, macro scaffolding, and offline replay for
   declared event folds;
 - local runtime execution through provider, virtual bash, and Wasm paths;

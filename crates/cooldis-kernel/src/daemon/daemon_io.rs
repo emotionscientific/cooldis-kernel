@@ -1285,7 +1285,7 @@ impl CooldisDaemonIoBridge {
                         if let Ok(handle) = self.supervisor.get_thread_at(coordinates).await {
                             return Ok(handle);
                         }
-                        let lifecycle = match reconstructed {
+                        let mut lifecycle = match reconstructed {
                             Some(lifecycle) => lifecycle,
                             None => {
                                 match self
@@ -1346,6 +1346,12 @@ impl CooldisDaemonIoBridge {
                                 }
                             }
                         };
+                        crate::adapters::app_server::recover_unwitnessed_workspace_metadata_as_unbound(
+                            &self.supervisor,
+                            &mut lifecycle,
+                        )
+                        .await
+                        .map_err(ThreadHandleResolutionError::LifecycleLoad)?;
                         match self.supervisor.load_thread_from_lifecycle(lifecycle).await {
                             Ok(handle) => return Ok(handle),
                             Err(CooldisError::ThreadAlreadyExists(_)) => {
@@ -2918,21 +2924,9 @@ impl CooldisDaemonIoBridge {
             (selected, handle)
         } else {
             let handle = self
-                .supervisor
-                .start_thread(request())
+                .start_thread_with_manifest_witness(request(), None, agent_binding)
                 .await
                 .map_err(cooldis_bridge_error)?;
-            if let Some(binding) = agent_binding
-                && let Err(err) = handle
-                    .record_manifest_receipts(binding.compile_receipt, binding.bind_receipt)
-                    .await
-            {
-                let _ = self
-                    .supervisor
-                    .shutdown_thread_at(&handle.context().coordinates)
-                    .await;
-                return Err(cooldis_bridge_error(err));
-            }
             (handle.context().coordinates.clone(), handle)
         };
         self.threads
@@ -2940,6 +2934,38 @@ impl CooldisDaemonIoBridge {
             .await
             .insert(scope_key, coordinates.clone());
         Ok((coordinates, handle))
+    }
+
+    async fn start_thread_with_manifest_witness(
+        &self,
+        request: ThreadStartRequest,
+        reserved_thread_id: Option<ThreadId>,
+        agent_binding: Option<KernelThreadSpawnAgentBinding>,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        let supervisor = self.supervisor.clone();
+        tokio::spawn(async move {
+            let handle = match reserved_thread_id {
+                Some(thread_id) => supervisor.start_thread_with_id(request, thread_id).await?,
+                None => supervisor.start_thread(request).await?,
+            };
+            if let Some(binding) = agent_binding
+                && let Err(err) = handle
+                    .record_manifest_receipts(binding.compile_receipt, binding.bind_receipt)
+                    .await
+            {
+                let _ = supervisor
+                    .shutdown_thread_at(&handle.context().coordinates)
+                    .await;
+                return Err(err);
+            }
+            Ok(handle)
+        })
+        .await
+        .map_err(|err| {
+            CooldisError::RuntimeExecution(format!(
+                "daemon thread manifest witness task failed: {err}"
+            ))
+        })?
     }
 
     async fn start_or_adopt_reserved_root(
@@ -2965,24 +2991,14 @@ impl CooldisDaemonIoBridge {
                     .map_err(|err| cooldis_bridge_error(err.into_inner()));
             }
             match self
-                .supervisor
-                .start_thread_with_id(request.clone(), coordinates.thread_id)
+                .start_thread_with_manifest_witness(
+                    request.clone(),
+                    Some(coordinates.thread_id),
+                    agent_binding.cloned(),
+                )
                 .await
             {
-                Ok(handle) => {
-                    if let Some(binding) = agent_binding
-                        && let Err(err) = handle
-                            .record_manifest_receipts(
-                                binding.compile_receipt.clone(),
-                                binding.bind_receipt.clone(),
-                            )
-                            .await
-                    {
-                        let _ = self.supervisor.shutdown_thread_at(coordinates).await;
-                        return Err(cooldis_bridge_error(err));
-                    }
-                    return Ok(handle);
-                }
+                Ok(handle) => return Ok(handle),
                 Err(CooldisError::ThreadAlreadyExists(existing))
                     if existing == coordinates.thread_id =>
                 {
@@ -3268,6 +3284,9 @@ impl CooldisDaemonIoBridge {
                 (child_handle, spawned, true)
             }
             None => {
+                let inherited_manifest_receipts = self
+                    .inherited_workspace_manifest_receipts(parent_handle)
+                    .await?;
                 let checkpoint = self
                     .supervisor
                     .create_checkpoint_at(
@@ -3279,10 +3298,10 @@ impl CooldisDaemonIoBridge {
                     .await
                     .map_err(cooldis_bridge_error)?;
                 let child_handle = self
-                    .supervisor
-                    .fork_thread_from_checkpoint_with_id_at(
+                    .fork_thread_with_manifest_witness(
                         checkpoint.clone(),
                         reserved_child_thread_id,
+                        inherited_manifest_receipts,
                     )
                     .await
                     .map_err(cooldis_bridge_error)?;
@@ -3380,6 +3399,79 @@ impl CooldisDaemonIoBridge {
         );
         receipt.thread_id = Some(child_coordinates.thread_id.to_string());
         Ok((receipt, spawned))
+    }
+
+    async fn inherited_workspace_manifest_receipts(
+        &self,
+        parent: &RuntimeThreadHandle,
+    ) -> IoResult<Option<(Value, Value)>> {
+        let Some(raw) = parent
+            .context()
+            .metadata
+            .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
+        else {
+            return Ok(None);
+        };
+        let stored = serde_json::from_str::<crate::AgentManifestResolvedWorkspaceMount>(raw)
+            .map_err(|err| {
+                IoError::Bridge(format!("parent workspace metadata is invalid: {err}"))
+            })?;
+        let (compile_payload, bind_payload) =
+            crate::adapters::app_server::active_manifest_receipt_payloads(parent)
+                .await
+                .map_err(cooldis_bridge_error)?
+                .ok_or_else(|| {
+                    IoError::Bridge(
+                        "parent workspace metadata has no durable manifest bind witness"
+                            .to_string(),
+                    )
+                })?;
+        let witnessed = bind_payload
+            .get("workspace")
+            .cloned()
+            .map(serde_json::from_value::<crate::AgentManifestResolvedWorkspaceMount>)
+            .transpose()
+            .map_err(|err| {
+                IoError::Bridge(format!("parent workspace bind witness is invalid: {err}"))
+            })?;
+        if witnessed.as_ref() != Some(&stored) {
+            return Err(IoError::Bridge(
+                "parent workspace metadata disagrees with its durable manifest bind witness"
+                    .to_string(),
+            ));
+        }
+        Ok(Some((compile_payload, bind_payload)))
+    }
+
+    async fn fork_thread_with_manifest_witness(
+        &self,
+        checkpoint: ThreadCheckpoint,
+        child_thread_id: ThreadId,
+        manifest_receipts: Option<(Value, Value)>,
+    ) -> CooldisResult<RuntimeThreadHandle> {
+        let supervisor = self.supervisor.clone();
+        tokio::spawn(async move {
+            let child = supervisor
+                .fork_thread_from_checkpoint_with_id_at(checkpoint, child_thread_id)
+                .await?;
+            if let Some((compile_payload, bind_payload)) = manifest_receipts
+                && let Err(err) = child
+                    .record_manifest_receipts(compile_payload, bind_payload)
+                    .await
+            {
+                let _ = supervisor
+                    .shutdown_thread_at(&child.context().coordinates)
+                    .await;
+                return Err(err);
+            }
+            Ok(child)
+        })
+        .await
+        .map_err(|err| {
+            CooldisError::RuntimeExecution(format!(
+                "daemon fork manifest witness task failed: {err}"
+            ))
+        })?
     }
 
     async fn fork_spawned_for_claim(

@@ -1527,6 +1527,7 @@ fn daemon_app_server_config_from_loaded(
         config.state_home = state_home;
     }
     config.default_placement = loaded.config.runtime.placement.clone().unwrap_or_default();
+    config.default_workspace = loaded.config.runtime.workspace.clone();
     if let Some(operations) = loaded.config.registries.operations.clone() {
         let operations = daemon_app_server_registry_root(operations)?;
         // lexicon-allow: capsule - existing app-server config field
@@ -1603,6 +1604,7 @@ fn resolve_console_app_server_config(
         config.state_home = state_home;
     }
     config.default_placement = loaded.config.runtime.placement.clone().unwrap_or_default();
+    config.default_workspace = loaded.config.runtime.workspace.clone();
     if options.cwd_explicit {
         config.cwd = env.selected_cwd;
     } else if let Some(cwd) = loaded.config.runtime.cwd.clone() {

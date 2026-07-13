@@ -17,6 +17,7 @@ use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 
 /// Top-level sections reserved by the ontology but deferred from the V1
 /// schema. Compile rejects each by name so the error states the deferral
@@ -45,6 +46,11 @@ pub struct AgentManifestSchema {
     pub model_profiles: Vec<AgentManifestModelProfile>,
     pub tools: Vec<AgentManifestTool>,
     pub resources: Vec<AgentManifestResource>,
+    /// Abstract host-workspace requirement. The portable manifest names only
+    /// the guest path and minimum access mode; bind-time operator surfaces
+    /// supply the machine-local host directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<AgentManifestWorkspaceRequirement>,
     /// `None` means the source omitted `[context]`; use
     /// [`AgentManifestSchema::effective_context_pipeline`] to get the
     /// synthesized default instead of reading this directly.
@@ -85,6 +91,7 @@ impl AgentManifestSchema {
                     | "model_profiles"
                     | "tools"
                     | "resources"
+                    | "workspace"
                     | "context"
                     | "couplings"
                     | "policies"
@@ -102,6 +109,7 @@ impl AgentManifestSchema {
         let model_profiles = optional_section(value, "model_profiles")?.unwrap_or_default();
         let tools = optional_section(value, "tools")?.unwrap_or_default();
         let resources = optional_section(value, "resources")?.unwrap_or_default();
+        let workspace = optional_section(value, "workspace")?;
         let couplings = optional_section(value, "couplings")?.unwrap_or_default();
         let context = match value.get("context") {
             Some(section) => {
@@ -123,6 +131,7 @@ impl AgentManifestSchema {
             model_profiles,
             tools,
             resources,
+            workspace,
             context,
             couplings,
             policies,
@@ -345,6 +354,10 @@ impl AgentManifestSchema {
                     validate_skill_resource_ref(&resource.reference)?;
                 }
             }
+        }
+
+        if let Some(workspace) = &self.workspace {
+            validate_workspace_requirement(workspace)?;
         }
 
         if let Some(context) = &self.context {
@@ -635,6 +648,30 @@ pub enum AgentManifestResourceMode {
     #[default]
     #[serde(rename = "read")]
     Read,
+}
+
+/// Portable declaration that this agent requires a host-backed workspace.
+///
+/// The requirement deliberately contains no host path. `guest_path` is the
+/// absolute path visible inside virtual bash and mounted operations;
+/// `min_mode` is the least authority an operator binding must provide.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestWorkspaceRequirement {
+    pub guest_path: String,
+    #[serde(default)]
+    pub min_mode: AgentManifestWorkspaceMode,
+}
+
+/// Access modes shared by workspace requirements, operator bindings, and
+/// resolved mount receipts. Read-write satisfies a read-only mode floor.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum AgentManifestWorkspaceMode {
+    #[default]
+    #[serde(rename = "ro")]
+    ReadOnly,
+    #[serde(rename = "rw")]
+    ReadWrite,
 }
 
 /// How model-visible context is assembled (audit section 7). Assemblers
@@ -1261,6 +1298,40 @@ where
             Ok(values)
         }
     }
+}
+
+fn validate_workspace_requirement(
+    workspace: &AgentManifestWorkspaceRequirement,
+) -> CooldisResult<()> {
+    let path = Path::new(&workspace.guest_path);
+    if !path.is_absolute() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "workspace guest_path {:?} must be absolute",
+            workspace.guest_path
+        )));
+    }
+    if path == Path::new("/") {
+        return Err(CooldisError::RuntimeFactory(
+            "workspace guest_path must not be /".to_string(),
+        ));
+    }
+    if path.starts_with(Path::new("/skills")) {
+        return Err(CooldisError::RuntimeFactory(
+            "workspace guest_path /skills and its descendants are reserved for skill resources"
+                .to_string(),
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        || path.components().collect::<PathBuf>() != path
+    {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "workspace guest_path {:?} must be normalized",
+            workspace.guest_path
+        )));
+    }
+    Ok(())
 }
 
 fn validate_context_pipeline(context: &AgentManifestContextPipeline) -> CooldisResult<()> {

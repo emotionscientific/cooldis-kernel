@@ -663,6 +663,7 @@ pub(crate) async fn run_remote_child(
     if bootstrap.schema != REMOTE_CHILD_BOOTSTRAP_SCHEMA_V1 {
         return Err(remote_error("unsupported remote child bootstrap schema"));
     }
+    reject_remote_workspace_binding(bootstrap.request.bind_payload.as_ref())?;
     #[cfg(unix)]
     // SAFETY: getppid has no pointer arguments or caller-side invariants.
     let parent_process_id = unsafe { libc::getppid() };
@@ -898,6 +899,18 @@ pub(crate) async fn run_remote_child(
     }
 }
 
+fn reject_remote_workspace_binding(bind_payload: Option<&serde_json::Value>) -> CooldisResult<()> {
+    if bind_payload
+        .and_then(|payload| payload.get("workspace"))
+        .is_some_and(|workspace| !workspace.is_null())
+    {
+        return Err(remote_error(
+            "remote child bootstrap cannot carry a local host workspace binding",
+        ));
+    }
+    Ok(())
+}
+
 fn is_transient_sync_error(error: &CooldisError) -> bool {
     matches!(error, CooldisError::RuntimeExecution(_))
 }
@@ -1053,6 +1066,22 @@ mod tests {
             compile_payload: None,
             bind_payload: None,
         }
+    }
+
+    #[test]
+    fn remote_child_bootstrap_rejects_workspace_before_constructing_the_runtime() {
+        let bind = serde_json::json!({
+            "placement": {"target": "remote"},
+            "workspace": {
+                "guest_path": "/work",
+                "host_path": "/tmp/remote-workspace",
+                "mode": "rw"
+            }
+        });
+
+        let error = reject_remote_workspace_binding(Some(&bind)).unwrap_err();
+
+        assert!(error.to_string().contains("cannot carry"));
     }
 
     fn child_record(

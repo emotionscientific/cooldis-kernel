@@ -391,8 +391,71 @@ impl RuntimeKernelControl {
         caller: &ThreadContext,
         task_name: Option<String>,
         input: TurnInput,
+        metadata: BTreeMap<String, String>,
+        witness: ThreadSpawnWitness,
+    ) -> CooldisResult<AgentProcessSpawnReceipt> {
+        self.spawn_child_cancellation_safe(caller, task_name, input, metadata, witness, None)
+            .await
+    }
+
+    pub(crate) async fn spawn_bound_child_with_witness(
+        &self,
+        caller: &ThreadContext,
+        task_name: Option<String>,
+        input: TurnInput,
+        metadata: BTreeMap<String, String>,
+        witness: ThreadSpawnWitness,
+        compile_payload: serde_json::Value,
+        bind_payload: serde_json::Value,
+    ) -> CooldisResult<AgentProcessSpawnReceipt> {
+        self.spawn_child_cancellation_safe(
+            caller,
+            task_name,
+            input,
+            metadata,
+            witness,
+            Some((compile_payload, bind_payload)),
+        )
+        .await
+    }
+
+    async fn spawn_child_cancellation_safe(
+        &self,
+        caller: &ThreadContext,
+        task_name: Option<String>,
+        input: TurnInput,
+        metadata: BTreeMap<String, String>,
+        witness: ThreadSpawnWitness,
+        manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
+    ) -> CooldisResult<AgentProcessSpawnReceipt> {
+        let control = self.clone();
+        let caller = caller.clone();
+        tokio::spawn(async move {
+            control
+                .spawn_child_inner(
+                    &caller,
+                    task_name,
+                    input,
+                    metadata,
+                    witness,
+                    manifest_payloads,
+                )
+                .await
+        })
+        .await
+        .map_err(|err| {
+            CooldisError::RuntimeExecution(format!("child spawn witness task failed: {err}"))
+        })?
+    }
+
+    async fn spawn_child_inner(
+        &self,
+        caller: &ThreadContext,
+        task_name: Option<String>,
+        input: TurnInput,
         mut metadata: BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
+        manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
     ) -> CooldisResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
         let coordinates = ThreadCoordinates::new(
@@ -432,6 +495,14 @@ impl RuntimeKernelControl {
             .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
         if let Err(err) =
             append_thread_spawned_event(&parent, caller, child.context(), witness).await
+        {
+            let _ = host.shutdown_thread(child_thread_id).await;
+            return Err(err);
+        }
+        if let Some((compile_payload, bind_payload)) = manifest_payloads
+            && let Err(err) = child
+                .record_manifest_receipts(compile_payload, bind_payload)
+                .await
         {
             let _ = host.shutdown_thread(child_thread_id).await;
             return Err(err);

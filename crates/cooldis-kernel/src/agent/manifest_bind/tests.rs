@@ -98,6 +98,68 @@ fn runtime_overrides_report_only_keys_that_changed() {
 }
 
 #[test]
+fn workspace_binding_resolution_is_declared_fail_closed_and_override_first() {
+    let root = temp_dir("manifest-workspace-binding");
+    let default_host = root.join("default");
+    let override_host = root.join("override");
+    fs::create_dir_all(&default_host).unwrap();
+    fs::create_dir_all(&override_host).unwrap();
+    let requirement = AgentManifestWorkspaceRequirement {
+        guest_path: "/workspace".to_string(),
+        min_mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+    let default_binding = AgentManifestWorkspaceBinding {
+        host_path: default_host.clone(),
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+    let override_binding = AgentManifestWorkspaceBinding {
+        host_path: override_host.clone(),
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+
+    let missing = resolve_manifest_workspace(Some(&requirement), None, None).unwrap_err();
+    assert!(missing.to_string().contains("requires a workspace binding"));
+
+    let undeclared = resolve_manifest_workspace(None, Some(&default_binding), None).unwrap_err();
+    assert!(undeclared.to_string().contains("did not declare"));
+
+    let resolved = resolve_manifest_workspace(
+        Some(&requirement),
+        Some(&default_binding),
+        Some(&override_binding),
+    )
+    .unwrap()
+    .expect("resolved workspace mount");
+    assert_eq!(resolved.guest_path, PathBuf::from("/workspace"));
+    assert_eq!(
+        resolved.host_path,
+        fs::canonicalize(&override_host).unwrap()
+    );
+    assert_eq!(resolved.mode, AgentManifestWorkspaceMode::ReadWrite);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_binding_enforces_the_manifest_mode_floor() {
+    let root = temp_dir("manifest-workspace-mode-floor");
+    fs::create_dir_all(&root).unwrap();
+    let requirement = AgentManifestWorkspaceRequirement {
+        guest_path: "/app".to_string(),
+        min_mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+    let binding = AgentManifestWorkspaceBinding {
+        host_path: root.clone(),
+        mode: AgentManifestWorkspaceMode::ReadOnly,
+    };
+
+    let err = resolve_manifest_workspace(Some(&requirement), Some(&binding), None).unwrap_err();
+
+    assert!(err.to_string().contains("minimum mode rw"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn provider_and_model_refs_fail_closed() {
     let surface = AgentManifestProviderSurface::single("local_offline", "echo");
     assert_eq!(
@@ -2095,6 +2157,7 @@ fn bind_receipt_placement_is_optional_on_the_wire() {
     let legacy_receipt: AgentManifestBindReceipt =
         serde_json::from_value(legacy_wire.clone()).unwrap();
     assert_eq!(legacy_receipt.placement, None);
+    assert_eq!(legacy_receipt.workspace, None);
     assert_eq!(legacy_receipt.ref_uri, "cooldis://agents/karl");
     assert_eq!(legacy_receipt.tool_ids, vec!["threads/spawn"]);
     assert!(
@@ -2103,6 +2166,13 @@ fn bind_receipt_placement_is_optional_on_the_wire() {
             .get("placement")
             .is_none(),
         "absent placement must serialize to the legacy wire shape"
+    );
+    assert!(
+        serde_json::to_value(&legacy_receipt)
+            .unwrap()
+            .get("workspace")
+            .is_none(),
+        "absent workspace must serialize to the legacy wire shape"
     );
 
     let placed = AgentManifestBindReceipt {

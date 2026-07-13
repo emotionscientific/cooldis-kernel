@@ -223,6 +223,7 @@ fn synthesize_default_manifest_with_version(
         }],
         tools,
         resources: Vec::new(),
+        workspace: None,
         context: None,
         couplings: Vec::new(),
         policies: AgentManifestPolicies {

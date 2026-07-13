@@ -596,11 +596,16 @@ impl ThreadSpawnProjector {
             .submitted_turn_id
             .clone()
             .unwrap_or_else(|| format!("thread-spawn-{}", request_event.id));
-        let placement = agent_binding
+        let (placement, has_workspace) = agent_binding
             .as_ref()
             .map(|binding| {
                 serde_json::from_value::<AgentManifestBindReceipt>(binding.bind_receipt.clone())
-                    .map(|receipt| receipt.placement.unwrap_or_default().target)
+                    .map(|receipt| {
+                        (
+                            receipt.placement.unwrap_or_default().target,
+                            receipt.workspace.is_some(),
+                        )
+                    })
                     .map_err(|err| {
                         CooldisError::RuntimeFactory(format!(
                             "thread spawn projector agent_ref bind receipt is invalid: {err}"
@@ -608,7 +613,13 @@ impl ThreadSpawnProjector {
                     })
             })
             .transpose()?
-            .unwrap_or(PlacementTarget::Local);
+            .unwrap_or((PlacementTarget::Local, false));
+        if placement != PlacementTarget::Local && has_workspace {
+            return Err(CooldisError::RuntimeFactory(
+                "workspace bindings require local placement and cannot cross the remote child executor boundary"
+                    .to_string(),
+            ));
+        }
         let task_name = payload
             .task_name
             .clone()
@@ -622,29 +633,31 @@ impl ThreadSpawnProjector {
         };
         let receipt = match placement {
             PlacementTarget::Local => {
-                let receipt = self
-                    .host
-                    .kernel_control()
-                    .spawn_child_with_witness(
-                        parent.context(),
-                        task_name,
-                        TurnInput::text(payload.initial_submission.clone()),
-                        metadata,
-                        witness,
-                    )
-                    .await?;
                 if let Some(binding) = agent_binding {
                     self.host
                         .kernel_control()
-                        .record_manifest_receipts_for_thread(
+                        .spawn_bound_child_with_witness(
                             parent.context(),
-                            receipt.thread_id,
+                            task_name,
+                            TurnInput::text(payload.initial_submission.clone()),
+                            metadata,
+                            witness,
                             binding.compile_receipt,
                             binding.bind_receipt,
                         )
-                        .await?;
+                        .await?
+                } else {
+                    self.host
+                        .kernel_control()
+                        .spawn_child_with_witness(
+                            parent.context(),
+                            task_name,
+                            TurnInput::text(payload.initial_submission.clone()),
+                            metadata,
+                            witness,
+                        )
+                        .await?
                 }
-                receipt
             }
             PlacementTarget::Remote => {
                 let (compile_payload, bind_payload) = agent_binding
@@ -1284,13 +1297,16 @@ fn spawn_request_belongs_to_parent(
 mod tests {
     use super::*;
     use crate::{
-        AgentManifestCouplingBudget, AgentManifestCouplingQuota, BoundCoupling,
-        BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSink, CouplingRole,
-        CouplingRunStatus, CouplingScheduler, EventStore, InMemorySessionStore, NewEventRecord,
-        RuntimeHost, STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID, StdlibCouplingExecutor,
-        ThreadSpawnedPayload, ThreadTopology, VirtualBashRuntimeFactory,
+        AgentManifestCouplingBudget, AgentManifestCouplingQuota,
+        AgentManifestResolvedWorkspaceMount, AgentManifestRuntimeDefaults,
+        AgentManifestWorkspaceMode, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,
+        BoundCouplingSink, CouplingRole, CouplingRunStatus, CouplingScheduler, EventStore,
+        InMemorySessionStore, NewEventRecord, RuntimeHost,
+        STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID, StdlibCouplingExecutor, ThreadSpawnedPayload,
+        ThreadTopology, VirtualBashRuntimeFactory,
     };
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn thread_spawn_projector_spawns_child_and_witnesses_thread_spawned() {
@@ -1348,6 +1364,113 @@ mod tests {
         assert_eq!(spawned.payload["correlation_id"], "projector-spawn-1");
         assert_eq!(spawned.provenance.source_event_ids, vec![request.id]);
 
+        host.shutdown_all().await.unwrap();
+    }
+
+    struct ForgedRemoteWorkspaceResolver;
+
+    #[async_trait::async_trait]
+    impl KernelThreadSpawnAgentResolver for ForgedRemoteWorkspaceResolver {
+        async fn resolve_agent_ref(
+            &self,
+            _caller: &crate::ThreadContext,
+            agent_ref: &str,
+        ) -> CooldisResult<KernelThreadSpawnAgentBinding> {
+            Ok(KernelThreadSpawnAgentBinding {
+                metadata: BTreeMap::new(),
+                compile_receipt: json!({
+                    "ref_uri": agent_ref,
+                    "manifest_hash": "sha256:forged-remote-workspace",
+                    "source_hash": "sha256:source"
+                }),
+                bind_receipt: serde_json::to_value(AgentManifestBindReceipt {
+                    ref_uri: agent_ref.to_string(),
+                    manifest_hash: "sha256:forged-remote-workspace".to_string(),
+                    model_profile_id: "default".to_string(),
+                    provider_id: "test".to_string(),
+                    model_id: "model".to_string(),
+                    tool_ids: Vec::new(),
+                    operation_bindings: Vec::new(),
+                    skill_packages: Vec::new(),
+                    static_context_segments: Vec::new(),
+                    tool_universes: Vec::new(),
+                    couplings: Vec::new(),
+                    granted: Vec::new(),
+                    effective_runtime: AgentManifestRuntimeDefaults::default(),
+                    overridden_keys: Vec::new(),
+                    placement: Some(crate::AgentManifestPlacementBinding {
+                        target: PlacementTarget::Remote,
+                        executor_ref: Some("executor://cluster/default".to_string()),
+                        config: BTreeMap::new(),
+                    }),
+                    workspace: Some(AgentManifestResolvedWorkspaceMount {
+                        guest_path: PathBuf::from("/work"),
+                        host_path: PathBuf::from("/tmp/forged-remote-workspace"),
+                        mode: AgentManifestWorkspaceMode::ReadWrite,
+                    }),
+                })
+                .unwrap(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn thread_spawn_projector_rejects_forged_remote_workspace_binding() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "remote-workspace");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        let control_stream = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let payload = serde_json::to_value(ThreadSpawnRequestedPayload {
+            parent_thread_id: coordinates.thread_id,
+            parent_turn_id: Some("parent-turn-1".to_string()),
+            task_name: None,
+            submitted_turn_id: None,
+            child_agent_ref: "agent://forged-remote-workspace@0.1.0".to_string(),
+            initial_submission: "must not start".to_string(),
+            correlation_id: "remote-workspace-dispatch".to_string(),
+            block_parent: true,
+        })
+        .unwrap();
+        let mut payload = payload;
+        payload["schema"] = json!(EventKind::ThreadSpawnRequested.payload_schema_id());
+        store
+            .append_events(
+                &control_stream,
+                vec![NewEventRecord::discharged(
+                    coordinates.clone(),
+                    EventKind::ThreadSpawnRequested,
+                    payload,
+                    EventProvenance {
+                        source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                        source_event_ids: vec![EventRecordId::new()],
+                        discharged_by: Some("coupling:std::supervisor.spawn".to_string()),
+                        function: Some("op://std-supervisor-spawn/run".to_string()),
+                        ..EventProvenance::default()
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+
+        let receipt = ThreadSpawnProjector::new(host.clone())
+            .with_agent_resolver(Arc::new(ForgedRemoteWorkspaceResolver))
+            .project_control_stream(&coordinates)
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.failed.len(), 1);
+        assert!(receipt.failed[0].reason.contains("require local placement"));
+        assert!(host.children_of(coordinates.thread_id).await.is_empty());
         host.shutdown_all().await.unwrap();
     }
 

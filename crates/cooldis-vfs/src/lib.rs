@@ -4,16 +4,17 @@ use bashkit::{
     PosixFs, RealFs, RealFsMode,
 };
 use futures_util::TryStreamExt;
+use futures_util::lock::Mutex as AsyncMutex;
 use object_store::aws::AmazonS3Builder;
 use object_store::memory::InMemory as InMemoryObjectStore;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::SystemTime;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -442,16 +443,62 @@ pub struct HostFileSystem {
     root: PathBuf,
     mode: HostFileSystemMode,
     inner: PosixFs<RealFs>,
+    operation_lock: Arc<AsyncMutex<()>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct HostFileSystemLockKey {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(not(unix))]
+type HostFileSystemLockKey = PathBuf;
+
+type HostFileSystemOperationLock = AsyncMutex<()>;
+
+fn shared_host_filesystem_operation_lock(
+    root: &Path,
+) -> std::io::Result<Arc<HostFileSystemOperationLock>> {
+    static LOCKS: OnceLock<
+        Mutex<HashMap<HostFileSystemLockKey, Weak<HostFileSystemOperationLock>>>,
+    > = OnceLock::new();
+    #[cfg(unix)]
+    let key = {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::metadata(root)?;
+        HostFileSystemLockKey {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    };
+    #[cfg(not(unix))]
+    let key = root.to_path_buf();
+
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(AsyncMutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
 }
 
 impl HostFileSystem {
     pub fn new(root: impl AsRef<Path>, mode: HostFileSystemMode) -> bashkit::Result<Self> {
         let realfs = RealFs::new(root, mode.as_realfs_mode())?;
         let root = realfs.root().to_path_buf();
+        let operation_lock = shared_host_filesystem_operation_lock(&root)?;
         Ok(Self {
             root,
             mode,
             inner: PosixFs::new(realfs),
+            operation_lock,
         })
     }
 
@@ -469,6 +516,37 @@ impl HostFileSystem {
 
     pub fn mode(&self) -> HostFileSystemMode {
         self.mode
+    }
+
+    fn reject_external_hard_link_mutation(&self, path: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let normalized = normalize_vfs_path(path);
+            let relative = normalized.strip_prefix("/").unwrap_or(&normalized);
+            let joined = self.root.join(relative);
+            if !joined.exists() {
+                return Ok(());
+            }
+            let canonical = std::fs::canonicalize(&joined)?;
+            if !canonical.starts_with(&self.root) {
+                return Err(IoError::new(
+                    ErrorKind::PermissionDenied,
+                    "path escapes host filesystem root",
+                ));
+            }
+            let metadata = std::fs::metadata(&canonical)?;
+            if metadata.is_file() && metadata.nlink() > 1 {
+                return Err(IoError::new(
+                    ErrorKind::PermissionDenied,
+                    "refusing to mutate a multiply-linked host file outside the mount boundary",
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+        Ok(())
     }
 }
 
@@ -495,58 +573,77 @@ impl FileSystemExt for HostFileSystem {
 #[async_trait]
 impl FileSystem for HostFileSystem {
     async fn read_file(&self, path: &Path) -> bashkit::Result<Vec<u8>> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.read_file(path).await
     }
 
     async fn write_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
+        self.reject_external_hard_link_mutation(path)?;
         self.inner.write_file(path, content).await
     }
 
     async fn append_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
+        self.reject_external_hard_link_mutation(path)?;
         self.inner.append_file(path, content).await
     }
 
     async fn mkdir(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.mkdir(path, recursive).await
     }
 
     async fn remove(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.remove(path, recursive).await
     }
 
     async fn stat(&self, path: &Path) -> bashkit::Result<Metadata> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.stat(path).await
     }
 
     async fn read_dir(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.read_dir(path).await
     }
 
     async fn exists(&self, path: &Path) -> bashkit::Result<bool> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.exists(path).await
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.rename(from, to).await
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
+        self.reject_external_hard_link_mutation(to)?;
         self.inner.copy(from, to).await
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.symlink(target, link).await
     }
 
     async fn read_link(&self, path: &Path) -> bashkit::Result<PathBuf> {
+        let _guard = self.operation_lock.lock().await;
         self.inner.read_link(path).await
     }
 
     async fn chmod(&self, path: &Path, mode: u32) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
+        self.reject_external_hard_link_mutation(path)?;
         self.inner.chmod(path, mode).await
     }
 
     async fn set_modified_time(&self, path: &Path, time: SystemTime) -> bashkit::Result<()> {
+        let _guard = self.operation_lock.lock().await;
+        self.reject_external_hard_link_mutation(path)?;
         self.inner.set_modified_time(path, time).await
     }
 }

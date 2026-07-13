@@ -25,6 +25,10 @@ target = "remote"
 executor_ref = "executor://cluster/default"
 config = { region = "us-west" }
 
+[daemon.runtime.workspace]
+host_path = "host-workspace"
+mode = "rw"
+
 [daemon.app_server]
 listen = "unix:///tmp/cooldis-test.sock"
 
@@ -63,6 +67,13 @@ agent_ref = "agent://karl-dev@latest"
         Some("executor://cluster/default")
     );
     assert_eq!(placement.config["region"], serde_json::json!("us-west"));
+    assert_eq!(
+        loaded.config.runtime.workspace,
+        Some(AgentManifestWorkspaceBinding {
+            host_path: root.join("host-workspace"),
+            mode: AgentManifestWorkspaceMode::ReadWrite,
+        })
+    );
     assert_eq!(loaded.config.provider.env_file, Some(root.join(".env")));
     assert_eq!(
         loaded.config.io.ingress.persistence.mode,
@@ -414,6 +425,47 @@ cwd = "workspace"
         Some(higher_root.join("workspace"))
     );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn layered_workspace_binding_is_replaced_atomically_by_the_higher_layer() {
+    let root = temp_root("layered-workspace");
+    let lower_root = root.join("lower");
+    let higher_root = root.join("higher");
+    std::fs::create_dir_all(&lower_root).unwrap();
+    std::fs::create_dir_all(&higher_root).unwrap();
+    let lower_config = lower_root.join("config.toml");
+    let higher_config = higher_root.join("config.toml");
+    std::fs::write(
+        &lower_config,
+        r#"
+[daemon.runtime.workspace]
+host_path = "readonly"
+mode = "ro"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &higher_config,
+        r#"
+[daemon.runtime.workspace]
+host_path = "writable"
+mode = "rw"
+"#,
+    )
+    .unwrap();
+
+    let loaded =
+        load_cooldis_daemon_config_layers(&[lower_config, higher_config], root.clone()).unwrap();
+
+    assert_eq!(
+        loaded.config.runtime.workspace,
+        Some(AgentManifestWorkspaceBinding {
+            host_path: higher_root.join("writable"),
+            mode: AgentManifestWorkspaceMode::ReadWrite,
+        })
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

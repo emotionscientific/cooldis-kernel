@@ -152,8 +152,55 @@ fn full_fixture_manifest_parses_and_validates() {
     assert_eq!(manifest.model_profiles.len(), 1);
     assert_eq!(manifest.tools.len(), 3);
     assert_eq!(manifest.resources.len(), 1);
+    assert!(manifest.workspace.is_none());
     assert!(manifest.couplings.is_empty());
     assert_eq!(manifest.effective_context_pipeline().sources.len(), 3);
+}
+
+#[test]
+fn workspace_requirement_parses_without_a_host_path() {
+    let source = valid_manifest().replace(
+        "[policies]",
+        r#"[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[policies]"#,
+    );
+
+    let manifest = parse(&source).unwrap();
+    let workspace = manifest.workspace.expect("workspace requirement");
+
+    assert_eq!(workspace.guest_path, "/workspace");
+    assert_eq!(workspace.min_mode, AgentManifestWorkspaceMode::ReadWrite);
+    assert!(
+        !serde_json::to_value(workspace)
+            .unwrap()
+            .to_string()
+            .contains("host")
+    );
+}
+
+#[test]
+fn workspace_requirement_rejects_unsafe_or_reserved_guest_paths() {
+    for (guest_path, expected) in [
+        ("workspace", "absolute"),
+        ("/", "must not be /"),
+        ("/workspace/../outside", "normalized"),
+        ("/skills", "reserved"),
+        ("/skills/nested", "reserved"),
+    ] {
+        let source = valid_manifest().replace(
+            "[policies]",
+            &format!("[workspace]\nguest_path = {guest_path:?}\nmin_mode = \"ro\"\n\n[policies]"),
+        );
+
+        let err = parse(&source).unwrap_err();
+        assert!(
+            err.to_string().contains(expected),
+            "expected {expected:?} for {guest_path:?}, got {err}"
+        );
+    }
 }
 
 #[test]

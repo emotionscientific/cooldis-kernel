@@ -134,6 +134,8 @@ pub(super) struct ThreadStartParams {
     pub(super) runtime_overrides: Option<AgentManifestBindOverrides>,
     #[serde(default)]
     pub(super) placement: Option<AgentManifestPlacementBinding>,
+    #[serde(default)]
+    pub(super) workspace: Option<AgentManifestWorkspaceBinding>,
     #[serde(default, deserialize_with = "deserialize_optional_thinking")]
     pub(super) thinking: Option<ThinkingConfig>,
 }
@@ -148,6 +150,8 @@ pub(super) struct ThreadSpawnParams {
     pub(super) agent_ref: Option<String>,
     #[serde(default)]
     pub(super) placement: Option<AgentManifestPlacementBinding>,
+    #[serde(default)]
+    pub(super) workspace: Option<AgentManifestWorkspaceBinding>,
     #[serde(default)]
     pub(super) dispatch_id: Option<String>,
 }
@@ -417,6 +421,8 @@ pub(super) struct ThreadRebindForkParams {
     pub(super) runtime_overrides: Option<AgentManifestBindOverrides>,
     #[serde(default)]
     pub(super) placement: Option<AgentManifestPlacementBinding>,
+    #[serde(default)]
+    pub(super) workspace: Option<AgentManifestWorkspaceBinding>,
     #[serde(default)]
     pub(super) reason: ThreadForkReason,
 }
@@ -2294,6 +2300,7 @@ impl CooldisAppServer {
                 &model_selection,
                 &overrides,
                 params.placement.as_ref(),
+                params.workspace.as_ref(),
             )
             .await
             .map_err(thread_start_bind_error)?;
@@ -2307,13 +2314,20 @@ impl CooldisAppServer {
         model_profile_id: Option<&str>,
         overrides: Option<&AgentManifestBindOverrides>,
         placement: Option<&AgentManifestPlacementBinding>,
+        workspace: Option<&AgentManifestWorkspaceBinding>,
     ) -> Result<AgentManifestBoundThread, JsonRpcErrorError> {
         let model_selection = model_profile_id
             .map(AgentManifestModelProfileSelection::profile_id)
             .unwrap_or_default();
         let overrides = overrides.cloned().unwrap_or_default();
         let bound = self
-            .bind_app_server_agent_ref(agent_ref, &model_selection, &overrides, placement)
+            .bind_app_server_agent_ref(
+                agent_ref,
+                &model_selection,
+                &overrides,
+                placement,
+                workspace,
+            )
             .await
             .map_err(thread_start_bind_error)?;
         require_local_binding_surface("thread/rebindFork", &bound)
@@ -2425,23 +2439,9 @@ impl CooldisAppServer {
             })
             .await
             .map_err(internal_error)?;
+        self.witness_bound_agent_and_persist_lifecycle(handle.clone(), bound_agent)
+            .await?;
         wait_for_initial_thread_status(&handle).await;
-        if let Err(err) = record_bound_agent_receipts(&handle, &bound_agent).await {
-            let _ = self
-                .inner
-                .supervisor
-                .shutdown_thread_at(&handle.context().coordinates)
-                .await;
-            return Err(internal_error(err));
-        }
-        if let Err(err) = self.persist_thread_lifecycle(&handle).await {
-            let _ = self
-                .inner
-                .supervisor
-                .shutdown_thread_at(&handle.context().coordinates)
-                .await;
-            return Err(err);
-        }
         let context = handle.context();
         let coordinates = context.coordinates.clone();
         let parent_thread_id = context.parent_thread_id.map(|id| id.to_string());
@@ -2614,7 +2614,8 @@ impl CooldisAppServer {
         connection: &ConnectionState,
         params: ThreadForkParams,
     ) -> Result<Value, JsonRpcErrorError> {
-        let coordinates = self.coordinates_for_thread(&params.thread_id).await?;
+        let source_handle = self.handle_for_thread(&params.thread_id).await?;
+        let coordinates = source_handle.context().coordinates.clone();
         let source = {
             let state = self.inner.state.read().await;
             state
@@ -2639,7 +2640,61 @@ impl CooldisAppServer {
         let mut checkpoint_metadata =
             app_server_thread_metadata(&cwd, &model_provider, params.ephemeral);
         insert_app_server_thinking_metadata(&mut checkpoint_metadata, source.thinking.as_ref())?;
-        let checkpoint = match params.checkpoint_id.as_deref() {
+        let workspace = source_handle
+            .context()
+            .metadata
+            .get(THREAD_AGENT_WORKSPACE_METADATA)
+            .map(|raw| {
+                serde_json::from_str::<AgentManifestResolvedWorkspaceMount>(raw).map_err(|err| {
+                    internal_error(CooldisError::RuntimeFactory(format!(
+                        "source thread workspace binding is invalid: {err}"
+                    )))
+                })
+            })
+            .transpose()?;
+        let workspace_metadata = workspace
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|err| {
+                internal_error(CooldisError::RuntimeFactory(format!(
+                    "source thread workspace binding could not be encoded: {err}"
+                )))
+            })?;
+        let inherited_manifest_receipts = if let Some(workspace) = &workspace {
+            let (compile_payload, bind_payload) = active_manifest_receipt_payloads(&source_handle)
+                .await
+                .map_err(internal_error)?
+                .ok_or_else(|| {
+                    internal_error(CooldisError::RuntimeFactory(
+                        "source thread workspace binding has no durable manifest bind witness"
+                            .to_string(),
+                    ))
+                })?;
+            let witnessed_workspace = bind_payload
+                .get("workspace")
+                .cloned()
+                .map(serde_json::from_value::<AgentManifestResolvedWorkspaceMount>)
+                .transpose()
+                .map_err(|err| {
+                    internal_error(CooldisError::RuntimeFactory(format!(
+                        "source thread manifest workspace witness is invalid: {err}"
+                    )))
+                })?;
+            if witnessed_workspace.as_ref() != Some(workspace) {
+                return Err(internal_error(CooldisError::RuntimeFactory(
+                    "source thread workspace metadata disagrees with its durable manifest bind witness"
+                        .to_string(),
+                )));
+            }
+            Some((compile_payload, bind_payload))
+        } else {
+            None
+        };
+        if let Some(raw) = &workspace_metadata {
+            checkpoint_metadata.insert(THREAD_AGENT_WORKSPACE_METADATA.to_string(), raw.clone());
+        }
+        let mut checkpoint = match params.checkpoint_id.as_deref() {
             Some(checkpoint_id) => {
                 let checkpoint_id = ThreadCheckpointId::parse_str(checkpoint_id)
                     .map_err(|err| jsonrpc_error(-32602, format!("invalid checkpointId: {err}")))?;
@@ -2669,6 +2724,11 @@ impl CooldisAppServer {
                 .await
                 .map_err(internal_error)?,
         };
+        if let Some(raw) = workspace_metadata {
+            checkpoint
+                .metadata
+                .insert(THREAD_AGENT_WORKSPACE_METADATA.to_string(), raw);
+        }
         let source_cut = thread_source_cut_json(&coordinates, &checkpoint, None);
         let handle = self
             .inner
@@ -2676,8 +2736,17 @@ impl CooldisAppServer {
             .fork_thread_from_checkpoint_at(checkpoint.clone())
             .await
             .map_err(internal_error)?;
+        if let Some((compile_payload, bind_payload)) = inherited_manifest_receipts {
+            self.witness_manifest_payloads_and_persist_lifecycle(
+                handle.clone(),
+                compile_payload,
+                bind_payload,
+            )
+            .await?;
+        } else {
+            self.persist_thread_lifecycle(&handle).await?;
+        }
         wait_for_initial_thread_status(&handle).await;
-        self.persist_thread_lifecycle(&handle).await?;
 
         let fork_context = handle.context();
         let fork_coordinates = fork_context.coordinates.clone();
@@ -2769,6 +2838,7 @@ impl CooldisAppServer {
                 params.model_profile_id.as_deref(),
                 params.runtime_overrides.as_ref(),
                 params.placement.as_ref(),
+                params.workspace.as_ref(),
             )
             .await?;
         let cwd = resolve_cwd(
@@ -2839,15 +2909,9 @@ impl CooldisAppServer {
             })
             .await
             .map_err(internal_error)?;
+        self.witness_bound_agent_and_persist_lifecycle(handle.clone(), bound_agent.clone())
+            .await?;
         wait_for_initial_thread_status(&handle).await;
-        if let Err(err) = record_bound_agent_receipts(&handle, &bound_agent).await {
-            let _ = self
-                .inner
-                .supervisor
-                .shutdown_thread_at(&handle.context().coordinates)
-                .await;
-            return Err(internal_error(err));
-        }
 
         let child_coordinates = handle.context().coordinates.clone();
         let parent_stream_id = EventStreamId::for_thread(&coordinates);
@@ -3092,6 +3156,12 @@ impl CooldisAppServer {
                 "placement requires agentRef on thread/spawn",
             ));
         }
+        if params.workspace.is_some() && params.agent_ref.is_none() {
+            return Err(jsonrpc_error(
+                -32602,
+                "workspace requires agentRef on thread/spawn",
+            ));
+        }
         let parent = self.handle_for_thread(&params.thread_id).await?;
         let dispatch_id = cooldis_runtime_contracts::DispatchId::new(
             params
@@ -3100,9 +3170,12 @@ impl CooldisAppServer {
         );
         let resolver = if params.agent_ref.is_some() {
             Some(Arc::new(
-                self.app_server_thread_spawn_agent_resolver(params.placement.clone())
-                    .await
-                    .map_err(internal_error)?,
+                self.app_server_thread_spawn_agent_resolver(
+                    params.placement.clone(),
+                    params.workspace.clone(),
+                )
+                .await
+                .map_err(internal_error)?,
             ) as Arc<dyn KernelThreadSpawnAgentResolver>)
         } else {
             None

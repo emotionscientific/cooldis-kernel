@@ -1,9 +1,10 @@
 use super::connection::*;
 use super::subscriptions::*;
 use super::threads::{
-    AppServerTurnState, app_server_turns_from_session_entries, apply_manifest_operation_grants,
-    apply_manifest_runtime_metadata, finalize_turn_payload, thread_manifest_operation_bindings,
-    thread_metadata_thinking, turn_input_from_values, user_input_preview,
+    AppServerTurnState, app_server_turns_from_session_entries, append_bound_agent_metadata,
+    apply_manifest_operation_grants, apply_manifest_runtime_metadata, finalize_turn_payload,
+    record_bound_agent_receipts, thread_manifest_operation_bindings, thread_metadata_thinking,
+    turn_input_from_values, user_input_preview,
 };
 use super::*;
 use crate::{
@@ -4247,6 +4248,276 @@ allow = ["streaming"]
 }
 
 #[tokio::test]
+async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata() {
+    let app = test_app().await;
+    let bound = app
+        .bind_app_server_agent_ref(
+            default_manifest::DEFAULT_AGENT_REF,
+            &AgentManifestModelProfileSelection::default(),
+            &AgentManifestBindOverrides::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut metadata = BTreeMap::new();
+    append_bound_agent_metadata(&mut metadata, &bound, None, None).unwrap();
+    let handle = app
+        .inner
+        .supervisor
+        .start_thread(ThreadStartRequest {
+            tenant_id: app.inner.tenant_id.clone(),
+            user_id: app.inner.user_id.clone(),
+            session_id: "manifest-lifecycle-cancel".to_string(),
+            topology: ThreadTopology::root(),
+            metadata,
+        })
+        .await
+        .unwrap();
+    wait_for_initial_thread_status(&handle).await;
+    let thread_id = handle.context().coordinates.thread_id;
+    let observer = handle.clone();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let caller_app = app.clone();
+    let operation_app = app.clone();
+    let operation_entered = entered.clone();
+    let operation_release = release.clone();
+    let caller = tokio::spawn(async move {
+        caller_app
+            .witness_and_persist_lifecycle(handle, move |handle| async move {
+                operation_entered.notify_one();
+                operation_release.notified().await;
+                record_bound_agent_receipts(&handle, &bound).await?;
+                operation_app
+                    .persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
+                    .await?;
+                Ok(())
+            })
+            .await
+    });
+
+    entered.notified().await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let has_receipt = observer
+                .read_thread_events(None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == EventKind::ManifestBindCompleted);
+            let has_lifecycle = app
+                .inner
+                .metadata_store
+                .get_thread_lifecycle(thread_id)
+                .await
+                .unwrap()
+                .is_some();
+            if has_receipt && has_lifecycle {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("manifest receipt and lifecycle metadata did not finish after caller cancellation");
+}
+
+struct StartingOnlyRuntimeFactory {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::AgentRuntimeFactory for StartingOnlyRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::ThreadContext,
+    ) -> crate::CooldisResult<Box<dyn crate::AgentRuntime>> {
+        Ok(Box::new(StartingOnlyRuntime {
+            started: self.started.clone(),
+        }))
+    }
+}
+
+struct StartingOnlyRuntime {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::AgentRuntime for StartingOnlyRuntime {
+    async fn run(
+        self: Box<Self>,
+        context: crate::ThreadContext,
+        _services: crate::RuntimeServices,
+        mut commands: mpsc::Receiver<crate::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+        _status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) {
+        let _ = events.send(crate::ThreadEvent::Started { context });
+        self.started.notify_one();
+        tokio::select! {
+            _ = cancellation.cancelled() => {}
+            _ = commands.recv() => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn thread_start_witnesses_workspace_before_waiting_for_initial_status() {
+    let root = unique_test_root("app-server-workspace-starting-witness");
+    let app_cwd = root.join("app-cwd");
+    let host_workspace = root.join("host-workspace");
+    let agent_registry_root = root.join("agents");
+    std::fs::create_dir_all(&app_cwd).unwrap();
+    std::fs::create_dir_all(&host_workspace).unwrap();
+    let manifest_path = root.join("starting-workspace.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "starting-workspace"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[workspace]
+guest_path = "/work"
+min_mode = "rw"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+
+    let listen = AppServerListenAddr::Unix(root.join("app.sock"));
+    let mut config = CooldisAppServerConfig::local(listen, &app_cwd);
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = agent_registry_root;
+    config.default_workspace = Some(AgentManifestWorkspaceBinding {
+        host_path: host_workspace,
+        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+    });
+    let started = Arc::new(tokio::sync::Notify::new());
+    let app = CooldisAppServer::with_runtime_factory(
+        config,
+        Arc::new(StartingOnlyRuntimeFactory {
+            started: started.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let caller_app = app.clone();
+    let caller_connection = connection.clone();
+    let caller = tokio::spawn(async move {
+        caller_app
+            .dispatch_request(
+                &caller_connection,
+                "thread/start",
+                Some(json!({"agentRef": "agent://starting-workspace@latest"})),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("workspace runtime did not start");
+
+    let coordinates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let snapshot = app.inner.supervisor.lifecycle_snapshot().await;
+            if let Some(record) = snapshot
+                .tenants
+                .iter()
+                .flat_map(|tenant| &tenant.records)
+                .find(|record| {
+                    record
+                        .metadata
+                        .contains_key(THREAD_AGENT_WORKSPACE_METADATA)
+                })
+            {
+                break record.coordinates.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workspace runtime did not become resident");
+    let handle = app
+        .inner
+        .supervisor
+        .get_thread_at(&coordinates)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            if handle
+                .read_thread_events(None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event.kind == EventKind::ManifestBindCompleted
+                        && event.payload["workspace"].is_object()
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workspace bind was not witnessed before the initial-status wait");
+    assert!(
+        !caller.is_finished(),
+        "thread/start should still be waiting for the runtime's initial status"
+    );
+
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if app
+                .inner
+                .metadata_store
+                .get_thread_lifecycle(coordinates.thread_id)
+                .await
+                .unwrap()
+                .is_some_and(|record| {
+                    record
+                        .metadata
+                        .contains_key(THREAD_AGENT_WORKSPACE_METADATA)
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workspace lifecycle metadata did not survive caller cancellation");
+    let _ = app.inner.supervisor.shutdown_thread_at(&coordinates).await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn protocol_tool_import_mounts_search_surface_and_records_receipts() {
     let root = unique_test_root("app-server-tool-universe");
     let workspace = root.join("workspace");
@@ -5973,6 +6244,175 @@ streaming = false
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn manifest_rw_workspace_binding_round_trips_real_files_and_blocks_host_escape() {
+    use crate::EventStore;
+    use std::os::unix::fs::symlink;
+
+    let root = unique_test_root("app-server-manifest-workspace");
+    let app_cwd = root.join("app-cwd");
+    let host_workspace = root.join("host-workspace");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&app_cwd).unwrap();
+    std::fs::create_dir_all(&host_workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(host_workspace.join("note.txt"), "seed\n").unwrap();
+    std::fs::write(outside.join("secret.txt"), "outside-safe\n").unwrap();
+    symlink(
+        outside.join("secret.txt"),
+        host_workspace.join("outside-link"),
+    )
+    .unwrap();
+
+    let agent_registry_root = root.join("agents");
+    let manifest_path = root.join("workspace.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "workspace-agent"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[workspace]
+guest_path = "/work"
+min_mode = "rw"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+
+    let client = Arc::new(WorkspaceBindingClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let app = test_app_with_provider_root(
+        &root,
+        &app_cwd,
+        provider_client,
+        CapsuleBindingsConfig::default(),
+    )
+    .await;
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let undeclared = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({
+                "workspace": {"hostPath": host_workspace, "mode": "rw"}
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert!(undeclared.message.contains("did not declare"));
+
+    let unbound = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({"agentRef": "agent://workspace-agent@latest"})),
+        )
+        .await
+        .unwrap_err();
+    assert!(unbound.message.contains("requires a workspace binding"));
+
+    let started = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({
+                "agentRef": "agent://workspace-agent@latest",
+                "workspace": {"hostPath": host_workspace, "mode": "rw"}
+            })),
+        )
+        .await
+        .unwrap();
+    let thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
+    let events = session_store
+        .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+        .await
+        .unwrap();
+    let bind = event_by_kind(&events, EventKind::ManifestBindCompleted);
+    assert_eq!(bind.payload["workspace"]["guest_path"], "/work");
+    assert_eq!(bind.payload["workspace"]["mode"], "rw");
+    assert_eq!(
+        bind.payload["workspace"]["host_path"],
+        std::fs::canonicalize(&host_workspace)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let fork = app
+        .dispatch_request(
+            &connection,
+            "thread/fork",
+            Some(json!({"threadId": thread_id})),
+        )
+        .await
+        .unwrap();
+    let fork_id = ThreadId::parse_str(fork["thread"]["id"].as_str().unwrap()).unwrap();
+    let fork_lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(fork_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fork_lifecycle.metadata.get(THREAD_AGENT_WORKSPACE_METADATA),
+        lifecycle.metadata.get(THREAD_AGENT_WORKSPACE_METADATA),
+        "clone forks must inherit the exact resolved bind-time workspace"
+    );
+
+    app.dispatch_request(
+        &connection,
+        "turn/start",
+        Some(json!({
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": "edit the workspace", "text_elements": []}]
+        })),
+    )
+    .await
+    .unwrap();
+    wait_for_provider_requests(&client, 2).await;
+
+    assert_eq!(
+        std::fs::read_to_string(host_workspace.join("note.txt")).unwrap(),
+        "updated\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+        "outside-safe\n"
+    );
+    assert!(!root.join("outside.txt").exists());
+    assert!(!root.join("absolute-outside.txt").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn manifest_bound_coupling_set_is_persisted_to_thread_metadata() {
     let root = unique_test_root("app-server-manifest-bound-coupling-set");
@@ -7121,6 +7561,281 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn reload_recovers_absent_or_corrupt_workspace_metadata_as_unbound() {
+    let root = unique_test_root("app-server-workspace-reload");
+    let app_cwd = root.join("app-cwd");
+    let first_workspace = root.join("first-workspace");
+    let replacement_workspace = root.join("replacement-workspace");
+    let agent_registry_root = root.join("agents");
+    for path in [&app_cwd, &first_workspace, &replacement_workspace] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let manifest_path = root.join("workspace-reload.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "workspace-reload"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[workspace]
+guest_path = "/work"
+min_mode = "rw"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+    let config_for = |host_path: &Path| {
+        let listen = AppServerListenAddr::Unix(
+            std::env::temp_dir().join(format!("cooldis-workspace-reload-{}.sock", Uuid::now_v7())),
+        );
+        let mut config = CooldisAppServerConfig::local(listen, &app_cwd);
+        config.runtime_home = root.join("runtime");
+        config.state_home = root.join("state");
+        config.agent_registry_root = agent_registry_root.clone();
+        config.default_workspace = Some(AgentManifestWorkspaceBinding {
+            host_path: host_path.to_path_buf(),
+            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+        });
+        config
+    };
+
+    let first = CooldisAppServer::new_local(config_for(&first_workspace))
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(first.clone());
+    initialize_for_test(&connection).await;
+    let absent = first
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+        )
+        .await
+        .unwrap();
+    let corrupt = first
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+        )
+        .await
+        .unwrap();
+    let drifted = first
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+        )
+        .await
+        .unwrap();
+    let valid = first
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+        )
+        .await
+        .unwrap();
+    let valid_fork = first
+        .dispatch_request(
+            &connection,
+            "thread/fork",
+            Some(json!({"threadId": valid["thread"]["id"]})),
+        )
+        .await
+        .unwrap();
+    let absent_id = ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
+    let corrupt_id = ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
+    let drifted_id = ThreadId::parse_str(drifted["thread"]["id"].as_str().unwrap()).unwrap();
+    let mut absent_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(absent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut corrupt_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(corrupt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut drifted_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(drifted_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let valid_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let valid_fork_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(
+            ThreadId::parse_str(valid_fork["thread"]["id"].as_str().unwrap()).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        SqliteSessionStore::open(&first.inner.session_store_path)
+            .await
+            .unwrap()
+            .read_events(
+                &EventStreamId::for_thread(&valid_fork_lifecycle.coordinates),
+                None,
+            )
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == EventKind::ManifestBindCompleted),
+        "a plain fork must receive its own durable workspace bind witness"
+    );
+    absent_lifecycle
+        .metadata
+        .remove(THREAD_AGENT_WORKSPACE_METADATA);
+    corrupt_lifecycle.metadata.insert(
+        THREAD_AGENT_WORKSPACE_METADATA.to_string(),
+        "not-json".to_string(),
+    );
+    drifted_lifecycle.metadata.insert(
+        THREAD_AGENT_WORKSPACE_METADATA.to_string(),
+        serde_json::to_string(&AgentManifestResolvedWorkspaceMount {
+            guest_path: PathBuf::from("/work"),
+            host_path: std::fs::canonicalize(&replacement_workspace).unwrap(),
+            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+        })
+        .unwrap(),
+    );
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(absent_lifecycle.clone())
+        .await
+        .unwrap();
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(corrupt_lifecycle.clone())
+        .await
+        .unwrap();
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(drifted_lifecycle.clone())
+        .await
+        .unwrap();
+    for lifecycle in [
+        &absent_lifecycle,
+        &corrupt_lifecycle,
+        &drifted_lifecycle,
+        &valid_lifecycle,
+    ] {
+        first
+            .inner
+            .supervisor
+            .shutdown_thread_at(&lifecycle.coordinates)
+            .await
+            .unwrap();
+    }
+    drop(connection);
+    drop(first);
+
+    let restarted = CooldisAppServer::new_local(config_for(&replacement_workspace))
+        .await
+        .unwrap();
+    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone());
+    initialize_for_test(&restarted_connection).await;
+    let loaded = restarted
+        .dispatch_request(&restarted_connection, "thread/loaded/list", Some(json!({})))
+        .await
+        .unwrap();
+    let loaded_ids = loaded["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    assert!(!loaded_ids.contains(absent["thread"]["id"].as_str().unwrap()));
+    assert!(!loaded_ids.contains(corrupt["thread"]["id"].as_str().unwrap()));
+    assert!(
+        !loaded_ids.contains(drifted["thread"]["id"].as_str().unwrap()),
+        "valid JSON that disagrees with the durable bind receipt must not be mounted"
+    );
+    assert!(loaded_ids.contains(valid["thread"]["id"].as_str().unwrap()));
+    assert!(
+        loaded_ids.contains(valid_fork["thread"]["id"].as_str().unwrap()),
+        "a plain fork must carry a durable workspace bind witness"
+    );
+    for thread_id in [
+        absent["thread"]["id"].as_str().unwrap(),
+        corrupt["thread"]["id"].as_str().unwrap(),
+        drifted["thread"]["id"].as_str().unwrap(),
+    ] {
+        let err = restarted
+            .dispatch_request(
+                &restarted_connection,
+                "thread/resume",
+                Some(json!({"threadId": thread_id})),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("requires a workspace binding"),
+            "unexpected reload error: {}",
+            err.message
+        );
+    }
+    let valid_reloaded = restarted
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let inherited: AgentManifestResolvedWorkspaceMount = serde_json::from_str(
+        valid_reloaded
+            .metadata
+            .get(THREAD_AGENT_WORKSPACE_METADATA)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        inherited.host_path,
+        std::fs::canonicalize(&first_workspace).unwrap(),
+        "a valid resumed binding must not consult the replacement daemon default"
+    );
+    assert!(
+        std::fs::read_dir(&replacement_workspace)
+            .unwrap()
+            .next()
+            .is_none()
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -8863,6 +9578,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
         thread.id
     };
 
+    // lexicon-allow: capsule - existing test provider helper type
     let second_client = Arc::new(InspectingCapsuleClient::default());
     let provider_client: Arc<dyn ProviderClient> = second_client.clone();
     let listen = AppServerListenAddr::Unix(socket.clone());
@@ -10659,6 +11375,7 @@ where
         None,
         None,
         config.default_placement.clone(),
+        None,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     CooldisAppServer::with_runtime_factory(config, factory)
@@ -11570,6 +12287,76 @@ impl ProviderClient for SkillResourceClient {
             usage: CanonicalUsage::default(),
             stop_reason: CanonicalStopReason::EndTurn,
         })
+    }
+}
+
+#[derive(Default)]
+struct WorkspaceBindingClient {
+    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for WorkspaceBindingClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+        if !has_tool_result {
+            assert!(tool_names(request).contains(&"bash".to_string()));
+            return Ok(ProviderResponse {
+                content: vec![CanonicalContent::tool_call(
+                    "call_workspace_bash",
+                    "bash",
+                    json!({
+                        "command": r#"ls /work
+cat /work/note.txt
+apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: /work/note.txt
+@@
+-seed
++updated
+*** End Patch
+PATCH
+cat /work/outside-link || true
+printf hacked > /work/outside-link || true
+printf traversal > /work/../outside.txt
+printf absolute > /absolute-outside.txt"#
+                    }),
+                )],
+                usage: CanonicalUsage::default(),
+                stop_reason: CanonicalStopReason::ToolUse,
+            });
+        }
+
+        let text = text_from_canonical_messages(&request.messages);
+        assert!(
+            text.contains("note.txt"),
+            "workspace ls was not returned: {text}"
+        );
+        assert!(
+            text.contains("seed"),
+            "workspace cat was not returned: {text}"
+        );
+        assert!(
+            text.contains("path escapes realfs root")
+                || text.contains("symlink")
+                || text.contains("Permission denied"),
+            "symlink escape denial was not returned: {text}"
+        );
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text("workspace edit completed")],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
+impl ProviderRequestRecorder for WorkspaceBindingClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
     }
 }
 

@@ -16,6 +16,7 @@ pub struct PluginMount {
     pub guest_path: PathBuf,
     pub host_path: PathBuf,
     pub mode: HostFileSystemMode,
+    expected_host_root: Option<PathBuf>,
 }
 
 impl PluginMount {
@@ -24,6 +25,7 @@ impl PluginMount {
             guest_path: guest_path.into(),
             host_path: host_path.into(),
             mode: HostFileSystemMode::ReadOnly,
+            expected_host_root: None,
         }
     }
 
@@ -32,6 +34,33 @@ impl PluginMount {
             guest_path: guest_path.into(),
             host_path: host_path.into(),
             mode: HostFileSystemMode::ReadWrite,
+            expected_host_root: None,
+        }
+    }
+
+    pub(crate) fn pinned_host_read_only(
+        guest_path: impl Into<PathBuf>,
+        canonical_host_path: impl Into<PathBuf>,
+    ) -> Self {
+        let host_path = canonical_host_path.into();
+        Self {
+            guest_path: guest_path.into(),
+            host_path: host_path.clone(),
+            mode: HostFileSystemMode::ReadOnly,
+            expected_host_root: Some(host_path),
+        }
+    }
+
+    pub(crate) fn pinned_host_read_write(
+        guest_path: impl Into<PathBuf>,
+        canonical_host_path: impl Into<PathBuf>,
+    ) -> Self {
+        let host_path = canonical_host_path.into();
+        Self {
+            guest_path: guest_path.into(),
+            host_path: host_path.clone(),
+            mode: HostFileSystemMode::ReadWrite,
+            expected_host_root: Some(host_path),
         }
     }
 }
@@ -261,14 +290,22 @@ fn mount_plugin_filesystems(vfs: &CooldisVfs, mounts: Vec<PluginMount>) -> Coold
                 mount.guest_path.display()
             )));
         }
-        let fs = Arc::new(
-            HostFileSystem::new(&mount.host_path, mount.mode).map_err(|err| {
-                CooldisError::RuntimeFactory(format!(
-                    "failed to open host plugin mount {}: {err}",
-                    mount.host_path.display()
-                ))
-            })?,
-        );
+        let fs = HostFileSystem::new(&mount.host_path, mount.mode).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to open host plugin mount {}: {err}",
+                mount.host_path.display()
+            ))
+        })?;
+        if let Some(expected) = &mount.expected_host_root
+            && fs.root() != expected
+        {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "host plugin mount {} resolved to {}, not its witnessed canonical root",
+                mount.host_path.display(),
+                fs.root().display()
+            )));
+        }
+        let fs = Arc::new(fs);
         vfs.mount(&mount.guest_path, fs).map_err(|err| {
             CooldisError::RuntimeFactory(format!(
                 "failed to mount host path {} at {}: {err}",

@@ -220,10 +220,11 @@ turn completion notifications.
 ## Thread Handle Dispatch
 
 `thread/spawn` accepts `{ "threadId", "taskName", "message", "agentRef"?,
-"placement"?, "dispatchId"? }`. Because placement attaches to a manifest bind,
-`placement` requires `agentRef`; supplying placement without it is invalid
-params. The optional `dispatchId` is generated when omitted. A retry with the
-same identity folds the parent control stream and returns the original
+"placement"?, "workspace"?, "dispatchId"? }`. Because placement and workspace
+authority attach to a manifest bind, either override requires `agentRef`;
+supplying one without it is invalid params. The optional `dispatchId` is
+generated when omitted. A retry with the same identity folds the parent control
+stream and returns the original
 `{ "handle": { "kind": "thread", "id": "..." }, "dispatchId": "..." }`
 alongside the child thread fields; it does not append another spawn request or
 start another child. The durable request continues to carry that identity in
@@ -250,7 +251,12 @@ The result includes the normal `thread` object plus a `fork` provenance object:
 "sourceCut": { "threadId": "...", "checkpointId": "...", "leafEntryId": "...",
 "streamId": "thread:...", "streamToSequence": null } }`. Clone forks copy the
 checkpoint branch into a new child branch; later parent and child turns diverge
-without sharing active leaves.
+without sharing active leaves. A workspace-bound source copies the exact
+resolved workspace receipt metadata into the fork checkpoint, so the child
+inherits the same guest path, canonical host path, and mode rather than
+consulting a newer daemon default. The child also receives its own compile and
+bind receipt pair; recovery never treats copied lifecycle metadata as authority
+without that child-local witness.
 
 `thread/rebindFork` is the borrowed-prefix/reference fork. It starts a child
 thread bound to a new agent manifest and records a `ThreadBaseRef` so context
@@ -282,7 +288,30 @@ same additive `placement` parameter is accepted by manifest-binding
 `thread/spawn` and `thread/rebindFork` calls. It overrides
 `daemon.runtime.placement`; existing callers that omit it keep using the daemon
 default. The model-visible `thread_spawn` tool remains
-`{task_name, message, agent_ref}` and cannot select placement.
+`{task_name, message, agent_ref}` and cannot select placement or a workspace.
+
+The same methods accept an additive operator workspace override:
+`{"workspace":{"hostPath":"/absolute/host/tree","mode":"rw"}}`. It overrides
+`daemon.runtime.workspace`, but only when the selected manifest declares a
+`[workspace]` requirement. Required-but-unbound and undeclared-but-supplied
+bindings both fail closed, and `ro` cannot satisfy a manifest whose `min_mode`
+is `rw`. Workspace is a binding-plane field only: it is not included in the
+content-addressed manifest and is not exposed as a model-facing tool argument.
+Local workspace bindings cannot be combined with `remote` or `sandbox`
+placement in this slice.
+
+The resolved mount is installed into the per-thread VFS at the declared guest
+path. Bash remains `virtual_only`; no host-route shell is enabled. The existing
+`HostFileSystem` backend canonicalizes the root, canonicalizes an existing path
+or its nearest existing ancestor before I/O, rejects paths that resolve outside
+the root, and refuses write-through of a symlink leaf. Read-write host mounts
+also serialize operations for the same directory, including mounts reached
+through filesystem aliases, and reject mutations of multiply-linked files so a
+pre-existing hard link cannot write an inode outside the mount. Mount
+construction rechecks the witnessed canonical root before installing the VFS
+entry. Absolute virtual paths and `..` components therefore remain rooted in
+the mounted tree, while symlinks to outside targets fail. Skill resources
+retain their separate read-only `/skills` mount.
 
 Remote execution in this slice is deliberately a conductor-to-child operation:
 only `thread/spawn` executes a `remote` binding, and only after this daemon
@@ -324,6 +353,15 @@ alias resolution receipt in the compile event payload. A remote child records
 the same bind receipt and unchanged `placement.decision` in its local stream
 before that stream converges to the parent store. Without a served sync backend,
 `remote` retains the missing-capability error; `sandbox` always does.
+When present, the effective workspace mount is part of that same
+`manifest.bind.completed` payload and atomic append. Thread lifecycle metadata
+stores the resolved mount for factory reconstruction. Missing or corrupt
+workspace metadata, and metadata that is absent from or disagrees with the
+active durable bind receipt, recovers as unbound and cannot fall through to the
+daemon's current default. The witness check runs before runtime construction, so
+untrusted lifecycle metadata is never mounted first and re-witnessed later. A
+manifest that requires the mount consequently remains unloadable until
+explicitly rebound through a new bind path.
 
 ## Thinking Config
 

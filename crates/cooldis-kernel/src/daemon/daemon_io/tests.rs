@@ -7060,6 +7060,252 @@ async fn seeded_binding_unloaded_before_ingress_is_reloaded() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn daemon_lazy_reload_recovers_unwitnessed_workspace_metadata_as_unbound() {
+    let root = test_root("daemon-lazy-workspace-witness");
+    let bridge = bridge_with_runtime_factory_at_root(
+        &root,
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            CanonicalProviderRuntimeConfig::new(
+                ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+                APP_SERVER_LOCAL_PROVIDER,
+                APP_SERVER_LOCAL_MODEL,
+            ),
+            Arc::new(RecordingRouteProviderClient::default()),
+        )),
+    )
+    .await;
+    let coordinates = ThreadCoordinates {
+        tenant_id: bridge.tenant_id.clone(),
+        user_id: bridge.user_id.clone(),
+        session_id: "workspace-reload".to_string(),
+        thread_id: ThreadId::new(),
+    };
+    let store = SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap())
+        .await
+        .unwrap();
+    store
+        .append(
+            &coordinates,
+            None,
+            SessionEntryKind::Runtime {
+                kind: "thread_started".to_string(),
+                payload: json!({
+                    "parent_thread_id": null,
+                    "topology": ThreadTopology::root(),
+                    "metadata": {
+                        "cooldis.agent.workspace": serde_json::to_string(&json!({
+                            "guest_path": "/work",
+                            "host_path": root.join("unwitnessed"),
+                            "mode": "rw"
+                        })).unwrap()
+                    },
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let handle = bridge
+        .get_or_load_thread_handle(&coordinates)
+        .await
+        .unwrap();
+
+    assert!(
+        !handle
+            .context()
+            .metadata
+            .contains_key("cooldis.agent.workspace"),
+        "daemon lazy reload must not mount lifecycle workspace metadata without a bind receipt"
+    );
+    bridge
+        .supervisor
+        .shutdown_thread_at(&coordinates)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
+    let root = test_root("daemon-fork-workspace-witness");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let bridge = bridge_with_runtime_factory_at_root(
+        &root,
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            CanonicalProviderRuntimeConfig::new(
+                ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+                APP_SERVER_LOCAL_PROVIDER,
+                APP_SERVER_LOCAL_MODEL,
+            ),
+            Arc::new(RecordingRouteProviderClient::default()),
+        )),
+    )
+    .await;
+    let resolved_workspace = crate::AgentManifestResolvedWorkspaceMount {
+        guest_path: PathBuf::from("/work"),
+        host_path: std::fs::canonicalize(&workspace).unwrap(),
+        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+    };
+    let mut metadata = BTreeMap::new();
+    metadata.insert(
+        "cooldis.agent.workspace".to_string(),
+        serde_json::to_string(&resolved_workspace).unwrap(),
+    );
+    let parent = bridge
+        .supervisor
+        .start_thread(ThreadStartRequest {
+            tenant_id: bridge.tenant_id.clone(),
+            user_id: bridge.user_id.clone(),
+            session_id: "workspace-fork".to_string(),
+            topology: ThreadTopology::root(),
+            metadata,
+        })
+        .await
+        .unwrap();
+    let compile_payload = json!({
+        "ref_uri": "agent://workspace@0.1.0",
+        "manifest_hash": "sha256:workspace",
+        "source_hash": "sha256:source"
+    });
+    let bind_payload = serde_json::to_value(crate::AgentManifestBindReceipt {
+        ref_uri: "agent://workspace@0.1.0".to_string(),
+        manifest_hash: "sha256:workspace".to_string(),
+        model_profile_id: "default".to_string(),
+        provider_id: APP_SERVER_LOCAL_PROVIDER.to_string(),
+        model_id: APP_SERVER_LOCAL_MODEL.to_string(),
+        tool_ids: Vec::new(),
+        operation_bindings: Vec::new(),
+        skill_packages: Vec::new(),
+        static_context_segments: Vec::new(),
+        tool_universes: Vec::new(),
+        couplings: Vec::new(),
+        granted: Vec::new(),
+        effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
+        overridden_keys: Vec::new(),
+        placement: Some(crate::AgentManifestPlacementBinding::default()),
+        workspace: Some(resolved_workspace),
+    })
+    .unwrap();
+    parent
+        .record_manifest_receipts(compile_payload, bind_payload)
+        .await
+        .unwrap();
+    let inherited = bridge
+        .inherited_workspace_manifest_receipts(&parent)
+        .await
+        .unwrap();
+    let checkpoint = bridge
+        .supervisor
+        .create_checkpoint_at(
+            &parent.context().coordinates,
+            None,
+            Some("workspace-fork".to_string()),
+            parent.context().metadata.clone(),
+        )
+        .await
+        .unwrap();
+    let child = bridge
+        .fork_thread_with_manifest_witness(checkpoint, ThreadId::new(), inherited)
+        .await
+        .unwrap();
+
+    assert!(
+        child
+            .read_thread_events(None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == EventKind::ManifestBindCompleted),
+        "daemon fork children must have a child-local workspace bind witness"
+    );
+    bridge.supervisor.shutdown_all().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn cancelled_daemon_start_finishes_the_workspace_bind_witness() {
+    let root = test_root("daemon-start-workspace-cancel");
+    let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;
+    let thread_id = ThreadId::new();
+    let coordinates = ThreadCoordinates {
+        tenant_id: bridge.tenant_id.clone(),
+        user_id: bridge.user_id.clone(),
+        session_id: "workspace-cancel".to_string(),
+        thread_id,
+    };
+    gate.block_first_build(coordinates.clone());
+    let workspace = json!({
+        "guest_path": "/work",
+        "host_path": root.join("workspace"),
+        "mode": "rw"
+    });
+    let mut metadata = BTreeMap::new();
+    metadata.insert(
+        "cooldis.agent.workspace".to_string(),
+        serde_json::to_string(&workspace).unwrap(),
+    );
+    let binding = KernelThreadSpawnAgentBinding {
+        metadata: metadata.clone(),
+        compile_receipt: json!({
+            "manifest_hash": "sha256:cancelled-daemon-start"
+        }),
+        bind_receipt: json!({
+            "manifest_hash": "sha256:cancelled-daemon-start",
+            "placement": {"target": "local"},
+            "workspace": workspace
+        }),
+    };
+    let request = ThreadStartRequest {
+        tenant_id: coordinates.tenant_id.clone(),
+        user_id: coordinates.user_id.clone(),
+        session_id: coordinates.session_id.clone(),
+        topology: ThreadTopology::root(),
+        metadata,
+    };
+    let caller_bridge = bridge.clone();
+    let caller = tokio::spawn(async move {
+        caller_bridge
+            .start_thread_with_manifest_witness(request, Some(thread_id), Some(binding))
+            .await
+    });
+
+    gate.wait_for_builds(1).await;
+    caller.abort();
+    match caller.await {
+        Err(err) => assert!(err.is_cancelled()),
+        Ok(_) => panic!("daemon start caller was not cancelled"),
+    }
+    gate.release();
+
+    let handle = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok(handle) = bridge.supervisor.get_thread_at(&coordinates).await
+                && handle
+                    .read_thread_events(None)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.kind == EventKind::ManifestBindCompleted)
+            {
+                break handle;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("daemon workspace bind witness did not finish after caller cancellation");
+    assert!(
+        handle
+            .context()
+            .metadata
+            .contains_key("cooldis.agent.workspace")
+    );
+    bridge.supervisor.shutdown_all().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
     let root = test_root("ingress-binding-concurrent-load");

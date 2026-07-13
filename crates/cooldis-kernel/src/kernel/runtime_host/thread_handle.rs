@@ -105,6 +105,16 @@ impl RuntimeThreadHandle {
         if !remote_execution_authorized {
             placement = resolve_manifest_placement(None, Some(&placement), false)?;
         }
+        if placement.target != crate::PlacementTarget::Local
+            && bind_payload
+                .get("workspace")
+                .is_some_and(|workspace| !workspace.is_null())
+        {
+            return Err(CooldisError::RuntimeFactory(
+                "workspace bindings require local placement and cannot be witnessed by a remote or sandbox runtime"
+                    .to_string(),
+            ));
+        }
         let snapshot_id = bind_payload
             .get("manifest_hash")
             .and_then(serde_json::Value::as_str)
@@ -200,12 +210,18 @@ impl RuntimeThreadHandle {
                 },
             ));
         }
-        let events = self
-            .thread
-            .services
-            .runtime_store()
-            .append_events(&stream_id, records)
+        // Once the atomic append has entered the store, finish it even if the
+        // RPC task that initiated the bind is cancelled. The runtime-host
+        // start guards separately remove a thread cancelled during factory
+        // construction, so no mounted runtime survives without this batch.
+        let runtime_store = self.thread.services.runtime_store();
+        let append =
+            tokio::spawn(async move { runtime_store.append_events(&stream_id, records).await });
+        let events = append
             .await
+            .map_err(|err| {
+                CooldisError::History(format!("manifest receipt append task failed: {err}"))
+            })?
             .map_err(|err| CooldisError::History(err.to_string()))?;
         if events.len() < 3 {
             return Err(CooldisError::History(format!(

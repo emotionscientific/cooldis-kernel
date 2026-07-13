@@ -7,6 +7,137 @@ use object_store::{
 use std::fmt::{Display, Result as FmtResult};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+fn unique_host_fs_root(label: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let root = std::env::temp_dir().join(format!(
+        "cooldis-vfs-{label}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn host_filesystem_rw_is_rooted_and_rejects_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = unique_host_fs_root("rooting");
+    let root = fixture.join("root");
+    let outside = fixture.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "outside-safe").unwrap();
+    symlink(outside.join("secret.txt"), root.join("escape-link")).unwrap();
+    symlink(outside.clone(), root.join("escape-dir")).unwrap();
+    symlink("escape-dir/secret.txt", root.join("escape-chain")).unwrap();
+
+    let fs = HostFileSystem::read_write(&root).unwrap();
+    fs.write_file(Path::new("/round-trip.txt"), b"host mutation")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("round-trip.txt")).unwrap(),
+        "host mutation"
+    );
+
+    assert!(fs.read_file(Path::new("/escape-link")).await.is_err());
+    assert!(fs.read_file(Path::new("/escape-chain")).await.is_err());
+    assert!(
+        fs.write_file(Path::new("/escape-link"), b"escaped")
+            .await
+            .is_err()
+    );
+    assert!(
+        fs.symlink(
+            Path::new("../../outside/secret.txt"),
+            Path::new("/agent-link")
+        )
+        .await
+        .is_err(),
+        "an agent-created relative symlink must not escape the host root"
+    );
+    assert!(
+        fs.symlink(
+            &outside.join("secret.txt"),
+            Path::new("/agent-absolute-link")
+        )
+        .await
+        .is_err(),
+        "an agent-created absolute symlink must not escape the host root"
+    );
+    fs.write_file(Path::new("/../../parent-escape.txt"), b"contained")
+        .await
+        .unwrap();
+    fs.write_file(Path::new("/absolute-path.txt"), b"contained")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+        "outside-safe"
+    );
+    assert!(!fixture.join("parent-escape.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("parent-escape.txt")).unwrap(),
+        "contained",
+        "parent components are normalized inside the host root"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("absolute-path.txt")).unwrap(),
+        "contained",
+        "absolute virtual paths are rooted under the host directory"
+    );
+    let _ = std::fs::remove_dir_all(fixture);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn host_filesystem_rw_rejects_mutating_a_preexisting_external_hard_link() {
+    let fixture = unique_host_fs_root("hard-link");
+    let root = fixture.join("root");
+    let outside = fixture.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("shared.txt");
+    std::fs::write(&outside_file, "outside-safe").unwrap();
+    std::fs::hard_link(&outside_file, root.join("shared.txt")).unwrap();
+
+    let fs = HostFileSystem::read_write(&root).unwrap();
+
+    assert!(
+        fs.write_file(Path::new("/shared.txt"), b"escaped")
+            .await
+            .is_err()
+    );
+    assert!(
+        fs.append_file(Path::new("/shared.txt"), b"-escaped")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside_file).unwrap(),
+        "outside-safe"
+    );
+    let _ = std::fs::remove_dir_all(fixture);
+}
+
+#[cfg(unix)]
+#[test]
+fn host_filesystem_mounts_of_the_same_directory_share_an_operation_lock() {
+    let fixture = unique_host_fs_root("shared-lock");
+    let root = fixture.join("root");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let first = HostFileSystem::read_write(&root).unwrap();
+    let second = HostFileSystem::read_write(root.join(".")).unwrap();
+
+    assert!(Arc::ptr_eq(&first.operation_lock, &second.operation_lock));
+    let _ = std::fs::remove_dir_all(fixture);
+}
+
 #[derive(Debug)]
 struct FailingFirstPutStore {
     inner: Arc<dyn ObjectStore>,

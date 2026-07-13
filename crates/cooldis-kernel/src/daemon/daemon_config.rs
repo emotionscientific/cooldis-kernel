@@ -1,6 +1,9 @@
+#[cfg(test)]
+use crate::AgentManifestWorkspaceMode;
 use crate::daemon::remote_store::endpoint::CooldisDaemonSyncConfig;
 use crate::{
-    AgentManifestPlacementBinding, AgentRecordRef, AppServerListenAddr, CooldisError, CooldisResult,
+    AgentManifestPlacementBinding, AgentManifestWorkspaceBinding, AgentRecordRef,
+    AppServerListenAddr, CooldisError, CooldisResult,
 };
 use cooldis_io_core::{IngressPersistenceConfig, IngressPersistenceMode};
 use regex::Regex;
@@ -143,6 +146,9 @@ impl CooldisDaemonConfig {
         if let Some(path) = self.runtime.state_home.take() {
             self.runtime.state_home = Some(resolve_config_path(base, path));
         }
+        if let Some(workspace) = &mut self.runtime.workspace {
+            workspace.host_path = resolve_config_path(base, workspace.host_path.clone());
+        }
         if let Some(path) = self.provider.env_file.take() {
             self.provider.env_file = Some(resolve_config_path(base, path));
         }
@@ -162,6 +168,10 @@ pub struct CooldisRuntimeConfig {
     /// surface supplies an override. Absent means local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<AgentManifestPlacementBinding>,
+    /// Default host workspace binding applied to a manifest that declares a
+    /// workspace requirement. Bind-time RPC input may override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<AgentManifestWorkspaceBinding>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -870,6 +880,7 @@ struct RuntimePresence {
     runtime_home: bool,
     state_home: bool,
     placement: bool,
+    workspace: bool,
 }
 
 #[derive(Default)]
@@ -920,6 +931,7 @@ fn daemon_config_presence(text: &str) -> CooldisResult<DaemonConfigPresence> {
             runtime_home: section_has_key(table, "runtime", "runtime_home"),
             state_home: section_has_key(table, "runtime", "state_home"),
             placement: section_has_key(table, "runtime", "placement"),
+            workspace: section_has_key(table, "runtime", "workspace"),
         },
         app_server: AppServerPresence {
             listen: section_has_key(table, "app_server", "listen"),
@@ -981,6 +993,9 @@ fn merge_daemon_config_layer(
     }
     if presence.runtime.placement {
         config.runtime.placement = layer.runtime.placement.take();
+    }
+    if presence.runtime.workspace {
+        config.runtime.workspace = layer.runtime.workspace.take();
     }
     if presence.app_server.listen {
         config.app_server.listen = layer.app_server.listen;

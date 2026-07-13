@@ -1,5 +1,8 @@
 use super::*;
-use crate::{AgentManifestPlacementBinding, CooldisDaemonConfig};
+use crate::{
+    AgentManifestPlacementBinding, AgentManifestWorkspaceBinding, AgentManifestWorkspaceMode,
+    CooldisDaemonConfig,
+};
 
 #[test]
 fn turso_cross_process_lock_match_accepts_only_refused_open_shapes() {
@@ -444,6 +447,7 @@ fn daemon_app_server_config_from_loaded_keeps_registry_defaults_when_unset() {
         app_config.default_placement,
         AgentManifestPlacementBinding::default()
     );
+    assert_eq!(app_config.default_workspace, None);
 }
 
 #[test]
@@ -465,6 +469,26 @@ fn daemon_app_server_config_from_loaded_applies_placement_default() {
             executor_ref: Some("executor://cluster/default".to_string()),
             config: BTreeMap::new(),
         }
+    );
+}
+
+#[test]
+fn daemon_app_server_config_from_loaded_applies_workspace_default() {
+    let mut daemon_config = CooldisDaemonConfig::default();
+    daemon_config.runtime.workspace = Some(AgentManifestWorkspaceBinding {
+        host_path: PathBuf::from("/tmp/cooldis-workspace"),
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    });
+
+    let app_config =
+        daemon_app_server_config_from_loaded(&loaded_daemon_config(daemon_config)).unwrap();
+
+    assert_eq!(
+        app_config.default_workspace,
+        Some(AgentManifestWorkspaceBinding {
+            host_path: PathBuf::from("/tmp/cooldis-workspace"),
+            mode: AgentManifestWorkspaceMode::ReadWrite,
+        })
     );
 }
 

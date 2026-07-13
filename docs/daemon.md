@@ -17,6 +17,12 @@ state_home = ".cooldis/state"
 # threads are started through thread/start; select remote on thread/spawn.
 target = "local"
 
+[daemon.runtime.workspace]
+# Optional bind-plane default for manifests that declare [workspace].
+# Relative host paths resolve against this config file's directory.
+host_path = "../living-app"
+mode = "rw" # "ro" or "rw"
+
 [daemon.app_server]
 # Optional. The default uses XDG_RUNTIME_DIR when available, otherwise a
 # user-scoped state directory such as ~/Library/Application Support/cooldis/run
@@ -109,6 +115,17 @@ executor is installed. With no served sync listener it retains the byte-stable
 fail-closed everywhere. This slice executes remote bindings only through
 `thread/spawn`; `thread/start`, daemon-route binding, and `thread/rebindFork`
 reject a remote binding instead of falling back to local execution.
+
+`daemon.runtime.workspace` is the default operator binding for an abstract
+manifest `[workspace]` requirement. It supplies the machine-local `host_path`
+and concrete `mode = "ro" | "rw"`; a bind-time app-server `workspace`
+parameter takes precedence. A requiring manifest fails closed when neither is
+present, and a configured or requested binding is rejected when the manifest
+did not declare a workspace. The selected mode must meet the manifest's
+`min_mode` floor. The bind receipt records the canonical host path, guest path,
+and mode. That receipt metadata—not the current daemon default—is used for
+resume and clone forks, so a restart cannot silently re-point an existing
+thread. Workspace mounts are local-placement only in this slice.
 
 ## Store-primary sync endpoint
 

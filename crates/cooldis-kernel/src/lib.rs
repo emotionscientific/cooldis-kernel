@@ -335,14 +335,16 @@ pub use agent::manifest_bind::{
     AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBoundThread,
     AgentManifestCompileReceipt, AgentManifestCouplingBinding, AgentManifestDirectToolBinding,
     AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestPlacementBinding, AgentManifestProviderSurface, AgentManifestSkillPackageBinding,
-    AgentManifestStaticContextSegment, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,
-    BoundCouplingSet, BoundCouplingSink, CouplingRole, MANIFEST_BINDER_DISCHARGED_BY,
-    MANIFEST_BINDER_FUNCTION, MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION,
+    AgentManifestPlacementBinding, AgentManifestProviderSurface,
+    AgentManifestResolvedWorkspaceMount, AgentManifestSkillPackageBinding,
+    AgentManifestStaticContextSegment, AgentManifestWorkspaceBinding, BoundCoupling,
+    BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSet, BoundCouplingSink,
+    CouplingRole, MANIFEST_BINDER_DISCHARGED_BY, MANIFEST_BINDER_FUNCTION,
+    MANIFEST_COMPILER_DISCHARGED_BY, MANIFEST_COMPILER_FUNCTION,
     THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_PACKAGES_METADATA,
     THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA, apply_runtime_overrides,
     bind_published_agent_record, bind_published_agent_record_with_placement,
-    compile_published_agent_record, resolve_manifest_placement,
+    compile_published_agent_record, resolve_manifest_placement, resolve_manifest_workspace,
 };
 pub use agent::manifest_schema::{
     AgentManifestBashTool, AgentManifestBudgetRest, AgentManifestBudgetShare,
@@ -358,7 +360,8 @@ pub use agent::manifest_schema::{
     AgentManifestResourceKind, AgentManifestResourceMode, AgentManifestResourceMount,
     AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey,
     AgentManifestRuntimeOverridePolicy, AgentManifestSchema, AgentManifestTool,
-    AgentManifestToolProtocol, AgentManifestToolSurface, default_context_pipeline,
+    AgentManifestToolProtocol, AgentManifestToolSurface, AgentManifestWorkspaceMode,
+    AgentManifestWorkspaceRequirement, default_context_pipeline,
 };
 pub use agent::tool_interceptor::{
     AllowAllToolPermissionGate, ToolExecutionInterceptor, ToolExecutionOutcome,

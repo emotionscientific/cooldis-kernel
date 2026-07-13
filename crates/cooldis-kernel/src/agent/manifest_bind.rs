@@ -16,7 +16,8 @@ use crate::agent::manifest_schema::{
     AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestModelProfile,
     AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
     AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey, AgentManifestSchema,
-    AgentManifestTool, AgentManifestToolSurface, KERNEL_ASSEMBLER_STATIC,
+    AgentManifestTool, AgentManifestToolSurface, AgentManifestWorkspaceMode,
+    AgentManifestWorkspaceRequirement, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::agent::tool_universe::{
     PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
@@ -38,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `discharged_by` coupling names and `function` versions for the two
 /// manifest receipts, mirroring `projection:context-compiler` /
@@ -225,6 +226,8 @@ pub async fn bind_published_agent_record(
         overrides,
         None,
         None,
+        None,
+        None,
         false,
     )
     .await
@@ -249,6 +252,8 @@ pub async fn bind_published_agent_record_with_placement(
     overrides: &AgentManifestBindOverrides,
     default_placement: Option<&AgentManifestPlacementBinding>,
     placement_override: Option<&AgentManifestPlacementBinding>,
+    default_workspace: Option<&AgentManifestWorkspaceBinding>,
+    workspace_override: Option<&AgentManifestWorkspaceBinding>,
     remote_event_store_served: bool,
 ) -> CooldisResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
@@ -257,6 +262,17 @@ pub async fn bind_published_agent_record_with_placement(
         placement_override,
         remote_event_store_served,
     )?;
+    let workspace = resolve_manifest_workspace(
+        manifest.workspace.as_ref(),
+        default_workspace,
+        workspace_override,
+    )?;
+    if placement.target != PlacementTarget::Local && workspace.is_some() {
+        return Err(CooldisError::RuntimeFactory(
+            "workspace bindings currently require local placement; remote and sandbox workspace transfer belongs to the sandbox executor boundary"
+                .to_string(),
+        ));
+    }
     let selected = select_manifest_model_profile(&manifest, model_selection)?;
     let profile = selected.profile;
     let provider_id = selected.provider_id;
@@ -333,6 +349,7 @@ pub async fn bind_published_agent_record_with_placement(
         effective_runtime,
         overridden_keys,
         placement: Some(placement),
+        workspace,
     };
     Ok(AgentManifestBoundThread {
         manifest,
@@ -1575,6 +1592,10 @@ pub struct AgentManifestBindReceipt {
     /// witnessed before the field existed keep decoding and folding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<AgentManifestPlacementBinding>,
+    /// Effective host workspace mount fixed for this bind. Optional so bind
+    /// receipts written before workspace binding existed keep decoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<AgentManifestResolvedWorkspaceMount>,
 }
 
 /// The placement resolved for a manifest-backed thread at bind time.
@@ -1635,6 +1656,98 @@ pub fn resolve_manifest_placement(
         )));
     }
     Ok(resolved)
+}
+
+/// Machine-local workspace authority supplied by daemon config or an
+/// operator bind-time override.
+///
+/// This type is never part of the content-addressed manifest and is never a
+/// model-facing tool argument. `host_path` may be relative on daemon config
+/// input; bind resolution canonicalizes it before writing the receipt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestWorkspaceBinding {
+    #[serde(alias = "hostPath")]
+    pub host_path: PathBuf,
+    pub mode: AgentManifestWorkspaceMode,
+}
+
+/// Effective workspace mount witnessed by `manifest.bind.completed` and
+/// persisted in thread lifecycle metadata for restart and fork recovery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentManifestResolvedWorkspaceMount {
+    pub guest_path: PathBuf,
+    pub host_path: PathBuf,
+    pub mode: AgentManifestWorkspaceMode,
+}
+
+impl AgentManifestResolvedWorkspaceMount {
+    pub fn binding(&self) -> AgentManifestWorkspaceBinding {
+        AgentManifestWorkspaceBinding {
+            host_path: self.host_path.clone(),
+            mode: self.mode,
+        }
+    }
+}
+
+/// Resolve an abstract manifest workspace requirement against operator
+/// bindings. An override wins over the daemon default. Both sides are
+/// fail-closed: required-without-binding and binding-without-declaration are
+/// errors, and the supplied mode must satisfy the declared floor.
+pub fn resolve_manifest_workspace(
+    requirement: Option<&AgentManifestWorkspaceRequirement>,
+    default_workspace: Option<&AgentManifestWorkspaceBinding>,
+    workspace_override: Option<&AgentManifestWorkspaceBinding>,
+) -> CooldisResult<Option<AgentManifestResolvedWorkspaceMount>> {
+    let binding = workspace_override.or(default_workspace);
+    let (requirement, binding) = match (requirement, binding) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => {
+            return Err(CooldisError::RuntimeFactory(
+                "agent manifest requires a workspace binding, but neither the bind override nor daemon default supplied one"
+                    .to_string(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(CooldisError::RuntimeFactory(
+                "workspace binding was supplied, but the agent manifest did not declare a workspace requirement"
+                    .to_string(),
+            ));
+        }
+        (Some(requirement), Some(binding)) => (requirement, binding),
+    };
+
+    if binding.mode < requirement.min_mode {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "workspace binding mode {} does not satisfy manifest minimum mode {}",
+            workspace_mode_name(binding.mode),
+            workspace_mode_name(requirement.min_mode)
+        )));
+    }
+    let host_path = std::fs::canonicalize(&binding.host_path).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "workspace host path {} could not be resolved: {err}",
+            binding.host_path.display()
+        ))
+    })?;
+    if !host_path.is_dir() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "workspace host path {} is not a directory",
+            host_path.display()
+        )));
+    }
+    Ok(Some(AgentManifestResolvedWorkspaceMount {
+        guest_path: PathBuf::from(&requirement.guest_path),
+        host_path,
+        mode: binding.mode,
+    }))
+}
+
+fn workspace_mode_name(mode: AgentManifestWorkspaceMode) -> &'static str {
+    match mode {
+        AgentManifestWorkspaceMode::ReadOnly => "ro",
+        AgentManifestWorkspaceMode::ReadWrite => "rw",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

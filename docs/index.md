@@ -76,7 +76,7 @@ agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
 couplings, witnessed OpenAPI operation imports, offline coupling replay,
 local runtime execution, provider adapters,
 virtual bash, VFS,
-skill-package resources, daemon/RPC surfaces, daemon-embedded store-primary
+skill-package resources, bind-plane local host-workspace mounts, daemon/RPC surfaces, daemon-embedded store-primary
 stream propagation, store-backed remote child placement, and the proof path for
 packageable local agents.
 
