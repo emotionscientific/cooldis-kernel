@@ -63,6 +63,51 @@ impl ProcessHandleDispatcher {
         }
     }
 
+    /// Whether this daemon generation still owns a live backend binding for
+    /// `dispatch_id`. Startup recovery uses the dispatcher's actual registry,
+    /// never a timestamp or stream heuristic, to avoid failing live work.
+    pub(crate) async fn is_live_dispatch(&self, dispatch_id: &DispatchId) -> bool {
+        self.inner
+            .live_bindings
+            .lock()
+            .await
+            .values()
+            .any(|binding| binding.dispatch_id == *dispatch_id)
+    }
+
+    /// Pins daemon startup ordering: EMO-426 runs before any surface may
+    /// install a process binding in this generation.
+    pub(crate) async fn assert_startup_registry_empty(&self) -> CooldisResult<()> {
+        let live_bindings = self.inner.live_bindings.lock().await;
+        let terminal_monitors = self.inner.terminal_monitors.lock().await;
+        if live_bindings.is_empty() && terminal_monitors.is_empty() {
+            return Ok(());
+        }
+        Err(CooldisError::RuntimeExecution(format!(
+            "startup recovery requires an empty process dispatcher registry ({} live bindings, {} terminal monitors)",
+            live_bindings.len(),
+            terminal_monitors.len(),
+        )))
+    }
+
+    /// Submit the stable observer-death outcome through the same process
+    /// ingress sink and envelope builder used by live terminal monitors.
+    pub(crate) async fn submit_recovery_outcome(
+        &self,
+        binding: &HandleDispatchEnvelope,
+    ) -> CooldisResult<()> {
+        validate_binding(
+            binding,
+            &binding.consumer,
+            &binding.dispatch_id,
+            &binding.command_digest,
+        )?;
+        self.inner
+            .ingress
+            .submit_process_handle_envelope(recovery_outcome_envelope(binding)?)
+            .await
+    }
+
     /// Starts a backend only after the dispatch witness has settled.
     pub async fn dispatch_start(
         &self,
@@ -402,7 +447,7 @@ pub fn command_digest(bytes: &[u8]) -> String {
     cooldis_agent::contracts::sha256_hex(bytes)
 }
 
-fn validate_binding(
+pub(crate) fn validate_binding(
     binding: &HandleDispatchEnvelope,
     consumer: &ThreadCoordinates,
     dispatch_id: &DispatchId,
@@ -497,6 +542,29 @@ fn setup_failure_envelope(binding: &HandleDispatchEnvelope, reason: &str) -> Ing
         },
     )
     .expect("serializing the fixed process setup failure envelope cannot fail")
+}
+
+/// Stable terminal envelope for a process whose durable dispatch survived
+/// the daemon generation that owned its unreattachable host backend.
+pub(crate) fn recovery_outcome_envelope(
+    binding: &HandleDispatchEnvelope,
+) -> CooldisResult<IngressEnvelope> {
+    outcome_envelope(
+        binding,
+        HandleTerminalEnvelope {
+            dispatch_id: binding.dispatch_id.clone(),
+            handle: binding.handle.clone(),
+            outcome: HandleTerminalOutcome::Failed,
+            outcome_reason: Some(
+                "startup recovery after process observer death; exit status unknown".to_string(),
+            ),
+            result: None,
+            result_schema_id: None,
+            artifact_refs: Vec::new(),
+            usage: None,
+            retryable: true,
+        },
+    )
 }
 
 fn outcome_envelope(

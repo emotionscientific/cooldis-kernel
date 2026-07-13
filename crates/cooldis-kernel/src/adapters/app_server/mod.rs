@@ -1,5 +1,6 @@
 use crate::ProcessHandleIngressSink;
 use crate::daemon::daemon_io::CooldisDaemonIoBridge;
+use crate::daemon::recovery_sweep::StartupRecoverySweep;
 use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindOverrides,
@@ -731,12 +732,11 @@ impl CooldisAppServer {
             .supervisor
             .runtime_store(&app.inner.tenant_id)
             .await?;
+        let process_dispatcher =
+            ProcessHandleDispatcher::new(runtime_store, Arc::clone(&process_ingress));
         app.inner
             .process_dispatcher
-            .set(ProcessHandleDispatcher::new(
-                runtime_store,
-                Arc::clone(&process_ingress),
-            ))
+            .set(process_dispatcher.clone())
             .map_err(|_| {
                 CooldisError::RuntimeFactory(
                     "app-server process dispatcher initialized twice".to_string(),
@@ -748,12 +748,37 @@ impl CooldisAppServer {
             .await?;
         app.inner
             .supervisor
+            .set_process_handle_dispatcher(&app.inner.tenant_id, Some(process_dispatcher.clone()))
+            .await?;
+        app.inner
+            .supervisor
             .set_thread_lifecycle_sink(
                 &app.inner.tenant_id,
                 Some(Arc::new(threads::AppServerThreadLifecycleSink::new(&app))),
             )
             .await?;
         app.load_threads_from_metadata().await?;
+        // Construction is the earliest common boundary for daemon listeners,
+        // standalone app-server serving, and in-process/local JSON-RPC users.
+        // Run recovery before returning the first callable surface.
+        process_dispatcher.assert_startup_registry_empty().await?;
+        let recovery_store = SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        let recovery = StartupRecoverySweep::new(
+            recovery_store,
+            process_dispatcher,
+            &app.inner.tenant_id,
+            &app.inner.user_id,
+        )
+        .run_once()
+        .await?;
+        if recovery.thread_joins > 0 || recovery.process_outcomes > 0 {
+            eprintln!(
+                "cooldis startup recovery appended {} thread join(s) and submitted {} process outcome(s)",
+                recovery.thread_joins, recovery.process_outcomes,
+            );
+        }
         Ok(app)
     }
 

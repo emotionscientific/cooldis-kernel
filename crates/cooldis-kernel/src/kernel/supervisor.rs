@@ -242,6 +242,19 @@ impl CooldisSupervisor {
         Ok(())
     }
 
+    pub(crate) async fn set_process_handle_dispatcher(
+        &self,
+        tenant_id: &str,
+        dispatcher: Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
+    ) -> CooldisResult<()> {
+        self.tenant(tenant_id)
+            .await?
+            .host
+            .set_process_handle_dispatcher(dispatcher)
+            .await;
+        Ok(())
+    }
+
     pub async fn set_process_handle_ingress(
         &self,
         tenant_id: &str,

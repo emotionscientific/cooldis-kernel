@@ -17,10 +17,12 @@ use crate::kernel::coupling_executor_registry::{
 use crate::kernel::coupling_scheduler::CouplingScheduler;
 use crate::kernel::history::{
     CONTEXT_READ_PLAN_SCHEMA_V1, CanonicalMessage, EventKind, EventProvenance, EventRecord,
-    EventRecordId, EventStreamId, NewEventRecord, NewObservationRecord, ObservationProvenance,
-    ObservationRecord, RuntimeStore, SessionContext, SessionContextSourceCut, SessionEntry,
-    SessionEntryId, SessionEntryKind, ThreadJoinedPayload, ThreadTerminalState,
+    EventRecordId, EventSequence, EventStreamId, HistoryError, NewEventRecord,
+    NewObservationRecord, ObservationProvenance, ObservationRecord, RuntimeStore, SessionContext,
+    SessionContextSourceCut, SessionEntry, SessionEntryId, SessionEntryKind, ThreadJoinedPayload,
+    ThreadTerminalState,
 };
+use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use cooldis_runtime_contracts::{ThreadContext, ThreadCoordinates};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -75,6 +77,7 @@ pub struct RuntimeServices {
     execution_policy: RuntimeExecutionPolicy,
     kernel_control: Option<RuntimeKernelControl>,
     process_handle_ingress: Option<Arc<dyn ProcessHandleIngressSink>>,
+    process_handle_dispatcher: Option<ProcessHandleDispatcher>,
     bound_coupling_set: Option<BoundCouplingSet>,
     operation_registry_root: Option<PathBuf>,
     turn_watchdog_sequence: Arc<AtomicU64>,
@@ -90,6 +93,7 @@ impl RuntimeServices {
             execution_policy,
             kernel_control: None,
             process_handle_ingress: None,
+            process_handle_dispatcher: None,
             bound_coupling_set: None,
             operation_registry_root: None,
             turn_watchdog_sequence: Arc::new(AtomicU64::new(0)),
@@ -98,6 +102,14 @@ impl RuntimeServices {
 
     pub fn with_kernel_control(mut self, kernel_control: RuntimeKernelControl) -> Self {
         self.kernel_control = Some(kernel_control);
+        self
+    }
+
+    pub(crate) fn with_process_handle_dispatcher(
+        mut self,
+        dispatcher: Option<ProcessHandleDispatcher>,
+    ) -> Self {
+        self.process_handle_dispatcher = dispatcher;
         self
     }
 
@@ -111,6 +123,10 @@ impl RuntimeServices {
 
     pub fn process_handle_ingress(&self) -> Option<Arc<dyn ProcessHandleIngressSink>> {
         self.process_handle_ingress.clone()
+    }
+
+    pub(crate) fn process_handle_dispatcher(&self) -> Option<ProcessHandleDispatcher> {
+        self.process_handle_dispatcher.clone()
     }
 
     pub fn with_bound_coupling_set(mut self, coupling_set: BoundCouplingSet) -> Self {
@@ -290,61 +306,22 @@ impl RuntimeServices {
         else {
             return Ok(None);
         };
-        let spawned_event_id = spawned.id.to_string();
-        if let Some(existing) = control_events
-            .into_iter()
-            .filter(|event| event.kind == EventKind::ThreadJoined)
-            .find(|event| {
-                event
-                    .payload
-                    .get("spawned_event_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(spawned_event_id.as_str())
-            })
-        {
-            return Ok(Some(existing));
-        }
-        let payload = ThreadJoinedPayload {
-            child_thread_id: context.coordinates.thread_id,
-            spawned_event_id: spawned.id,
+        let source_event = source_event_id
+            .map(|event_id| (EventStreamId::for_thread(&context.coordinates), event_id));
+        let joined = append_thread_joined_first_wins(
+            self.runtime_store.as_ref(),
+            parent_coordinates,
+            context.coordinates.clone(),
+            spawned.id,
             terminal_state,
             result_digest,
-        };
-        let mut payload = serde_json::to_value(payload).map_err(|err| {
-            CooldisError::History(format!("thread.joined payload codec failed: {err}"))
-        })?;
-        if let Some(object) = payload.as_object_mut() {
-            object.insert(
-                "schema".to_string(),
-                serde_json::json!(EventKind::ThreadJoined.payload_schema_id()),
-            );
-        }
-        let source_event_ids = source_event_id.into_iter().collect::<Vec<_>>();
-        let appended = self
-            .runtime_store
-            .append_events(
-                &parent_control_stream,
-                vec![NewEventRecord::discharged(
-                    parent_coordinates,
-                    EventKind::ThreadJoined,
-                    payload,
-                    EventProvenance {
-                        source_streams: vec![EventStreamId::for_thread(&context.coordinates)],
-                        source_event_ids,
-                        discharged_by: Some("runtime:thread-lifecycle".to_string()),
-                        function: Some("thread_join/v1".to_string()),
-                        ..EventProvenance::default()
-                    },
-                )],
-            )
-            .await
-            .map_err(|err| CooldisError::History(err.to_string()))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                CooldisError::History("thread.joined append returned no record".to_string())
-            })?;
-        Ok(Some(appended))
+            None,
+            source_event,
+            "runtime:thread-lifecycle",
+            "thread_join/v1",
+        )
+        .await?;
+        Ok(Some(joined.record))
     }
 
     async fn append_event(
@@ -681,5 +658,129 @@ impl RuntimeServices {
                 )
             })?;
         Ok((summary_event, read_plan_event))
+    }
+}
+
+/// Result of the fenced first-join-wins append shared by live lifecycle code
+/// and startup recovery.
+pub(crate) struct ThreadJoinAppend {
+    pub(crate) record: EventRecord,
+    pub(crate) appended: bool,
+}
+
+/// Atomically append one `thread.joined`, or return the already committed
+/// first join for the same spawn binding. Every caller races through the
+/// stream-tail fence, so recovery can never overwrite a live monitor and a
+/// live retry can never append behind recovery.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn append_thread_joined_first_wins(
+    store: &dyn RuntimeStore,
+    parent_coordinates: ThreadCoordinates,
+    child_coordinates: ThreadCoordinates,
+    spawned_event_id: EventRecordId,
+    terminal_state: ThreadTerminalState,
+    result_digest: Option<String>,
+    reason: Option<String>,
+    source_event: Option<(EventStreamId, EventRecordId)>,
+    discharged_by: &str,
+    function: &str,
+) -> CooldisResult<ThreadJoinAppend> {
+    let parent_control_stream =
+        EventStreamId::new(format!("control:{}", parent_coordinates.thread_id));
+    let spawned_event_id_text = spawned_event_id.to_string();
+    let mut payload = serde_json::to_value(ThreadJoinedPayload {
+        child_thread_id: child_coordinates.thread_id,
+        spawned_event_id,
+        terminal_state,
+        result_digest,
+    })
+    .map_err(|err| CooldisError::History(format!("thread.joined payload codec failed: {err}")))?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "schema".to_string(),
+            serde_json::json!(EventKind::ThreadJoined.payload_schema_id()),
+        );
+        if let Some(reason) = reason {
+            object.insert("reason".to_string(), serde_json::json!(reason));
+        }
+    }
+    let (source_streams, source_event_ids) = source_event
+        .map(|(stream_id, event_id)| (vec![stream_id], vec![event_id]))
+        .unwrap_or_else(|| {
+            (
+                vec![EventStreamId::for_thread(&child_coordinates)],
+                Vec::new(),
+            )
+        });
+    let record = NewEventRecord::discharged(
+        parent_coordinates,
+        EventKind::ThreadJoined,
+        payload,
+        EventProvenance {
+            source_streams,
+            source_event_ids,
+            discharged_by: Some(discharged_by.to_string()),
+            function: Some(function.to_string()),
+            ..EventProvenance::default()
+        },
+    );
+
+    loop {
+        let events = store
+            .read_events(&parent_control_stream, None)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        for existing in events
+            .iter()
+            .filter(|event| event.kind == EventKind::ThreadJoined)
+        {
+            let existing_payload = serde_json::from_value::<ThreadJoinedPayload>(
+                existing.payload.clone(),
+            )
+            .map_err(|err| {
+                CooldisError::History(format!(
+                    "existing thread.joined {} payload is malformed: {err}",
+                    existing.id
+                ))
+            })?;
+            if existing_payload.spawned_event_id.to_string() == spawned_event_id_text {
+                return Ok(ThreadJoinAppend {
+                    record: existing.clone(),
+                    appended: false,
+                });
+            }
+        }
+        let expected_next_sequence = events
+            .last()
+            .map(|event| EventSequence::new(event.sequence.get() + 1))
+            .unwrap_or_else(|| EventSequence::new(1));
+        match store
+            .append_events_fenced(
+                &parent_control_stream,
+                expected_next_sequence,
+                vec![record.clone()],
+            )
+            .await
+        {
+            Ok(appended) => {
+                let expected = EventRecord::from_new(
+                    parent_control_stream.clone(),
+                    expected_next_sequence,
+                    record.clone(),
+                );
+                if appended.len() != 1 || appended[0] != expected {
+                    return Err(CooldisError::History(format!(
+                        "thread.joined fenced append returned {} unexpected record(s)",
+                        appended.len()
+                    )));
+                }
+                return Ok(ThreadJoinAppend {
+                    record: appended[0].clone(),
+                    appended: true,
+                });
+            }
+            Err(HistoryError::AppendFenceConflict { .. }) => continue,
+            Err(err) => return Err(CooldisError::History(err.to_string())),
+        }
     }
 }

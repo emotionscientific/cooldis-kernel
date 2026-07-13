@@ -2022,6 +2022,11 @@ impl CrashCutHost for ScenarioHarness {
                     let _ = projection.await;
                 }
             }
+            CrashCutSeam::ThreadTerminalJoinCommit => {
+                panic!(
+                    "thread-terminal-join-commit uses the dedicated provider-backed EMO-426 host"
+                );
+            }
         }
         for coordinates in self.coordinates.clone() {
             self.append_placement(&coordinates, "terminal", Some("failed"))

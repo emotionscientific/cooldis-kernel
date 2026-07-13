@@ -328,6 +328,7 @@ pub enum CrashCutSeam {
     IngressBindingBarrier,
     ThreadLoadRootBarrier,
     SpawnSnapshotBarrier,
+    ThreadTerminalJoinCommit,
 }
 
 /// Registry entry connecting the stable cut vocabulary to its existing seam.
@@ -378,6 +379,14 @@ pub const CRASH_CUT_REGISTRY: &[CrashCutRegistration] = &[
         name: "spawn-snapshot",
         seam: CrashCutSeam::SpawnSnapshotBarrier,
         seam_path: "kernel::thread_spawn_projector::ThreadSpawnProjector::with_snapshot_barrier",
+    },
+    // Dedicated EMO-426 recovery cut. It is registered for the common
+    // kill/rebuild/recover harness but deliberately excluded from CUTS_V1:
+    // adding it to derived plans would reinterpret every version-1 seed.
+    CrashCutRegistration {
+        name: "thread-terminal-join-commit",
+        seam: CrashCutSeam::ThreadTerminalJoinCommit,
+        seam_path: "kernel::runtime_host::RuntimeServices::append_thread_joined_event_if_spawned",
     },
 ];
 
@@ -522,7 +531,12 @@ mod tests {
             .iter()
             .map(|registration| registration.name)
             .collect::<Vec<_>>();
-        assert_eq!(names, CUTS_V1);
+        assert_eq!(
+            names.len(),
+            names.iter().copied().collect::<BTreeSet<_>>().len(),
+            "crash-cut registry names must be unique"
+        );
+        assert!(CUTS_V1.iter().all(|name| names.contains(name)));
         for name in CUTS_V1 {
             assert_eq!(crash_cut(name).unwrap().name, *name);
         }
@@ -609,4 +623,8 @@ mod tests {
         "thread-load-root"
     );
     crash_cut_smoke!(spawn_snapshot_cut_kill_rebuild_recover, "spawn-snapshot");
+    crash_cut_smoke!(
+        thread_terminal_join_commit_cut_kill_rebuild_recover,
+        "thread-terminal-join-commit"
+    );
 }

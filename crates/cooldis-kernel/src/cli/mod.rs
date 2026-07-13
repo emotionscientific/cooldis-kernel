@@ -1786,6 +1786,9 @@ async fn start_daemon_io(
 ) -> CooldisResult<Vec<JoinHandle<()>>> {
     let bridge = CooldisDaemonIoBridge::from_app_server(server);
     let mut tasks = Vec::new();
+    // App-server construction already completed the startup recovery fold;
+    // install settlement workers before external route listeners.
+    start_thread_handle_ingress(&io.ingress, server, &bridge, &mut tasks).await?;
     let enabled_routes = io.routes.iter().filter(|route| route.enabled);
     for route in enabled_routes {
         bridge.validate_route_agent_ref(route).await?;
@@ -1812,8 +1815,6 @@ async fn start_daemon_io(
             }
         }
     }
-    start_thread_handle_ingress(&io.ingress, server, &bridge, &mut tasks).await?;
-
     if !io.routes.is_empty() {
         eprintln!(
             "cooldis daemon loaded {} IO route(s), {} task(s) active",
@@ -1845,6 +1846,9 @@ async fn start_thread_handle_ingress(
             .await
             .map_err(io_error)?,
     );
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?;
     let worker = CooldisDaemonQueueWorker::new(
         queue.clone(),
         bridge.clone(),
@@ -1852,9 +1856,6 @@ async fn start_thread_handle_ingress(
         ingress.persistence.visibility_timeout_secs,
     );
     tasks.push(tokio::spawn(worker.run()));
-    let store = SqliteSessionStore::open(server.session_store_path())
-        .await
-        .map_err(|err| CooldisError::History(err.to_string()))?;
     tasks.push(tokio::spawn(
         ThreadHandleIngressAdapter::new(store, queue, server.tenant_id(), server.user_id()).run(),
     ));

@@ -14,7 +14,14 @@
 //! the manager's terminal snapshot, and submits `cooldis.handle.outcome/1`
 //! directly. It retains the terminal manager entry until ingress settlement is
 //! acknowledged. A daemon restart cannot reattach an orphaned host process;
-//! EMO-426 owns convergence of a dispatch witness with no outcome witness.
+//! EMO-426's startup recovery sweep re-observes every parent-control stream.
+//! It fails a process dispatch witness with no outcome retryably through the
+//! same outcome envelope lane. On the thread side it appends a missing
+//! first-wins `thread.joined` only for a spawned child whose dispatch was
+//! claimed by the dead generation: durable child terminal truth wins, while
+//! an inconclusive dead claim fails retryably and an unclaimed queued request
+//! is left for normal execution. This adapter then settles the recovered join
+//! without any recovery-specific behavior.
 
 use crate::kernel::thread_spawn_projector::fold_thread_handle_bindings;
 use crate::{

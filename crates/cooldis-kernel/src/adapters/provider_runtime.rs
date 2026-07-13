@@ -493,11 +493,13 @@ impl CanonicalProviderRuntime {
             .as_ref()
             .map(|config| config.cwd.clone())
             .unwrap_or_else(default_process_dispatcher_cwd);
-        let process_handle_dispatcher = services.process_handle_ingress().map(|ingress| {
-            crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new(
-                services.runtime_store(),
-                ingress,
-            )
+        let process_handle_dispatcher = services.process_handle_dispatcher().or_else(|| {
+            services.process_handle_ingress().map(|ingress| {
+                crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new(
+                    services.runtime_store(),
+                    ingress,
+                )
+            })
         });
         let mut process_provider =
             KernelProcessOperationProvider::new(context.clone(), process_cwd);

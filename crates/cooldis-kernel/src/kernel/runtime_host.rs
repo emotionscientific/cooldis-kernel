@@ -8,6 +8,7 @@ use crate::kernel::history::{
     EventKind, EventStreamId, InMemorySessionStore, RuntimeStore, SessionContext, SessionEntryKind,
     ThreadBaseRef,
 };
+use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use cooldis_agent::CooldisAgentError;
 use cooldis_operations::CooldisOperationsError;
 use cooldis_process::CooldisProcessError;
@@ -49,6 +50,7 @@ pub use runtime_api::{
     ThreadLifecycleSink, ThreadSnapshot,
 };
 pub use runtime_events::{RuntimeEvent, RuntimeEventKind, emit_runtime_event};
+pub(crate) use runtime_services::append_thread_joined_first_wins;
 pub use runtime_services::{RuntimeExecutionPolicy, RuntimeServices};
 use turn::TurnWatchdogHandle;
 pub use turn::{TurnContent, TurnContext, TurnContextSnapshot, TurnInput};
@@ -236,6 +238,7 @@ struct RuntimeHostInner {
     checkpoints: Mutex<HashMap<ThreadCheckpointId, ThreadCheckpoint>>,
     lifecycle_sink: RwLock<Option<Arc<dyn ThreadLifecycleSink>>>,
     process_handle_ingress: RwLock<Option<Arc<dyn ProcessHandleIngressSink>>>,
+    process_handle_dispatcher: RwLock<Option<ProcessHandleDispatcher>>,
 }
 
 struct RuntimeThread {
@@ -439,12 +442,20 @@ impl RuntimeHost {
                 checkpoints: Mutex::new(HashMap::new()),
                 lifecycle_sink: RwLock::new(None),
                 process_handle_ingress: RwLock::new(None),
+                process_handle_dispatcher: RwLock::new(None),
             }),
         }
     }
 
     pub async fn set_lifecycle_sink(&self, sink: Option<Arc<dyn ThreadLifecycleSink>>) {
         *self.inner.lifecycle_sink.write().await = sink;
+    }
+
+    pub(crate) async fn set_process_handle_dispatcher(
+        &self,
+        dispatcher: Option<ProcessHandleDispatcher>,
+    ) {
+        *self.inner.process_handle_dispatcher.write().await = dispatcher;
     }
 
     pub async fn set_process_handle_ingress(
@@ -456,6 +467,10 @@ impl RuntimeHost {
 
     async fn process_handle_ingress(&self) -> Option<Arc<dyn ProcessHandleIngressSink>> {
         self.inner.process_handle_ingress.read().await.clone()
+    }
+
+    async fn process_handle_dispatcher(&self) -> Option<ProcessHandleDispatcher> {
+        self.inner.process_handle_dispatcher.read().await.clone()
     }
 
     async fn lifecycle_sink(&self) -> Option<Arc<dyn ThreadLifecycleSink>> {
@@ -637,7 +652,8 @@ impl RuntimeHost {
             self.inner.execution_policy.clone(),
         )
         .with_kernel_control(self.kernel_control())
-        .with_process_handle_ingress(self.process_handle_ingress().await);
+        .with_process_handle_ingress(self.process_handle_ingress().await)
+        .with_process_handle_dispatcher(self.process_handle_dispatcher().await);
         if let Some(coupling_set) = bound_coupling_set_from_metadata(&context.metadata)? {
             services = services.with_bound_coupling_set(coupling_set);
         }

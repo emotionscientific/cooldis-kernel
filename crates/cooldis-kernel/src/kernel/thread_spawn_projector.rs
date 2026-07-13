@@ -941,7 +941,9 @@ pub struct ThreadTaskNameResolutionReceipt {
 /// restart and never depends on a live subscription to the child.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ThreadHandleBinding {
+    pub request_event_id: EventRecordId,
     pub spawned_event_id: EventRecordId,
+    pub submitted_turn_id: String,
     pub consumer: ThreadCoordinates,
     pub dispatch_id: DispatchId,
     pub handle: HandleId,
@@ -1147,7 +1149,13 @@ pub(crate) fn fold_thread_handle_bindings(
             )));
         }
         let binding = ThreadHandleBinding {
+            request_event_id: request.0.id,
             spawned_event_id: spawned.id,
+            submitted_turn_id: request
+                .1
+                .submitted_turn_id
+                .clone()
+                .unwrap_or_else(|| format!("thread-spawn-{}", request.0.id)),
             consumer: spawned.coordinates.clone(),
             dispatch_id: DispatchId::new(correlation_id),
             handle: HandleId::thread(spawned_payload.child_thread_id),
@@ -1212,7 +1220,7 @@ fn spawn_request_already_projected(
     })
 }
 
-fn is_spawn_request_claim(event: &EventRecord) -> bool {
+pub(crate) fn is_spawn_request_claim(event: &EventRecord) -> bool {
     event.kind == EventKind::ThreadSpawnRequested
         && event.provenance.discharged_by.as_deref() == Some(THREAD_SPAWN_PROJECTOR_DISCHARGED_BY)
         && event.provenance.function.as_deref() == Some(THREAD_SPAWN_PROJECTOR_FUNCTION)
