@@ -3873,5 +3873,10 @@ fn usage_from_message(message: &CanonicalMessage) -> Option<RuntimeUsage> {
     }
 }
 
+// Unwired until EMO-434 Part B replaces the sequential tool loop with the
+// hold-scheduled batch executor; the implementing ticket removes this allow.
+#[allow(dead_code)]
+mod tool_holds;
+
 #[cfg(test)]
 mod tests;
