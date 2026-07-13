@@ -760,6 +760,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             serde_json::to_value(ThreadSpawnRequestedPayload {
                 parent_thread_id,
                 parent_turn_id: Some("turn-parent".to_string()),
+                task_name: None,
+                submitted_turn_id: None,
                 child_agent_ref: "agent://release-worker".to_string(),
                 initial_submission: "collect release evidence".to_string(),
                 correlation_id: "spawn-release-worker-1".to_string(),
@@ -1014,6 +1016,26 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
     }))
     .unwrap();
     assert_eq!(admission.admissible, None);
+}
+
+#[test]
+fn thread_spawn_payload_schemas_type_only_fields_owned_by_their_wire_structs() {
+    let spawned = thread_spawned_payload_schema_v1();
+    assert_eq!(
+        spawned["properties"]["inputs_hash"],
+        serde_json::json!({"type": "string"})
+    );
+
+    let requested = thread_spawn_requested_payload_schema_v1();
+    assert!(requested["properties"].get("inputs_hash").is_none());
+    assert_eq!(
+        requested["properties"]["task_name"],
+        serde_json::json!({"type": "string"})
+    );
+    assert_eq!(
+        requested["properties"]["submitted_turn_id"],
+        serde_json::json!({"type": "string"})
+    );
 }
 
 #[test]

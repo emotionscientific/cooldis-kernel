@@ -1504,7 +1504,7 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
 }
 
 #[derive(Clone)]
-struct AppServerThreadSpawnAgentResolver {
+pub(super) struct AppServerThreadSpawnAgentResolver {
     agent_registry_root: PathBuf,
     operation_registry_root: Option<PathBuf>,
     blob_registry_root: Option<PathBuf>,
@@ -1588,6 +1588,24 @@ impl AppServerThreadSpawnAgentResolver {
     }
 }
 
+impl CooldisAppServer {
+    pub(super) async fn app_server_thread_spawn_agent_resolver(
+        &self,
+    ) -> CooldisResult<AppServerThreadSpawnAgentResolver> {
+        Ok(AppServerThreadSpawnAgentResolver {
+            agent_registry_root: self.inner.agent_registry_root.clone(),
+            operation_registry_root: self.inner.capsule_bindings.registry_root.clone(),
+            blob_registry_root: Some(self.inner.blob_registry_root.clone()),
+            skill_registry_root: Some(self.inner.skill_registry_root.clone()),
+            metadata_store_path: Some(self.inner.metadata_store_path.clone()),
+            secret_store_path: Some(self.inner.user_metadata_store_path.clone()),
+            cwd: self.inner.cwd.clone(),
+            provider_surface: self.agent_manifest_provider_surface().await?,
+        })
+    }
+}
+
+// lexicon-allow: capsule - existing app-server compatibility type
 impl CapsuleBindingRuntimeFactory {
     fn thread_spawn_agent_resolver(&self) -> Option<AppServerThreadSpawnAgentResolver> {
         let agent_registry_root = self.agent_registry_root.clone()?;

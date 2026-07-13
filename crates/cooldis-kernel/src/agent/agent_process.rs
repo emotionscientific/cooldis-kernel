@@ -1,13 +1,11 @@
-use crate::agent::manifest_bind::canonical_json_hash;
 use crate::{
-    ActiveMandate, AgentManifestBindReceipt, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE,
-    COOLDIS_PROCESS_PACKAGE, COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CooldisError,
-    CooldisResult, KernelOperationDispatcher, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
+    ActiveMandate, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult,
+    KernelOperationDispatcher, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
     MANDATE_START_OPERATION, MandateCatchUpPolicy, MandateSchedulePayload, MandateStartRequest,
     NOTIFY_PREVIEW_OPERATION, PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION,
     PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, RuntimeKernelControl,
-    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_CANCEL_OPERATION, THREAD_SPAWN_GRANTED_METADATA,
-    THREAD_SPAWN_INPUTS_HASH_METADATA, THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION,
+    THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION,
     THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, ThreadContext, ThreadId, TurnInput,
     parse_mandate_event_id,
 };
@@ -17,6 +15,7 @@ use cooldis_process::{
     AsyncExecutionManager, AsyncProcessOwner, AsyncProcessSnapshot, AsyncProcessStartRequest,
     CooldisProcessId, ExecutionDeadline, HostBashLiveBackend, LiveProcessBackend,
 };
+use cooldis_runtime_contracts::DispatchId;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -56,65 +55,33 @@ impl KernelThreadOperationProvider {
     }
 
     async fn invoke_json(&self, operation_name: &str, arguments: Value) -> CooldisResult<Value> {
+        self.invoke_json_with_dispatch(operation_name, arguments, None)
+            .await
+    }
+
+    async fn invoke_json_with_dispatch(
+        &self,
+        operation_name: &str,
+        arguments: Value,
+        injected_dispatch_id: Option<DispatchId>,
+    ) -> CooldisResult<Value> {
         let value = match operation_name {
             THREAD_SPAWN_OPERATION => {
-                let inputs_hash = canonical_json_hash(&arguments)?;
                 let args: ThreadSpawnArgs = decode_args(operation_name, arguments)?;
-                let agent_binding = if let Some(agent_ref) = args.agent_ref.as_deref() {
-                    let resolver = self.agent_resolver.as_ref().ok_or_else(|| {
-                        CooldisError::RuntimeExecution(
-                            "thread_spawn agent_ref requires a manifest resolver from the runtime"
-                                .to_string(),
-                        )
-                    })?;
-                    Some(resolver.resolve_agent_ref(&self.caller, agent_ref).await?)
-                } else {
-                    None
-                };
-                let metadata = agent_binding
-                    .as_ref()
-                    .map(|binding| binding.metadata.clone())
-                    .unwrap_or_default();
-                let mut metadata = metadata;
-                metadata.insert(THREAD_SPAWN_INPUTS_HASH_METADATA.to_string(), inputs_hash);
-                if let Some(binding) = &agent_binding {
-                    let bind_receipt = serde_json::from_value::<AgentManifestBindReceipt>(
-                        binding.bind_receipt.clone(),
-                    )
-                    .map_err(|err| {
-                        CooldisError::RuntimeFactory(format!(
-                            "thread_spawn agent_ref bind receipt is invalid: {err}"
-                        ))
-                    })?;
-                    metadata
-                        .entry(THREAD_AGENT_MANIFEST_HASH_METADATA.to_string())
-                        .or_insert_with(|| bind_receipt.manifest_hash.clone());
-                    let granted = serde_json::to_string(&bind_receipt.granted).map_err(|err| {
-                        CooldisError::RuntimeFactory(format!(
-                            "failed to encode thread_spawn grants: {err}"
-                        ))
-                    })?;
-                    metadata.insert(THREAD_SPAWN_GRANTED_METADATA.to_string(), granted);
-                }
+                let dispatch_id = injected_dispatch_id
+                    .or_else(|| args.dispatch_id.map(DispatchId::new))
+                    .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
                 let receipt = self
                     .control
-                    .spawn_subagent(
+                    .dispatch_thread_spawn(
                         &self.caller,
-                        Some(args.task_name),
-                        TurnInput::text(args.message),
-                        metadata,
+                        dispatch_id,
+                        args.task_name,
+                        args.message,
+                        args.agent_ref,
+                        self.agent_resolver.clone(),
                     )
                     .await?;
-                if let Some(binding) = agent_binding {
-                    self.control
-                        .record_manifest_receipts_for_thread(
-                            &self.caller,
-                            receipt.thread_id,
-                            binding.compile_receipt,
-                            binding.bind_receipt,
-                        )
-                        .await?;
-                }
                 let mut value = serde_json::to_value(receipt).map_err(json_error)?;
                 value["operation"] = json!("cooldis.thread_spawn");
                 value
@@ -122,12 +89,15 @@ impl KernelThreadOperationProvider {
             THREAD_SUBMIT_OPERATION => {
                 let args: ThreadSubmitArgs = decode_args(operation_name, arguments)?;
                 let target_thread_id = parse_thread_id(&args.target_thread_id, "target_thread_id")?;
+                let dispatch_id = injected_dispatch_id
+                    .or_else(|| args.dispatch_id.map(DispatchId::new))
+                    .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
                 let mut value = serde_json::to_value(
                     self.control
-                        .submit_to_thread(
+                        .submit_to_thread_with_dispatch(
                             &self.caller,
                             target_thread_id,
-                            None,
+                            dispatch_id,
                             TurnInput::text(args.message),
                         )
                         .await?,
@@ -521,6 +491,24 @@ impl KernelOperationDispatcher for KernelThreadOperationProvider {
             .map_err(operations_runtime_error)?;
         serde_json::to_vec(&value).map_err(operations_runtime_error)
     }
+
+    async fn invoke_kernel_operation_with_metadata(
+        &self,
+        operation_name: &str,
+        input: Vec<u8>,
+        metadata: BTreeMap<String, Value>,
+    ) -> cooldis_operations::CooldisResult<Vec<u8>> {
+        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let dispatch_id = metadata
+            .get("cooldis.tool_call_id")
+            .and_then(Value::as_str)
+            .map(DispatchId::new);
+        let value = self
+            .invoke_json_with_dispatch(operation_name, arguments, dispatch_id)
+            .await
+            .map_err(operations_runtime_error)?;
+        serde_json::to_vec(&value).map_err(operations_runtime_error)
+    }
 }
 
 #[async_trait]
@@ -578,6 +566,8 @@ struct ThreadSpawnArgs {
     message: String,
     #[serde(default)]
     agent_ref: Option<String>,
+    #[serde(default)]
+    dispatch_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -585,6 +575,8 @@ struct ThreadSpawnArgs {
 struct ThreadSubmitArgs {
     target_thread_id: String,
     message: String,
+    #[serde(default)]
+    dispatch_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -136,6 +136,27 @@ pub(super) struct ThreadStartParams {
     pub(super) thinking: Option<ThinkingConfig>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ThreadSpawnParams {
+    pub(super) thread_id: String,
+    pub(super) task_name: String,
+    pub(super) message: String,
+    #[serde(default)]
+    pub(super) agent_ref: Option<String>,
+    #[serde(default)]
+    pub(super) dispatch_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ThreadSubmitParams {
+    pub(super) thread_id: String,
+    pub(super) message: String,
+    #[serde(default)]
+    pub(super) dispatch_id: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ThreadCapsuleBindingsParams {
@@ -932,6 +953,14 @@ impl CooldisAppServer {
             "thread/start" => {
                 let params: ThreadStartParams = parse_params(params)?;
                 self.thread_start(connection, params).await
+            }
+            "thread/spawn" => {
+                let params: ThreadSpawnParams = parse_params(params)?;
+                self.thread_spawn(connection, params).await
+            }
+            "thread/submit" => {
+                let params: ThreadSubmitParams = parse_params(params)?;
+                self.thread_submit(params).await
             }
             "thread/fork" => {
                 let params: ThreadForkParams = parse_params(params)?;
@@ -3023,6 +3052,91 @@ impl CooldisAppServer {
             ))
             .await
             .map_err(internal_error)
+    }
+
+    pub(super) async fn thread_spawn(
+        &self,
+        connection: &ConnectionState,
+        params: ThreadSpawnParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let parent = self.handle_for_thread(&params.thread_id).await?;
+        let dispatch_id = cooldis_runtime_contracts::DispatchId::new(
+            params
+                .dispatch_id
+                .unwrap_or_else(|| Uuid::now_v7().to_string()),
+        );
+        let resolver = if params.agent_ref.is_some() {
+            Some(Arc::new(
+                self.app_server_thread_spawn_agent_resolver()
+                    .await
+                    .map_err(internal_error)?,
+            ) as Arc<dyn KernelThreadSpawnAgentResolver>)
+        } else {
+            None
+        };
+        let receipt = self
+            .inner
+            .supervisor
+            .kernel_control(&self.inner.tenant_id)
+            .await
+            .map_err(internal_error)?
+            .dispatch_thread_spawn(
+                parent.context(),
+                dispatch_id,
+                params.task_name,
+                params.message,
+                params.agent_ref,
+                resolver,
+            )
+            .await
+            .map_err(internal_error)?;
+        let child_id = receipt.thread_id.to_string();
+        let child = self.handle_for_thread(&child_id).await?;
+        connection.subscribe_thread(child).await;
+        let thread = self.thread_json_by_id(&child_id, false).await?;
+        Ok(json!({
+            "thread": thread,
+            "threadId": child_id,
+            "parentThreadId": receipt.parent_thread_id,
+            "status": receipt.status,
+            "taskName": receipt.task_name,
+            "submittedTurnId": receipt.submitted_turn_id,
+            "handle": receipt.handle,
+            "dispatchId": receipt.dispatch_id,
+        }))
+    }
+
+    pub(super) async fn thread_submit(
+        &self,
+        params: ThreadSubmitParams,
+    ) -> Result<Value, JsonRpcErrorError> {
+        let target = self.handle_for_thread(&params.thread_id).await?;
+        let dispatch_id = cooldis_runtime_contracts::DispatchId::new(
+            params
+                .dispatch_id
+                .unwrap_or_else(|| Uuid::now_v7().to_string()),
+        );
+        let receipt = self
+            .inner
+            .supervisor
+            .kernel_control(&self.inner.tenant_id)
+            .await
+            .map_err(internal_error)?
+            .submit_to_thread_with_dispatch(
+                target.context(),
+                target.context().coordinates.thread_id,
+                dispatch_id,
+                TurnInput::text(params.message),
+            )
+            .await
+            .map_err(internal_error)?;
+        Ok(json!({
+            "threadId": receipt.target_thread_id,
+            "status": receipt.status,
+            "turnId": receipt.turn_id,
+            "interactionId": receipt.interaction_id,
+            "dispatchId": receipt.dispatch_id,
+        }))
     }
 
     pub(super) async fn turn_start(

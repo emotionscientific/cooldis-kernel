@@ -217,6 +217,20 @@ started threads do. A client that reconnects after a daemon restart can issue a
 turn against the loaded thread id and expect the usual item delta/completion and
 turn completion notifications.
 
+## Thread Handle Dispatch
+
+`thread/spawn` accepts `{ "threadId", "taskName", "message", "agentRef"?,
+"dispatchId"? }`. The optional `dispatchId` is generated when omitted. A retry
+with the same identity folds the parent control stream and returns the original
+`{ "handle": { "kind": "thread", "id": "..." }, "dispatchId": "..." }`
+alongside the child thread fields; it does not append another spawn request or
+start another child. The durable request continues to carry that identity in
+its existing `correlation_id` field, as specified by ADR 0006.
+
+`thread/submit` accepts `{ "threadId", "message", "dispatchId"? }`. Its local
+lane binds the dispatch identity to the target turn reservation, so a retry
+returns the same turn identity without injecting a second queued input.
+
 ## Thread Forks
 
 `thread/fork` is the clone-style fork. Params are
@@ -683,7 +697,7 @@ The V1 app-server implements the Codex TUI-critical request subset:
 - `mcpSource/list`, `mcpSource/read`, `mcpSource/upsert`,
   `mcpSource/discover`, `mcpSource/delete`, `mcpSource/testTool`,
   `mcpSource/manifestPatch`;
-- `thread/start`, `thread/resume`, `thread/fork`, `thread/read`,
+- `thread/start`, `thread/spawn`, `thread/submit`, `thread/resume`, `thread/fork`, `thread/read`,
   `thread/list`, `thread/loaded/list`, `thread/events/list`,
   `thread/couplings/list`, `thread/approvals/list`, `thread/waiting/list`,
   `thread/debug/export`;

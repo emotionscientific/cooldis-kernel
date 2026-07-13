@@ -1088,7 +1088,17 @@ fn spawn_output_schema() -> Value {
             "parent_thread_id": string_schema("Parent thread id."),
             "status": thread_status_schema("Current child thread status."),
             "task_name": string_schema("Stable task name, when provided."),
-            "submitted_turn_id": string_schema("Submitted initial turn id.")
+            "submitted_turn_id": string_schema("Submitted initial turn id."),
+            "handle": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "kind": {"type": "string", "enum": ["thread"]},
+                    "id": {"type": "string"}
+                },
+                "required": ["kind", "id"]
+            },
+            "dispatch_id": string_schema("Identity of the originating dispatch.")
         }),
         &[
             "operation",
@@ -1097,6 +1107,8 @@ fn spawn_output_schema() -> Value {
             "parent_thread_id",
             "status",
             "submitted_turn_id",
+            "handle",
+            "dispatch_id",
         ],
     )
 }
@@ -1109,7 +1121,8 @@ fn submit_output_schema() -> Value {
             "target_thread_id": string_schema("Target thread id."),
             "interaction_id": string_schema("Recorded interaction id."),
             "status": thread_status_schema("Current target thread status."),
-            "turn_id": string_schema("Submitted turn id.")
+            "turn_id": string_schema("Submitted turn id."),
+            "dispatch_id": string_schema("Identity of the originating submit dispatch.")
         }),
         &[
             "operation",
@@ -1118,6 +1131,7 @@ fn submit_output_schema() -> Value {
             "interaction_id",
             "status",
             "turn_id",
+            "dispatch_id",
         ],
     )
 }

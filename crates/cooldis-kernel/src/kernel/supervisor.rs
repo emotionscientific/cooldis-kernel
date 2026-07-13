@@ -242,6 +242,13 @@ impl CooldisSupervisor {
         Ok(())
     }
 
+    pub(crate) async fn kernel_control(
+        &self,
+        tenant_id: &str,
+    ) -> CooldisResult<crate::RuntimeKernelControl> {
+        Ok(self.tenant(tenant_id).await?.host.kernel_control())
+    }
+
     pub async fn start_thread(
         &self,
         request: ThreadStartRequest,

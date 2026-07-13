@@ -34,6 +34,9 @@ async fn kernel_thread_operations_spawn_wait_and_report_children() {
     let child_thread_id =
         parse_thread_id(spawn["thread_id"].as_str().unwrap(), "thread_id").unwrap();
     assert_eq!(spawn["operation"], "cooldis.thread_spawn");
+    assert_eq!(spawn["handle"]["kind"], "thread");
+    assert_eq!(spawn["handle"]["id"], child_thread_id.to_string());
+    assert!(spawn["dispatch_id"].as_str().is_some());
     assert_eq!(
         spawn["parent_thread_id"].as_str().unwrap(),
         root.context().coordinates.thread_id.to_string()
@@ -118,6 +121,180 @@ async fn kernel_thread_operations_reject_cross_session_targets() {
         CooldisError::ThreadScopeMismatch { thread_id, .. }
             if thread_id == other.context().coordinates.thread_id
     ));
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn retried_thread_submit_dispatch_enqueues_one_turn() {
+    let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
+    let root = host
+        .start_thread(
+            ThreadCoordinates::new("tenant", "user", "session"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let provider =
+        KernelThreadOperationProvider::new(host.kernel_control(), root.context().clone());
+    let arguments = json!({
+        "target_thread_id": root.context().coordinates.thread_id.to_string(),
+        "message": "echo submit-once",
+        "dispatch_id": "submit-dispatch-1",
+    });
+
+    let first = provider
+        .invoke_json(THREAD_SUBMIT_OPERATION, arguments.clone())
+        .await
+        .unwrap();
+    let retry = provider
+        .invoke_json(THREAD_SUBMIT_OPERATION, arguments)
+        .await
+        .unwrap();
+
+    assert_eq!(first["dispatch_id"], "submit-dispatch-1");
+    assert_eq!(retry["dispatch_id"], "submit-dispatch-1");
+    assert_eq!(first["turn_id"], retry["turn_id"]);
+    assert_eq!(first["interaction_id"], retry["interaction_id"]);
+    tokio::task::yield_now().await;
+    let session = root.session_context().await.unwrap();
+    assert_eq!(
+        session
+            .messages
+            .iter()
+            .filter(|message| matches!(
+                message,
+                crate::CanonicalMessage::User { content, .. }
+                    if content.iter().any(|content| matches!(
+                        content,
+                        crate::CanonicalContent::Text { text, .. }
+                            if text == "echo submit-once"
+                    ))
+            ))
+            .count(),
+        1
+    );
+
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn thread_submit_dispatch_fold_is_scoped_to_the_target_thread() {
+    let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
+    let caller = host
+        .start_thread(
+            ThreadCoordinates::new("tenant", "user", "session"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let first_target = host
+        .start_thread(
+            ThreadCoordinates::new("tenant", "user", "session"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let second_target = host
+        .start_thread(
+            ThreadCoordinates::new("tenant", "user", "session"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let control = host.kernel_control();
+    let dispatch_id = DispatchId::new("shared-submit-dispatch");
+
+    let first = control
+        .submit_to_thread_with_dispatch(
+            caller.context(),
+            first_target.context().coordinates.thread_id,
+            dispatch_id.clone(),
+            TurnInput::text("echo first target"),
+        )
+        .await
+        .unwrap();
+    let retry = control
+        .submit_to_thread_with_dispatch(
+            caller.context(),
+            first_target.context().coordinates.thread_id,
+            dispatch_id.clone(),
+            TurnInput::text("echo folded retry"),
+        )
+        .await
+        .unwrap();
+    let second = control
+        .submit_to_thread_with_dispatch(
+            caller.context(),
+            second_target.context().coordinates.thread_id,
+            dispatch_id,
+            TurnInput::text("echo second target"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first, retry);
+    assert_eq!(first.turn_id, second.turn_id);
+    assert_ne!(first.interaction_id, second.interaction_id);
+    for interaction_id in [first.interaction_id, second.interaction_id] {
+        let interaction_id = uuid::Uuid::parse_str(&interaction_id.to_string()).unwrap();
+        assert_eq!(interaction_id.get_version_num(), 8);
+    }
+    tokio::task::yield_now().await;
+    let first_session = first_target.session_context().await.unwrap();
+    let second_session = second_target.session_context().await.unwrap();
+    assert!(first_session.messages.iter().any(|message| matches!(
+        message,
+        crate::CanonicalMessage::User { content, .. }
+            if content.iter().any(|content| matches!(
+                content,
+                crate::CanonicalContent::Text { text, .. } if text == "echo first target"
+            ))
+    )));
+    assert!(first_session.messages.iter().all(|message| !matches!(
+        message,
+        crate::CanonicalMessage::User { content, .. }
+            if content.iter().any(|content| matches!(
+                content,
+                crate::CanonicalContent::Text { text, .. } if text == "echo folded retry"
+            ))
+    )));
+    assert!(second_session.messages.iter().any(|message| matches!(
+        message,
+        crate::CanonicalMessage::User { content, .. }
+            if content.iter().any(|content| matches!(
+                content,
+                crate::CanonicalContent::Text { text, .. } if text == "echo second target"
+            ))
+    )));
+
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn compatibility_submit_without_dispatch_keeps_legacy_turn_identity() {
+    let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
+    let root = host
+        .start_thread(
+            ThreadCoordinates::new("tenant", "user", "session"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    let receipt = host
+        .kernel_control()
+        .submit_to_thread(
+            root.context(),
+            root.context().coordinates.thread_id,
+            None,
+            TurnInput::text("echo compatibility submit"),
+        )
+        .await
+        .unwrap();
+
+    assert!(receipt.turn_id.starts_with("agent-process-v1-"));
+    let interaction_id = uuid::Uuid::parse_str(&receipt.interaction_id.to_string()).unwrap();
+    assert_eq!(interaction_id.get_version_num(), 7);
     host.shutdown_all().await.unwrap();
 }
 

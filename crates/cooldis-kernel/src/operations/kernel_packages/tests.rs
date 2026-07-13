@@ -98,6 +98,40 @@ fn cooldis_threads_package_declares_five_kernel_operations() {
 }
 
 #[test]
+fn thread_spawn_model_input_schema_has_no_dispatch_identity_field() {
+    let package = cooldis_threads_kernel_package();
+    let operation = package
+        .interface
+        .operations
+        .iter()
+        .find(|operation| operation.name == THREAD_SPAWN_OPERATION)
+        .unwrap();
+
+    assert_eq!(
+        operation.input_schema,
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "task_name": {
+                    "type": "string",
+                    "description": "Stable task name for the child thread."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Initial user message submitted to the child thread."
+                },
+                "agent_ref": {
+                    "type": "string",
+                    "description": "Optional published agent reference for the child thread."
+                }
+            },
+            "required": ["task_name", "message"]
+        })
+    );
+}
+
+#[test]
 fn cooldis_schedule_package_declares_three_kernel_operations() {
     let package = cooldis_schedule_kernel_package();
     let operations = package
@@ -352,7 +386,12 @@ fn cooldis_threads_package_schemas_accept_operation_receipts() {
             "parent_thread_id": Uuid::now_v7().to_string(),
             "status": "idle",
             "task_name": "worker",
-            "submitted_turn_id": "turn-1"
+            "submitted_turn_id": "turn-1",
+            "handle": {
+                "kind": "thread",
+                "id": Uuid::now_v7().to_string()
+            },
+            "dispatch_id": "dispatch-1"
         }),
     );
     validate_operation_output(
@@ -366,6 +405,19 @@ fn cooldis_threads_package_schemas_accept_operation_receipts() {
             "timed_out": false,
             "latest_output": "done",
             "result_interaction_id": Uuid::now_v7().to_string()
+        }),
+    );
+    validate_operation_output(
+        &package,
+        THREAD_SUBMIT_OPERATION,
+        json!({
+            "operation": "cooldis.thread_submit",
+            "caller_thread_id": Uuid::now_v7().to_string(),
+            "target_thread_id": Uuid::now_v7().to_string(),
+            "interaction_id": Uuid::now_v7().to_string(),
+            "status": "running",
+            "turn_id": "turn-1",
+            "dispatch_id": "submit-dispatch-1"
         }),
     );
     validate_operation_output(

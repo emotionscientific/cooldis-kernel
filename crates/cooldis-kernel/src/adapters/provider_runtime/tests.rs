@@ -2914,6 +2914,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
                 "task_name": "worker",
                 "message": "echo child-through-tool",
                 "agent_ref": CHILD_AGENT_REF,
+                "dispatch_id": "model-supplied-id-must-not-win",
             }),
         ),
         response_text("spawned child"),
@@ -2977,6 +2978,15 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
         text_messages(&child_session.messages),
         vec!["echo child-through-tool"]
     );
+    let requested = wait_for_control_event(
+        store.as_ref(),
+        &thread.context().coordinates,
+        EventKind::ThreadSpawnRequested,
+    )
+    .await;
+    let requested_payload: crate::ThreadSpawnRequestedPayload =
+        serde_json::from_value(requested.payload.clone()).unwrap();
+    assert_eq!(requested_payload.correlation_id, "call_1|fc_1");
     let spawned = wait_for_control_event(
         store.as_ref(),
         &thread.context().coordinates,

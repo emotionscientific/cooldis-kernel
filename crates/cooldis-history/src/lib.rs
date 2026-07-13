@@ -599,6 +599,15 @@ pub struct ThreadSpawnRequestedPayload {
     pub parent_thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_turn_id: Option<String>,
+    /// Caller-facing alias for the child handle. Absent on pre-handle-lane
+    /// records and supervisor requests that do not declare an alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+    /// Deterministic first-turn identity for a dispatched child. Absent on
+    /// legacy supervisor requests, whose projector derives it from the
+    /// request event id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_turn_id: Option<String>,
     /// Registry ref of the agent manifest the child runs under.
     pub child_agent_ref: String,
     /// The child's first turn input.
@@ -1842,6 +1851,8 @@ fn thread_spawn_requested_payload_schema_v1() -> Value {
         "properties": {
             "parent_thread_id": {"type": "string"},
             "parent_turn_id": {"type": "string"},
+            "task_name": {"type": "string"},
+            "submitted_turn_id": {"type": "string"},
             "child_agent_ref": {"type": "string"},
             "initial_submission": {"type": "string"},
             "correlation_id": {"type": "string"},

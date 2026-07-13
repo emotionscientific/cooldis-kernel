@@ -8,12 +8,17 @@ use crate::{
     THREAD_SPAWN_INPUTS_HASH_METADATA, THREADS_SPAWN_CAPABILITY, ThreadCoordinates, ThreadId,
     ThreadSpawnRequestedPayload, ThreadSpawnWitness, TurnInput,
 };
+use cooldis_runtime_contracts::{DispatchId, HandleId};
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 const THREAD_SPAWN_PROJECTOR_DISCHARGED_BY: &str = "projector:thread-spawn";
 const THREAD_SPAWN_PROJECTOR_FUNCTION: &str = "thread_spawn_projector/v1";
+const THREAD_SPAWN_DISPATCH_FUNCTION: &str = "thread_spawn_dispatch/v1";
+const THREAD_SPAWN_CLAIM_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const THREAD_SPAWN_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const UNBOUND_CHILD_AGENT_REF: &str = "unbound";
 
 enum FencedDecisionAppend {
@@ -65,6 +70,7 @@ enum FencedAppendReceiptOverride {
 pub struct ThreadSpawnProjector {
     host: RuntimeHost,
     agent_resolver: Option<Arc<dyn KernelThreadSpawnAgentResolver>>,
+    claimed_dispatch_wait_timeout: Duration,
     #[cfg(test)]
     snapshot_barrier: Option<Arc<tokio::sync::Barrier>>,
     #[cfg(test)]
@@ -80,6 +86,7 @@ impl ThreadSpawnProjector {
         Self {
             host,
             agent_resolver: None,
+            claimed_dispatch_wait_timeout: THREAD_SPAWN_CLAIM_WAIT_TIMEOUT,
             #[cfg(test)]
             snapshot_barrier: None,
             #[cfg(test)]
@@ -99,9 +106,182 @@ impl ThreadSpawnProjector {
         self
     }
 
+    /// Atomically folds or records a thread-spawn dispatch, then returns the
+    /// original thread handle. The control-stream append fence is the
+    /// serialization point: only the caller that claims the one durable
+    /// request performs the child effect; retries fold the request and its
+    /// spawned/failure decision instead of appending or executing again.
+    pub async fn dispatch_request(
+        &self,
+        coordinates: &ThreadCoordinates,
+        payload: ThreadSpawnRequestedPayload,
+    ) -> CooldisResult<ThreadSpawnDispatchReceipt> {
+        self.dispatch_request_with_authority(coordinates, payload, true)
+            .await
+    }
+
+    pub(crate) async fn dispatch_request_with_authority(
+        &self,
+        coordinates: &ThreadCoordinates,
+        payload: ThreadSpawnRequestedPayload,
+        require_supervisor_grant: bool,
+    ) -> CooldisResult<ThreadSpawnDispatchReceipt> {
+        if payload.parent_thread_id != coordinates.thread_id {
+            return Err(CooldisError::RuntimeExecution(format!(
+                "thread spawn dispatch parent {} does not match control stream {}",
+                payload.parent_thread_id, coordinates.thread_id
+            )));
+        }
+        let dispatch_id = DispatchId::new(payload.correlation_id.clone());
+        let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let mut claimed_wait_started_at = None;
+        #[cfg(test)]
+        let mut first_snapshot = true;
+        loop {
+            let events = self
+                .host
+                .runtime_store()
+                .read_events(&stream_id, None)
+                .await
+                .map_err(|err| CooldisError::History(err.to_string()))?;
+            #[cfg(test)]
+            if first_snapshot && let Some(barrier) = &self.snapshot_barrier {
+                barrier.wait().await;
+            }
+            #[cfg(test)]
+            {
+                first_snapshot = false;
+            }
+
+            if let Some(folded) = fold_thread_spawn_dispatch(&events, &dispatch_id) {
+                if let Some(handle) = folded.handle {
+                    ThreadId::parse_str(&handle.id).map_err(|err| {
+                        CooldisError::History(format!(
+                            "thread spawn dispatch {} folded invalid child handle: {err}",
+                            dispatch_id
+                        ))
+                    })?;
+                    return Ok(ThreadSpawnDispatchReceipt {
+                        request_event_id: folded.request_event_id,
+                        handle,
+                        dispatch_id,
+                        submitted_turn_id: folded.submitted_turn_id,
+                        task_name: folded.task_name,
+                    });
+                }
+                if let Some(reason) = folded.failure_reason {
+                    return Err(CooldisError::RuntimeExecution(reason));
+                }
+                if folded.claimed {
+                    let started_at =
+                        claimed_wait_started_at.get_or_insert_with(tokio::time::Instant::now);
+                    let elapsed = started_at.elapsed();
+                    if elapsed >= self.claimed_dispatch_wait_timeout {
+                        return Err(CooldisError::RuntimeExecution(format!(
+                            "thread spawn dispatch {dispatch_id} is claimed without a terminal decision; refusing to replay the child effect"
+                        )));
+                    }
+                    tokio::time::sleep(
+                        THREAD_SPAWN_CLAIM_POLL_INTERVAL
+                            .min(self.claimed_dispatch_wait_timeout - elapsed),
+                    )
+                    .await;
+                    continue;
+                }
+                let request_event = events
+                    .iter()
+                    .find(|event| event.id == folded.request_event_id)
+                    .expect("folded request event must come from the folded event slice");
+                match self
+                    .claim_request(request_event, dispatch_id.as_str(), &events)
+                    .await?
+                {
+                    FencedDecisionAppend::AlreadyProjected => {
+                        claimed_wait_started_at.get_or_insert_with(tokio::time::Instant::now);
+                        continue;
+                    }
+                    FencedDecisionAppend::Appended(_) => {
+                        let parent = self.host.get_thread(coordinates.thread_id).await?;
+                        let request_payload = serde_json::from_value(request_event.payload.clone())
+                            .map_err(|err| {
+                                CooldisError::History(format!(
+                                    "thread spawn dispatch payload decode failed: {err}"
+                                ))
+                            })?;
+                        let projected = match self
+                            .project_claimed(
+                                parent,
+                                request_event,
+                                request_payload,
+                                require_supervisor_grant,
+                            )
+                            .await
+                        {
+                            Ok(projected) => projected,
+                            Err(err) => {
+                                let reason = err.to_string();
+                                self.append_failure(
+                                    coordinates,
+                                    request_event,
+                                    Some(dispatch_id.as_str()),
+                                    reason,
+                                )
+                                .await?;
+                                return Err(err);
+                            }
+                        };
+                        return Ok(ThreadSpawnDispatchReceipt {
+                            request_event_id: projected.request_event_id,
+                            handle: HandleId::thread(projected.child_thread_id),
+                            dispatch_id,
+                            submitted_turn_id: Some(projected.submitted_turn_id),
+                            task_name: projected.task_name,
+                        });
+                    }
+                }
+            }
+
+            let mut value = serde_json::to_value(&payload).map_err(|err| {
+                CooldisError::History(format!(
+                    "thread spawn dispatch payload encode failed: {err}"
+                ))
+            })?;
+            value["schema"] = json!(EventKind::ThreadSpawnRequested.payload_schema_id());
+            let request = NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::ThreadSpawnRequested,
+                value,
+                EventProvenance {
+                    discharged_by: Some("dispatcher:thread-spawn".to_string()),
+                    function: Some(THREAD_SPAWN_DISPATCH_FUNCTION.to_string()),
+                    ..EventProvenance::default()
+                },
+            );
+            let expected_next_sequence = events
+                .last()
+                .map(|event| EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| EventSequence::new(1));
+            match self
+                .host
+                .runtime_store()
+                .append_events_fenced(&stream_id, expected_next_sequence, vec![request])
+                .await
+            {
+                Ok(_) | Err(HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(err) => return Err(CooldisError::History(err.to_string())),
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_snapshot_barrier(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
         self.snapshot_barrier = Some(barrier);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_claimed_dispatch_wait_timeout(mut self, timeout: Duration) -> Self {
+        self.claimed_dispatch_wait_timeout = timeout;
         self
     }
 
@@ -287,7 +467,7 @@ impl ThreadSpawnProjector {
                 }
                 FencedDecisionAppend::Appended(_) => {}
             }
-            match self.project_claimed(parent, event, payload).await {
+            match self.project_claimed(parent, event, payload, true).await {
                 Ok(projected) => receipt.projected.push(projected),
                 Err(err) => {
                     let reason = err.to_string();
@@ -340,26 +520,46 @@ impl ThreadSpawnProjector {
         parent: RuntimeThreadHandle,
         request_event: &EventRecord,
         payload: ThreadSpawnRequestedPayload,
+        require_supervisor_grant: bool,
     ) -> CooldisResult<ThreadSpawnProjected> {
-        if !parent_allows_supervisor_spawn(&parent.context().metadata)? {
+        if require_supervisor_grant && !parent_allows_supervisor_spawn(&parent.context().metadata)?
+        {
             return Err(CooldisError::RuntimeExecution(format!(
                 "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} projector requires parent thread bound coupling grant {THREADS_SPAWN_CAPABILITY}"
             )));
         }
 
-        let arguments = json!({
-            "agent_ref": payload.child_agent_ref,
-            "message": payload.initial_submission,
-        });
+        let arguments = if let Some(task_name) = &payload.task_name {
+            let mut arguments = json!({
+                "task_name": task_name,
+                "message": payload.initial_submission,
+            });
+            if payload.child_agent_ref != UNBOUND_CHILD_AGENT_REF {
+                arguments["agent_ref"] = json!(payload.child_agent_ref);
+            }
+            arguments
+        } else {
+            json!({
+                "agent_ref": payload.child_agent_ref,
+                "message": payload.initial_submission,
+            })
+        };
         let (agent_binding, metadata) = self
             .spawn_metadata(&parent.context().clone(), &arguments)
             .await?;
+        let submitted_turn_id = payload
+            .submitted_turn_id
+            .clone()
+            .unwrap_or_else(|| format!("thread-spawn-{}", request_event.id));
         let receipt = self
             .host
             .kernel_control()
             .spawn_child_with_witness(
                 parent.context(),
-                Some(payload.correlation_id.clone()),
+                payload
+                    .task_name
+                    .clone()
+                    .or_else(|| Some(payload.correlation_id.clone())),
                 TurnInput::text(payload.initial_submission.clone()),
                 metadata,
                 ThreadSpawnWitness {
@@ -367,6 +567,7 @@ impl ThreadSpawnProjector {
                     correlation_id: Some(payload.correlation_id.clone()),
                     request_stream_id: Some(request_event.stream_id.clone()),
                     request_event_id: Some(request_event.id),
+                    submitted_turn_id: Some(submitted_turn_id),
                 },
             )
             .await?;
@@ -386,6 +587,7 @@ impl ThreadSpawnProjector {
             child_thread_id: receipt.thread_id,
             submitted_turn_id: receipt.submitted_turn_id,
             correlation_id: payload.correlation_id,
+            task_name: payload.task_name,
         })
     }
 
@@ -642,6 +844,7 @@ pub struct ThreadSpawnProjected {
     pub child_thread_id: ThreadId,
     pub submitted_turn_id: String,
     pub correlation_id: String,
+    pub task_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -649,6 +852,91 @@ pub struct ThreadSpawnProjectionFailure {
     pub request_event_id: EventRecordId,
     pub failure_event_id: EventRecordId,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadSpawnDispatchReceipt {
+    pub request_event_id: EventRecordId,
+    pub handle: HandleId,
+    pub dispatch_id: DispatchId,
+    pub submitted_turn_id: Option<String>,
+    pub task_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadSpawnDispatchFold {
+    pub request_event_id: EventRecordId,
+    pub handle: Option<HandleId>,
+    pub submitted_turn_id: Option<String>,
+    pub task_name: Option<String>,
+    pub failure_reason: Option<String>,
+    pub claimed: bool,
+}
+
+/// Folds the durable records for one dispatch identity. The original
+/// non-claim `thread.spawn.requested` record anchors the fold; spawned and
+/// failure decisions join by its existing `correlation_id` wire value. Raw
+/// pre-handle-lane request payloads decode because every newer field is
+/// optional with a serde default.
+pub fn fold_thread_spawn_dispatch(
+    events: &[EventRecord],
+    dispatch_id: &DispatchId,
+) -> Option<ThreadSpawnDispatchFold> {
+    let (request, payload) = events.iter().find_map(|event| {
+        if event.kind != EventKind::ThreadSpawnRequested || is_spawn_request_claim(event) {
+            return None;
+        }
+        let payload =
+            serde_json::from_value::<ThreadSpawnRequestedPayload>(event.payload.clone()).ok()?;
+        (payload.correlation_id == dispatch_id.as_str()).then_some((event, payload))
+    })?;
+    let spawned = events.iter().find(|event| {
+        event.kind == EventKind::ThreadSpawned
+            && event
+                .payload
+                .get("correlation_id")
+                .and_then(JsonValue::as_str)
+                == Some(dispatch_id.as_str())
+    });
+    let handle = spawned
+        .and_then(|event| event.payload.get("child_thread_id"))
+        .and_then(JsonValue::as_str)
+        .and_then(|value| ThreadId::parse_str(value).ok())
+        .map(HandleId::thread);
+    let failure_reason = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::LoopDenied
+                && event
+                    .payload
+                    .get("correlation_id")
+                    .and_then(JsonValue::as_str)
+                    == Some(dispatch_id.as_str())
+        })
+        .and_then(|event| event.payload.get("reason"))
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string);
+    let claimed = events.iter().any(|event| {
+        is_spawn_request_claim(event)
+            && (event.provenance.source_event_ids.contains(&request.id)
+                || event
+                    .payload
+                    .get("correlation_id")
+                    .and_then(JsonValue::as_str)
+                    == Some(dispatch_id.as_str()))
+    });
+    Some(ThreadSpawnDispatchFold {
+        request_event_id: request.id,
+        handle,
+        submitted_turn_id: Some(
+            payload
+                .submitted_turn_id
+                .unwrap_or_else(|| format!("thread-spawn-{}", request.id)),
+        ),
+        task_name: payload.task_name,
+        failure_reason,
+        claimed,
+    })
 }
 
 fn parent_allows_supervisor_spawn(metadata: &BTreeMap<String, String>) -> CooldisResult<bool> {
@@ -973,6 +1261,278 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn racing_dispatches_with_same_id_append_one_request_and_return_one_handle() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first =
+            ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(Arc::clone(&barrier));
+        let second = ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(barrier);
+        let request = ThreadSpawnRequestedPayload {
+            parent_thread_id: coordinates.thread_id,
+            parent_turn_id: Some("parent-turn-1".to_string()),
+            task_name: Some("worker".to_string()),
+            submitted_turn_id: Some("thread-spawn-dispatch-race-1".to_string()),
+            child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+            initial_submission: "echo one child".to_string(),
+            correlation_id: "dispatch-race-1".to_string(),
+            block_parent: false,
+        };
+
+        let (first, second) = tokio::join!(
+            first.dispatch_request(&coordinates, request.clone()),
+            second.dispatch_request(&coordinates, request),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert_eq!(first, second);
+        let control_events = store
+            .read_events(
+                &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            control_events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::ThreadSpawnRequested && !is_spawn_request_claim(event)
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            control_events
+                .iter()
+                .filter(|event| is_spawn_request_claim(event))
+                .count(),
+            1
+        );
+        assert_eq!(
+            control_events
+                .iter()
+                .filter(|event| event.kind == EventKind::ThreadSpawned)
+                .count(),
+            1
+        );
+        assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
+
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn racing_dispatches_with_different_ids_append_two_requests_and_spawn_two_children() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first =
+            ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(Arc::clone(&barrier));
+        let second = ThreadSpawnProjector::new(host.clone()).with_snapshot_barrier(barrier);
+        let request = |dispatch_id: &str, task_name: &str| ThreadSpawnRequestedPayload {
+            parent_thread_id: coordinates.thread_id,
+            parent_turn_id: Some("parent-turn-1".to_string()),
+            task_name: Some(task_name.to_string()),
+            submitted_turn_id: Some(format!("thread-spawn-{dispatch_id}")),
+            child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+            initial_submission: format!("echo {task_name}"),
+            correlation_id: dispatch_id.to_string(),
+            block_parent: false,
+        };
+
+        let (first, second) = tokio::join!(
+            first.dispatch_request(
+                &coordinates,
+                request("dispatch-race-distinct-1", "worker-1")
+            ),
+            second.dispatch_request(
+                &coordinates,
+                request("dispatch-race-distinct-2", "worker-2")
+            ),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert_ne!(first.handle, second.handle);
+        let control_events = store
+            .read_events(
+                &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            control_events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::ThreadSpawnRequested && !is_spawn_request_claim(event)
+                })
+                .count(),
+            2
+        );
+        assert_eq!(
+            control_events
+                .iter()
+                .filter(|event| is_spawn_request_claim(event))
+                .count(),
+            2
+        );
+        assert_eq!(
+            control_events
+                .iter()
+                .filter(|event| event.kind == EventKind::ThreadSpawned)
+                .count(),
+            2
+        );
+        assert_eq!(host.children_of(coordinates.thread_id).await.len(), 2);
+
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn retry_after_dispatch_claim_without_decision_fails_closed_instead_of_spinning() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let host = RuntimeHost::with_session_store(
+            Arc::new(VirtualBashRuntimeFactory::default()),
+            store.clone(),
+        );
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        host.start_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            parent_metadata_with_spawn_grant(),
+        )
+        .await
+        .unwrap();
+        let request = ThreadSpawnRequestedPayload {
+            parent_thread_id: coordinates.thread_id,
+            parent_turn_id: Some("parent-turn-1".to_string()),
+            task_name: Some("worker".to_string()),
+            submitted_turn_id: Some("thread-spawn-dispatch-dead-claim-1".to_string()),
+            child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
+            initial_submission: "echo never started".to_string(),
+            correlation_id: "dispatch-dead-claim-1".to_string(),
+            block_parent: false,
+        };
+        let pause = Arc::new(ProjectionPause::default());
+        let projector =
+            ThreadSpawnProjector::new(host.clone()).with_after_claim_pause(pause.clone());
+        let dispatched_coordinates = coordinates.clone();
+        let dispatched_request = request.clone();
+        let dispatch = tokio::spawn(async move {
+            projector
+                .dispatch_request(&dispatched_coordinates, dispatched_request)
+                .await
+        });
+
+        pause.wait_until_paused().await;
+        dispatch.abort();
+        assert!(dispatch.await.unwrap_err().is_cancelled());
+
+        let err = ThreadSpawnProjector::new(host.clone())
+            .with_claimed_dispatch_wait_timeout(std::time::Duration::ZERO)
+            .dispatch_request(&coordinates, request)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("claimed without a terminal decision"),
+            "unexpected error: {err}"
+        );
+        assert!(host.children_of(coordinates.thread_id).await.is_empty());
+        let control_events = store
+            .read_events(
+                &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            control_events
+                .iter()
+                .filter(|event| is_spawn_request_claim(event))
+                .count(),
+            1
+        );
+        assert!(
+            control_events
+                .iter()
+                .all(|event| event.kind != EventKind::ThreadSpawned)
+        );
+
+        host.shutdown_all().await.unwrap();
+    }
+
+    #[test]
+    fn legacy_spawn_request_decodes_and_folds_to_original_handle() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let request_id = EventRecordId::new();
+        let mut legacy_request = NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::ThreadSpawnRequested,
+            serde_json::from_str(
+                r#"{"schema":"cooldis.thread.spawn.requested/1","parent_thread_id":"018f0000-0000-7000-8000-000000000001","parent_turn_id":"parent-turn-1","child_agent_ref":"unbound","initial_submission":"legacy child","correlation_id":"legacy-dispatch-1","block_parent":false}"#,
+            )
+            .unwrap(),
+        );
+        legacy_request.id = request_id;
+        let request =
+            EventRecord::from_new(stream_id.clone(), EventSequence::new(1), legacy_request);
+        let child_thread_id = ThreadId::new();
+        let spawned = EventRecord::from_new(
+            stream_id,
+            EventSequence::new(2),
+            NewEventRecord::witnessed(
+                coordinates,
+                EventKind::ThreadSpawned,
+                json!({
+                    "schema": EventKind::ThreadSpawned.payload_schema_id(),
+                    "parent_thread_id": "018f0000-0000-7000-8000-000000000001",
+                    "child_thread_id": child_thread_id,
+                    "child_manifest_hash": "unbound",
+                    "granted": [],
+                    "inputs_hash": "sha256:legacy",
+                    "correlation_id": "legacy-dispatch-1"
+                }),
+            ),
+        );
+
+        let folded =
+            fold_thread_spawn_dispatch(&[request, spawned], &DispatchId::new("legacy-dispatch-1"))
+                .unwrap();
+        assert_eq!(folded.request_event_id, request_id);
+        assert_eq!(folded.handle, Some(HandleId::thread(child_thread_id)));
+        assert_eq!(
+            folded.submitted_turn_id.as_deref(),
+            Some(format!("thread-spawn-{request_id}").as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn racing_rejections_emit_one_failure() {
         let store = Arc::new(InMemorySessionStore::new());
         let host = RuntimeHost::with_session_store(
@@ -1227,6 +1787,8 @@ mod tests {
         let mut payload = serde_json::to_value(ThreadSpawnRequestedPayload {
             parent_thread_id: coordinates.thread_id,
             parent_turn_id: Some("parent-turn-1".to_string()),
+            task_name: None,
+            submitted_turn_id: None,
             child_agent_ref: UNBOUND_CHILD_AGENT_REF.to_string(),
             initial_submission: "echo projected child".to_string(),
             correlation_id: correlation_id.to_string(),

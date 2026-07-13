@@ -1954,6 +1954,122 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn thread_handle_dispatch_retries_fold_through_rpc() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-thread-spawn-{}.sock", Uuid::now_v7())),
+    );
+    let root = std::env::temp_dir().join(format!("cooldis-thread-spawn-{}", Uuid::now_v7()));
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+    let started = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let parent_thread_id = started["thread"]["id"].as_str().unwrap();
+    let params = json!({
+        "threadId": parent_thread_id,
+        "taskName": "worker",
+        "message": "echo dispatched child",
+        "dispatchId": "rpc-dispatch-1",
+    });
+
+    let first = app
+        .dispatch_request(&connection, "thread/spawn", Some(params.clone()))
+        .await
+        .unwrap();
+    let retry = app
+        .dispatch_request(&connection, "thread/spawn", Some(params))
+        .await
+        .unwrap();
+    let conflicting_retry = app
+        .dispatch_request(
+            &connection,
+            "thread/spawn",
+            Some(json!({
+                "threadId": parent_thread_id,
+                "taskName": "retry-alias-must-not-win",
+                "message": "echo retry message must not run",
+                "dispatchId": "rpc-dispatch-1",
+            })),
+        )
+        .await
+        .unwrap();
+    let distinct = app
+        .dispatch_request(
+            &connection,
+            "thread/spawn",
+            Some(json!({
+                "threadId": parent_thread_id,
+                "taskName": "worker-2",
+                "message": "echo second child",
+                "dispatchId": "rpc-dispatch-2",
+            })),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first["handle"], retry["handle"]);
+    assert_eq!(first["dispatchId"], "rpc-dispatch-1");
+    assert_eq!(retry["dispatchId"], "rpc-dispatch-1");
+    assert_eq!(conflicting_retry["handle"], first["handle"]);
+    assert_eq!(conflicting_retry["taskName"], "worker");
+    assert_ne!(first["handle"], distinct["handle"]);
+    let submit_params = json!({
+        "threadId": parent_thread_id,
+        "message": "echo submitted once",
+        "dispatchId": "rpc-submit-dispatch-1",
+    });
+    let first_submit = app
+        .dispatch_request(&connection, "thread/submit", Some(submit_params.clone()))
+        .await
+        .unwrap();
+    let retry_submit = app
+        .dispatch_request(&connection, "thread/submit", Some(submit_params))
+        .await
+        .unwrap();
+    assert_eq!(first_submit["dispatchId"], "rpc-submit-dispatch-1");
+    assert_eq!(first_submit["turnId"], retry_submit["turnId"]);
+    assert_eq!(first_submit["interactionId"], retry_submit["interactionId"]);
+    let parent = app.handle_for_thread(parent_thread_id).await.unwrap();
+    let store = app
+        .inner
+        .supervisor
+        .runtime_store(&app.inner.tenant_id)
+        .await
+        .unwrap();
+    let control_events = store
+        .read_events(
+            &EventStreamId::new(format!(
+                "control:{}",
+                parent.context().coordinates.thread_id
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::ThreadSpawnRequested
+                    && event.payload["correlation_id"] == "rpc-dispatch-1"
+                    && event.provenance.discharged_by.as_deref() == Some("dispatcher:thread-spawn")
+            })
+            .count(),
+        1
+    );
+
+    app.inner.supervisor.shutdown_all().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn ref_less_thread_start_default_manifest_gate_allows_lowered_params() {
     let params = ThreadStartParams::default();

@@ -1946,6 +1946,7 @@ fn thread_lifecycle_contracts_match_fixture() {
         interaction_id: runtime_event_id(2),
         status: ThreadStatus::Running,
         turn_id: "turn-2".to_string(),
+        dispatch_id: cooldis_runtime_contracts::DispatchId::new("submit-dispatch-2"),
     };
     support::assert_json_fixture(
         "contracts/thread_lifecycle.json",

@@ -1,6 +1,7 @@
 {
   "agent_process_submit": {
     "caller_thread_id": "018f0000-0000-7000-8000-000000000009",
+    "dispatch_id": "submit-dispatch-2",
     "interaction_id": "018f0000-0000-7000-8000-000000000002",
     "operation": "submit_to_thread",
     "status": "running",

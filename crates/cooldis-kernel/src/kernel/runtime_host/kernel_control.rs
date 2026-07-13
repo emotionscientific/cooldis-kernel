@@ -24,13 +24,13 @@ use crate::kernel::runtime_host::{
     THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA,
 };
 use cooldis_runtime_contracts::{
-    RuntimeEventId, ThreadCheckpointId, ThreadContext, ThreadCoordinates, ThreadId,
-    ThreadInteractionKind, ThreadLifecycleStatus, ThreadSignalId, ThreadStatus, ThreadTopology,
-    TurnSubmissionMode,
+    DispatchId, HandleId, RuntimeEventId, ThreadCheckpointId, ThreadContext, ThreadCoordinates,
+    ThreadId, ThreadInteractionKind, ThreadLifecycleStatus, ThreadSignalId, ThreadStatus,
+    ThreadTopology, TurnSubmissionMode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -131,6 +131,7 @@ pub struct ThreadSpawnWitness {
     pub correlation_id: Option<String>,
     pub request_stream_id: Option<EventStreamId>,
     pub request_event_id: Option<EventRecordId>,
+    pub submitted_turn_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -142,6 +143,8 @@ pub struct AgentProcessSpawnReceipt {
     pub status: ThreadStatus,
     pub task_name: Option<String>,
     pub submitted_turn_id: String,
+    pub handle: HandleId,
+    pub dispatch_id: DispatchId,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -152,6 +155,7 @@ pub struct AgentProcessSubmitReceipt {
     pub interaction_id: RuntimeEventId,
     pub status: ThreadStatus,
     pub turn_id: String,
+    pub dispatch_id: DispatchId,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -282,6 +286,54 @@ impl RuntimeKernelControl {
         .await
     }
 
+    pub async fn dispatch_thread_spawn(
+        &self,
+        caller: &ThreadContext,
+        dispatch_id: DispatchId,
+        task_name: String,
+        message: String,
+        agent_ref: Option<String>,
+        agent_resolver: Option<Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
+    ) -> CooldisResult<AgentProcessSpawnReceipt> {
+        let host = self.host()?;
+        let mut projector = crate::ThreadSpawnProjector::new(host);
+        if let Some(agent_resolver) = agent_resolver {
+            projector = projector.with_agent_resolver(agent_resolver);
+        }
+        let submitted_turn_id = format!("thread-spawn-{dispatch_id}");
+        let dispatched = projector
+            .dispatch_request_with_authority(
+                &caller.coordinates,
+                crate::ThreadSpawnRequestedPayload {
+                    parent_thread_id: caller.coordinates.thread_id,
+                    parent_turn_id: None,
+                    task_name: Some(task_name.clone()),
+                    submitted_turn_id: Some(submitted_turn_id.clone()),
+                    child_agent_ref: agent_ref.unwrap_or_else(|| "unbound".to_string()),
+                    initial_submission: message,
+                    correlation_id: dispatch_id.to_string(),
+                    block_parent: false,
+                },
+                false,
+            )
+            .await?;
+        let thread_id = ThreadId::parse_str(&dispatched.handle.id).map_err(|err| {
+            CooldisError::History(format!("thread dispatch returned invalid handle: {err}"))
+        })?;
+        let status = self.host()?.get_thread(thread_id).await?.status();
+        Ok(AgentProcessSpawnReceipt {
+            operation: "cooldis.spawn_subagent".to_string(),
+            caller_thread_id: caller.coordinates.thread_id,
+            thread_id,
+            parent_thread_id: caller.coordinates.thread_id,
+            status,
+            task_name: dispatched.task_name,
+            submitted_turn_id: dispatched.submitted_turn_id.unwrap_or(submitted_turn_id),
+            handle: dispatched.handle,
+            dispatch_id: dispatched.dispatch_id,
+        })
+    }
+
     pub async fn spawn_child_with_witness(
         &self,
         caller: &ThreadContext,
@@ -315,11 +367,21 @@ impl RuntimeKernelControl {
             .await?;
         let child_thread_id = child.context().coordinates.thread_id;
         let parent = host.get_thread(caller.coordinates.thread_id).await?;
+        let dispatch_id = DispatchId::new(
+            witness
+                .correlation_id
+                .clone()
+                .unwrap_or_else(|| format!("thread-spawn-{}", ThreadSignalId::new())),
+        );
+        let turn_id = witness
+            .submitted_turn_id
+            .clone()
+            .filter(|turn_id| !turn_id.trim().is_empty())
+            .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
         if let Err(err) = append_thread_spawned_event(&parent, caller, &child, witness).await {
             let _ = host.shutdown_thread(child_thread_id).await;
             return Err(err);
         }
-        let turn_id = format!("agent-process-v1-{}", ThreadSignalId::new());
         if let Err(err) = host
             .submit_turn(child_thread_id, turn_id.clone(), input)
             .await
@@ -336,6 +398,8 @@ impl RuntimeKernelControl {
             status: child.status(),
             task_name,
             submitted_turn_id: turn_id,
+            handle: HandleId::thread(child_thread_id),
+            dispatch_id,
         })
     }
 
@@ -452,17 +516,68 @@ impl RuntimeKernelControl {
         turn_id: Option<String>,
         input: TurnInput,
     ) -> CooldisResult<AgentProcessSubmitReceipt> {
+        let turn_id = turn_id
+            .filter(|turn_id| !turn_id.trim().is_empty())
+            .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
+        self.submit_to_thread_with_identities(
+            caller,
+            target_thread_id,
+            DispatchId::new(format!("thread-submit-{}", ThreadSignalId::new())),
+            turn_id,
+            RuntimeEventId::new(),
+            input,
+        )
+        .await
+    }
+
+    /// Submits through the target-scoped local dispatch fold. The reserved
+    /// turn id is derived solely from the dispatch id; callers cannot replace
+    /// the fold key with an organic turn identity.
+    pub async fn submit_to_thread_with_dispatch(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+        dispatch_id: DispatchId,
+        input: TurnInput,
+    ) -> CooldisResult<AgentProcessSubmitReceipt> {
+        let turn_id = format!("thread-submit-{dispatch_id}");
+        let interaction_id = submit_dispatch_interaction_id(target_thread_id, &dispatch_id);
+        self.submit_to_thread_with_identities(
+            caller,
+            target_thread_id,
+            dispatch_id,
+            turn_id,
+            interaction_id,
+            input,
+        )
+        .await
+    }
+
+    async fn submit_to_thread_with_identities(
+        &self,
+        caller: &ThreadContext,
+        target_thread_id: ThreadId,
+        dispatch_id: DispatchId,
+        turn_id: String,
+        interaction_id: RuntimeEventId,
+        input: TurnInput,
+    ) -> CooldisResult<AgentProcessSubmitReceipt> {
         let host = self.host()?;
         let caller_thread = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
         let target = self.scoped_thread(caller, target_thread_id).await?;
-        let turn_id = turn_id
-            .filter(|turn_id| !turn_id.trim().is_empty())
-            .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
-        let interaction_id = RuntimeEventId::new();
-        host.submit_turn(target_thread_id, turn_id.clone(), input)
-            .await?;
+        let submitted = host
+            .reserve_turn_submission_with_admission(
+                target_thread_id,
+                turn_id.clone(),
+                input,
+                TurnSubmissionMode::Queue,
+                None,
+            )
+            .await?
+            .submit()
+            .await;
         let metadata = BTreeMap::from([
             (
                 "operation".to_string(),
@@ -473,28 +588,30 @@ impl RuntimeKernelControl {
                 TurnSubmissionMode::Queue.as_str().to_string(),
             ),
         ]);
-        emit_thread_interaction(
-            &caller_thread,
-            interaction_id,
-            ThreadInteractionKind::PromptSubmitted,
-            caller.coordinates.thread_id,
-            target_thread_id,
-            None,
-            Some(turn_id.clone()),
-            None,
-            metadata.clone(),
-        );
-        emit_thread_interaction(
-            &target,
-            interaction_id,
-            ThreadInteractionKind::PromptReceived,
-            caller.coordinates.thread_id,
-            target_thread_id,
-            None,
-            Some(turn_id.clone()),
-            None,
-            metadata,
-        );
+        if submitted {
+            emit_thread_interaction(
+                &caller_thread,
+                interaction_id,
+                ThreadInteractionKind::PromptSubmitted,
+                caller.coordinates.thread_id,
+                target_thread_id,
+                None,
+                Some(turn_id.clone()),
+                None,
+                metadata.clone(),
+            );
+            emit_thread_interaction(
+                &target,
+                interaction_id,
+                ThreadInteractionKind::PromptReceived,
+                caller.coordinates.thread_id,
+                target_thread_id,
+                None,
+                Some(turn_id.clone()),
+                None,
+                metadata,
+            );
+        }
         Ok(AgentProcessSubmitReceipt {
             operation: "cooldis.submit_to_thread".to_string(),
             caller_thread_id: caller.coordinates.thread_id,
@@ -502,6 +619,7 @@ impl RuntimeKernelControl {
             interaction_id,
             status: target.status(),
             turn_id,
+            dispatch_id,
         })
     }
 
@@ -860,4 +978,20 @@ impl RuntimeKernelControl {
         }
         Ok(target)
     }
+}
+
+/// Derives the target-scoped interaction identity for a local submit fold.
+/// Version 8 keeps deterministic dispatch interactions disjoint from organic
+/// runtime event ids, which are generated as UUIDv7.
+fn submit_dispatch_interaction_id(
+    target_thread_id: ThreadId,
+    dispatch_id: &DispatchId,
+) -> RuntimeEventId {
+    let digest = sha256_hex(format!("{target_thread_id}:{dispatch_id}").as_bytes());
+    let digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    let mut value =
+        u128::from_str_radix(&digest[..32], 16).expect("sha256 hex prefix is always a valid u128");
+    value = (value & !(0xf_u128 << 76)) | (8_u128 << 76);
+    value = (value & !(0b11_u128 << 62)) | (0b10_u128 << 62);
+    RuntimeEventId::from_uuid(uuid::Uuid::from_u128(value))
 }

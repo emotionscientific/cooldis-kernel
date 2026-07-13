@@ -543,8 +543,9 @@ pub use kernel::supervisor::{
     TenantRuntimeContextDescriptor, TenantSnapshot, ThreadStartRequest,
 };
 pub use kernel::thread_spawn_projector::{
-    ThreadSpawnProjected, ThreadSpawnProjectionFailure, ThreadSpawnProjectionReceipt,
-    ThreadSpawnProjector,
+    ThreadSpawnDispatchFold, ThreadSpawnDispatchReceipt, ThreadSpawnProjected,
+    ThreadSpawnProjectionFailure, ThreadSpawnProjectionReceipt, ThreadSpawnProjector,
+    fold_thread_spawn_dispatch,
 };
 pub use kernel::wasm_couplings::WasmCouplingExecutor;
 pub use operations::kernel_packages::{

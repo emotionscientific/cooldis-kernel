@@ -638,6 +638,8 @@ fn invoke_supervisor_spawn(request: CouplingInvocation) -> CooldisResult<Couplin
     let payload = ThreadSpawnRequestedPayload {
         parent_thread_id: request.trigger_event.coordinates.thread_id,
         parent_turn_id: parent_turn_id.clone(),
+        task_name: None,
+        submitted_turn_id: None,
         child_agent_ref,
         initial_submission,
         correlation_id: correlation_id.clone(),
