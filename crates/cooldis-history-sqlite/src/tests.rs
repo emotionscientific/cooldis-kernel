@@ -351,17 +351,37 @@ async fn cancelling_append_finishes_atomically_and_releases_the_write_lock() {
     append.abort();
     assert!(append.await.unwrap_err().is_cancelled());
 
-    let committed = store
-        .append_events(
-            &stream_id,
-            vec![NewEventRecord::witnessed(
-                coordinates,
-                EventKind::TurnSubmitted,
-                serde_json::json!({"turn_id": "committed"}),
-            )],
-        )
-        .await
-        .unwrap();
+    // The cancellation shield finishes the aborted append's transaction in a
+    // detached task; on a slow runner that can outlast a single attempt's
+    // busy timeout. "database is locked" within the deadline is the shield
+    // still working, not a failure — retry until the lock is released.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let committed = loop {
+        let attempt = store
+            .append_events(
+                &stream_id,
+                vec![NewEventRecord::witnessed(
+                    coordinates.clone(),
+                    EventKind::TurnSubmitted,
+                    serde_json::json!({"turn_id": "committed"}),
+                )],
+            )
+            .await;
+        match attempt {
+            Ok(events) => break events,
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("database is locked"),
+                    "unexpected append error while waiting for the shield: {error}"
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "write lock not released within the shield deadline: {error}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    };
     assert_eq!(committed[0].sequence.get(), 1_001);
     let events = store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 1_001);
