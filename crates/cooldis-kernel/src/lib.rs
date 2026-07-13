@@ -213,6 +213,7 @@ pub mod daemon {
     pub mod daemon_config;
     pub mod daemon_io;
     pub(crate) mod handle_ingress;
+    pub mod remote_store;
 }
 
 pub mod kernel {
