@@ -190,6 +190,8 @@ fn workspace_requirement_rejects_unsafe_or_reserved_guest_paths() {
         ("/workspace/../outside", "normalized"),
         ("/skills", "reserved"),
         ("/skills/nested", "reserved"),
+        ("/spill", "reserved"),
+        ("/spill/nested", "reserved"),
     ] {
         let source = valid_manifest().replace(
             "[policies]",

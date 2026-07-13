@@ -391,13 +391,14 @@ pub use capabilities::bridge::{
     UnixExecPayload, UnixExecutionMode,
 };
 pub use capabilities::execution::{
-    BASH_TOOL, BashExecutionPolicy, BashToolProvider, BashkitExecutionHarness, BashkitLiveBackend,
-    CommandRoute, CommandRoutingPolicy, ExecutionDeadline, ExternalCommandExecutor,
-    ExternalCommandInvocation, ExternalCommandRequest, ExternalCommandResult, ExternalExecutorKind,
-    ExternalFileWrite, HostBashExecutor, HostBashExecutorConfig, PROCESS_EXEC_TOOL,
-    RejectingExternalCommandExecutor, VirtualBashRuntimeConfig, VirtualBashRuntimeFactory,
-    VirtualCommandOutput, VirtualFile, VirtualMount, VirtualMountBackend, VirtualMountMode,
-    WRITE_STDIN_TOOL,
+    BASH_TOOL, BashExecutionPolicy, BashToolProvider, BashToolResultPayload,
+    BashkitExecutionHarness, BashkitLiveBackend, CommandRoute, CommandRoutingPolicy,
+    ExecutionDeadline, ExternalCommandExecutor, ExternalCommandInvocation, ExternalCommandRequest,
+    ExternalCommandResult, ExternalExecutorKind, ExternalFileWrite, HostBashExecutor,
+    HostBashExecutorConfig, PROCESS_EXEC_TOOL, RejectingExternalCommandExecutor,
+    SPILL_RETENTION_MAX_BYTES, ToolOutputSpill, ToolOutputSpillReceipt, VirtualBashRuntimeConfig,
+    VirtualBashRuntimeFactory, VirtualCommandOutput, VirtualFile, VirtualMount,
+    VirtualMountBackend, VirtualMountMode, WRITE_STDIN_TOOL,
 };
 pub use capabilities::process::{
     AsyncExecutionManager, AsyncExecutionManagerConfig, AsyncProcessOutcome, AsyncProcessOwner,

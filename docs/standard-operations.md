@@ -145,6 +145,10 @@ registry root is configured. It publishes four process-handle operations:
 The contract uses the same process snapshot vocabulary as the app-server
 `command/exec` surface: stable process id, status, backend, label,
 exit code when known, stdout/stderr, truncation flags, and event count.
+Provider-facing process snapshots follow the
+[oversized tool output contract](command-contracts.md#oversized-tool-output):
+each oversized stream is preserved under the thread VFS `/spill` path and the
+durable tool result carries its typed receipt.
 
 `process_exec` accepts an optional `dispatch_id` and generates one when absent.
 The durable observe-only dispatch witness is settled before backend startup;

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -264,29 +264,44 @@ impl ExternalCommandExecutor for HostBashExecutor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let stdin = request.stdin.clone();
-        let wait_for_output = async move {
-            let mut child = command.spawn().map_err(process_error)?;
-            if let Some(stdin) = stdin
-                && let Some(mut child_stdin) = child.stdin.take()
-            {
-                child_stdin
-                    .write_all(stdin.as_bytes())
-                    .await
-                    .map_err(process_error)?;
-            }
-            child.wait_with_output().await.map_err(process_error)
-        };
-
-        let output = match tokio::time::timeout(request.deadline.remaining(), wait_for_output).await
+        let mut child = command.spawn().map_err(process_error)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| process_error("host bash stdout pipe was not available"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| process_error("host bash stderr pipe was not available"))?;
+        let stdout_task = tokio::spawn(read_capped_output(stdout, request.max_output_bytes));
+        let stderr_task = tokio::spawn(read_capped_output(stderr, request.max_output_bytes));
+        if let Some(stdin) = request.stdin
+            && let Some(mut child_stdin) = child.stdin.take()
         {
-            Ok(output) => output?,
-            Err(_) => return Ok(external_timeout_result("host bash exec timed out\n")),
+            child_stdin
+                .write_all(stdin.as_bytes())
+                .await
+                .map_err(process_error)?;
+        }
+
+        let status = match tokio::time::timeout(request.deadline.remaining(), child.wait()).await {
+            Ok(status) => status.map_err(process_error)?,
+            Err(_) => {
+                let _ = child.kill().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Ok(external_timeout_result("host bash exec timed out\n"));
+            }
         };
-        Ok(ExternalCommandResult::new(output_from_host_process(
-            output,
-            request.max_output_bytes,
-        )))
+        let (stdout, stdout_truncated) = stdout_task.await.map_err(process_error)??;
+        let (stderr, stderr_truncated) = stderr_task.await.map_err(process_error)??;
+        Ok(ExternalCommandResult::new(VirtualCommandOutput {
+            stdout,
+            stderr,
+            exit_code: status.code().unwrap_or(1),
+            stdout_truncated,
+            stderr_truncated,
+        }))
     }
 }
 
@@ -304,25 +319,160 @@ fn external_timeout_result(message: impl Into<String>) -> ExternalCommandResult 
     })
 }
 
-fn output_from_host_process(
-    output: std::process::Output,
+async fn read_capped_output<R>(
+    mut reader: R,
     max_output_bytes: usize,
-) -> VirtualCommandOutput {
-    let (stdout, stdout_truncated) = bytes_to_capped_text(&output.stdout, max_output_bytes);
-    let (stderr, stderr_truncated) = bytes_to_capped_text(&output.stderr, max_output_bytes);
-    VirtualCommandOutput {
-        stdout,
-        stderr,
-        exit_code: output.status.code().unwrap_or(1),
-        stdout_truncated,
-        stderr_truncated,
+) -> CooldisProcessResult<(String, bool)>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut retained = String::with_capacity(max_output_bytes.min(8192));
+    let mut truncated = false;
+    let mut buffer = [0_u8; 8192 + 3];
+    let mut pending = 0;
+    loop {
+        let read = reader
+            .read(&mut buffer[pending..pending + 8192])
+            .await
+            .map_err(process_error)?;
+        if read == 0 {
+            if pending > 0
+                && !truncated
+                && matches!(
+                    append_lossy_chunk(&mut retained, &buffer[..pending], max_output_bytes, true,),
+                    LossyChunk::Truncated
+                )
+            {
+                truncated = true;
+            }
+            break;
+        }
+        if truncated {
+            pending = 0;
+            continue;
+        }
+        let available = pending + read;
+        match append_lossy_chunk(&mut retained, &buffer[..available], max_output_bytes, false) {
+            LossyChunk::Complete => pending = 0,
+            LossyChunk::Pending(start) => {
+                buffer.copy_within(start..available, 0);
+                pending = available - start;
+            }
+            LossyChunk::Truncated => {
+                truncated = true;
+                pending = 0;
+            }
+        }
+    }
+    Ok((retained, truncated))
+}
+
+enum LossyChunk {
+    Complete,
+    Pending(usize),
+    Truncated,
+}
+
+fn append_lossy_chunk(
+    output: &mut String,
+    input: &[u8],
+    max_output_bytes: usize,
+    eof: bool,
+) -> LossyChunk {
+    let mut offset = 0;
+    loop {
+        match std::str::from_utf8(&input[offset..]) {
+            Ok(valid) => {
+                return if append_valid_prefix(output, valid, max_output_bytes) {
+                    LossyChunk::Complete
+                } else {
+                    LossyChunk::Truncated
+                };
+            }
+            Err(error) => {
+                let valid_end = offset + error.valid_up_to();
+                let valid = std::str::from_utf8(&input[offset..valid_end])
+                    .expect("Utf8Error::valid_up_to must delimit valid UTF-8");
+                if !append_valid_prefix(output, valid, max_output_bytes) {
+                    return LossyChunk::Truncated;
+                }
+                let Some(invalid_bytes) = error.error_len() else {
+                    if !eof {
+                        return LossyChunk::Pending(valid_end);
+                    }
+                    return if append_replacement(output, max_output_bytes) {
+                        LossyChunk::Complete
+                    } else {
+                        LossyChunk::Truncated
+                    };
+                };
+                if !append_replacement(output, max_output_bytes) {
+                    return LossyChunk::Truncated;
+                }
+                offset = valid_end + invalid_bytes;
+            }
+        }
     }
 }
 
-fn bytes_to_capped_text(bytes: &[u8], max_output_bytes: usize) -> (String, bool) {
-    if bytes.len() <= max_output_bytes {
-        return (String::from_utf8_lossy(bytes).to_string(), false);
+fn append_valid_prefix(output: &mut String, valid: &str, max_output_bytes: usize) -> bool {
+    let available = max_output_bytes.saturating_sub(output.len());
+    let mut end = available.min(valid.len());
+    while !valid.is_char_boundary(end) {
+        end -= 1;
     }
-    let capped = &bytes[..max_output_bytes];
-    (String::from_utf8_lossy(capped).to_string(), true)
+    output.push_str(&valid[..end]);
+    end == valid.len()
+}
+
+fn append_replacement(output: &mut String, max_output_bytes: usize) -> bool {
+    if output.len().saturating_add('\u{fffd}'.len_utf8()) > max_output_bytes {
+        return false;
+    }
+    output.push('\u{fffd}');
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn capped_reader_drains_but_never_retains_more_than_its_limit() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let write = tokio::spawn(async move {
+            writer.write_all(&vec![b'x'; 1025]).await.unwrap();
+        });
+
+        let (retained, truncated) = read_capped_output(reader, 1024).await.unwrap();
+        write.await.unwrap();
+
+        assert_eq!(retained.len(), 1024);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn lossy_conversion_is_bounded_and_keeps_small_legacy_output() {
+        let legacy = b"before\xffafter";
+        let (text, truncated) = read_capped_output(&legacy[..], 64).await.unwrap();
+        assert_eq!(text, String::from_utf8_lossy(legacy));
+        assert!(!truncated);
+
+        let invalid = vec![0xff; 1024];
+        let (text, truncated) = read_capped_output(&invalid[..], 1024).await.unwrap();
+        assert!(text.len() <= 1024);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn lossy_conversion_preserves_utf8_split_at_the_reader_boundary() {
+        let mut input = vec![b'a'; 8191];
+        input.extend_from_slice("💥tail".as_bytes());
+
+        let (text, truncated) = read_capped_output(&input[..], input.len()).await.unwrap();
+
+        assert_eq!(text.as_bytes(), input);
+        assert!(!truncated);
+    }
 }

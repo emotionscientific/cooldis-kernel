@@ -83,7 +83,8 @@ The V1 work is focused on runtime primitives:
   read-write host directories mounted through the virtual VFS;
 - custom Wasm coupling execution, macro scaffolding, and offline replay for
   declared event folds;
-- local runtime execution through provider, virtual bash, and Wasm paths;
+- local runtime execution through provider, virtual bash, and Wasm paths,
+  including thread-VFS `/spill` receipts for oversized bash and process output;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
 - daemon-hosted remote child placement: store-backed ingress, separate local
   child processes, and local-first stream propagation fenced by durable scoped

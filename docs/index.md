@@ -75,7 +75,7 @@ Cooldis is experimental. The repository is focused on V1 runtime primitives:
 agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
 couplings, witnessed OpenAPI operation imports, offline coupling replay,
 local runtime execution, provider adapters,
-virtual bash, VFS,
+virtual bash, VFS-backed oversized-output spill receipts,
 skill-package resources, bind-plane local host-workspace mounts, daemon/RPC surfaces, daemon-embedded store-primary
 stream propagation, store-backed remote child placement, and the proof path for
 packageable local agents.

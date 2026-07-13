@@ -41,6 +41,37 @@ or invent ambient host access.
    process-shaped subset: argv, env, cwd, stdin, stdout, stderr, exit status,
    cancellation, and scoped VFS.
 
+## Oversized Tool Output
+
+The bash and process tool projections plan stdout and stderr independently. A
+stream at or below its configured byte ceiling remains inline. An oversized
+stream writes its retained raw bytes to the thread VFS at
+`/spill/<call-id>.<stream>.txt`, where `<stream>` is `stdout` or `stderr`. The
+tool result keeps the truncation flag, replaces the inline stream with a 16 KiB
+head preview and retrieval pointer, and adds a typed receipt containing `path`,
+`total_bytes`, `preview_bytes`, and an additive `retention_truncated` flag.
+Capture retains at most 64 MiB per stream. If a source exceeds that retention
+ceiling, the spill contains the retained 64 MiB prefix and both its pointer text
+and receipt state that the source was retention-truncated.
+The default in-memory `/spill` root is capped at 128 MiB, enough for one
+retention-sized stdout and stderr pair. Further writes degrade to the emergency
+stub rather than growing thread memory without bound.
+
+Use ordinary virtual bash to retrieve the artifact. `cat` can redirect the
+complete file, while `head -c` and `sed` can read bounded ranges without
+repeating an oversized result:
+
+```sh
+cat /spill/<call-id>.stdout.txt > /workspace/full-output.txt
+head -c 4096 /spill/<call-id>.stdout.txt
+sed -n '200,260p' /spill/<call-id>.stderr.txt
+```
+
+`/spill` is reserved from manifest workspace mounts. Spill files have the same
+session lifecycle as the thread VFS and require no host cleanup. If the VFS
+write is unavailable, the tool call still completes with a labeled, bounded
+head-and-tail emergency stub instead of silently discarding the whole stream.
+
 ## Contract Fields
 
 A complete command contract should be able to generate `--help`, `man`, model

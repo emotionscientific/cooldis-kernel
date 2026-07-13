@@ -1,14 +1,17 @@
 use super::*;
 use crate::{
     AsyncExecutionManager, AsyncProcessStartRequest, CanonicalContent, CanonicalMessage,
-    CooldisProcessBackend, CooldisProcessTerminalState, LiveProcessBackend, OperationRegistration,
-    ProcessSnapshotStatus, RuntimeHost, ThreadCoordinates, ThreadTopology, VfsMutationKind,
-    WasmRuntimeArtifact,
+    CooldisProcessBackend, CooldisProcessEventKind, CooldisProcessHandle,
+    CooldisProcessTerminalState, CooldisVfsBackend, LiveProcessBackend, LiveProcessSpawn,
+    OperationRegistration, ProcessSnapshotStatus, ReadOnlyFileSystem, RuntimeHost,
+    ThreadCoordinates, ThreadTopology, VfsMutationKind, WasmRuntimeArtifact,
 };
 use object_store::memory::InMemory as InMemoryObjectStore;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 async fn expect_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
     loop {
@@ -76,6 +79,41 @@ fn tool_result_json(message: CanonicalMessage) -> (serde_json::Value, bool) {
         .collect::<Vec<_>>()
         .join("");
     (serde_json::from_str(&text).unwrap(), is_error)
+}
+
+fn tool_result_text(message: CanonicalMessage) -> (String, bool) {
+    let CanonicalMessage::ToolResult {
+        content, is_error, ..
+    } = message
+    else {
+        panic!("expected tool result");
+    };
+    let text = content
+        .iter()
+        .filter_map(|content| match content {
+            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    (text, is_error)
+}
+
+async fn invoke_bash(
+    provider: &BashToolProvider,
+    call_id: &str,
+    command: &str,
+) -> CanonicalMessage {
+    provider
+        .invoke_tool_call(AgentKernelToolCall {
+            call_id: call_id.to_string(),
+            tool_name: BASH_TOOL.to_string(),
+            arguments: serde_json::json!({ "command": command }),
+            turn_context: None,
+        })
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 fn echo_operation_guest() -> String {
@@ -739,6 +777,7 @@ async fn selective_proxy_routes_named_command_through_executor() {
     assert_eq!(requests[0].executor, ExternalExecutorKind::RemoteLinux);
     assert_eq!(requests[0].cwd, PathBuf::from("/workspace"));
     assert_eq!(requests[0].stdin.as_deref(), Some("hi\n"));
+    assert_eq!(requests[0].max_output_bytes, SPILL_RETENTION_MAX_BYTES);
     assert_eq!(
         requests[0].invocation,
         ExternalCommandInvocation::Argv {
@@ -746,6 +785,30 @@ async fn selective_proxy_routes_named_command_through_executor() {
             args: vec!["test".to_string()]
         }
     );
+}
+
+#[tokio::test]
+async fn selective_proxy_sub_cap_pipeline_matches_the_legacy_result() {
+    let executor = Arc::new(RecordingExternalExecutor::default());
+    let policy = BashExecutionPolicy::selective([("cargo", CommandRoute::RemoteLinux)]);
+    let mut harness = BashkitExecutionHarness::new(
+        VirtualBashRuntimeConfig::default()
+            .with_execution_policy(policy)
+            .with_external_executor(executor),
+    )
+    .await
+    .unwrap();
+
+    let output = harness
+        .execute("printf input | cargo test | sed 's/cargo/CARGO/'")
+        .await
+        .unwrap();
+
+    assert_eq!(output.stdout, "CARGO args=test stdin=input\n");
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.exit_code, 0);
+    assert!(!output.stdout_truncated);
+    assert!(!output.stderr_truncated);
 }
 
 #[tokio::test]
@@ -815,6 +878,7 @@ async fn harness_execute_process_records_remote_linux_backend() {
     let requests = executor.requests.lock().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].executor, ExternalExecutorKind::RemoteLinux);
+    assert_eq!(requests[0].max_output_bytes, SPILL_RETENTION_MAX_BYTES);
     assert_eq!(
         requests[0].invocation,
         ExternalCommandInvocation::Script("uname -a".to_string())
@@ -912,6 +976,377 @@ async fn bash_tool_provider_exposes_process_handle_tools() {
 }
 
 #[tokio::test]
+async fn bash_tool_inline_result_keeps_the_legacy_wire_bytes() {
+    let provider = BashToolProvider::new(VirtualBashRuntimeConfig::default());
+
+    let (text, is_error) =
+        tool_result_text(invoke_bash(&provider, "call_inline", "echo exact").await);
+
+    assert!(!is_error);
+    assert_eq!(
+        text,
+        r#"{"exit_code":0,"stderr":"","stderr_truncated":false,"stdout":"exact\n","stdout_truncated":false}"#
+    );
+}
+
+#[tokio::test]
+async fn inline_stream_keeps_the_legacy_lossy_utf8_conversion() {
+    let harness = BashkitExecutionHarness::new(VirtualBashRuntimeConfig::default())
+        .await
+        .unwrap();
+
+    let (text, receipt, spilled) = present_output_stream(
+        &harness,
+        b"before\xffafter",
+        1024,
+        false,
+        "/spill/lossy.stdout.txt",
+    )
+    .await;
+
+    assert_eq!(text, "before\u{fffd}after");
+    assert!(receipt.is_none());
+    assert!(!spilled);
+}
+
+#[tokio::test]
+async fn bash_tool_spills_complete_stdout_and_cat_round_trips_it() {
+    let provider = BashToolProvider::new(VirtualBashRuntimeConfig {
+        max_output_bytes: 64,
+        ..VirtualBashRuntimeConfig::default()
+    });
+    let expected = b"x\n".repeat(10_000);
+
+    let (result, is_error) =
+        tool_result_json(invoke_bash(&provider, "call_round_trip", "yes x | head -c 20000").await);
+
+    assert!(!is_error, "{result}");
+    assert_eq!(result["stdout_truncated"], true);
+    assert_eq!(result["stderr_truncated"], false);
+    assert_eq!(
+        result["spill"]["stdout"]["path"],
+        "/spill/call_round_trip.stdout.txt"
+    );
+    assert_eq!(result["spill"]["stdout"]["total_bytes"], 20_000);
+    assert_eq!(result["spill"]["stdout"]["preview_bytes"], 16_384);
+    assert!(result["spill"].get("stderr").is_none());
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("Tip: cat /spill/call_round_trip.stdout.txt")
+    );
+
+    let copied = invoke_bash(
+        &provider,
+        "call_copy_spill",
+        "cat /spill/call_round_trip.stdout.txt > /workspace/retrieved.txt",
+    )
+    .await;
+    let (_, copy_is_error) = tool_result_json(copied);
+    assert!(!copy_is_error);
+    let harness = provider.harness.lock().await;
+    let retrieved = harness
+        .as_ref()
+        .unwrap()
+        .read_file("/workspace/retrieved.txt")
+        .await
+        .unwrap();
+    assert_eq!(retrieved, expected);
+}
+
+#[tokio::test]
+async fn bash_tool_spills_stderr_independently() {
+    let provider = BashToolProvider::new(VirtualBashRuntimeConfig {
+        max_output_bytes: 64,
+        ..VirtualBashRuntimeConfig::default()
+    });
+
+    let (result, is_error) = tool_result_json(
+        invoke_bash(
+            &provider,
+            "call_stderr",
+            "printf ok; yes e | head -c 20000 >&2",
+        )
+        .await,
+    );
+
+    assert!(!is_error, "{result}");
+    assert_eq!(result["stdout"], "ok");
+    assert!(result["spill"].get("stdout").is_none());
+    assert_eq!(
+        result["spill"]["stderr"]["path"],
+        "/spill/call_stderr.stderr.txt"
+    );
+    assert_eq!(result["spill"]["stderr"]["total_bytes"], 20_000);
+}
+
+#[tokio::test]
+async fn bash_tool_spill_failure_returns_emergency_stub_without_failing_call() {
+    let root: Arc<dyn CooldisVfsBackend> = Arc::new(ReadOnlyFileSystem::new(Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
+    let workspace_vfs = Arc::new(CooldisVfs::new(root));
+    let provider = BashToolProvider::new(VirtualBashRuntimeConfig {
+        max_output_bytes: 64,
+        workspace_vfs: Some(workspace_vfs),
+        ..VirtualBashRuntimeConfig::default()
+    });
+
+    let (result, is_error) = tool_result_json(
+        invoke_bash(&provider, "call_spill_failure", "yes f | head -c 20000").await,
+    );
+
+    assert!(!is_error, "{result}");
+    assert_eq!(result["stdout_truncated"], true);
+    assert!(result.get("spill").is_none());
+    let stdout = result["stdout"].as_str().unwrap();
+    assert!(stdout.contains("[CONTENT_OVERFLOW - spill path unavailable]"));
+    assert!(stdout.contains("Length: 20000 bytes"));
+    assert!(stdout.contains("Head bytes: 500"));
+    assert!(stdout.contains("Tail bytes: 500"));
+}
+
+#[tokio::test]
+async fn concurrent_bash_spills_are_isolated_by_call_id() {
+    let provider = Arc::new(BashToolProvider::new(VirtualBashRuntimeConfig {
+        max_output_bytes: 64,
+        ..VirtualBashRuntimeConfig::default()
+    }));
+    let left = Arc::clone(&provider);
+    let right = Arc::clone(&provider);
+
+    let (left, right) = tokio::join!(
+        async move { invoke_bash(&left, "call_left", "yes l | head -c 20000").await },
+        async move { invoke_bash(&right, "call_right", "yes r | head -c 20000").await },
+    );
+    let (left, _) = tool_result_json(left);
+    let (right, _) = tool_result_json(right);
+
+    assert_eq!(
+        left["spill"]["stdout"]["path"],
+        "/spill/call_left.stdout.txt"
+    );
+    assert_eq!(
+        right["spill"]["stdout"]["path"],
+        "/spill/call_right.stdout.txt"
+    );
+    let harness = provider.harness.lock().await;
+    let harness = harness.as_ref().unwrap();
+    assert_eq!(
+        harness
+            .read_file("/spill/call_left.stdout.txt")
+            .await
+            .unwrap(),
+        b"l\n".repeat(10_000)
+    );
+    assert_eq!(
+        harness
+            .read_file("/spill/call_right.stdout.txt")
+            .await
+            .unwrap(),
+        b"r\n".repeat(10_000)
+    );
+}
+
+#[tokio::test]
+async fn repeated_call_id_does_not_overwrite_an_earlier_spill() {
+    let provider = BashToolProvider::new(VirtualBashRuntimeConfig {
+        max_output_bytes: 64,
+        ..VirtualBashRuntimeConfig::default()
+    });
+    let first = b"a\n".repeat(10_000);
+
+    let _ = invoke_bash(&provider, "call_repeat", "yes a | head -c 20000").await;
+    let (second, is_error) =
+        tool_result_json(invoke_bash(&provider, "call_repeat", "yes b | head -c 20000").await);
+
+    assert!(!is_error, "{second}");
+    assert!(second.get("spill").is_none());
+    assert!(
+        second["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("spill path unavailable")
+    );
+    let harness = provider.harness.lock().await;
+    assert_eq!(
+        harness
+            .as_ref()
+            .unwrap()
+            .read_file("/spill/call_repeat.stdout.txt")
+            .await
+            .unwrap(),
+        first
+    );
+}
+
+#[tokio::test]
+async fn concurrent_same_call_id_spills_keep_the_first_complete_stream() {
+    let provider = Arc::new(BashToolProvider::new(VirtualBashRuntimeConfig {
+        max_output_bytes: 64,
+        ..VirtualBashRuntimeConfig::default()
+    }));
+    let left = Arc::clone(&provider);
+    let right = Arc::clone(&provider);
+
+    let (left, right) = tokio::join!(
+        async move { invoke_bash(&left, "call_same", "yes a | head -c 20000").await },
+        async move { invoke_bash(&right, "call_same", "yes b | head -c 20000").await },
+    );
+    let (left, _) = tool_result_json(left);
+    let (right, _) = tool_result_json(right);
+
+    assert_eq!(
+        usize::from(left.get("spill").is_some()) + usize::from(right.get("spill").is_some()),
+        1
+    );
+    assert_eq!(
+        usize::from(
+            left["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("spill path unavailable")
+        ) + usize::from(
+            right["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("spill path unavailable")
+        ),
+        1
+    );
+    let harness = provider.harness.lock().await;
+    let stored = harness
+        .as_ref()
+        .unwrap()
+        .read_file("/spill/call_same.stdout.txt")
+        .await
+        .unwrap();
+    assert!(stored == b"a\n".repeat(10_000) || stored == b"b\n".repeat(10_000));
+}
+
+#[test]
+fn spill_paths_are_single_component_collision_safe_and_bounded() {
+    let hostile = spill_path("../call/_2f/💥", "stdout");
+    assert!(hostile.starts_with("/spill/"));
+    assert_eq!(hostile.matches('/').count(), 2);
+    assert!(!hostile.contains(".."));
+    assert_ne!(spill_path("/", "stdout"), spill_path("_2f", "stdout"));
+
+    let overlong = spill_path(&"x".repeat(10_000), "stderr");
+    assert!(
+        overlong.len() <= 240,
+        "overlong spill path: {}",
+        overlong.len()
+    );
+    assert_eq!(overlong.matches('/').count(), 2);
+}
+
+struct RetentionCeilingExternalExecutor {
+    requested_cap: AtomicUsize,
+}
+
+#[async_trait]
+impl ExternalCommandExecutor for RetentionCeilingExternalExecutor {
+    async fn exec(
+        &self,
+        request: ExternalCommandRequest,
+    ) -> CooldisProcessResult<ExternalCommandResult> {
+        self.requested_cap
+            .store(request.max_output_bytes, Ordering::SeqCst);
+        Ok(ExternalCommandResult::new(VirtualCommandOutput {
+            stdout: "x".repeat(request.max_output_bytes),
+            stderr: String::new(),
+            exit_code: 0,
+            stdout_truncated: true,
+            stderr_truncated: false,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn retention_ceiling_truncation_still_spills_and_succeeds() {
+    let executor = Arc::new(RetentionCeilingExternalExecutor {
+        requested_cap: AtomicUsize::new(0),
+    });
+    let provider = BashToolProvider::new(
+        VirtualBashRuntimeConfig {
+            max_output_bytes: usize::MAX,
+            ..VirtualBashRuntimeConfig::default()
+        }
+        .with_execution_policy(BashExecutionPolicy::host_always())
+        .with_external_executor(executor.clone()),
+    );
+
+    let (result, is_error) =
+        tool_result_json(invoke_bash(&provider, "call_retention_ceiling", "runaway-output").await);
+
+    assert!(!is_error, "{result}");
+    assert_eq!(
+        executor.requested_cap.load(Ordering::SeqCst),
+        SPILL_RETENTION_MAX_BYTES
+    );
+    assert_eq!(result["stdout_truncated"], true);
+    assert_eq!(
+        result["spill"]["stdout"]["total_bytes"],
+        SPILL_RETENTION_MAX_BYTES
+    );
+    assert_eq!(result["spill"]["stdout"]["retention_truncated"], true);
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("exceeded the 67108864-byte retention ceiling")
+    );
+    let harness = provider.harness.lock().await;
+    assert_eq!(
+        harness
+            .as_ref()
+            .unwrap()
+            .read_file("/spill/call_retention_ceiling.stdout.txt")
+            .await
+            .unwrap()
+            .len(),
+        SPILL_RETENTION_MAX_BYTES
+    );
+}
+
+#[test]
+fn spill_payload_decodes_in_old_and_new_reader_shapes() {
+    let old = r#"{"stdout":"ok","stderr":"","exit_code":0,"stdout_truncated":false,"stderr_truncated":false}"#;
+    let decoded: BashToolResultPayload = serde_json::from_str(old).unwrap();
+    assert!(decoded.spill.is_empty());
+
+    let new = r#"{"stdout":"preview","stderr":"","exit_code":0,"stdout_truncated":true,"stderr_truncated":false,"spill":{"stdout":{"path":"/spill/c.stdout.txt","total_bytes":20000,"preview_bytes":16384}}}"#;
+    let decoded: BashToolResultPayload = serde_json::from_str(new).unwrap();
+    let receipt = decoded.spill.stdout.unwrap();
+    assert_eq!(receipt.path, "/spill/c.stdout.txt");
+    assert!(!receipt.retention_truncated);
+
+    let retention_truncated = r#"{"stdout":"preview","stderr":"","exit_code":0,"stdout_truncated":true,"stderr_truncated":false,"spill":{"stdout":{"path":"/spill/c.stdout.txt","total_bytes":67108864,"preview_bytes":16384,"retention_truncated":true}}}"#;
+    let decoded: BashToolResultPayload = serde_json::from_str(retention_truncated).unwrap();
+    assert!(decoded.spill.stdout.unwrap().retention_truncated);
+
+    #[derive(Deserialize)]
+    struct LegacyBashToolResult {
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    }
+    let legacy: LegacyBashToolResult = serde_json::from_str(new).unwrap();
+    assert_eq!(legacy.stdout, "preview");
+    assert_eq!(legacy.stderr, "");
+    assert_eq!(legacy.exit_code, 0);
+    assert!(legacy.stdout_truncated);
+    assert!(!legacy.stderr_truncated);
+
+    let legacy: LegacyBashToolResult = serde_json::from_str(retention_truncated).unwrap();
+    assert_eq!(legacy.stdout, "preview");
+}
+
+#[tokio::test]
 async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
     let (provider, turn_context) = process_test_provider();
 
@@ -957,6 +1392,106 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
 }
 
 #[tokio::test]
+async fn process_exec_tool_spills_a_completed_initial_snapshot() {
+    let (provider, turn_context) = process_test_provider();
+
+    let completed = provider
+        .invoke_tool_call(AgentKernelToolCall {
+            call_id: "call_process_exec_spill".to_string(),
+            tool_name: PROCESS_EXEC_TOOL.to_string(),
+            arguments: serde_json::json!({
+                "command": "yes q | head -c 20000; yes e | head -c 20000 >&2",
+                "yield_time_ms": 1000,
+                "timeout_ms": 1000,
+                "output_bytes_cap": 64
+            }),
+            turn_context: Some(turn_context),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let (completed, is_error) = tool_result_json(completed);
+
+    assert!(!is_error, "{completed}");
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["stdout_truncated"], true);
+    assert_eq!(
+        completed["spill"]["stdout"]["path"],
+        "/spill/call_process_exec_spill.stdout.txt"
+    );
+    assert_eq!(completed["spill"]["stdout"]["total_bytes"], 20_000);
+    assert_eq!(
+        completed["spill"]["stderr"]["path"],
+        "/spill/call_process_exec_spill.stderr.txt"
+    );
+    assert_eq!(completed["spill"]["stderr"]["total_bytes"], 20_000);
+    assert!(
+        completed["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("Tip: cat /spill/call_process_exec_spill.stdout.txt")
+    );
+}
+
+#[tokio::test]
+async fn process_poll_tool_spills_the_complete_later_snapshot() {
+    let (provider, turn_context) = process_test_provider();
+    let started = provider
+        .invoke_tool_call(AgentKernelToolCall {
+            call_id: "call_process_start_for_spill".to_string(),
+            tool_name: PROCESS_EXEC_TOOL.to_string(),
+            arguments: serde_json::json!({
+                "command": "sleep 0.05; yes p | head -c 20000",
+                "yield_time_ms": 1,
+                "timeout_ms": 1000,
+                "output_bytes_cap": 64
+            }),
+            turn_context: Some(turn_context),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let (started, is_error) = tool_result_json(started);
+    assert!(!is_error, "{started}");
+    assert_eq!(started["status"], "running");
+    let process_id = started["process_id"].as_str().unwrap().to_string();
+
+    let completed = provider
+        .invoke_tool_call(AgentKernelToolCall {
+            call_id: "call_process_poll_spill".to_string(),
+            tool_name: PROCESS_EXEC_TOOL.to_string(),
+            arguments: serde_json::json!({
+                "process_id": process_id,
+                "yield_time_ms": 1000,
+                "output_bytes_cap": 64
+            }),
+            turn_context: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let (completed, is_error) = tool_result_json(completed);
+
+    assert!(!is_error, "{completed}");
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(
+        completed["spill"]["stdout"]["path"],
+        "/spill/call_process_poll_spill.stdout.txt"
+    );
+    assert_eq!(completed["spill"]["stdout"]["total_bytes"], 20_000);
+    let harness = provider.harness.lock().await;
+    assert_eq!(
+        harness
+            .as_ref()
+            .unwrap()
+            .read_file("/spill/call_process_poll_spill.stdout.txt")
+            .await
+            .unwrap(),
+        b"p\n".repeat(10_000)
+    );
+}
+
+#[tokio::test]
 async fn write_stdin_tool_reports_unsupported_for_virtual_bash_handle() {
     let (provider, turn_context) = process_test_provider();
     let started = provider
@@ -996,6 +1531,117 @@ async fn write_stdin_tool_reports_unsupported_for_virtual_bash_handle() {
     assert!(is_error, "{unsupported}");
     assert_eq!(unsupported["status"].as_str(), Some("unsupported"));
     assert!(unsupported["error"].as_str().unwrap().contains("stdin"));
+}
+
+struct StdinOutputBackend {
+    requested_cap: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl LiveProcessBackend for StdinOutputBackend {
+    fn backend_kind(&self) -> CooldisProcessBackend {
+        CooldisProcessBackend::VirtualBash
+    }
+
+    async fn start(
+        &self,
+        request: crate::LiveProcessStartRequest,
+        process: CooldisProcessHandle,
+        cancellation: CancellationToken,
+    ) -> CooldisProcessResult<LiveProcessSpawn> {
+        self.requested_cap
+            .store(request.output_cap_bytes, Ordering::SeqCst);
+        process.record(CooldisProcessEventKind::Started {
+            command: Some("stdin-output-test".to_string()),
+        });
+        let (stdin, mut input) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let join = tokio::spawn(async move {
+            tokio::select! {
+                delta = input.recv() => {
+                    if delta.is_some() {
+                        process.record(CooldisProcessEventKind::Stdout {
+                            bytes: vec![b'w'; 20_000],
+                        });
+                        process.record(CooldisProcessEventKind::Completed {
+                            status: crate::CooldisProcessExitStatus::exited(0),
+                        });
+                    }
+                }
+                _ = cancellation.cancelled() => {
+                    process.record(CooldisProcessEventKind::Cancelled {
+                        reason: "cancelled".to_string(),
+                    });
+                }
+            }
+            Ok(())
+        });
+        Ok(LiveProcessSpawn {
+            stdin: Some(stdin),
+            join,
+        })
+    }
+}
+
+#[tokio::test]
+async fn write_stdin_snapshot_uses_the_shared_spill_and_retention_bounds() {
+    let (mut provider, turn_context) = process_test_provider();
+    let requested_cap = Arc::new(AtomicUsize::new(0));
+    provider.live_backend = Arc::new(StdinOutputBackend {
+        requested_cap: Arc::clone(&requested_cap),
+    });
+
+    let started = provider
+        .invoke_tool_call(AgentKernelToolCall {
+            call_id: "call_stdin_start".to_string(),
+            tool_name: PROCESS_EXEC_TOOL.to_string(),
+            arguments: serde_json::json!({
+                "command": "wait-for-stdin",
+                "yield_time_ms": 1,
+                "timeout_ms": 1000,
+                "output_bytes_cap": 64
+            }),
+            turn_context: Some(turn_context),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let (started, is_error) = tool_result_json(started);
+    assert!(!is_error, "{started}");
+    let process_id = started["process_id"].as_str().unwrap();
+
+    let written = provider
+        .invoke_tool_call(AgentKernelToolCall {
+            call_id: "call_stdin_spill".to_string(),
+            tool_name: WRITE_STDIN_TOOL.to_string(),
+            arguments: serde_json::json!({
+                "process_id": process_id,
+                "delta_base64": "aGkK",
+                "yield_time_ms": 1000,
+                "output_bytes_cap": 64
+            }),
+            turn_context: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let (written, is_error) = tool_result_json(written);
+
+    assert!(!is_error, "{written}");
+    assert_eq!(
+        requested_cap.load(Ordering::SeqCst),
+        SPILL_RETENTION_MAX_BYTES
+    );
+    assert_eq!(written["status"], "completed");
+    assert_eq!(
+        written["spill"]["stdout"]["path"],
+        "/spill/call_stdin_spill.stdout.txt"
+    );
+    assert_eq!(written["spill"]["stdout"]["total_bytes"], 20_000);
+    assert!(
+        written["spill"]["stdout"]
+            .get("retention_truncated")
+            .is_none()
+    );
 }
 
 struct EscapingExternalExecutor;

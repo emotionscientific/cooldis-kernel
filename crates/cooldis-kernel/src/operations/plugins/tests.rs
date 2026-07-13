@@ -3,6 +3,7 @@ use crate::{
     PublishOperationRequest, PublishedOperationBuild, PublishedOperationSource, ResolvedSecret,
     SecretStoreResult,
 };
+use bashkit::FileSystemExt as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -67,6 +68,41 @@ fn pinned_host_mount_rejects_repointing_after_bind_resolution() {
     .unwrap_err();
 
     assert!(error.to_string().contains("witnessed canonical root"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn plugin_mount_assembly_rejects_spill_and_descendants() {
+    let root = temp_dir("plugin-reserved-spill-mount");
+    std::fs::create_dir_all(&root).unwrap();
+
+    for guest_path in ["/spill", "/spill/nested"] {
+        let vfs = CooldisVfs::new(Arc::new(InMemoryFs::new()));
+        let error =
+            mount_plugin_filesystems(&vfs, vec![PluginMount::host_read_write(guest_path, &root)])
+                .unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn catalog_vfs_allows_two_retention_sized_spill_files() {
+    let root = temp_dir("plugin-spill-retention-limit");
+    let catalog = LocalPluginCatalog::load_records(root.clone(), Vec::new(), Vec::new())
+        .await
+        .unwrap();
+
+    assert!(
+        catalog.vfs().limits().max_file_size
+            >= u64::try_from(crate::SPILL_RETENTION_MAX_BYTES).unwrap()
+    );
+    assert!(
+        catalog.vfs().limits().max_total_bytes
+            >= u64::try_from(cooldis_vbash::SPILL_VFS_MAX_BYTES).unwrap()
+    );
+
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -4,9 +4,10 @@ use crate::{
     PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, SecretResolver,
     resolve_manifest_secret_resolution,
 };
-use bashkit::InMemoryFs;
+use bashkit::{FsLimits, InMemoryFs};
+use cooldis_vbash::{SPILL_RETENTION_MAX_BYTES, SPILL_VFS_MAX_BYTES};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::operation_registry::filter_manifest_operations;
@@ -195,7 +196,10 @@ impl LocalPluginCatalog {
         secret_resolver: Option<Arc<dyn SecretResolver>>,
     ) -> CooldisResult<Self> {
         let local_registry = LocalOperationRegistry::new(registry_root);
-        let vfs = Arc::new(CooldisVfs::new(Arc::new(InMemoryFs::new())));
+        let limits = FsLimits::default()
+            .max_file_size(SPILL_RETENTION_MAX_BYTES as u64)
+            .max_total_bytes(SPILL_VFS_MAX_BYTES as u64);
+        let vfs = Arc::new(CooldisVfs::new(Arc::new(InMemoryFs::with_limits(limits))));
         mount_plugin_filesystems(&vfs, mounts)?;
         Self::from_records(local_registry, vfs, records, secret_resolver).await
     }
@@ -289,6 +293,13 @@ fn mount_plugin_filesystems(vfs: &CooldisVfs, mounts: Vec<PluginMount>) -> Coold
                 "plugin mount guest path must be absolute: {}",
                 mount.guest_path.display()
             )));
+        }
+        let normalized_guest_path = bashkit::normalize_path(&mount.guest_path);
+        if normalized_guest_path.starts_with(Path::new("/spill")) {
+            return Err(CooldisError::RuntimeFactory(
+                "plugin mount guest path /spill and its descendants are reserved for tool output spill"
+                    .to_string(),
+            ));
         }
         let fs = HostFileSystem::new(&mount.host_path, mount.mode).map_err(|err| {
             CooldisError::RuntimeFactory(format!(

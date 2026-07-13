@@ -1,16 +1,17 @@
 use crate::{
     BashExecutionPolicy, CommandRoute, CooldisVirtualBashError, CooldisVirtualBashResult,
-    VirtualFile, VirtualMount, VirtualMountBackend, VirtualMountMode, absolute_mount_path,
-    apply_external_file_writes, apply_patch_to_bashkit, cooldis_usage, default_virtual_mounts,
-    deny_output, enforce_output_limit, exec_result_from_virtual_output,
-    missing_operation_capability_grants, operation_shell_command_name, operation_shell_input,
-    operation_shell_manual, operation_shell_reserved_commands, validate_mounts,
-    virtual_bash_execution_error, virtual_command_output_from_exec_result,
+    SPILL_RETENTION_MAX_BYTES, SPILL_VFS_MAX_BYTES, VirtualFile, VirtualMount, VirtualMountBackend,
+    VirtualMountMode, absolute_mount_path, apply_external_file_writes, apply_patch_to_bashkit,
+    cooldis_usage, default_virtual_mounts, deny_output, enforce_output_limit,
+    exec_result_from_virtual_output, missing_operation_capability_grants,
+    operation_shell_command_name, operation_shell_input, operation_shell_manual,
+    operation_shell_reserved_commands, validate_mounts, virtual_bash_execution_error,
+    virtual_command_output_from_exec_result,
 };
 use async_trait::async_trait;
 use bashkit::{
     Bash, Builtin, BuiltinContext, BuiltinRegistry, ExecResult, ExecutionExtensions,
-    ExecutionLimits, FileSystem, InMemoryFs,
+    ExecutionLimits, FileSystem, FsLimits, InMemoryFs,
 };
 use cooldis_operations::{OperationProjection, RegisteredOperation};
 use cooldis_process::{
@@ -203,8 +204,8 @@ impl BashkitExecutionConfig {
             .parser_timeout(self.parser_timeout)
             .max_commands(self.max_commands)
             .max_loop_iterations(self.max_loop_iterations)
-            .max_stdout_bytes(self.max_output_bytes)
-            .max_stderr_bytes(self.max_output_bytes)
+            .max_stdout_bytes(SPILL_RETENTION_MAX_BYTES)
+            .max_stderr_bytes(SPILL_RETENTION_MAX_BYTES)
     }
 }
 
@@ -317,7 +318,10 @@ impl BashkitExecutionHarness {
         validate_mounts(&config.mounts)?;
         let uses_shared_workspace_vfs = config.workspace_vfs.is_some();
         let vfs = config.workspace_vfs.clone().unwrap_or_else(|| {
-            let root: Arc<dyn CooldisVfsBackend> = Arc::new(InMemoryFs::new());
+            let limits = FsLimits::default()
+                .max_file_size(SPILL_RETENTION_MAX_BYTES as u64)
+                .max_total_bytes(SPILL_VFS_MAX_BYTES as u64);
+            let root: Arc<dyn CooldisVfsBackend> = Arc::new(InMemoryFs::with_limits(limits));
             Arc::new(CooldisVfs::new(root))
         });
 
@@ -372,7 +376,6 @@ impl BashkitExecutionHarness {
                     command: command.clone(),
                     route: *route,
                     executor: external_executor.clone(),
-                    max_output_bytes,
                 }),
             );
         }
@@ -425,6 +428,16 @@ impl BashkitExecutionHarness {
         &mut self,
         script: &str,
     ) -> CooldisVirtualBashResult<VirtualCommandOutput> {
+        Ok(enforce_output_limit(
+            self.execute_full_output(script).await?,
+            self.max_output_bytes,
+        ))
+    }
+
+    pub async fn execute_full_output(
+        &mut self,
+        script: &str,
+    ) -> CooldisVirtualBashResult<VirtualCommandOutput> {
         let process = self.execute_process(script).await?;
         Ok(VirtualCommandOutput::from(&process.output()))
     }
@@ -466,12 +479,13 @@ impl BashkitExecutionHarness {
                     cwd: self.cwd.clone(),
                     stdin: None,
                     deadline,
-                    max_output_bytes: self.max_output_bytes,
+                    max_output_bytes: SPILL_RETENTION_MAX_BYTES,
                 };
-                let result = executor
+                let mut result = executor
                     .exec(request.clone())
                     .await
                     .map_err(execution_error)?;
+                result.output = enforce_output_limit(result.output, SPILL_RETENTION_MAX_BYTES);
                 apply_external_file_writes(self.vfs.as_ref(), &result).await?;
                 self.vfs.flush().await.map_err(execution_error)?;
                 Ok(CooldisProcessHandle::from_external_command(
@@ -499,6 +513,29 @@ impl BashkitExecutionHarness {
             .read_file(path.as_ref())
             .await
             .map_err(execution_error)
+    }
+
+    pub async fn write_spill_file_if_available(
+        &self,
+        path: impl AsRef<Path>,
+        content: &[u8],
+    ) -> CooldisVirtualBashResult<bool> {
+        let path = path.as_ref();
+        self.vfs
+            .mkdir(Path::new("/spill"), true)
+            .await
+            .map_err(execution_error)?;
+        if self.vfs.exists(path).await.map_err(execution_error)? {
+            let existing = self.vfs.read_file(path).await.map_err(execution_error)?;
+            self.vfs.flush().await.map_err(execution_error)?;
+            return Ok(existing == content);
+        }
+        self.vfs
+            .write_file(path, content)
+            .await
+            .map_err(execution_error)?;
+        self.vfs.flush().await.map_err(execution_error)?;
+        Ok(true)
     }
 
     pub fn mutations(&self) -> Vec<VfsMutation> {
@@ -701,7 +738,6 @@ struct ExternalCommandProxyBuiltin {
     command: String,
     route: CommandRoute,
     executor: Option<Arc<dyn ExternalCommandExecutor>>,
-    max_output_bytes: usize,
 }
 
 #[async_trait]
@@ -744,7 +780,7 @@ impl Builtin for ExternalCommandProxyBuiltin {
             cwd: ctx.cwd.clone(),
             stdin: ctx.stdin.map(ToString::to_string),
             deadline,
-            max_output_bytes: self.max_output_bytes,
+            max_output_bytes: SPILL_RETENTION_MAX_BYTES,
         };
 
         let result = match executor.exec(request).await {
@@ -756,7 +792,7 @@ impl Builtin for ExternalCommandProxyBuiltin {
         }
         Ok(exec_result_from_virtual_output(enforce_output_limit(
             result.output,
-            self.max_output_bytes,
+            SPILL_RETENTION_MAX_BYTES,
         )))
     }
 }
@@ -855,13 +891,192 @@ fn execution_error(err: impl std::fmt::Display) -> CooldisVirtualBashError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bashkit::{DirEntry, FileSystemExt, Metadata};
     use cooldis_abi::{
         WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest, WasmOperationMode,
         WasmOperationValueKind,
     };
+    use std::sync::atomic::AtomicUsize;
+    use std::time::SystemTime;
+    use tokio::sync::{Mutex, Notify};
+
+    struct SpillTestFs {
+        inner: InMemoryFs,
+        flush_calls: AtomicUsize,
+        first_flush_entered: Notify,
+        fail_reads: AtomicBool,
+    }
+
+    impl SpillTestFs {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryFs::new(),
+                flush_calls: AtomicUsize::new(0),
+                first_flush_entered: Notify::new(),
+                fail_reads: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl FileSystemExt for SpillTestFs {
+        fn usage(&self) -> bashkit::FsUsage {
+            self.inner.usage()
+        }
+
+        fn limits(&self) -> bashkit::FsLimits {
+            self.inner.limits()
+        }
+    }
+
+    #[async_trait]
+    impl FileSystem for SpillTestFs {
+        async fn read_file(&self, path: &Path) -> bashkit::Result<Vec<u8>> {
+            if self.fail_reads.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected read failure").into());
+            }
+            self.inner.read_file(path).await
+        }
+
+        async fn write_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+            self.inner.write_file(path, content).await
+        }
+
+        async fn append_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+            self.inner.append_file(path, content).await
+        }
+
+        async fn mkdir(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+            self.inner.mkdir(path, recursive).await
+        }
+
+        async fn remove(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+            self.inner.remove(path, recursive).await
+        }
+
+        async fn stat(&self, path: &Path) -> bashkit::Result<Metadata> {
+            self.inner.stat(path).await
+        }
+
+        async fn read_dir(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
+            self.inner.read_dir(path).await
+        }
+
+        async fn exists(&self, path: &Path) -> bashkit::Result<bool> {
+            self.inner.exists(path).await
+        }
+
+        async fn rename(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+            self.inner.rename(from, to).await
+        }
+
+        async fn copy(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn symlink(&self, target: &Path, link: &Path) -> bashkit::Result<()> {
+            self.inner.symlink(target, link).await
+        }
+
+        async fn read_link(&self, path: &Path) -> bashkit::Result<PathBuf> {
+            self.inner.read_link(path).await
+        }
+
+        async fn chmod(&self, path: &Path, mode: u32) -> bashkit::Result<()> {
+            self.inner.chmod(path, mode).await
+        }
+
+        async fn set_modified_time(&self, path: &Path, time: SystemTime) -> bashkit::Result<()> {
+            self.inner.set_modified_time(path, time).await
+        }
+    }
+
+    #[async_trait]
+    impl CooldisVfsBackend for SpillTestFs {
+        async fn flush(&self) -> bashkit::Result<()> {
+            let call = self.flush_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                self.first_flush_entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
+    }
 
     struct StaticOperationRegistry {
         record: RegisteredOperation,
+    }
+
+    #[test]
+    fn bashkit_capture_limits_use_the_spill_retention_ceiling() {
+        let limits = BashkitExecutionConfig::default().limits();
+
+        assert_eq!(limits.max_stdout_bytes, SPILL_RETENTION_MAX_BYTES);
+        assert_eq!(limits.max_stderr_bytes, SPILL_RETENTION_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn cancelled_spill_flush_releases_the_harness_lock_and_retry_flushes() {
+        let root = Arc::new(SpillTestFs::new());
+        let vfs = Arc::new(CooldisVfs::new(root.clone()));
+        let harness = Arc::new(Mutex::new(
+            BashkitExecutionHarness::new(BashkitExecutionConfig::default().with_workspace_vfs(vfs))
+                .await
+                .unwrap(),
+        ));
+        let writing = Arc::clone(&harness);
+        let task = tokio::spawn(async move {
+            writing
+                .lock()
+                .await
+                .write_spill_file_if_available("/spill/call.stdout.txt", b"complete")
+                .await
+        });
+
+        root.first_flush_entered.notified().await;
+        task.abort();
+        let guard = tokio::time::timeout(Duration::from_secs(1), harness.lock())
+            .await
+            .expect("cancelled spill must release the harness mutex");
+        assert_eq!(
+            guard.read_file("/spill/call.stdout.txt").await.unwrap(),
+            b"complete"
+        );
+        assert!(
+            guard
+                .write_spill_file_if_available("/spill/call.stdout.txt", b"complete")
+                .await
+                .unwrap()
+        );
+        assert_eq!(root.flush_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn spill_read_failure_never_overwrites_an_existing_file() {
+        let root = Arc::new(SpillTestFs::new());
+        root.inner.mkdir(Path::new("/spill"), true).await.unwrap();
+        root.inner
+            .write_file(Path::new("/spill/call.stdout.txt"), b"first")
+            .await
+            .unwrap();
+        root.fail_reads.store(true, Ordering::SeqCst);
+        let vfs = Arc::new(CooldisVfs::new(root.clone()));
+        let harness =
+            BashkitExecutionHarness::new(BashkitExecutionConfig::default().with_workspace_vfs(vfs))
+                .await
+                .unwrap();
+
+        assert!(
+            harness
+                .write_spill_file_if_available("/spill/call.stdout.txt", b"second")
+                .await
+                .is_err()
+        );
+        root.fail_reads.store(false, Ordering::SeqCst);
+        assert_eq!(
+            harness.read_file("/spill/call.stdout.txt").await.unwrap(),
+            b"first"
+        );
     }
 
     #[async_trait]

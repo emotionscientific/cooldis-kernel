@@ -14,16 +14,19 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cooldis_runtime_contracts::DispatchId;
 pub use cooldis_vbash::{
     BASH_TOOL, BashExecutionPolicy, BashkitExecutionConfig, BashkitExecutionHarness,
-    BashkitLiveBackend, CommandRoute, CommandRoutingPolicy, VbashOperationRegistry, VirtualFile,
-    VirtualMount, VirtualMountBackend, VirtualMountMode, absolute_mount_path,
-    apply_external_file_writes, cooldis_usage, default_virtual_mounts, deny_output,
-    enforce_output_limit, exec_result_from_virtual_output, missing_operation_capability_grants,
-    operation_shell_command_name, operation_shell_command_names, operation_shell_input,
-    operation_shell_manual, operation_shell_reserved_commands, reserved_operation_shell_commands,
+    BashkitLiveBackend, CommandRoute, CommandRoutingPolicy, OverflowPlan,
+    SPILL_RETENTION_MAX_BYTES, VbashOperationRegistry, VirtualFile, VirtualMount,
+    VirtualMountBackend, VirtualMountMode, absolute_mount_path, apply_external_file_writes,
+    build_emergency_spill_stub, cooldis_usage, default_virtual_mounts, deny_output,
+    enforce_output_limit, exec_result_from_virtual_output, format_spill_stub,
+    missing_operation_capability_grants, operation_shell_command_name,
+    operation_shell_command_names, operation_shell_input, operation_shell_manual,
+    operation_shell_reserved_commands, plan_output_overflow, reserved_operation_shell_commands,
     summarize_operation_shell_commands, validate_mounts, virtual_command_output_from_exec_result,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +46,40 @@ pub use cooldis_process::{
 
 pub const PROCESS_EXEC_TOOL: &str = "process_exec";
 pub const WRITE_STDIN_TOOL: &str = "write_stdin";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolOutputSpillReceipt {
+    pub path: String,
+    pub total_bytes: usize,
+    pub preview_bytes: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retention_truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolOutputSpill {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<ToolOutputSpillReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<ToolOutputSpillReceipt>,
+}
+
+impl ToolOutputSpill {
+    pub fn is_empty(&self) -> bool {
+        self.stdout.is_none() && self.stderr.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BashToolResultPayload {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    #[serde(default, skip_serializing_if = "ToolOutputSpill::is_empty")]
+    pub spill: ToolOutputSpill,
+}
 
 #[derive(Clone)]
 pub struct VirtualBashRuntimeConfig {
@@ -353,7 +390,7 @@ impl AgentKernelToolProvider for BashToolProvider {
                         "output_bytes_cap": {
                             "type": "integer",
                             "minimum": 1,
-                            "description": "Maximum stdout/stderr bytes retained for this snapshot."
+                            "description": "Maximum stdout/stderr bytes kept inline before spill for this snapshot."
                         }
                     },
                     "additionalProperties": false
@@ -381,7 +418,7 @@ impl AgentKernelToolProvider for BashToolProvider {
                         "output_bytes_cap": {
                             "type": "integer",
                             "minimum": 1,
-                            "description": "Maximum stdout/stderr bytes retained for this snapshot."
+                            "description": "Maximum stdout/stderr bytes kept inline before spill for this snapshot."
                         }
                     },
                     "required": ["process_id", "delta_base64"],
@@ -418,20 +455,42 @@ impl BashToolProvider {
         let harness = harness.as_mut().ok_or_else(|| {
             CooldisError::RuntimeExecution("bash harness did not initialize".to_string())
         })?;
-        let output = harness.execute(&args.command).await?;
-        let output_json = serde_json::to_string(&json!({
-            "stdout": output.stdout,
-            "stderr": output.stderr,
+        let output = harness.execute_full_output(&args.command).await?;
+        let is_error = !output.success();
+        let (stdout, stdout_spill, stdout_spilled) = present_output_stream(
+            harness,
+            output.stdout.as_bytes(),
+            self.config.max_output_bytes,
+            output.stdout_truncated,
+            &spill_path(&call.call_id, "stdout"),
+        )
+        .await;
+        let (stderr, stderr_spill, stderr_spilled) = present_output_stream(
+            harness,
+            output.stderr.as_bytes(),
+            self.config.max_output_bytes,
+            output.stderr_truncated,
+            &spill_path(&call.call_id, "stderr"),
+        )
+        .await;
+        let spill = ToolOutputSpill {
+            stdout: stdout_spill,
+            stderr: stderr_spill,
+        };
+        let mut output = json!({
+            "stdout": stdout,
+            "stderr": stderr,
             "exit_code": output.exit_code,
-            "stdout_truncated": output.stdout_truncated,
-            "stderr_truncated": output.stderr_truncated,
-        }))
-        .map_err(execution_error)?;
+            "stdout_truncated": output.stdout_truncated || stdout_spilled,
+            "stderr_truncated": output.stderr_truncated || stderr_spilled,
+        });
+        insert_spill(&mut output, spill)?;
+        let output_json = serde_json::to_string(&output).map_err(execution_error)?;
         Ok(CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             output_json,
-            !output.success(),
+            is_error,
         ))
     }
 
@@ -458,7 +517,7 @@ impl BashToolProvider {
             })?;
             self.require_process_handle(process_id).await?;
             self.process_manager
-                .poll(process_id, yield_time, output_cap)
+                .poll(process_id, yield_time, SPILL_RETENTION_MAX_BYTES)
                 .await?
         } else {
             let command = args.command.ok_or_else(|| {
@@ -493,7 +552,7 @@ impl BashToolProvider {
                 ))
                 .with_deadline(ExecutionDeadline::from_now(timeout))
                 .with_yield_time(yield_time)
-                .with_output_cap_bytes(output_cap);
+                .with_output_cap_bytes(SPILL_RETENTION_MAX_BYTES);
             let id = DispatchId::new(call_id.clone());
             let outcome = dispatcher
                 .dispatch_start(
@@ -509,7 +568,9 @@ impl BashToolProvider {
             outcome
         };
         let is_error = process_snapshot_is_error(&outcome.snapshot);
-        let mut output = process_snapshot_json(&outcome.snapshot);
+        let mut output = self
+            .process_snapshot_json_with_spill(&outcome.snapshot, &call_id, output_cap)
+            .await?;
         if let Some(dispatch_id) = dispatch_id {
             output["dispatch_id"] = json!(dispatch_id.to_string());
         }
@@ -548,13 +609,15 @@ impl BashToolProvider {
         let yield_time = process_yield_time(args.yield_time_ms);
         match self
             .process_manager
-            .write(process_id, bytes, yield_time, output_cap)
+            .write(process_id, bytes, yield_time, SPILL_RETENTION_MAX_BYTES)
             .await
         {
             Ok(outcome) => {
                 let is_error = process_snapshot_is_error(&outcome.snapshot);
-                let output_json = serde_json::to_string(&process_snapshot_json(&outcome.snapshot))
-                    .map_err(execution_error)?;
+                let output = self
+                    .process_snapshot_json_with_spill(&outcome.snapshot, &call_id, output_cap)
+                    .await?;
+                let output_json = serde_json::to_string(&output).map_err(execution_error)?;
                 Ok(CanonicalMessage::tool_result(
                     call_id,
                     tool_name,
@@ -593,6 +656,54 @@ impl BashToolProvider {
             .require_live_handle(process_id, None)
             .await
             .map(|_| ())
+    }
+
+    async fn process_snapshot_json_with_spill(
+        &self,
+        snapshot: &AsyncProcessSnapshot,
+        call_id: &str,
+        output_cap: usize,
+    ) -> CooldisResult<serde_json::Value> {
+        let mut harness = self.harness.lock().await;
+        if harness.is_none() {
+            *harness = Some(BashkitExecutionHarness::new(self.config.clone()).await?);
+        }
+        let harness = harness.as_ref().ok_or_else(|| {
+            CooldisError::RuntimeExecution("bash harness did not initialize".to_string())
+        })?;
+        let (stdout, stdout_spill, stdout_spilled) = present_output_stream(
+            harness,
+            &snapshot.stdout,
+            output_cap,
+            snapshot.stdout_truncated,
+            &spill_path(call_id, "stdout"),
+        )
+        .await;
+        let (stderr, stderr_spill, stderr_spilled) = present_output_stream(
+            harness,
+            &snapshot.stderr,
+            output_cap,
+            snapshot.stderr_truncated,
+            &spill_path(call_id, "stderr"),
+        )
+        .await;
+        let mut output = process_snapshot_json(snapshot, stdout, stderr);
+        output["truncated"] = json!(
+            snapshot.stdout_truncated
+                || snapshot.stderr_truncated
+                || stdout_spilled
+                || stderr_spilled
+        );
+        output["stdout_truncated"] = json!(snapshot.stdout_truncated || stdout_spilled);
+        output["stderr_truncated"] = json!(snapshot.stderr_truncated || stderr_spilled);
+        insert_spill(
+            &mut output,
+            ToolOutputSpill {
+                stdout: stdout_spill,
+                stderr: stderr_spill,
+            },
+        )?;
+        Ok(output)
     }
 }
 
@@ -659,19 +770,108 @@ fn process_snapshot_is_error(snapshot: &AsyncProcessSnapshot) -> bool {
     }
 }
 
-fn process_snapshot_json(snapshot: &AsyncProcessSnapshot) -> serde_json::Value {
+fn process_snapshot_json(
+    snapshot: &AsyncProcessSnapshot,
+    stdout: String,
+    stderr: String,
+) -> serde_json::Value {
     json!({
         "process_id": snapshot.process_id.map(|process_id| process_id.to_string()),
         "backend": snapshot.backend,
         "label": snapshot.label,
         "status": snapshot.status.as_str(),
         "exit_code": snapshot.exit_code,
-        "stdout": String::from_utf8_lossy(&snapshot.stdout),
-        "stderr": String::from_utf8_lossy(&snapshot.stderr),
+        "stdout": stdout,
+        "stderr": stderr,
         "truncated": snapshot.stdout_truncated || snapshot.stderr_truncated,
         "stdout_truncated": snapshot.stdout_truncated,
         "stderr_truncated": snapshot.stderr_truncated,
     })
+}
+
+async fn present_output_stream(
+    harness: &BashkitExecutionHarness,
+    raw: &[u8],
+    max_output_bytes: usize,
+    retention_truncated: bool,
+    path: &str,
+) -> (String, Option<ToolOutputSpillReceipt>, bool) {
+    match plan_output_overflow(raw, max_output_bytes, retention_truncated, path) {
+        OverflowPlan::Inline(plan) => (plan.content, None, false),
+        OverflowPlan::Spill(plan) => {
+            let stored = harness
+                .write_spill_file_if_available(&plan.path, plan.raw)
+                .await
+                .unwrap_or(false);
+            if stored {
+                let receipt = ToolOutputSpillReceipt {
+                    path: plan.path.clone(),
+                    total_bytes: plan.total_bytes,
+                    preview_bytes: plan.preview_bytes,
+                    retention_truncated: plan.retention_truncated,
+                };
+                (format_spill_stub(&plan), Some(receipt), true)
+            } else {
+                (
+                    build_emergency_spill_stub(plan.raw, &plan.path, plan.retention_truncated),
+                    None,
+                    true,
+                )
+            }
+        }
+    }
+}
+
+fn insert_spill(output: &mut serde_json::Value, spill: ToolOutputSpill) -> CooldisResult<()> {
+    if spill.is_empty() {
+        return Ok(());
+    }
+    output["spill"] = serde_json::to_value(spill).map_err(execution_error)?;
+    Ok(())
+}
+
+fn spill_path(call_id: &str, stream: &str) -> String {
+    const ENCODED_PREFIX: &str = "_encoded_";
+    const MAX_COMPONENT_BYTES: usize = 160;
+
+    let requires_encoding = call_id.starts_with(ENCODED_PREFIX)
+        || call_id
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_'));
+    let mut safe_call_id = if requires_encoding {
+        let mut encoded = String::with_capacity(call_id.len().saturating_mul(3));
+        encoded.push_str(ENCODED_PREFIX);
+        for byte in call_id.bytes() {
+            if byte.is_ascii_alphanumeric() || byte == b'-' {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push('_');
+                push_hex_byte(&mut encoded, byte);
+            }
+        }
+        encoded
+    } else {
+        call_id.to_string()
+    };
+    if safe_call_id.len() > MAX_COMPONENT_BYTES {
+        let digest = Sha256::digest(call_id.as_bytes());
+        let mut digest_hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            push_hex_byte(&mut digest_hex, byte);
+        }
+        safe_call_id = format!("{ENCODED_PREFIX}h_{}_{}", &safe_call_id[..80], digest_hex);
+    }
+    format!("/spill/{safe_call_id}.{stream}.txt")
+}
+
+fn push_hex_byte(output: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    output.push(char::from(HEX[usize::from(byte >> 4)]));
+    output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug)]

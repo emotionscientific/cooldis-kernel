@@ -265,6 +265,12 @@ pub fn validate_mounts(mounts: &[VirtualMount]) -> CooldisVirtualBashResult<()> 
                 "virtual mount path must not be /".to_string(),
             ));
         }
+        if normalized.starts_with(Path::new("/spill")) {
+            return Err(CooldisVirtualBashError::RuntimeFactory(
+                "virtual mount path /spill and its descendants are reserved for tool output spill"
+                    .to_string(),
+            ));
+        }
         if !seen.insert(normalized.clone()) {
             return Err(CooldisVirtualBashError::RuntimeFactory(format!(
                 "duplicate virtual mount path: {}",
@@ -336,18 +342,141 @@ pub fn exec_result_from_virtual_output(output: VirtualCommandOutput) -> ExecResu
 }
 
 pub fn enforce_output_limit(
-    output: VirtualCommandOutput,
+    mut output: VirtualCommandOutput,
     max_output_bytes: usize,
 ) -> VirtualCommandOutput {
-    let (stdout, capped_stdout) = bytes_to_capped_text(output.stdout.as_bytes(), max_output_bytes);
-    let (stderr, capped_stderr) = bytes_to_capped_text(output.stderr.as_bytes(), max_output_bytes);
-    VirtualCommandOutput {
-        stdout,
-        stderr,
-        exit_code: output.exit_code,
-        stdout_truncated: output.stdout_truncated || capped_stdout,
-        stderr_truncated: output.stderr_truncated || capped_stderr,
+    let capped_stdout = truncate_text_to_byte_limit(&mut output.stdout, max_output_bytes);
+    let capped_stderr = truncate_text_to_byte_limit(&mut output.stderr, max_output_bytes);
+    output.stdout_truncated |= capped_stdout;
+    output.stderr_truncated |= capped_stderr;
+    output
+}
+
+fn truncate_text_to_byte_limit(text: &mut String, max_output_bytes: usize) -> bool {
+    if text.len() <= max_output_bytes {
+        return false;
     }
+    let mut end = max_output_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    true
+}
+
+pub const DEFAULT_SPILL_PREVIEW_BYTES: usize = 16 * 1024;
+pub const EMERGENCY_SPILL_PREVIEW_BYTES: usize = 500;
+pub const SPILL_RETENTION_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub const SPILL_VFS_MAX_BYTES: usize = 2 * SPILL_RETENTION_MAX_BYTES;
+
+/// A stream that remains inline because it does not exceed the configured ceiling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlinePlan {
+    pub content: String,
+}
+
+/// A stream whose retained raw bytes must be written to `path` before presenting `preview`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpillPlan<'a> {
+    pub raw: &'a [u8],
+    pub preview: String,
+    pub path: String,
+    pub total_bytes: usize,
+    pub preview_bytes: usize,
+    pub retention_truncated: bool,
+}
+
+/// Pure per-stream output plan selected before any VFS write is attempted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OverflowPlan<'a> {
+    Inline(InlinePlan),
+    Spill(SpillPlan<'a>),
+}
+
+pub fn plan_output_overflow<'a>(
+    raw: &'a [u8],
+    max_output_bytes: usize,
+    retention_truncated: bool,
+    spill_path: impl Into<String>,
+) -> OverflowPlan<'a> {
+    if !retention_truncated && raw.len() <= max_output_bytes {
+        return OverflowPlan::Inline(InlinePlan {
+            content: String::from_utf8_lossy(raw).into_owned(),
+        });
+    }
+
+    let preview = utf8_safe_prefix(raw, DEFAULT_SPILL_PREVIEW_BYTES);
+    OverflowPlan::Spill(SpillPlan {
+        raw,
+        preview: String::from_utf8_lossy(preview).into_owned(),
+        path: spill_path.into(),
+        total_bytes: raw.len(),
+        preview_bytes: preview.len(),
+        retention_truncated,
+    })
+}
+
+pub fn format_spill_stub(plan: &SpillPlan<'_>) -> String {
+    let retention = retention_truncation_notice(plan.retention_truncated);
+    format!(
+        "[CONTENT_SPILL: {} bytes]\n- Path: {}\n- Total bytes: {}\n- Preview bytes: {}{}\n\nPreview:\n---\n{}\n---\n\nTip: cat {}",
+        plan.total_bytes,
+        plan.path,
+        plan.total_bytes,
+        plan.preview_bytes,
+        retention,
+        plan.preview,
+        plan.path,
+    )
+}
+
+pub fn build_emergency_spill_stub(
+    raw: &[u8],
+    spill_path: &str,
+    retention_truncated: bool,
+) -> String {
+    let head = utf8_safe_prefix(raw, EMERGENCY_SPILL_PREVIEW_BYTES);
+    let tail = utf8_safe_suffix(raw, EMERGENCY_SPILL_PREVIEW_BYTES);
+    let retention = retention_truncation_notice(retention_truncated);
+    format!(
+        "[CONTENT_OVERFLOW - spill path unavailable]\nPath: {spill_path}\nLength: {} bytes{}\nHead bytes: {}\nHead:\n{}\n...\nTail bytes: {}\nTail:\n{}",
+        raw.len(),
+        retention,
+        head.len(),
+        String::from_utf8_lossy(head),
+        tail.len(),
+        String::from_utf8_lossy(tail),
+    )
+}
+
+fn retention_truncation_notice(retention_truncated: bool) -> String {
+    if retention_truncated {
+        format!(
+            "\n- Retention: source stream exceeded the {SPILL_RETENTION_MAX_BYTES}-byte retention ceiling"
+        )
+    } else {
+        String::new()
+    }
+}
+
+fn utf8_safe_prefix(bytes: &[u8], max_bytes: usize) -> &[u8] {
+    let mut end = bytes.len().min(max_bytes);
+    while end > 0 && end < bytes.len() && is_utf8_continuation(bytes[end]) {
+        end -= 1;
+    }
+    &bytes[..end]
+}
+
+fn utf8_safe_suffix(bytes: &[u8], max_bytes: usize) -> &[u8] {
+    let mut start = bytes.len().saturating_sub(max_bytes);
+    while start < bytes.len() && is_utf8_continuation(bytes[start]) {
+        start += 1;
+    }
+    &bytes[start..]
+}
+
+fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
 }
 
 pub fn bytes_to_capped_text(bytes: &[u8], max_output_bytes: usize) -> (String, bool) {
@@ -697,6 +826,8 @@ mod tests {
     fn mount_validation_rejects_relative_duplicate_and_root_mounts() {
         assert!(validate_mounts(&[VirtualMount::writable("relative")]).is_err());
         assert!(validate_mounts(&[VirtualMount::writable("/")]).is_err());
+        assert!(validate_mounts(&[VirtualMount::writable("/spill")]).is_err());
+        assert!(validate_mounts(&[VirtualMount::writable("/spill/nested")]).is_err());
         assert!(
             validate_mounts(&[
                 VirtualMount::writable("/workspace"),
@@ -721,6 +852,101 @@ mod tests {
         assert_eq!(output.stdout, "abc");
         assert!(output.stdout_truncated);
         assert!(!output.stderr_truncated);
+    }
+
+    #[test]
+    fn output_limit_never_expands_past_the_byte_ceiling() {
+        let output = enforce_output_limit(
+            VirtualCommandOutput {
+                stdout: "💥💥".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            5,
+        );
+
+        assert_eq!(output.stdout, "💥");
+        assert_eq!(output.stdout.len(), 4);
+        assert!(output.stdout_truncated);
+    }
+
+    #[test]
+    fn overflow_plan_preserves_inline_bytes_and_spills_with_utf8_safe_preview() {
+        let inline = plan_output_overflow(b"exact output\n", 13, false, "/spill/call.stdout.txt");
+        assert_eq!(
+            inline,
+            OverflowPlan::Inline(InlinePlan {
+                content: "exact output\n".to_string(),
+            })
+        );
+
+        let mut raw = vec![b'a'; DEFAULT_SPILL_PREVIEW_BYTES - 1];
+        raw.extend_from_slice("💥".as_bytes());
+        raw.extend_from_slice(b"tail");
+        let OverflowPlan::Spill(plan) = plan_output_overflow(
+            &raw,
+            DEFAULT_SPILL_PREVIEW_BYTES,
+            false,
+            "/spill/call.stdout.txt",
+        ) else {
+            panic!("oversized output should spill");
+        };
+
+        assert_eq!(plan.raw, raw);
+        assert_eq!(plan.raw.as_ptr(), raw.as_ptr());
+        assert_eq!(plan.path, "/spill/call.stdout.txt");
+        assert_eq!(plan.total_bytes, DEFAULT_SPILL_PREVIEW_BYTES + 7);
+        assert_eq!(plan.preview_bytes, DEFAULT_SPILL_PREVIEW_BYTES - 1);
+        assert_eq!(
+            plan.preview.as_bytes(),
+            &raw[..DEFAULT_SPILL_PREVIEW_BYTES - 1]
+        );
+        assert!(!plan.preview.contains('\u{fffd}'));
+
+        let stub = format_spill_stub(&plan);
+        assert!(stub.contains("[CONTENT_SPILL: 16391 bytes]"));
+        assert!(stub.contains("- Path: /spill/call.stdout.txt"));
+        assert!(stub.contains("- Preview bytes: 16383"));
+        assert!(stub.contains("Tip: cat /spill/call.stdout.txt"));
+
+        let OverflowPlan::Spill(retained) =
+            plan_output_overflow(b"retained", usize::MAX, true, "/spill/retained.stdout.txt")
+        else {
+            panic!("retention-truncated output must spill regardless of presentation cap");
+        };
+        assert!(retained.retention_truncated);
+        assert!(
+            format_spill_stub(&retained).contains("exceeded the 67108864-byte retention ceiling")
+        );
+        assert!(
+            build_emergency_spill_stub(retained.raw, &retained.path, true)
+                .contains("exceeded the 67108864-byte retention ceiling")
+        );
+    }
+
+    #[test]
+    fn emergency_spill_stub_has_utf8_safe_head_and_tail() {
+        let mut raw = vec![b'h'; EMERGENCY_SPILL_PREVIEW_BYTES - 1];
+        raw.extend_from_slice("💥".as_bytes());
+        raw.extend_from_slice(&vec![b't'; EMERGENCY_SPILL_PREVIEW_BYTES]);
+
+        let stub = build_emergency_spill_stub(&raw, "/spill/call.stderr.txt", false);
+
+        assert!(stub.contains("[CONTENT_OVERFLOW - spill path unavailable]"));
+        assert!(stub.contains("Path: /spill/call.stderr.txt"));
+        assert!(stub.contains("Length: 1003 bytes"));
+        assert!(stub.contains("Head bytes: 499"));
+        assert!(stub.contains("Tail bytes: 500"));
+        assert!(!stub.contains('\u{fffd}'));
+        assert!(!stub.contains('—'));
+    }
+
+    #[test]
+    fn spill_retention_ceiling_is_sixty_four_mibibytes() {
+        assert_eq!(SPILL_RETENTION_MAX_BYTES, 64 * 1024 * 1024);
+        assert_eq!(SPILL_VFS_MAX_BYTES, 2 * SPILL_RETENTION_MAX_BYTES);
     }
 
     #[test]

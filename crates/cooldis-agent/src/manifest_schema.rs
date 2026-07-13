@@ -1400,6 +1400,12 @@ fn validate_workspace_requirement(
                 .to_string(),
         ));
     }
+    if path.starts_with(Path::new("/spill")) {
+        return Err(CooldisError::RuntimeFactory(
+            "workspace guest_path /spill and its descendants are reserved for tool output spill"
+                .to_string(),
+        ));
+    }
     if path
         .components()
         .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
