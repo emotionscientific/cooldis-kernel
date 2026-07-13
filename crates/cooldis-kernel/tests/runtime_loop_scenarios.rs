@@ -1,17 +1,19 @@
 mod support;
 
 use cooldis::{
-    AgentKernelToolCall, AgentKernelToolProvider, AgentToolRouter, BashExecutionPolicy,
-    CanonicalMessage, CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory,
-    CanonicalStopReason, CanonicalUsage, CompactionTrigger, CooldisResult, EventKind, EventStore,
-    EventStreamId, HookEventName, HookHandler, HookHandlerOutput, HookRequest, HookRunStatus,
-    InMemorySessionStore, KernelOperationRegistration, OperationRegistry, OperationToolAlias,
-    ProviderApi, ProviderClient, ProviderRequest, ProviderResponse, ProviderResult,
-    ProviderStreamEvent, RuntimeEventKind, RuntimeHost, RuntimeModelRequestMode,
-    RuntimeModelRequestPurpose, RuntimePermissionDecision, RuntimeToolLogLevel, SessionContext,
-    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadEvent, ThreadSignal,
-    ThreadSignalKind, ThreadStatus, ThreadTopology, ToolDefinition, TurnSubmissionMode,
-    VirtualBashRuntimeConfig, VirtualBashRuntimeFactory, cooldis_threads_kernel_package,
+    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider, AgentToolRouter,
+    BashExecutionPolicy, CanonicalMessage, CanonicalProviderRuntimeConfig,
+    CanonicalProviderRuntimeFactory, CanonicalStopReason, CanonicalUsage, CompactionTrigger,
+    CooldisResult, EventKind, EventStore, EventStreamId, HookEventName, HookHandler,
+    HookHandlerOutput, HookRequest, HookRunStatus, InMemorySessionStore,
+    KernelOperationRegistration, OperationRegistry, OperationToolAlias, ProviderApi,
+    ProviderClient, ProviderRequest, ProviderResponse, ProviderResult, ProviderStreamEvent,
+    RuntimeEventKind, RuntimeHost, RuntimeModelRequestMode, RuntimeModelRequestPurpose,
+    RuntimePermissionDecision, RuntimeToolLogLevel, SessionContext, SqliteSessionStore,
+    THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadEvent, ThreadSignal, ThreadSignalKind,
+    ThreadStatus, ThreadTopology, ToolCallCancellation, ToolCallCompletedPayload, ToolDefinition,
+    ToolInvocationCancellation, TurnSubmissionMode, VirtualBashRuntimeConfig,
+    VirtualBashRuntimeFactory, cooldis_threads_kernel_package,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -148,6 +150,101 @@ PY
             .unwrap(),
         "print(\"hello from model host author\")\n"
     );
+    tokio::fs::remove_dir_all(host_root).await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupting_host_bash_acknowledges_the_call_and_kills_its_process_tree() {
+    let host_root = std::env::temp_dir().join(format!(
+        "cooldis-provider-host-cancel-{}",
+        uuid::Uuid::now_v7()
+    ));
+    tokio::fs::create_dir_all(&host_root).await.unwrap();
+    let client = Arc::new(ScriptedProviderClient::with_responses(vec![
+        response_tool_call(
+            "bash",
+            json!({
+                "command": "(trap '' TERM; while :; do sleep 1; done) & echo $! > child.pid; wait"
+            }),
+        ),
+    ]));
+    let bash_config = VirtualBashRuntimeConfig::default()
+        .with_execution_policy(BashExecutionPolicy::host_always())
+        .with_host_bash_executor(&host_root);
+    let host = RuntimeHost::new(Arc::new(
+        provider_factory(Arc::clone(&client)).with_bash_tool(bash_config),
+    ));
+    let thread = start_thread(&host).await;
+    let coordinates = thread.context().coordinates.clone();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        coordinates.thread_id,
+        "turn-host-cancel",
+        "run until interrupted",
+    )
+    .await
+    .unwrap();
+    let child_pid = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(pid) = tokio::fs::read_to_string(host_root.join("child.pid")).await
+                && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
+            {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("host bash did not expose its child pid");
+
+    host.cancel(coordinates.thread_id, "stop host process")
+        .await
+        .unwrap();
+    collect_until_cancelled(&mut events, "stop host process").await;
+    let completion = host
+        .runtime_store()
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::ToolCallCompleted)
+        .expect("interrupted host bash did not settle a completion");
+    let completion =
+        serde_json::from_value::<ToolCallCompletedPayload>(completion.payload).unwrap();
+    assert_eq!(
+        completion.cancellation,
+        Some(ToolCallCancellation::CancelledAcknowledged)
+    );
+    assert!(!completion.success);
+    assert!(
+        thread
+            .session_context()
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| {
+                matches!(message, CanonicalMessage::ToolResult { is_error: true, .. })
+                    && text_from_message(message).contains("host bash exec cancelled")
+            }),
+        "the canonical mirror must retain the partial cancelled process result"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if unsafe { libc::kill(child_pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("interrupt left a host bash descendant alive");
+    host.shutdown_all().await.unwrap();
     tokio::fs::remove_dir_all(host_root).await.unwrap();
 }
 
@@ -771,6 +868,10 @@ async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() 
     tool.release();
 
     collect_until_signal(&mut events, ThreadSignalKind::UserSteer).await;
+    assert!(
+        !tool.cancellation_observed.load(Ordering::SeqCst),
+        "a steer must not fire an in-flight tool token"
+    );
     collect_until_output(&mut events, "boundary reply").await;
     wait_for_requests(&client, 2).await;
     let requests = client.requests();
@@ -783,6 +884,20 @@ async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() 
         1,
         "the boundary request did not fold the concurrently settling steer: {:?}",
         request_texts(&requests[1]),
+    );
+    assert!(
+        thread
+            .session_context()
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| matches!(
+                message,
+                CanonicalMessage::ToolResult { tool_call_id, .. }
+                    if tool_call_id == "call_1|fc_1"
+            )),
+        "the steer boundary must retain the completed tool result"
     );
     assert_eq!(
         request_text_occurrence_count(&requests[1], "arrived while tool results were completing"),
@@ -823,6 +938,7 @@ async fn cancel_during_tool_execution_cancels_in_flight_batch_and_keeps_thread_r
         .unwrap()
         .unwrap();
     collect_until_cancelled(&mut events, "cancel at boundary").await;
+    assert!(tool.cancellation_observed.load(Ordering::SeqCst));
     assert_eq!(thread.status(), ThreadStatus::Idle);
 
     host.submit(
@@ -1336,6 +1452,7 @@ struct GatedToolProvider {
     started_notify: Notify,
     released: AtomicBool,
     release_notify: Notify,
+    cancellation_observed: AtomicBool,
 }
 
 impl GatedToolProvider {
@@ -1346,6 +1463,7 @@ impl GatedToolProvider {
             started_notify: Notify::new(),
             released: AtomicBool::new(false),
             release_notify: Notify::new(),
+            cancellation_observed: AtomicBool::new(false),
         }
     }
 
@@ -1358,6 +1476,30 @@ impl GatedToolProvider {
     fn release(&self) {
         self.released.store(true, Ordering::SeqCst);
         self.release_notify.notify_waiters();
+    }
+
+    async fn wait_until_released(&self) {
+        while !self.released.load(Ordering::SeqCst) {
+            self.release_notify.notified().await;
+        }
+    }
+
+    fn result(&self, call: AgentKernelToolCall, cancelled: bool) -> CanonicalMessage {
+        let input = call
+            .arguments
+            .get("input")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            if cancelled {
+                "tool invocation cancelled".to_string()
+            } else {
+                format!("echo:{input}")
+            },
+            cancelled,
+        )
     }
 }
 
@@ -1382,19 +1524,26 @@ impl AgentKernelToolProvider for GatedToolProvider {
     ) -> CooldisResult<Option<CanonicalMessage>> {
         self.started.store(true, Ordering::SeqCst);
         self.started_notify.notify_waiters();
-        while !self.released.load(Ordering::SeqCst) {
-            self.release_notify.notified().await;
-        }
-        let input = call
-            .arguments
-            .get("input")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        Ok(Some(CanonicalMessage::tool_result(
-            call.call_id,
-            call.tool_name,
-            format!("echo:{input}"),
-            false,
+        self.wait_until_released().await;
+        Ok(Some(self.result(call, false)))
+    }
+
+    async fn invoke_tool_call_cancellable(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+    ) -> CooldisResult<AgentKernelToolOutcome> {
+        self.started.store(true, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        let cancelled = tokio::select! {
+            _ = self.wait_until_released() => false,
+            _ = cancellation.token().cancelled() => {
+                self.cancellation_observed.store(true, Ordering::SeqCst);
+                true
+            }
+        };
+        Ok(AgentKernelToolOutcome::Completed(Some(
+            self.result(call, cancelled),
         )))
     }
 }

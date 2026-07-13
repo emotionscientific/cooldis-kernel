@@ -1,7 +1,7 @@
 use crate::{
     AgentToolRouter, CanonicalContent, CanonicalMessage, CooldisResult, HookHandlerSpec,
     HookMutationWitness, HookPipeline, HookRunRecord, PostToolUseHookRequest,
-    PreToolUseHookRequest, TurnContext, TurnContextSnapshot,
+    PreToolUseHookRequest, ToolInvocationCancellation, TurnContext, TurnContextSnapshot,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -96,6 +96,26 @@ impl ToolExecutionInterceptor {
     pub async fn execute_with_witnessing<W, Fut>(
         &self,
         request: ToolExecutionRequest<'_>,
+        on_hook_started: impl FnMut(&HookHandlerSpec),
+        witness_hook_mutations: W,
+    ) -> CooldisResult<ToolExecutionOutcome>
+    where
+        W: FnMut(Vec<HookMutationWitness>) -> Fut,
+        Fut: Future<Output = CooldisResult<()>>,
+    {
+        self.execute_with_witnessing_cancellable(
+            request,
+            ToolInvocationCancellation::never(),
+            on_hook_started,
+            witness_hook_mutations,
+        )
+        .await
+    }
+
+    pub async fn execute_with_witnessing_cancellable<W, Fut>(
+        &self,
+        request: ToolExecutionRequest<'_>,
+        cancellation: ToolInvocationCancellation,
         mut on_hook_started: impl FnMut(&HookHandlerSpec),
         mut witness_hook_mutations: W,
     ) -> CooldisResult<ToolExecutionOutcome>
@@ -185,11 +205,12 @@ impl ToolExecutionInterceptor {
 
         let result = self
             .tool_router
-            .invoke_tool_call_for_turn(
+            .invoke_tool_call_cancellable_for_turn(
                 request.turn_context,
                 request.call_id.clone(),
                 request.tool_name.clone(),
                 arguments.clone(),
+                cancellation,
             )
             .await;
         let success = tool_result_success(&result);

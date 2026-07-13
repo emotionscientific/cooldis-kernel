@@ -4,10 +4,11 @@ use crate::kernel::history::{
 };
 use crate::kernel::process_handle_dispatch::{ProcessHandleDispatcher, command_digest};
 use crate::{
-    AgentKernelToolCall, AgentKernelToolProvider, AgentRuntime, AgentRuntimeFactory, CooldisError,
-    CooldisResult, OperationRegistry, RuntimeEventKind, RuntimeServices, RuntimeTerminalState,
-    SessionEntryKind, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
-    ToolDefinition, TurnContextSnapshot, TurnSubmissionMode, emit_runtime_event,
+    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider, AgentRuntime,
+    AgentRuntimeFactory, CooldisError, CooldisResult, OperationRegistry, RuntimeEventKind,
+    RuntimeServices, RuntimeTerminalState, SessionEntryKind, ThreadCommand, ThreadContext,
+    ThreadEvent, ThreadSignal, ThreadStatus, ToolDefinition, ToolInvocationCancellation,
+    TurnContextSnapshot, TurnSubmissionMode, emit_runtime_event,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -432,17 +433,48 @@ impl AgentKernelToolProvider for BashToolProvider {
         &self,
         call: AgentKernelToolCall,
     ) -> CooldisResult<Option<CanonicalMessage>> {
-        match call.tool_name.as_str() {
-            BASH_TOOL => self.invoke_bash_tool(call).await.map(Some),
-            PROCESS_EXEC_TOOL => self.invoke_process_exec_tool(call).await.map(Some),
-            WRITE_STDIN_TOOL => self.invoke_write_stdin_tool(call).await.map(Some),
-            _ => Ok(None),
-        }
+        self.invoke_tool_call_inner(call, None).await
+    }
+
+    async fn invoke_tool_call_cancellable(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+    ) -> CooldisResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call_inner(call, Some(cancellation))
+            .await
+            .map(AgentKernelToolOutcome::Completed)
     }
 }
 
 impl BashToolProvider {
-    async fn invoke_bash_tool(&self, call: AgentKernelToolCall) -> CooldisResult<CanonicalMessage> {
+    async fn invoke_tool_call_inner(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: Option<ToolInvocationCancellation>,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        match call.tool_name.as_str() {
+            BASH_TOOL => self
+                .invoke_bash_tool(call, cancellation.as_ref())
+                .await
+                .map(Some),
+            PROCESS_EXEC_TOOL => self
+                .invoke_process_exec_tool(call, cancellation.as_ref())
+                .await
+                .map(Some),
+            WRITE_STDIN_TOOL => self
+                .invoke_write_stdin_tool(call, cancellation.as_ref())
+                .await
+                .map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    async fn invoke_bash_tool(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: Option<&ToolInvocationCancellation>,
+    ) -> CooldisResult<CanonicalMessage> {
         let args: BashToolArgs = serde_json::from_value(call.arguments).map_err(|err| {
             CooldisError::RuntimeExecution(format!(
                 "tool {BASH_TOOL:?} has invalid arguments: {err}"
@@ -455,7 +487,14 @@ impl BashToolProvider {
         let harness = harness.as_mut().ok_or_else(|| {
             CooldisError::RuntimeExecution("bash harness did not initialize".to_string())
         })?;
-        let output = harness.execute_full_output(&args.command).await?;
+        let output = match cancellation {
+            Some(cancellation) => {
+                harness
+                    .execute_full_output_cancellable(&args.command, cancellation.token().clone())
+                    .await?
+            }
+            None => harness.execute_full_output(&args.command).await?,
+        };
         let is_error = !output.success();
         let (stdout, stdout_spill, stdout_spilled) = present_output_stream(
             harness,
@@ -497,6 +536,7 @@ impl BashToolProvider {
     async fn invoke_process_exec_tool(
         &self,
         call: AgentKernelToolCall,
+        cancellation: Option<&ToolInvocationCancellation>,
     ) -> CooldisResult<CanonicalMessage> {
         let call_id = call.call_id;
         let tool_name = call.tool_name;
@@ -516,9 +556,29 @@ impl BashToolProvider {
                 ))
             })?;
             self.require_process_handle(process_id).await?;
-            self.process_manager
-                .poll(process_id, yield_time, SPILL_RETENTION_MAX_BYTES)
-                .await?
+            match cancellation {
+                Some(cancellation) => {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.token().cancelled() => {
+                            self.terminate_process_for_tool(
+                                process_id,
+                                cancellation.grace(),
+                            ).await?
+                        }
+                        outcome = self.process_manager.poll(
+                            process_id,
+                            yield_time,
+                            SPILL_RETENTION_MAX_BYTES,
+                        ) => outcome?,
+                    }
+                }
+                None => {
+                    self.process_manager
+                        .poll(process_id, yield_time, SPILL_RETENTION_MAX_BYTES)
+                        .await?
+                }
+            }
         } else {
             let command = args.command.ok_or_else(|| {
                 CooldisError::RuntimeExecution(format!(
@@ -554,16 +614,42 @@ impl BashToolProvider {
                 .with_yield_time(yield_time)
                 .with_output_cap_bytes(SPILL_RETENTION_MAX_BYTES);
             let id = DispatchId::new(call_id.clone());
-            let outcome = dispatcher
-                .dispatch_start(
-                    &consumer,
-                    id.clone(),
-                    digest,
-                    self.process_manager.clone(),
-                    Arc::clone(&self.live_backend),
-                    request,
-                )
-                .await?;
+            let mut outcome = match cancellation {
+                Some(cancellation) => {
+                    dispatcher
+                        .dispatch_start_cancellable(
+                            &consumer,
+                            id.clone(),
+                            digest,
+                            self.process_manager.clone(),
+                            Arc::clone(&self.live_backend),
+                            request,
+                            cancellation.token().clone(),
+                        )
+                        .await?
+                }
+                None => {
+                    dispatcher
+                        .dispatch_start(
+                            &consumer,
+                            id.clone(),
+                            digest,
+                            self.process_manager.clone(),
+                            Arc::clone(&self.live_backend),
+                            request,
+                        )
+                        .await?
+                }
+            };
+            if let Some(cancellation) = cancellation
+                && cancellation.is_cancelled()
+                && outcome.snapshot.status == ProcessSnapshotStatus::Running
+                && let Some(process_id) = outcome.snapshot.process_id
+            {
+                outcome = self
+                    .terminate_process_for_tool(process_id, cancellation.grace())
+                    .await?;
+            }
             dispatch_id = Some(id);
             outcome
         };
@@ -586,6 +672,7 @@ impl BashToolProvider {
     async fn invoke_write_stdin_tool(
         &self,
         call: AgentKernelToolCall,
+        cancellation: Option<&ToolInvocationCancellation>,
     ) -> CooldisResult<CanonicalMessage> {
         let call_id = call.call_id;
         let tool_name = call.tool_name;
@@ -607,11 +694,31 @@ impl BashToolProvider {
         })?;
         let output_cap = process_output_cap(args.output_bytes_cap, self.config.max_output_bytes);
         let yield_time = process_yield_time(args.yield_time_ms);
-        match self
-            .process_manager
-            .write(process_id, bytes, yield_time, SPILL_RETENTION_MAX_BYTES)
-            .await
-        {
+        let execution = match cancellation {
+            Some(cancellation) => {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.token().cancelled() => {
+                        self.terminate_process_for_tool(
+                            process_id,
+                            cancellation.grace(),
+                        ).await
+                    }
+                    outcome = self.process_manager.write(
+                        process_id,
+                        bytes,
+                        yield_time,
+                        SPILL_RETENTION_MAX_BYTES,
+                    ) => outcome,
+                }
+            }
+            None => {
+                self.process_manager
+                    .write(process_id, bytes, yield_time, SPILL_RETENTION_MAX_BYTES)
+                    .await
+            }
+        };
+        match execution {
             Ok(outcome) => {
                 let is_error = process_snapshot_is_error(&outcome.snapshot);
                 let output = self
@@ -644,6 +751,33 @@ impl BashToolProvider {
 }
 
 impl BashToolProvider {
+    async fn terminate_process_for_tool(
+        &self,
+        process_id: CooldisProcessId,
+        grace: Duration,
+    ) -> CooldisProcessResult<cooldis_process::AsyncProcessOutcome> {
+        let mut outcome = self
+            .process_manager
+            .terminate(
+                process_id,
+                "tool invocation cancelled",
+                grace,
+                SPILL_RETENTION_MAX_BYTES,
+            )
+            .await?;
+        while outcome.snapshot.status == ProcessSnapshotStatus::Running {
+            outcome = self
+                .process_manager
+                .poll(
+                    process_id,
+                    Duration::from_secs(1),
+                    SPILL_RETENTION_MAX_BYTES,
+                )
+                .await?;
+        }
+        Ok(outcome)
+    }
+
     async fn require_process_handle(&self, process_id: CooldisProcessId) -> CooldisResult<()> {
         self.process_dispatcher
             .as_ref()

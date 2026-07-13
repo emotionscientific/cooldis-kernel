@@ -296,6 +296,16 @@ impl AsyncExecutionManager {
         backend: Arc<dyn LiveProcessBackend>,
         request: AsyncProcessStartRequest,
     ) -> CooldisProcessResult<AsyncProcessOutcome> {
+        self.start_cancellable(backend, request, CancellationToken::new())
+            .await
+    }
+
+    pub async fn start_cancellable(
+        &self,
+        backend: Arc<dyn LiveProcessBackend>,
+        request: AsyncProcessStartRequest,
+        cancellation: CancellationToken,
+    ) -> CooldisProcessResult<AsyncProcessOutcome> {
         self.cleanup_expired().await;
         let process = CooldisProcessHandle::with_process_id(
             request.process_id.unwrap_or_default(),
@@ -303,7 +313,6 @@ impl AsyncExecutionManager {
             request.invocation.label(),
         );
         let process_id = process.process_id();
-        let cancellation = CancellationToken::new();
         let spawn = backend
             .start(
                 LiveProcessStartRequest {
@@ -601,6 +610,8 @@ impl LiveProcessBackend for HostBashLiveBackend {
         }
 
         let mut child = child_command.spawn().map_err(process_error)?;
+        #[cfg(unix)]
+        let process_group_guard = ProcessGroupKillGuard::new(child.id());
         process.record(CooldisProcessEventKind::Started {
             command: Some(command.join(" ")),
         });
@@ -643,19 +654,69 @@ impl LiveProcessBackend for HostBashLiveBackend {
         };
 
         let join = tokio::spawn(async move {
-            let terminal =
-                wait_for_host_child(&mut child, child_id, request.deadline, cancellation.clone())
-                    .await;
-            if let Some(task) = stdout_task {
-                let _ = task.await;
+            #[cfg(unix)]
+            let mut process_group_guard = process_group_guard;
+            let mut stdout_task = stdout_task;
+            let mut stderr_task = stderr_task;
+            let mut terminal = wait_for_host_child(
+                &mut child,
+                child_id,
+                request.deadline.clone(),
+                cancellation.clone(),
+            )
+            .await;
+            #[cfg(unix)]
+            if matches!(&terminal, CooldisProcessEventKind::Completed { .. }) {
+                process_group_guard.disarm_if_group_gone();
             }
-            if let Some(task) = stderr_task {
-                let _ = task.await;
+            let mut readers_drained = false;
+            if matches!(&terminal, CooldisProcessEventKind::Completed { .. }) {
+                let drain_readers = async {
+                    if let Some(task) = &mut stdout_task {
+                        let _ = task.await;
+                    }
+                    if let Some(task) = &mut stderr_task {
+                        let _ = task.await;
+                    }
+                };
+                tokio::pin!(drain_readers);
+                terminal = tokio::select! {
+                    _ = &mut drain_readers => {
+                        readers_drained = true;
+                        terminal
+                    }
+                    _ = cancellation.cancelled() => {
+                        terminate_reaped_process_group(child_id).await;
+                        CooldisProcessEventKind::Cancelled {
+                            reason: "process terminated".to_string(),
+                        }
+                    }
+                    _ = tokio::time::sleep(request.deadline.remaining()) => {
+                        terminate_reaped_process_group(child_id).await;
+                        CooldisProcessEventKind::TimedOut {
+                            timeout_ms: Some(request.deadline.timeout_ms()),
+                            message: format!(
+                                "process timed out after {}ms",
+                                request.deadline.timeout_ms()
+                            ),
+                        }
+                    }
+                };
+            }
+            if !readers_drained {
+                if let Some(task) = stdout_task {
+                    let _ = task.await;
+                }
+                if let Some(task) = stderr_task {
+                    let _ = task.await;
+                }
             }
             if let Some(task) = stdin_task {
                 task.abort();
             }
             process.record(terminal);
+            #[cfg(unix)]
+            process_group_guard.disarm();
             Ok(())
         });
 
@@ -786,16 +847,91 @@ async fn terminate_child(child: &mut tokio::process::Child, child_id: Option<u32
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
         }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        unsafe {
+            libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.wait().await;
+        reap_adopted_process_group(child_id as libc::pid_t).await;
+        return;
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+async fn terminate_reaped_process_group(child_id: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(child_id) = child_id {
+        unsafe {
+            libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        unsafe {
+            libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
+        }
+        reap_adopted_process_group(child_id as libc::pid_t).await;
     }
     #[cfg(not(unix))]
-    let _ = child.kill().await;
+    let _ = child_id;
+}
 
-    if tokio::time::timeout(Duration::from_millis(250), child.wait())
-        .await
-        .is_err()
-    {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+#[cfg(unix)]
+async fn reap_adopted_process_group(process_group: libc::pid_t) {
+    // When Cooldis itself is container PID 1, killed grandchildren can be
+    // reparented here. Reap only children in the process group we just killed;
+    // ordinary deployments get ECHILD and return immediately.
+    for _ in 0..10 {
+        loop {
+            let mut status = 0;
+            let reaped = unsafe { libc::waitpid(-process_group, &mut status, libc::WNOHANG) };
+            if reaped <= 0 {
+                break;
+            }
+        }
+        if unsafe { libc::killpg(process_group, 0) } == -1 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(unix)]
+struct ProcessGroupKillGuard {
+    process_group: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupKillGuard {
+    fn new(child_id: Option<u32>) -> Self {
+        Self {
+            process_group: child_id.map(|id| id as libc::pid_t),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.process_group = None;
+    }
+
+    fn disarm_if_group_gone(&mut self) {
+        let Some(process_group) = self.process_group else {
+            return;
+        };
+        if unsafe { libc::killpg(process_group, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            self.disarm();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupKillGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.process_group {
+            unsafe {
+                libc::killpg(process_group, libc::SIGKILL);
+            }
+        }
     }
 }
 

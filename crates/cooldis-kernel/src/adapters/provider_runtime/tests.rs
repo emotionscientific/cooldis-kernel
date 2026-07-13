@@ -1,6 +1,6 @@
 use super::*;
 use crate::EventKind;
-use crate::test_support::FaultingProviderClient;
+use crate::test_support::{FaultingProviderClient, FaultingRuntimeStore};
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindReceipt,
     AgentManifestCouplingBinding, AgentManifestCouplingBudget, AgentManifestRuntimeDefaults,
@@ -15,13 +15,13 @@ use crate::{
     SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadBaseRef, ThreadCoordinates,
     ThreadJoinedPayload, ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology,
     ToolCallDecisionOutcomePayload, ToolCallDecisionPayload, ToolCallSubject,
-    ToolCallSuspendedPayload, TurnContextSnapshot, WasmRuntimeArtifact,
+    ToolCallSuspendedPayload, ToolInvocationCancellation, TurnContextSnapshot, WasmRuntimeArtifact,
     cooldis_threads_kernel_package,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
@@ -88,21 +88,33 @@ struct SerialBlockingToolProvider {
     release_first: Notify,
 }
 
-struct PendingCancellationToolProvider {
+struct CancellationAcknowledgingThreadToolProvider {
     started: mpsc::UnboundedSender<String>,
-    dropped: mpsc::UnboundedSender<String>,
-    active: Arc<AtomicUsize>,
+    acknowledged: mpsc::UnboundedSender<String>,
+}
+
+struct NonObservingThreadToolProvider {
+    started: mpsc::UnboundedSender<String>,
+    released: AtomicBool,
+    release: Notify,
+    never_launched: AtomicBool,
+}
+
+struct PanickingAfterGraceToolProvider {
+    started: mpsc::UnboundedSender<()>,
+    release: Notify,
+}
+
+impl NonObservingThreadToolProvider {
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
 }
 
 struct ImmediateThreadToolProvider;
 
 struct IsolatedFailureToolProvider;
-
-struct DropCallWitness {
-    call_id: String,
-    dropped: mpsc::UnboundedSender<String>,
-    active: Arc<AtomicUsize>,
-}
 
 #[derive(Default)]
 struct AppendPause {
@@ -253,9 +265,16 @@ impl EventStore for PausingRuntimeStore {
         expected_next_sequence: EventSequence,
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
-        self.inner
+        let should_pause = records.iter().any(|record| record.kind == self.pause_kind)
+            && self.pause_once.swap(false, Ordering::SeqCst);
+        let appended = self
+            .inner
             .append_events_fenced(stream_id, expected_next_sequence, records)
-            .await
+            .await?;
+        if should_pause {
+            self.pause.arrive_and_wait().await;
+        }
+        Ok(appended)
     }
 
     async fn read_events(
@@ -283,13 +302,6 @@ impl ObservationStore for PausingRuntimeStore {
         kind: Option<&str>,
     ) -> HistoryResult<Vec<ObservationRecord>> {
         self.inner.list_observations(scope, kind).await
-    }
-}
-
-impl Drop for DropCallWitness {
-    fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::SeqCst);
-        let _ = self.dropped.send(self.call_id.clone());
     }
 }
 
@@ -656,28 +668,93 @@ impl AgentKernelToolProvider for SerialBlockingToolProvider {
 }
 
 #[async_trait]
-impl AgentKernelToolProvider for PendingCancellationToolProvider {
+impl AgentKernelToolProvider for CancellationAcknowledgingThreadToolProvider {
     async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition::new(
             "thread_submit",
-            "Pending cancellation test tool.",
+            "Cancellation-aware interruption test tool.",
             serde_json::json!({"type": "object"}),
         )]
     }
 
     async fn invoke_tool_call(
         &self,
+        _call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        panic!("the interruption test must use the cancellable provider surface")
+    }
+
+    async fn invoke_tool_call_cancellable(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+    ) -> CooldisResult<crate::AgentKernelToolOutcome> {
+        self.started.send(call.call_id.clone()).unwrap();
+        cancellation.token().cancelled().await;
+        self.acknowledged.send(call.call_id.clone()).unwrap();
+        Ok(crate::AgentKernelToolOutcome::Completed(Some(
+            CanonicalMessage::tool_result(
+                call.call_id,
+                call.tool_name,
+                "interrupt acknowledged",
+                true,
+            ),
+        )))
+    }
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for NonObservingThreadToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        ["thread_status", "thread_wait"]
+            .into_iter()
+            .map(|name| {
+                ToolDefinition::new(
+                    name,
+                    "Default-implementation interruption test tool.",
+                    serde_json::json!({"type": "object"}),
+                )
+            })
+            .collect()
+    }
+
+    async fn invoke_tool_call(
+        &self,
         call: AgentKernelToolCall,
     ) -> CooldisResult<Option<CanonicalMessage>> {
-        self.active.fetch_add(1, Ordering::SeqCst);
-        let _drop_witness = DropCallWitness {
-            call_id: call.call_id.clone(),
-            dropped: self.dropped.clone(),
-            active: Arc::clone(&self.active),
-        };
-        self.started.send(call.call_id).unwrap();
-        std::future::pending::<()>().await;
-        unreachable!()
+        if call.tool_name == "thread_wait" {
+            self.never_launched.store(false, Ordering::SeqCst);
+        }
+        self.started.send(call.call_id.clone()).unwrap();
+        while !self.released.load(Ordering::SeqCst) {
+            self.release.notified().await;
+        }
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            "finished without observing cancellation",
+            false,
+        )))
+    }
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for PanickingAfterGraceToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            "thread_status",
+            "Panics after the cancellation monitor abandons it.",
+            serde_json::json!({"type": "object"}),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        _call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        self.started.send(()).unwrap();
+        self.release.notified().await;
+        panic!("panic after grace")
     }
 }
 
@@ -1858,6 +1935,104 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
 }
 
 #[tokio::test]
+async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() {
+    let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+        "summary after late result",
+    )]));
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "compact-late-result");
+    let store = Arc::new(InMemorySessionStore::new());
+    let first_user = store
+        .append_turn_input(
+            &coordinates,
+            "turn-old",
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("first turn"),
+            },
+        )
+        .await
+        .unwrap();
+    let assistant = store
+        .append(
+            &coordinates,
+            Some(first_user.entry_id),
+            SessionEntryKind::Message {
+                message: CanonicalMessage::assistant(
+                    "openai",
+                    ProviderApi::OpenAIResponses,
+                    "gpt-test",
+                    vec![CanonicalContent::tool_call(
+                        "call-late",
+                        "lookup",
+                        serde_json::json!({"q": "slow"}),
+                    )],
+                    CanonicalStopReason::ToolUse,
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    let replacement_user = store
+        .append_turn_input(
+            &coordinates,
+            "turn-new",
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("replacement turn"),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append(
+            &coordinates,
+            Some(replacement_user.entry_id),
+            SessionEntryKind::Message {
+                message: CanonicalMessage::tool_result(
+                    "call-late",
+                    "lookup",
+                    "settled after cancellation",
+                    true,
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(assistant.parent_entry_id, Some(first_user.entry_id));
+    let host = RuntimeHost::with_session_store(
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+            client.clone(),
+        )),
+        store,
+    );
+    let thread = host
+        .start_thread(coordinates, ThreadTopology::root())
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.compact_thread(thread.context().coordinates.thread_id, "compact-1", None)
+        .await
+        .unwrap();
+    assert_compaction(
+        &mut events,
+        CompactionTrigger::Manual,
+        "summary after late result",
+    )
+    .await;
+
+    let request = client.requests().pop().unwrap();
+    assert!(matches!(
+        request.messages.as_slice(),
+        [
+            CanonicalMessage::User { .. },
+            CanonicalMessage::Assistant { .. },
+            CanonicalMessage::ToolResult { tool_call_id, .. },
+            CanonicalMessage::User { .. },
+        ] if tool_call_id == "call-late"
+    ));
+}
+
+#[tokio::test]
 async fn auto_compaction_triggers_before_next_submit_when_budget_is_exceeded() {
     let client = Arc::new(RecordingClient::with_responses(vec![
         response_text("first reply"),
@@ -2818,6 +2993,7 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
     )
     .await
     .unwrap();
+    pause.release();
     assert_cancelled(&mut events, "cancel request append").await;
 
     let records = store
@@ -2834,11 +3010,18 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
             .count(),
         2
     );
-    assert!(
-        records
-            .iter()
-            .all(|event| event.kind != EventKind::ToolCallCompleted)
-    );
+    let completed = records
+        .iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .map(|event| {
+            serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 2);
+    assert!(completed.iter().all(|payload| {
+        !payload.success
+            && payload.cancellation == Some(ToolCallCancellation::CancelledAcknowledged)
+    }));
 }
 
 #[tokio::test]
@@ -3330,34 +3513,45 @@ async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
     assert_eq!(results, vec![("call-fail", true), ("call-after", false)]);
 }
 
-#[tokio::test]
-async fn turn_cancellation_drops_every_independent_in_flight_tool_call() {
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_calls() {
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let (dropped_tx, mut dropped_rx) = mpsc::unbounded_channel();
-    let active = Arc::new(AtomicUsize::new(0));
-    let tool_provider = Arc::new(PendingCancellationToolProvider {
+    let (acknowledged_tx, mut acknowledged_rx) = mpsc::unbounded_channel();
+    let acknowledging_provider = Arc::new(CancellationAcknowledgingThreadToolProvider {
+        started: started_tx.clone(),
+        acknowledged: acknowledged_tx,
+    });
+    let non_observing_provider = Arc::new(NonObservingThreadToolProvider {
         started: started_tx,
-        dropped: dropped_tx,
-        active: Arc::clone(&active),
+        released: AtomicBool::new(false),
+        release: Notify::new(),
+        never_launched: AtomicBool::new(true),
     });
     let router = Arc::new(
         AgentToolRouter::new(Arc::new(OperationRegistry::new()))
-            .with_kernel_tool_provider(tool_provider),
+            .with_kernel_tool_provider(acknowledging_provider)
+            .with_kernel_tool_provider(non_observing_provider.clone()),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
-        vec![
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_calls(vec![
             (
-                "call-first",
+                "call-acknowledged",
                 "thread_submit",
                 serde_json::json!({"task_name": "worker-a"}),
             ),
             (
-                "call-second",
-                "thread_submit",
+                "call-exceeded",
+                "thread_status",
                 serde_json::json!({"task_name": "worker-b"}),
             ),
-        ],
-    )]));
+            (
+                "call-never-launched",
+                "thread_wait",
+                serde_json::json!({"task_name": "worker-b"}),
+            ),
+        ]),
+        response_text("replacement reply"),
+    ]));
     let provider_client: Arc<dyn ProviderClient> = client;
     let mut config =
         CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
@@ -3371,12 +3565,302 @@ async fn turn_cancellation_drops_every_independent_in_flight_tool_call() {
     );
     let thread = host
         .start_thread_with_topology_and_metadata(
-            ThreadCoordinates::new("tenant_a", "user_1", "hold-cancel"),
+            ThreadCoordinates::new("tenant_a", "user_1", "interrupt-tool-batch"),
             ThreadTopology::root(),
-            BTreeMap::from([(
-                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
-                "unlimited".to_string(),
-            )]),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    append_manifest_runtime_grace(&store, &thread.context().coordinates, 100).await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "interrupt batch",
+    )
+    .await
+    .unwrap();
+    let mut started = vec![
+        started_rx.recv().await.unwrap(),
+        started_rx.recv().await.unwrap(),
+    ];
+    started.sort();
+    assert_eq!(started, vec!["call-acknowledged", "call-exceeded"]);
+    assert!(non_observing_provider.never_launched.load(Ordering::SeqCst));
+
+    host.submit_with_mode(
+        thread.context().coordinates.thread_id,
+        "turn-replacement",
+        "replacement",
+        TurnSubmissionMode::Interrupt,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        acknowledged_rx.recv().await.as_deref(),
+        Some("call-acknowledged")
+    );
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_millis(99)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !drain_has_cancelled(&mut events),
+        "the turn terminal must remain blocked until the configured grace"
+    );
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let mut saw_cancelled = false;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+        saw_cancelled |= drain_has_cancelled(&mut events);
+        if saw_cancelled {
+            break;
+        }
+    }
+    assert!(saw_cancelled, "interrupt did not settle at grace");
+
+    let before_detached_settlement = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let requests = before_detached_settlement
+        .iter()
+        .filter(|event| event.kind == EventKind::ToolCallRequested)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|event| !event.payload["holds"].is_null())
+    );
+    let completed_before_release = before_detached_settlement
+        .iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .map(|event| {
+            (
+                event.payload["subject"]["call_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                event.payload["cancellation"].as_str().map(str::to_string),
+                event.payload["success"].as_bool().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed_before_release,
+        vec![
+            (
+                "call-acknowledged".to_string(),
+                Some("cancelled_acknowledged".to_string()),
+                false,
+            ),
+            (
+                "call-never-launched".to_string(),
+                Some("cancelled_acknowledged".to_string()),
+                false,
+            ),
+        ]
+    );
+
+    non_observing_provider.release();
+    wait_for_tool_completion_count(&store, &thread.context().coordinates, 3).await;
+    let records = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let exceeded = records
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::ToolCallCompleted
+                && event.payload["subject"]["call_id"] == "call-exceeded"
+        })
+        .expect("detached invocation did not settle its own completion");
+    assert_eq!(
+        exceeded.payload["cancellation"],
+        serde_json::json!("cancelled_exceeded_grace")
+    );
+    assert_eq!(exceeded.payload["success"], true);
+    assert!(non_observing_provider.never_launched.load(Ordering::SeqCst));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn invocation_panic_after_grace_still_self_settles_exactly_once() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let tool_provider = Arc::new(PanickingAfterGraceToolProvider {
+        started: started_tx,
+        release: Notify::new(),
+    });
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider.clone()),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named("thread_status", serde_json::json!({"task_name": "worker"})),
+    ]));
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "panic-after-grace"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    append_manifest_runtime_grace(&store, &thread.context().coordinates, 100).await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "panic")
+        .await
+        .unwrap();
+    started_rx.recv().await.unwrap();
+    host.cancel(
+        thread.context().coordinates.thread_id,
+        "cancel panicking tool",
+    )
+    .await
+    .unwrap();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert_cancelled(&mut events, "cancel panicking tool").await;
+
+    tool_provider.release.notify_waiters();
+    wait_for_tool_completion_count(&store, &thread.context().coordinates, 1).await;
+    let completions = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 1);
+    assert!(!completions[0].success);
+    assert_eq!(
+        completions[0].cancellation,
+        Some(ToolCallCancellation::CancelledExceededGrace)
+    );
+}
+
+#[tokio::test]
+async fn invocation_panic_before_cancellation_is_a_failed_completion() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let tool_provider = Arc::new(PanickingAfterGraceToolProvider {
+        started: started_tx,
+        release: Notify::new(),
+    });
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider.clone()),
+    );
+    let client: Arc<dyn ProviderClient> = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named("thread_status", serde_json::json!({"task_name": "worker"})),
+    ]));
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "panic-before-cancel"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "panic")
+        .await
+        .unwrap();
+    started_rx.recv().await.unwrap();
+    tool_provider.release.notify_waiters();
+    wait_for_tool_completion_count(&store, &thread.context().coordinates, 1).await;
+
+    let completion = store
+        .read_events(
+            &EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::ToolCallCompleted)
+        .map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).unwrap())
+        .unwrap();
+    assert!(!completion.success);
+    assert_eq!(completion.cancellation, None);
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn monitor_panic_after_settlement_recovers_one_completion() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (acknowledged_tx, mut acknowledged_rx) = mpsc::unbounded_channel();
+    let tool_provider: Arc<dyn AgentKernelToolProvider> =
+        Arc::new(CancellationAcknowledgingThreadToolProvider {
+            started: started_tx,
+            acknowledged: acknowledged_tx,
+        });
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(tool_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named("thread_submit", serde_json::json!({"task_name": "worker"})),
+    ]));
+    let inner = Arc::new(InMemorySessionStore::new());
+    let store = Arc::new(FaultingRuntimeStore::new(inner.clone()));
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client,
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            ThreadCoordinates::new("tenant_a", "user_1", "monitor-panic"),
+            ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3385,64 +3869,476 @@ async fn turn_cancellation_drops_every_independent_in_flight_tool_call() {
     host.submit(
         thread.context().coordinates.thread_id,
         "turn-1",
-        "cancel batch",
+        "interrupt",
     )
     .await
     .unwrap();
-    let mut started = vec![
-        timeout(Duration::from_secs(2), started_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        timeout(Duration::from_secs(2), started_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-    ];
-    started.sort();
-    assert_eq!(started, vec!["call-first", "call-second"]);
-    assert_eq!(active.load(Ordering::SeqCst), 2);
-
-    host.cancel(thread.context().coordinates.thread_id, "stop batch")
+    timeout(Duration::from_secs(2), started_rx.recv())
         .await
+        .unwrap()
         .unwrap();
-    assert_cancelled(&mut events, "stop batch").await;
-    let mut dropped = vec![
-        timeout(Duration::from_secs(2), dropped_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        timeout(Duration::from_secs(2), dropped_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-    ];
-    dropped.sort();
-    assert_eq!(dropped, vec!["call-first", "call-second"]);
-    assert_eq!(active.load(Ordering::SeqCst), 0);
+    store.panic_next("build_context", "monitor settlement read");
+    host.cancel(
+        thread.context().coordinates.thread_id,
+        "cancel monitor panic",
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(2), acknowledged_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_cancelled(&mut events, "cancel monitor panic").await;
 
-    let records = store
+    let records = inner
         .read_events(
             &EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap();
-    let requests = records
-        .iter()
-        .filter(|event| event.kind == EventKind::ToolCallRequested)
-        .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 2);
-    assert!(
-        requests
-            .iter()
-            .all(|event| !event.payload["holds"].is_null())
-    );
-    assert!(
+    assert_eq!(
         records
             .iter()
-            .all(|event| event.kind != EventKind::ToolCallCompleted)
+            .filter(|event| {
+                event.kind == EventKind::ToolCallCompleted
+                    && event.payload["subject"]["call_id"] == "call_1|fc_1"
+            })
+            .count(),
+        1
     );
+    let context = inner
+        .build_context(&thread.context().coordinates)
+        .await
+        .unwrap();
+    assert_eq!(
+        context
+            .messages
+            .iter()
+            .filter(|message| matches!(
+                message,
+                CanonicalMessage::ToolResult { tool_call_id, .. }
+                    if tool_call_id == "call_1|fc_1"
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failure() {
+    for fail_after_append in [false, true] {
+        let inner = Arc::new(InMemorySessionStore::new());
+        let coordinates = ThreadCoordinates::new(
+            "tenant_a",
+            "user_1",
+            if fail_after_append {
+                "detached-fail-after"
+            } else {
+                "detached-fail-before"
+            },
+        );
+        let request = inner
+            .append_events(
+                &EventStreamId::for_thread(&coordinates),
+                vec![NewEventRecord::discharged(
+                    coordinates.clone(),
+                    EventKind::ToolCallRequested,
+                    serde_json::to_value(ToolCallRequestedPayload {
+                        subject: ToolCallSubject {
+                            turn_id: "turn-1".to_string(),
+                            call_id: "call-1".to_string(),
+                        },
+                        snapshot_id: "snapshot-1".to_string(),
+                        tool_name: "thread_status".to_string(),
+                        arguments: serde_json::json!({}),
+                        holds: Vec::new(),
+                    })
+                    .unwrap(),
+                    EventProvenance {
+                        source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                        discharged_by: Some("test:detached-retry".to_string()),
+                        function: Some("tool_request/v1".to_string()),
+                        ..EventProvenance::default()
+                    },
+                )],
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        inner
+            .append_events(
+                &EventStreamId::for_thread(&coordinates),
+                vec![NewEventRecord::witnessed(
+                    coordinates.clone(),
+                    EventKind::ToolCallCompleted,
+                    serde_json::json!({
+                        "subject": {"turn_id": "unrelated-turn"},
+                        "malformed": true
+                    }),
+                )],
+            )
+            .await
+            .unwrap();
+        let faulting = FaultingRuntimeStore::new(inner.clone());
+        let faulting = if fail_after_append {
+            faulting.fail_nth_after(
+                "append_events_fenced",
+                1,
+                "completion append failed after commit",
+            )
+        } else {
+            faulting.fail_nth(
+                "append_events_fenced",
+                1,
+                "completion append failed before commit",
+            )
+        };
+        let services = RuntimeServices::new(Arc::new(faulting), RuntimeExecutionPolicy::default());
+        let turn_context = TurnContext::new(
+            ThreadContext::root(coordinates.clone()),
+            "turn-1",
+            &TurnInput::text(""),
+            CancellationToken::new(),
+        );
+        let (events, mut event_rx) = broadcast::channel(16);
+        let append = tokio::spawn({
+            let services = services.clone();
+            let turn_context = turn_context.clone();
+            async move {
+                append_detached_tool_call_outcome_until_recorded(
+                    &services,
+                    &turn_context,
+                    coordinates.thread_id,
+                    &events,
+                    Ok(PreparedToolCallOutcome::Completed {
+                        call_id: "call-1".to_string(),
+                        tool_name: "thread_status".to_string(),
+                        snapshot_id: "snapshot-1".to_string(),
+                        source_event_id: request.id,
+                        finish_order: 0,
+                        cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
+                        outcome: ToolExecutionOutcome {
+                            result: CanonicalMessage::tool_result(
+                                "call-1",
+                                "thread_status",
+                                "cancelled after grace",
+                                true,
+                            ),
+                            hook_records: Vec::new(),
+                            pre_model_contexts: Vec::new(),
+                            post_model_contexts: Vec::new(),
+                            permission_decision: None,
+                            duration_ms: 0,
+                        },
+                    }),
+                )
+                .await;
+            }
+        });
+        loop {
+            if matches!(
+                event_rx.recv().await.unwrap(),
+                ThreadEvent::Runtime {
+                    event: RuntimeEvent {
+                        kind: RuntimeEventKind::Recovery { ref action, .. },
+                        ..
+                    },
+                    ..
+                } if action == "retry_detached_tool_completion"
+            ) {
+                break;
+            }
+        }
+        tokio::time::advance(DETACHED_COMPLETION_RETRY_DELAY).await;
+        append.await.unwrap();
+
+        let completions = inner
+            .read_events(&EventStreamId::for_thread(&coordinates), None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| {
+                event.kind == EventKind::ToolCallCompleted
+                    && event.payload["subject"]["turn_id"] == "turn-1"
+                    && event.payload["subject"]["call_id"] == "call-1"
+            })
+            .count();
+        let results = inner
+            .build_context(&coordinates)
+            .await
+            .unwrap()
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.kind,
+                    SessionEntryKind::Message {
+                        message: CanonicalMessage::ToolResult { tool_call_id, .. }
+                    } if tool_call_id == "call-1"
+                )
+            })
+            .count();
+        assert_eq!(completions, 1);
+        assert_eq!(results, 1);
+    }
+}
+
+#[tokio::test]
+async fn completion_append_is_subject_idempotent_under_concurrency() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "completion-race");
+    let append = || {
+        append_tool_completion_event(
+            &services,
+            &coordinates,
+            "turn-1".to_string(),
+            "call-1".to_string(),
+            "snapshot-1".to_string(),
+            "thread_status".to_string(),
+            false,
+            Some(0),
+            Some(0),
+            Some(ToolCallCancellation::CancelledExceededGrace),
+        )
+    };
+
+    let (left, right) = tokio::join!(append(), append());
+    left.unwrap();
+    right.unwrap();
+
+    let completions = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .count();
+    assert_eq!(completions, 1);
+}
+
+#[tokio::test]
+async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_window() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let parent_coordinates = ThreadCoordinates::new("tenant_a", "user_1", "cancel-sweep-parent");
+    let child_coordinates = ThreadCoordinates::new("tenant_a", "user_1", "cancel-sweep-child");
+    let turn_submitted = store
+        .append_events(
+            &EventStreamId::for_thread(&child_coordinates),
+            vec![NewEventRecord::witnessed(
+                child_coordinates.clone(),
+                EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "turn-cancelled"}),
+            )],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let request = |call_id: &str| {
+        NewEventRecord::discharged(
+            child_coordinates.clone(),
+            EventKind::ToolCallRequested,
+            serde_json::to_value(ToolCallRequestedPayload {
+                subject: ToolCallSubject {
+                    turn_id: "turn-cancelled".to_string(),
+                    call_id: call_id.to_string(),
+                },
+                snapshot_id: "snapshot-cancelled".to_string(),
+                tool_name: "thread_status".to_string(),
+                arguments: serde_json::json!({"task_name": "worker"}),
+                holds: Vec::new(),
+            })
+            .unwrap(),
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+                source_event_ids: vec![turn_submitted.id],
+                discharged_by: Some("test:cancel-sweep".to_string()),
+                function: Some("tool_request/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        )
+    };
+    let requests = store
+        .append_events(
+            &EventStreamId::for_thread(&child_coordinates),
+            vec![
+                request("call-dangling"),
+                request("call-dangling"),
+                request("call-already-completed"),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .append_with_provenance(
+            &child_coordinates,
+            None,
+            SessionEntryKind::Message {
+                message: CanonicalMessage::tool_result(
+                    "call-dangling",
+                    "thread_status",
+                    "result persisted before the completion fact",
+                    false,
+                ),
+            },
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+                source_event_ids: vec![requests[0].id],
+                discharged_by: Some("test:partial-detached-append".to_string()),
+                function: Some("session_entry_append/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append_events(
+            &EventStreamId::new(format!("control:{}", parent_coordinates.thread_id)),
+            vec![
+                NewEventRecord::witnessed(
+                    parent_coordinates.clone(),
+                    EventKind::ThreadJoined,
+                    serde_json::json!({"malformed": "unrelated legacy join"}),
+                ),
+                NewEventRecord::discharged(
+                    parent_coordinates.clone(),
+                    EventKind::ThreadJoined,
+                    serde_json::json!({
+                        "child_thread_id": child_coordinates.thread_id,
+                        "terminal_state": "cancelled"
+                    }),
+                    EventProvenance {
+                        source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+                        source_event_ids: vec![turn_submitted.id],
+                        discharged_by: Some("test:interrupt".to_string()),
+                        function: Some("thread_join/v1".to_string()),
+                        ..EventProvenance::default()
+                    },
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .append_events(
+            &EventStreamId::for_thread(&child_coordinates),
+            vec![NewEventRecord::discharged(
+                child_coordinates.clone(),
+                EventKind::ToolCallCompleted,
+                serde_json::to_value(ToolCallCompletedPayload {
+                    subject: ToolCallSubject {
+                        turn_id: "turn-cancelled".to_string(),
+                        call_id: "call-already-completed".to_string(),
+                    },
+                    snapshot_id: "snapshot-cancelled".to_string(),
+                    tool_name: "thread_status".to_string(),
+                    success: true,
+                    duration_ms: Some(7),
+                    finish_order: Some(4),
+                    cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
+                })
+                .unwrap(),
+                EventProvenance {
+                    source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+                    source_event_ids: vec![requests[2].id],
+                    discharged_by: Some("test:late-detached-completion".to_string()),
+                    function: Some("tool_result/v1".to_string()),
+                    ..EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    store
+        .append_events(
+            &EventStreamId::for_thread(&child_coordinates),
+            vec![
+                NewEventRecord::witnessed(
+                    child_coordinates.clone(),
+                    EventKind::ToolCallRequested,
+                    serde_json::json!({
+                        "subject": {"turn_id": "unrelated-turn"},
+                        "malformed": true
+                    }),
+                ),
+                NewEventRecord::witnessed(
+                    child_coordinates.clone(),
+                    EventKind::ToolCallCompleted,
+                    serde_json::json!({
+                        "subject": {"turn_id": "unrelated-turn"},
+                        "malformed": true
+                    }),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let client: Arc<dyn ProviderClient> = Arc::new(RecordingClient::default());
+    let host = RuntimeHost::with_session_store(
+        Arc::new(CanonicalProviderRuntimeFactory::new(
+            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+            client,
+        )),
+        store.clone(),
+    );
+    let child = host
+        .load_thread_with_topology_and_metadata(
+            child_coordinates.clone(),
+            ThreadTopology::spawned_from(parent_coordinates.thread_id),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    wait_for_tool_completion_count(&store, &child_coordinates, 3).await;
+
+    let completed = store
+        .read_events(&EventStreamId::for_thread(&child_coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .filter_map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).ok())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed.len(),
+        2,
+        "the late completion must not be duplicated"
+    );
+    let recovered = completed
+        .iter()
+        .find(|payload| payload.subject.call_id == "call-dangling")
+        .unwrap();
+    assert!(
+        recovered.success,
+        "recovery must preserve the persisted natural tool outcome"
+    );
+    assert_eq!(
+        recovered.cancellation,
+        Some(ToolCallCancellation::CancelledExceededGrace)
+    );
+    assert_eq!(recovered.finish_order, Some(5));
+    assert_eq!(
+        child
+            .session_context()
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|message| matches!(
+                message,
+                CanonicalMessage::ToolResult { tool_call_id, .. }
+                    if tool_call_id == "call-dangling"
+            ))
+            .count(),
+        1,
+        "recovery must reuse a canonical result persisted before its completion fact"
+    );
+    let _ = child;
+    host.shutdown_all().await.unwrap();
 }
 
 #[tokio::test]
@@ -4862,6 +5758,51 @@ async fn append_tool_controller_bind_receipt(
         .unwrap();
 }
 
+async fn append_manifest_runtime_grace(
+    store: &InMemorySessionStore,
+    coordinates: &ThreadCoordinates,
+    cancellation_grace_ms: u64,
+) {
+    let receipt = AgentManifestBindReceipt {
+        ref_uri: "agent://test/interruption".to_string(),
+        manifest_hash: "snapshot-interruption".to_string(),
+        model_profile_id: "default".to_string(),
+        provider_id: "test".to_string(),
+        model_id: "model".to_string(),
+        tool_ids: Vec::new(),
+        operation_bindings: Vec::new(),
+        skill_packages: Vec::new(),
+        static_context_segments: Vec::new(),
+        tool_universes: Vec::new(),
+        couplings: Vec::new(),
+        granted: Vec::new(),
+        effective_runtime: AgentManifestRuntimeDefaults {
+            cancellation_grace_ms: Some(cancellation_grace_ms),
+            ..AgentManifestRuntimeDefaults::default()
+        },
+        overridden_keys: vec!["cancellation_grace_ms".to_string()],
+        placement: None,
+        workspace: None,
+    };
+    store
+        .append_events(
+            &EventStreamId::for_thread(coordinates),
+            vec![NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::ManifestBindCompleted,
+                serde_json::to_value(receipt).unwrap(),
+                EventProvenance {
+                    source_streams: vec![EventStreamId::for_thread(coordinates)],
+                    discharged_by: Some("binder:manifest".to_string()),
+                    function: Some("bind/v1".to_string()),
+                    ..EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+}
+
 async fn append_witnessed_tool_suspension(
     store: &InMemorySessionStore,
     coordinates: &ThreadCoordinates,
@@ -5853,6 +6794,35 @@ async fn assert_cancelled(events: &mut broadcast::Receiver<ThreadEvent>, expecte
             return;
         }
     }
+}
+
+fn drain_has_cancelled(events: &mut broadcast::Receiver<ThreadEvent>) -> bool {
+    let mut cancelled = false;
+    while let Ok(event) = events.try_recv() {
+        cancelled |= matches!(event, ThreadEvent::Cancelled { .. });
+    }
+    cancelled
+}
+
+async fn wait_for_tool_completion_count(
+    store: &InMemorySessionStore,
+    coordinates: &ThreadCoordinates,
+    expected: usize,
+) {
+    for _ in 0..100 {
+        let count = store
+            .read_events(&EventStreamId::for_thread(coordinates), None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ToolCallCompleted)
+            .count();
+        if count == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("tool completion count did not reach {expected}");
 }
 
 async fn assert_signal(

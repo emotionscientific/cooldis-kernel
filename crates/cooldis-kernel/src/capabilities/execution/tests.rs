@@ -9,7 +9,7 @@ use crate::{
 use object_store::memory::InMemory as InMemoryObjectStore;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -907,6 +907,119 @@ impl ExternalCommandExecutor for SlowDeadlineExecutor {
     }
 }
 
+struct SerialNonObservingExternalExecutor {
+    started: AtomicUsize,
+    started_notify: tokio::sync::Notify,
+    first_released: AtomicBool,
+    first_release: tokio::sync::Notify,
+}
+
+impl SerialNonObservingExternalExecutor {
+    async fn wait_for_started(&self, count: usize) {
+        while self.started.load(Ordering::SeqCst) < count {
+            self.started_notify.notified().await;
+        }
+    }
+
+    fn release_first(&self) {
+        self.first_released.store(true, Ordering::SeqCst);
+        self.first_release.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl ExternalCommandExecutor for SerialNonObservingExternalExecutor {
+    async fn exec(
+        &self,
+        request: ExternalCommandRequest,
+    ) -> CooldisProcessResult<ExternalCommandResult> {
+        let order = self.started.fetch_add(1, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        if order == 0 {
+            while !self.first_released.load(Ordering::SeqCst) {
+                self.first_release.notified().await;
+            }
+        }
+        let label = request.label();
+        Ok(ExternalCommandResult::new(VirtualCommandOutput {
+            stdout: format!("{label}\n").repeat(4_000),
+            stderr: String::new(),
+            exit_code: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }))
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn abandoned_bash_invocation_keeps_the_harness_mutex_and_serializes_the_next_call() {
+    let executor = Arc::new(SerialNonObservingExternalExecutor {
+        started: AtomicUsize::new(0),
+        started_notify: tokio::sync::Notify::new(),
+        first_released: AtomicBool::new(false),
+        first_release: tokio::sync::Notify::new(),
+    });
+    let provider = Arc::new(BashToolProvider::new(
+        VirtualBashRuntimeConfig {
+            max_output_bytes: 64,
+            ..VirtualBashRuntimeConfig::default()
+        }
+        .with_execution_policy(BashExecutionPolicy::host_always())
+        .with_external_executor(executor.clone()),
+    ));
+    let cancellation = CancellationToken::new();
+    let first = tokio::spawn({
+        let provider = Arc::clone(&provider);
+        let cancellation = cancellation.clone();
+        async move {
+            provider
+                .invoke_tool_call_cancellable(
+                    AgentKernelToolCall {
+                        call_id: "call-abandoned".to_string(),
+                        tool_name: BASH_TOOL.to_string(),
+                        arguments: serde_json::json!({"command": "first"}),
+                        turn_context: None,
+                    },
+                    ToolInvocationCancellation::new(cancellation, Duration::from_millis(10)),
+                )
+                .await
+        }
+    });
+    executor.wait_for_started(1).await;
+    cancellation.cancel();
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+
+    let mut second = std::pin::pin!(provider.invoke_tool_call(AgentKernelToolCall {
+        call_id: "call-abandoned".to_string(),
+        tool_name: BASH_TOOL.to_string(),
+        arguments: serde_json::json!({"command": "second"}),
+        turn_context: None,
+    }));
+    assert!(matches!(
+        futures_util::poll!(&mut second),
+        std::task::Poll::Pending
+    ));
+    assert_eq!(
+        executor.started.load(Ordering::SeqCst),
+        1,
+        "the next call must serialize behind the abandoned call's harness mutex"
+    );
+
+    executor.release_first();
+    first.await.unwrap().unwrap();
+    second.await.unwrap();
+    assert_eq!(executor.started.load(Ordering::SeqCst), 2);
+    let harness = provider.harness.lock().await;
+    let stored = harness
+        .as_ref()
+        .unwrap()
+        .read_file("/spill/call-abandoned.stdout.txt")
+        .await
+        .unwrap();
+    assert_eq!(stored, b"first\n".repeat(4_000));
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn harness_execute_process_marks_external_timeout_from_shared_deadline() {
     let mut config = VirtualBashRuntimeConfig::default()
@@ -1389,6 +1502,88 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
     assert_eq!(completed["status"].as_str(), Some("completed"));
     assert!(completed["stdout"].as_str().unwrap().contains("done"));
     assert_eq!(completed["process_id"].as_str(), Some(process_id.as_str()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_process_poll_terminates_the_live_handle_and_returns_its_snapshot() {
+    let store: Arc<dyn crate::RuntimeStore> = Arc::new(crate::InMemorySessionStore::new());
+    let coordinates = ThreadCoordinates::new("tenant", "user", "process-cancel");
+    let dispatcher = crate::kernel::process_handle_dispatch::test_process_dispatcher(
+        Arc::clone(&store),
+        coordinates.clone(),
+    );
+    let turn_context = crate::TurnContext::new(
+        crate::ThreadContext::root(coordinates),
+        "process-cancel-turn",
+        &crate::TurnInput::text("process cancellation test"),
+        CancellationToken::new(),
+    )
+    .snapshot();
+    let provider = Arc::new(
+        BashToolProvider::new(
+            VirtualBashRuntimeConfig::default()
+                .with_execution_policy(BashExecutionPolicy::host_always())
+                .with_host_bash_executor("/"),
+        )
+        .with_process_dispatcher(dispatcher),
+    );
+    let started = provider
+        .invoke_tool_call(AgentKernelToolCall {
+            call_id: "call_process_start_for_cancel".to_string(),
+            tool_name: PROCESS_EXEC_TOOL.to_string(),
+            arguments: serde_json::json!({
+                "command": "sleep 60",
+                "yield_time_ms": 1,
+                "timeout_ms": 60_000,
+                "output_bytes_cap": 1024
+            }),
+            turn_context: Some(turn_context),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let (started, _) = tool_result_json(started);
+    let process_id = started["process_id"].as_str().unwrap().to_string();
+    let cancellation = CancellationToken::new();
+    let poll = tokio::spawn({
+        let provider = Arc::clone(&provider);
+        let process_id = process_id.clone();
+        let cancellation = cancellation.clone();
+        async move {
+            provider
+                .invoke_tool_call_cancellable(
+                    AgentKernelToolCall {
+                        call_id: "call_process_cancel_poll".to_string(),
+                        tool_name: PROCESS_EXEC_TOOL.to_string(),
+                        arguments: serde_json::json!({
+                            "process_id": process_id,
+                            "yield_time_ms": 10_000,
+                            "output_bytes_cap": 1024
+                        }),
+                        turn_context: None,
+                    },
+                    ToolInvocationCancellation::new(cancellation, Duration::from_secs(1)),
+                )
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    cancellation.cancel();
+
+    let AgentKernelToolOutcome::Completed(Some(cancelled)) =
+        tokio::time::timeout(Duration::from_secs(2), poll)
+            .await
+            .expect("cancelled process poll did not return promptly")
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("process poll did not return a completed tool result");
+    };
+    let (cancelled, is_error) = tool_result_json(cancelled);
+    assert!(is_error, "{cancelled}");
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["process_id"], process_id);
 }
 
 #[tokio::test]

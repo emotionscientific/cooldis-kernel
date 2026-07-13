@@ -264,6 +264,46 @@ impl AgentToolRouter {
         }
     }
 
+    pub async fn invoke_tool_call_cancellable_for_turn(
+        &self,
+        turn_context: &TurnContext,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+        cancellation: ToolInvocationCancellation,
+    ) -> CanonicalMessage {
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        match self
+            .invoke_tool_call_outcome_message(
+                Some(turn_context),
+                &call_id,
+                &tool_name,
+                arguments,
+                Some(cancellation),
+            )
+            .await
+        {
+            Ok(AgentKernelToolOutcome::Completed(Some(message))) => message,
+            Ok(AgentKernelToolOutcome::Completed(None)) => CanonicalMessage::tool_result(
+                call_id,
+                tool_name.clone(),
+                format!("unknown tool {tool_name:?}"),
+                true,
+            ),
+            Ok(AgentKernelToolOutcome::Pending(pending)) => CanonicalMessage::tool_result(
+                call_id,
+                tool_name.clone(),
+                format!(
+                    "tool {tool_name:?} returned pending process {} from {:?}, but this caller expects a completed tool result",
+                    pending.process_id, pending.backend
+                ),
+                true,
+            ),
+            Err(err) => CanonicalMessage::tool_result(call_id, tool_name, err.to_string(), true),
+        }
+    }
+
     pub async fn invoke_tool_call_outcome(
         &self,
         call_id: impl Into<String>,
@@ -272,7 +312,7 @@ impl AgentToolRouter {
     ) -> CooldisResult<AgentKernelToolOutcome> {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
-        self.invoke_tool_call_outcome_message(None, &call_id, &tool_name, arguments)
+        self.invoke_tool_call_outcome_message(None, &call_id, &tool_name, arguments, None)
             .await
     }
 
@@ -285,8 +325,14 @@ impl AgentToolRouter {
     ) -> CooldisResult<AgentKernelToolOutcome> {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
-        self.invoke_tool_call_outcome_message(Some(turn_context), &call_id, &tool_name, arguments)
-            .await
+        self.invoke_tool_call_outcome_message(
+            Some(turn_context),
+            &call_id,
+            &tool_name,
+            arguments,
+            None,
+        )
+        .await
     }
 
     pub async fn route_tool_call(
@@ -316,7 +362,7 @@ impl AgentToolRouter {
         arguments: Value,
     ) -> CooldisResult<CanonicalMessage> {
         match self
-            .invoke_tool_call_outcome_message(turn_context, call_id, tool_name, arguments)
+            .invoke_tool_call_outcome_message(turn_context, call_id, tool_name, arguments, None)
             .await?
         {
             AgentKernelToolOutcome::Completed(Some(message)) => Ok(message),
@@ -338,6 +384,7 @@ impl AgentToolRouter {
         call_id: &str,
         tool_name: &str,
         arguments: Value,
+        cancellation: Option<ToolInvocationCancellation>,
     ) -> CooldisResult<AgentKernelToolOutcome> {
         if let Some(projection) = self.projection_for_tool_name(tool_name).await? {
             if projection.abi.has_hidden_durable_sink() {
@@ -377,14 +424,20 @@ impl AgentToolRouter {
         }
 
         if let Some(kernel_tool_provider) = self.kernel_tool_provider_for_name(tool_name).await {
-            let outcome = kernel_tool_provider
-                .invoke_tool_call_outcome(AgentKernelToolCall {
-                    call_id: call_id.to_string(),
-                    tool_name: tool_name.to_string(),
-                    arguments,
-                    turn_context: turn_context.map(TurnContext::snapshot),
-                })
-                .await?;
+            let call = AgentKernelToolCall {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments,
+                turn_context: turn_context.map(TurnContext::snapshot),
+            };
+            let outcome = match cancellation {
+                Some(cancellation) => {
+                    kernel_tool_provider
+                        .invoke_tool_call_cancellable(call, cancellation)
+                        .await?
+                }
+                None => kernel_tool_provider.invoke_tool_call_outcome(call).await?,
+            };
             match outcome {
                 AgentKernelToolOutcome::Completed(Some(_)) | AgentKernelToolOutcome::Pending(_) => {
                     return Ok(outcome);

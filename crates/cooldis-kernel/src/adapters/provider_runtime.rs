@@ -24,47 +24,125 @@ use crate::{
     AllowAllToolPermissionGate, BashToolProvider, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
     COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, CanonicalContent, CanonicalMessage,
     CompactionPolicy, CompactionTrigger, CompiledAgentContext, CooldisError, CooldisResult,
-    EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId,
-    HookHandlerSpec, HookMutationWitness, HookPipeline, HookRunRecord,
-    KernelNotifyOperationProvider, KernelOperationDispatcher, KernelProcessOperationProvider,
-    KernelScheduleOperationProvider, KernelThreadOperationProvider, KernelThreadSpawnAgentResolver,
-    NewEventRecord, NewObservationRecord, ObservationProvenance, OperationRegistry,
-    PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient, ProviderError,
-    ProviderRequest, ProviderRequestMode, ProviderStreamEvent, ReplayTransformCounts,
-    RuntimeEventKind, RuntimeModelRequestErrorClass, RuntimeModelRequestMode,
-    RuntimeModelRequestPurpose, RuntimePermissionDecision, RuntimeServices, RuntimeTerminalState,
-    RuntimeToolLogLevel, RuntimeUsage, SessionEntry, SessionEntryId, SessionEntryKind,
-    SessionStartHookRequest, StopHookRequest, SystemBlock,
+    DEFAULT_TOOL_CANCELLATION_GRACE, EventKind, EventProvenance, EventRecord, EventRecordId,
+    EventSequence, EventStreamId, HistoryError, HookHandlerSpec, HookMutationWitness, HookPipeline,
+    HookRunRecord, KernelNotifyOperationProvider, KernelOperationDispatcher,
+    KernelProcessOperationProvider, KernelScheduleOperationProvider, KernelThreadOperationProvider,
+    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationProvenance,
+    OperationRegistry, PostCompactHookRequest, PreCompactHookRequest, ProviderApi, ProviderClient,
+    ProviderError, ProviderRequest, ProviderRequestMode, ProviderStreamEvent,
+    ReplayTransformCounts, RuntimeEventKind, RuntimeModelRequestErrorClass,
+    RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
+    RuntimeServices, RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, SessionEntry,
+    SessionEntryId, SessionEntryKind, SessionStartHookRequest, StopHookRequest, SystemBlock,
     THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
     ThinkingConfig, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
-    ThreadTerminalState, ToolCallCompletedPayload, ToolCallDecision, ToolCallRequestedPayload,
-    ToolCallSubject, ToolDecisionRequest, ToolDefinition, ToolExecutionInterceptor,
-    ToolExecutionOutcome, ToolExecutionRequest, ToolPermissionDecision, ToolPermissionGate,
-    TurnBudget, TurnContext, TurnInput, TurnSubmissionMode, UserPromptSubmitHookRequest,
+    ThreadTerminalState, ToolCallCancellation, ToolCallCompletedPayload, ToolCallDecision,
+    ToolCallRequestedPayload, ToolCallSubject, ToolDecisionRequest, ToolDefinition,
+    ToolExecutionInterceptor, ToolExecutionOutcome, ToolExecutionRequest,
+    ToolInvocationCancellation, ToolPermissionDecision, ToolPermissionGate, TurnBudget,
+    TurnContext, TurnInput, TurnSubmissionMode, UserPromptSubmitHookRequest,
     VirtualBashRuntimeConfig, active_manifest_bind_receipt, active_tool_controller_for_request,
     compile_provider_request_context, decide_tool_call, deterministic_compaction_summary,
     emit_runtime_event, normalize_history_for_target,
 };
 use async_trait::async_trait;
-use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 const MAX_TOOL_ROUTER_ROUNDS: usize = 8;
+const DETACHED_COMPLETION_RETRY_DELAY: Duration = Duration::from_millis(250);
+const TOOL_INVOCATION_AWAITED: u8 = 0;
+const TOOL_INVOCATION_ABANDONED: u8 = 1;
+const TOOL_INVOCATION_SETTLED: u8 = 2;
 pub(crate) const THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA: &str =
     "cooldis.agent.runtime.max_tool_rounds";
 const HOOK_MUTATION_WITNESS_OBSERVATION_KIND: &str = "host.hook.mutation_witnessed";
 const HOOK_MUTATION_WITNESS_OBSERVATION_SCHEMA_V1: &str =
     "cooldis.observation.host_hook_mutation/1";
+
+fn reattach_late_tool_result_entries(entries: Vec<SessionEntry>) -> Vec<SessionEntry> {
+    let mut issuer_by_call_id = HashMap::<String, Option<usize>>::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let SessionEntryKind::Message {
+            message: CanonicalMessage::Assistant { content, .. },
+        } = &entry.kind
+        else {
+            continue;
+        };
+        for block in content {
+            let CanonicalContent::ToolCall { id, .. } = block else {
+                continue;
+            };
+            issuer_by_call_id
+                .entry(id.clone())
+                .and_modify(|issuer| *issuer = None)
+                .or_insert(Some(index));
+        }
+    }
+
+    let mut results_before = BTreeMap::<usize, Vec<usize>>::new();
+    let mut moved = HashSet::new();
+    for (result_index, entry) in entries.iter().enumerate() {
+        let SessionEntryKind::Message {
+            message: CanonicalMessage::ToolResult { tool_call_id, .. },
+        } = &entry.kind
+        else {
+            continue;
+        };
+        let Some(Some(issuer_index)) = issuer_by_call_id.get(tool_call_id).copied() else {
+            continue;
+        };
+        if issuer_index >= result_index
+            || entries[issuer_index + 1..result_index]
+                .iter()
+                .any(|entry| matches!(&entry.kind, SessionEntryKind::Compaction { .. }))
+        {
+            continue;
+        }
+        let Some(turn_input_index) = (issuer_index + 1..result_index).find(|&index| {
+            entries[index].turn_id.is_some()
+                && matches!(
+                    &entries[index].kind,
+                    SessionEntryKind::Message {
+                        message: CanonicalMessage::User { .. }
+                    }
+                )
+        }) else {
+            continue;
+        };
+        results_before
+            .entry(turn_input_index)
+            .or_default()
+            .push(result_index);
+        moved.insert(result_index);
+    }
+    if moved.is_empty() {
+        return entries;
+    }
+
+    let mut output = Vec::with_capacity(entries.len());
+    for index in 0..entries.len() {
+        if let Some(result_indices) = results_before.remove(&index) {
+            for result_index in result_indices {
+                output.push(entries[result_index].clone());
+            }
+        }
+        if !moved.contains(&index) {
+            output.push(entries[index].clone());
+        }
+    }
+    output
+}
 
 fn default_process_dispatcher_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -357,6 +435,19 @@ impl AgentRuntime for CanonicalProviderRuntime {
         let _ = events.send(ThreadEvent::Started {
             context: context.clone(),
         });
+        if let Err(err) =
+            sweep_cancelled_turn_tool_calls(&runtime, &context, &services, thread_id, &events).await
+        {
+            fail_provider_turn(
+                &coordinates,
+                thread_id,
+                &events,
+                &status,
+                "tool_cancellation_recovery",
+                err.to_string(),
+            );
+            return;
+        }
         match runtime
             .run_session_start_hooks(&context, &services, thread_id, &events)
             .await
@@ -658,11 +749,13 @@ impl CanonicalProviderRuntime {
             .iter()
             .map(|steer| steer.entry_id)
             .collect::<HashSet<_>>();
-        let assembly_session_entries = session_entries
-            .iter()
-            .filter(|entry| !steering_entry_ids.contains(&entry.entry_id))
-            .cloned()
-            .collect();
+        let assembly_session_entries = reattach_late_tool_result_entries(
+            session_entries
+                .iter()
+                .filter(|entry| !steering_entry_ids.contains(&entry.entry_id))
+                .cloned()
+                .collect(),
+        );
         let memory_contexts = services
             .build_recall_read_plan_contexts(coordinates)
             .await?;
@@ -797,6 +890,216 @@ impl CanonicalProviderRuntime {
         }
         tools
     }
+}
+
+/// Settles interrupted child-turn requests left dangling by daemon shutdown.
+///
+/// Both streams are read through their current tails before deciding what is
+/// missing. In particular, a completion that legally follows the parent's
+/// terminal `thread.joined` is included and is never overwritten by recovery.
+async fn sweep_cancelled_turn_tool_calls(
+    runtime: &CanonicalProviderRuntime,
+    thread_context: &ThreadContext,
+    services: &RuntimeServices,
+    thread_id: crate::ThreadId,
+    events: &broadcast::Sender<ThreadEvent>,
+) -> CooldisResult<()> {
+    let Some(parent_thread_id) = thread_context.parent_thread_id else {
+        return Ok(());
+    };
+    let coordinates = &thread_context.coordinates;
+    let thread_events = services
+        .runtime_store()
+        .read_events(&EventStreamId::for_thread(coordinates), None)
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?;
+    let submitted_turns = thread_events
+        .iter()
+        .filter(|event| event.kind == EventKind::TurnSubmitted)
+        .filter_map(|event| {
+            event
+                .payload
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .map(|turn_id| (event.id, turn_id.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut parent_coordinates = coordinates.clone();
+    parent_coordinates.thread_id = parent_thread_id;
+    let parent_events = services
+        .runtime_store()
+        .read_events(&crate::control_stream_id(&parent_coordinates), None)
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?;
+    let mut cancelled_turns = BTreeSet::new();
+    let child_thread_id = coordinates.thread_id.to_string();
+    for event in parent_events
+        .iter()
+        .filter(|event| event.kind == EventKind::ThreadJoined)
+    {
+        if event.payload.get("child_thread_id").and_then(Value::as_str)
+            != Some(child_thread_id.as_str())
+            || event.payload.get("terminal_state").and_then(Value::as_str) != Some("cancelled")
+        {
+            continue;
+        }
+        for source_event_id in &event.provenance.source_event_ids {
+            if let Some(turn_id) = submitted_turns.get(source_event_id) {
+                cancelled_turns.insert(turn_id.clone());
+            }
+        }
+    }
+    if cancelled_turns.is_empty() {
+        return Ok(());
+    }
+
+    let mut completed = BTreeSet::new();
+    let mut next_finish_order = HashMap::<String, u64>::new();
+    let mut requests = Vec::new();
+    let mut requested = BTreeSet::new();
+    for event in &thread_events {
+        match event.kind {
+            EventKind::ToolCallCompleted => {
+                let Some(turn_id) = event
+                    .payload
+                    .get("subject")
+                    .and_then(|subject| subject.get("turn_id"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                if !cancelled_turns.contains(turn_id) {
+                    continue;
+                }
+                let payload = serde_json::from_value::<ToolCallCompletedPayload>(
+                    event.payload.clone(),
+                )
+                .map_err(|err| {
+                    CooldisError::History(format!(
+                        "tool.call.completed {} payload is invalid during cancellation recovery: {err}",
+                        event.id
+                    ))
+                })?;
+                next_finish_order
+                    .entry(payload.subject.turn_id.clone())
+                    .and_modify(|next| {
+                        *next = (*next).max(payload.finish_order.unwrap_or(0).saturating_add(1))
+                    })
+                    .or_insert_with(|| payload.finish_order.unwrap_or(0).saturating_add(1));
+                completed.insert(payload.subject);
+            }
+            EventKind::ToolCallRequested => {
+                let Some(turn_id) = event
+                    .payload
+                    .get("subject")
+                    .and_then(|subject| subject.get("turn_id"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                if !cancelled_turns.contains(turn_id) {
+                    continue;
+                }
+                let payload = serde_json::from_value::<ToolCallRequestedPayload>(
+                    event.payload.clone(),
+                )
+                .map_err(|err| {
+                    CooldisError::History(format!(
+                        "tool.call.requested {} payload is invalid during cancellation recovery: {err}",
+                        event.id
+                    ))
+                })?;
+                if requested.insert(payload.subject.clone()) {
+                    requests.push((event.id, payload));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (request_event_id, request) in requests {
+        if completed.contains(&request.subject) {
+            continue;
+        }
+        let finish_order = next_finish_order
+            .entry(request.subject.turn_id.clone())
+            .or_default();
+        let witness = WitnessedToolCall {
+            tool_call: ProviderToolCall {
+                id: request.subject.call_id.clone(),
+                name: request.tool_name.clone(),
+                arguments: request.arguments.clone(),
+            },
+            snapshot_id: request.snapshot_id.clone(),
+            request_event_id,
+            holds: request
+                .holds
+                .clone()
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| {
+                    CooldisError::History(format!(
+                        "tool hold payload is invalid during cancellation recovery: {err}"
+                    ))
+                })?,
+        };
+        let turn_context = runtime.turn_context(
+            thread_context,
+            request.subject.turn_id.clone(),
+            &TurnInput::text(""),
+            CancellationToken::new(),
+        );
+        let current_finish_order = *finish_order;
+        let outcome = cancelled_tool_call_outcome(
+            &witness,
+            current_finish_order,
+            ToolCallCancellation::CancelledExceededGrace,
+            "tool call was abandoned by an interrupt before daemon shutdown",
+        );
+        *finish_order = finish_order.saturating_add(1);
+        if let Some(result) = existing_tool_result_message(
+            services,
+            coordinates,
+            request_event_id,
+            &request.subject.call_id,
+        )
+        .await?
+        {
+            let success = matches!(
+                result,
+                CanonicalMessage::ToolResult {
+                    is_error: false,
+                    ..
+                }
+            );
+            append_tool_completion_event(
+                services,
+                coordinates,
+                request.subject.turn_id.clone(),
+                request.subject.call_id.clone(),
+                request.snapshot_id.clone(),
+                request.tool_name.clone(),
+                success,
+                Some(0),
+                Some(current_finish_order),
+                Some(ToolCallCancellation::CancelledExceededGrace),
+            )
+            .await?;
+        } else {
+            append_detached_tool_call_outcome(
+                services,
+                &turn_context,
+                thread_id,
+                events,
+                Ok(outcome),
+            )
+            .await?;
+        }
+        completed.insert(request.subject);
+    }
+    Ok(())
 }
 
 async fn run_idle_provider_command(
@@ -1260,11 +1563,18 @@ async fn generate_compaction_summary(
     let context = services
         .build_session_context(turn_context.coordinates())
         .await?;
-    let fallback = deterministic_compaction_summary(&context.messages);
-    if context.messages.is_empty() {
+    let mut messages = Vec::new();
+    crate::kernel::history::append_model_visible_messages(
+        &reattach_late_tool_result_entries(context.entries),
+        &mut messages,
+    );
+    let fallback = deterministic_compaction_summary(&messages);
+    if messages.is_empty() {
         return Ok(fallback);
     }
-    let mut request = runtime.config.request_from_messages(context.messages);
+    let normalized =
+        normalize_history_for_target(messages, &runtime.config.api, &runtime.config.provider);
+    let mut request = runtime.config.request_from_messages(normalized.messages);
     request.system.push(SystemBlock::text(
         "Summarize the conversation so far for continuation. Preserve decisions, open tasks, tool results, and constraints. Return only the summary.",
     ));
@@ -1684,6 +1994,26 @@ async fn run_provider_turn(
             return true;
         }
     };
+    let tool_cancellation_grace =
+        match active_manifest_bind_receipt(services.runtime_store().as_ref(), coordinates).await {
+            Ok(Some((_, receipt))) => receipt
+                .effective_runtime
+                .cancellation_grace_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_TOOL_CANCELLATION_GRACE),
+            Ok(None) => DEFAULT_TOOL_CANCELLATION_GRACE,
+            Err(err) => {
+                fail_provider_turn(
+                    coordinates,
+                    thread_id,
+                    events,
+                    status,
+                    "history",
+                    err.to_string(),
+                );
+                return true;
+            }
+        };
     let turn_cancellation = CancellationToken::new();
     let turn_context = runtime.turn_context(
         thread_context,
@@ -1791,6 +2121,7 @@ async fn run_provider_turn(
                     pending_commands,
                     &turn_cancellation,
                     false,
+                    false,
                 )
                 .await
                 {
@@ -1877,6 +2208,7 @@ async fn run_provider_turn(
                         pending_commands,
                         &turn_cancellation,
                         cancelled_reason.is_some(),
+                        false,
                     )
                     .await
                     {
@@ -1997,6 +2329,7 @@ async fn run_provider_turn(
                                         commands,
                                         runtime_cancellation,
                                         pending_commands,
+                                        tool_cancellation_grace,
                                     )
                                     .await
                                     {
@@ -2257,6 +2590,7 @@ async fn handle_active_provider_command(
     pending_commands: &mut VecDeque<ThreadCommand>,
     turn_cancellation: &CancellationToken,
     already_cancelled: bool,
+    defer_cancel_terminal: bool,
 ) -> ActiveProviderCommandOutcome {
     match command {
         Some(ThreadCommand::Cancel { reason }) => {
@@ -2269,14 +2603,16 @@ async fn handle_active_provider_command(
             if already_cancelled {
                 return ActiveProviderCommandOutcome::Continue;
             }
-            append_terminal_join_until_recorded(
-                services,
-                &turn_context.thread,
-                ThreadTerminalState::Cancelled,
-                Some(reason.clone()),
-                Some(turn_source_event_id),
-            )
-            .await;
+            if !defer_cancel_terminal {
+                append_terminal_join_until_recorded(
+                    services,
+                    &turn_context.thread,
+                    ThreadTerminalState::Cancelled,
+                    Some(reason.clone()),
+                    Some(turn_source_event_id),
+                )
+                .await;
+            }
             ActiveProviderCommandOutcome::Cancelled { reason }
         }
         Some(ThreadCommand::CancelTurn {
@@ -2295,14 +2631,16 @@ async fn handle_active_provider_command(
             if already_cancelled {
                 return ActiveProviderCommandOutcome::Continue;
             }
-            append_terminal_join_until_recorded(
-                services,
-                &turn_context.thread,
-                ThreadTerminalState::Cancelled,
-                Some(reason.clone()),
-                Some(turn_source_event_id),
-            )
-            .await;
+            if !defer_cancel_terminal {
+                append_terminal_join_until_recorded(
+                    services,
+                    &turn_context.thread,
+                    ThreadTerminalState::Cancelled,
+                    Some(reason.clone()),
+                    Some(turn_source_event_id),
+                )
+                .await;
+            }
             ActiveProviderCommandOutcome::Cancelled { reason }
         }
         Some(ThreadCommand::Shutdown) | None => {
@@ -2348,14 +2686,16 @@ async fn handle_active_provider_command(
                     Err(err) => {
                         let reason = err.to_string();
                         turn_cancellation.cancel();
-                        append_terminal_join_until_recorded(
-                            services,
-                            &turn_context.thread,
-                            ThreadTerminalState::Failed,
-                            Some(reason.clone()),
-                            Some(turn_source_event_id),
-                        )
-                        .await;
+                        if !defer_cancel_terminal {
+                            append_terminal_join_until_recorded(
+                                services,
+                                &turn_context.thread,
+                                ThreadTerminalState::Failed,
+                                Some(reason.clone()),
+                                Some(turn_source_event_id),
+                            )
+                            .await;
+                        }
                         return ActiveProviderCommandOutcome::Failed {
                             code: "history",
                             reason,
@@ -2389,14 +2729,16 @@ async fn handle_active_provider_command(
                 if already_cancelled {
                     return ActiveProviderCommandOutcome::Continue;
                 }
-                append_terminal_join_until_recorded(
-                    services,
-                    &turn_context.thread,
-                    ThreadTerminalState::Cancelled,
-                    Some(reason.clone()),
-                    Some(turn_source_event_id),
-                )
-                .await;
+                if !defer_cancel_terminal {
+                    append_terminal_join_until_recorded(
+                        services,
+                        &turn_context.thread,
+                        ThreadTerminalState::Cancelled,
+                        Some(reason.clone()),
+                        Some(turn_source_event_id),
+                    )
+                    .await;
+                }
                 ActiveProviderCommandOutcome::Cancelled { reason }
             }
         },
@@ -2498,6 +2840,7 @@ enum ResumedToolCallAction {
     Deny(String),
 }
 
+#[derive(Clone)]
 struct WitnessedToolCall {
     tool_call: ProviderToolCall,
     snapshot_id: String,
@@ -2505,6 +2848,7 @@ struct WitnessedToolCall {
     holds: Vec<tool_holds::ToolHold>,
 }
 
+#[derive(Clone)]
 enum PreparedToolCallOutcome {
     Completed {
         call_id: String,
@@ -2512,6 +2856,7 @@ enum PreparedToolCallOutcome {
         snapshot_id: String,
         source_event_id: EventRecordId,
         finish_order: u64,
+        cancellation: Option<ToolCallCancellation>,
         outcome: ToolExecutionOutcome,
     },
     Denied {
@@ -2529,6 +2874,12 @@ enum PreparedToolCallOutcome {
         approval_id: Option<String>,
         reason: Option<String>,
     },
+    Abandoned,
+}
+
+enum ToolCallMonitorOutcome {
+    Settled(CooldisResult<PreparedToolCallOutcome>),
+    Abandoned,
 }
 
 enum PreparedToolBatch {
@@ -2790,6 +3141,7 @@ async fn resume_pending_tool_call(
                 request.snapshot_id,
                 reason,
                 Some(0),
+                None,
                 resumed.id,
             )
             .await?;
@@ -2842,6 +3194,7 @@ async fn handle_tool_batch_command(
     events: &broadcast::Sender<ThreadEvent>,
     status: &watch::Sender<ThreadStatus>,
     pending_commands: &mut VecDeque<ThreadCommand>,
+    defer_cancel_terminal: bool,
 ) -> Option<ToolBatchAwaitOutcome> {
     match handle_active_provider_command(
         command,
@@ -2856,6 +3209,7 @@ async fn handle_tool_batch_command(
         pending_commands,
         &turn_context.cancellation,
         false,
+        defer_cancel_terminal,
     )
     .await
     {
@@ -2868,6 +3222,31 @@ async fn handle_tool_batch_command(
             Some(ToolBatchAwaitOutcome::Failed { code, reason })
         }
     }
+}
+
+async fn append_deferred_tool_batch_terminal(
+    outcome: &ToolBatchAwaitOutcome,
+    services: &RuntimeServices,
+    turn_context: &TurnContext,
+    turn_source_event_id: EventRecordId,
+) {
+    let (terminal_state, reason) = match outcome {
+        ToolBatchAwaitOutcome::Cancelled { reason } => {
+            (ThreadTerminalState::Cancelled, Some(reason.clone()))
+        }
+        ToolBatchAwaitOutcome::Failed { reason, .. } => {
+            (ThreadTerminalState::Failed, Some(reason.clone()))
+        }
+        ToolBatchAwaitOutcome::Shutdown | ToolBatchAwaitOutcome::Completed(_) => return,
+    };
+    append_terminal_join_until_recorded(
+        services,
+        &turn_context.thread,
+        terminal_state,
+        reason,
+        Some(turn_source_event_id),
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2886,6 +3265,7 @@ async fn append_tool_results_while_handling_commands(
     commands: &mut mpsc::Receiver<ThreadCommand>,
     runtime_cancellation: &CancellationToken,
     pending_commands: &mut VecDeque<ThreadCommand>,
+    cancellation_grace: Duration,
 ) -> ToolBatchAwaitOutcome {
     let preparation = prepare_tool_results(
         runtime,
@@ -2894,6 +3274,7 @@ async fn append_tool_results_while_handling_commands(
         events,
         tool_calls,
         assistant_entry_id,
+        cancellation_grace,
     );
     tokio::pin!(preparation);
     let batch = loop {
@@ -2902,6 +3283,21 @@ async fn append_tool_results_while_handling_commands(
             _ = runtime_cancellation.cancelled() => {
                 let reason = "runtime cancellation requested".to_string();
                 turn_context.cancellation.cancel();
+                let batch = match preparation.as_mut().await {
+                    Ok(batch) => batch,
+                    Err(err) => return ToolBatchAwaitOutcome::Completed(Err(err)),
+                };
+                if let Err(err) = append_tool_results(
+                    turn_context,
+                    services,
+                    thread_id,
+                    events,
+                    batch,
+                )
+                .await
+                {
+                    return ToolBatchAwaitOutcome::Completed(Err(err));
+                }
                 append_terminal_join_until_recorded(
                     services,
                     &turn_context.thread,
@@ -2924,9 +3320,32 @@ async fn append_tool_results_while_handling_commands(
                     events,
                     status,
                     pending_commands,
+                    true,
                 )
                 .await
                 {
+                    let batch = match preparation.as_mut().await {
+                        Ok(batch) => batch,
+                        Err(err) => return ToolBatchAwaitOutcome::Completed(Err(err)),
+                    };
+                    if let Err(err) = append_tool_results(
+                        turn_context,
+                        services,
+                        thread_id,
+                        events,
+                        batch,
+                    )
+                    .await
+                    {
+                        return ToolBatchAwaitOutcome::Completed(Err(err));
+                    }
+                    append_deferred_tool_batch_terminal(
+                        &outcome,
+                        services,
+                        turn_context,
+                        turn_source_event_id,
+                    )
+                    .await;
                     return outcome;
                 }
             }
@@ -2976,6 +3395,7 @@ async fn append_tool_results_while_handling_commands(
                         events,
                         status,
                         pending_commands,
+                        false,
                     )
                     .await
                     .unwrap_or(ToolBatchAwaitOutcome::Completed(Ok(committed)));
@@ -2991,6 +3411,7 @@ async fn append_tool_results_while_handling_commands(
                     events,
                     status,
                     pending_commands,
+                    false,
                 )
                 .await
                 {
@@ -3013,6 +3434,7 @@ async fn prepare_tool_results(
     events: &broadcast::Sender<ThreadEvent>,
     tool_calls: Vec<ProviderToolCall>,
     assistant_entry_id: SessionEntryId,
+    cancellation_grace: Duration,
 ) -> CooldisResult<PreparedToolBatch> {
     let Some(tool_router) = &runtime.tool_router else {
         return Ok(PreparedToolBatch::NoTools);
@@ -3097,6 +3519,7 @@ async fn prepare_tool_results(
             events,
             witnessed_calls,
             witnessed_wait_edges,
+            cancellation_grace,
         )
         .await,
     ))
@@ -3131,6 +3554,7 @@ async fn append_tool_results(
                 snapshot_id,
                 source_event_id,
                 finish_order,
+                cancellation,
                 outcome,
             } => {
                 append_tool_execution_outcome(
@@ -3143,7 +3567,9 @@ async fn append_tool_results(
                     snapshot_id,
                     source_event_id,
                     Some(finish_order),
+                    cancellation,
                     outcome,
+                    false,
                 )
                 .await?;
             }
@@ -3165,6 +3591,7 @@ async fn append_tool_results(
                     snapshot_id,
                     reason,
                     Some(finish_order),
+                    None,
                     source_event_id,
                 )
                 .await?;
@@ -3188,6 +3615,7 @@ async fn append_tool_results(
                 .await?;
                 suspended = true;
             }
+            PreparedToolCallOutcome::Abandoned => {}
         }
     }
     if let Some(err) = first_error {
@@ -3213,6 +3641,271 @@ fn decode_witnessed_tool_holds(
     .map_err(|err| CooldisError::History(format!("tool hold payload is invalid: {err}")))
 }
 
+type ToolInvocationTaskOutput = (CooldisResult<PreparedToolCallOutcome>, bool);
+
+#[allow(clippy::too_many_arguments)]
+async fn run_owned_tool_invocation(
+    interceptor: ToolExecutionInterceptor,
+    services: RuntimeServices,
+    turn_context: TurnContext,
+    events: broadcast::Sender<ThreadEvent>,
+    call: WitnessedToolCall,
+    witness: WitnessedToolCall,
+    finish_order: Arc<AtomicU64>,
+    cancellation: ToolInvocationCancellation,
+    settlement: Arc<AtomicU8>,
+) -> ToolInvocationTaskOutput {
+    let thread_id = turn_context.coordinates().thread_id;
+    let outcome = std::panic::AssertUnwindSafe(prepare_tool_call(
+        &interceptor,
+        &services,
+        &turn_context,
+        &events,
+        call,
+        Arc::clone(&finish_order),
+        cancellation.clone(),
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|panic| {
+        Ok(failed_tool_call_outcome(
+            &witness,
+            finish_order.fetch_add(1, Ordering::SeqCst),
+            &format!(
+                "tool invocation panicked: {}",
+                panic_payload_message(&panic)
+            ),
+        ))
+    });
+    let cancelled_at_settlement = cancellation.is_cancelled();
+    match settlement.compare_exchange(
+        TOOL_INVOCATION_AWAITED,
+        TOOL_INVOCATION_SETTLED,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_) => (outcome, cancelled_at_settlement),
+        Err(TOOL_INVOCATION_ABANDONED) => {
+            let detached = settle_prepared_for_cancellation(
+                outcome,
+                &witness,
+                &finish_order,
+                ToolCallCancellation::CancelledExceededGrace,
+            );
+            append_detached_tool_call_outcome_until_recorded(
+                &services,
+                &turn_context,
+                thread_id,
+                &events,
+                detached,
+            )
+            .await;
+            (Ok(PreparedToolCallOutcome::Abandoned), true)
+        }
+        Err(state) => (
+            Err(CooldisError::RuntimeExecution(format!(
+                "tool invocation entered unexpected settlement state {state}"
+            ))),
+            cancelled_at_settlement,
+        ),
+    }
+}
+
+async fn settled_tool_invocation(
+    joined: Result<ToolInvocationTaskOutput, tokio::task::JoinError>,
+    witness: &WitnessedToolCall,
+    finish_order: &Arc<AtomicU64>,
+    cancellation: &ToolInvocationCancellation,
+    services: &RuntimeServices,
+    turn_context: &TurnContext,
+    events: &broadcast::Sender<ThreadEvent>,
+) -> ToolCallMonitorOutcome {
+    let cancellation_observed = cancellation.is_cancelled();
+    let outcome = match joined {
+        Ok((outcome, cancelled_at_settlement))
+            if cancelled_at_settlement || cancellation_observed =>
+        {
+            settle_prepared_for_cancellation(
+                outcome,
+                witness,
+                finish_order,
+                ToolCallCancellation::CancelledAcknowledged,
+            )
+        }
+        Ok((outcome, _)) => outcome,
+        Err(err) if cancellation_observed => Ok(cancelled_tool_call_outcome(
+            witness,
+            finish_order.fetch_add(1, Ordering::SeqCst),
+            ToolCallCancellation::CancelledAcknowledged,
+            &format!("cancelled tool invocation task failed: {err}"),
+        )),
+        Err(err) => Err(CooldisError::RuntimeExecution(format!(
+            "tool invocation task failed: {err}"
+        ))),
+    };
+    if cancellation_observed {
+        append_detached_tool_call_outcome_until_recorded(
+            services,
+            turn_context,
+            turn_context.coordinates().thread_id,
+            events,
+            outcome,
+        )
+        .await;
+        return ToolCallMonitorOutcome::Abandoned;
+    }
+    ToolCallMonitorOutcome::Settled(outcome)
+}
+
+async fn monitor_owned_tool_invocation_inner(
+    index: usize,
+    mut invocation: tokio::task::JoinHandle<ToolInvocationTaskOutput>,
+    witness: WitnessedToolCall,
+    finish_order: Arc<AtomicU64>,
+    cancellation: ToolInvocationCancellation,
+    settlement: Arc<AtomicU8>,
+    services: RuntimeServices,
+    turn_context: TurnContext,
+    events: broadcast::Sender<ThreadEvent>,
+) -> (usize, ToolCallMonitorOutcome) {
+    let outcome = tokio::select! {
+        joined = &mut invocation => {
+            settled_tool_invocation(
+                joined,
+                &witness,
+                &finish_order,
+                &cancellation,
+                &services,
+                &turn_context,
+                &events,
+            ).await
+        }
+        _ = cancellation.cancelled_then_grace_elapsed() => {
+            match settlement.compare_exchange(
+                TOOL_INVOCATION_AWAITED,
+                TOOL_INVOCATION_ABANDONED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => ToolCallMonitorOutcome::Abandoned,
+                Err(TOOL_INVOCATION_SETTLED) => {
+                    settled_tool_invocation(
+                        invocation.await,
+                        &witness,
+                        &finish_order,
+                        &cancellation,
+                        &services,
+                        &turn_context,
+                        &events,
+                    ).await
+                },
+                Err(state) => ToolCallMonitorOutcome::Settled(Err(
+                    CooldisError::RuntimeExecution(format!(
+                        "tool invocation monitor entered unexpected settlement state {state}"
+                    )),
+                )),
+            }
+        }
+    };
+    (index, outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn monitor_owned_tool_invocation(
+    index: usize,
+    invocation: tokio::task::JoinHandle<ToolInvocationTaskOutput>,
+    witness: WitnessedToolCall,
+    finish_order: Arc<AtomicU64>,
+    cancellation: ToolInvocationCancellation,
+    settlement: Arc<AtomicU8>,
+    services: RuntimeServices,
+    turn_context: TurnContext,
+    events: broadcast::Sender<ThreadEvent>,
+) -> (usize, ToolCallMonitorOutcome) {
+    let recovery_witness = witness.clone();
+    let recovery_finish_order = Arc::clone(&finish_order);
+    let recovery_cancellation = cancellation.clone();
+    let recovery_settlement = Arc::clone(&settlement);
+    let recovery_services = services.clone();
+    let recovery_turn_context = turn_context.clone();
+    let recovery_events = events.clone();
+    match std::panic::AssertUnwindSafe(monitor_owned_tool_invocation_inner(
+        index,
+        invocation,
+        witness,
+        finish_order,
+        cancellation,
+        settlement,
+        services,
+        turn_context,
+        events,
+    ))
+    .catch_unwind()
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(panic) => {
+            let message = panic_payload_message(&panic);
+            emit_runtime_event(
+                &recovery_events,
+                recovery_turn_context.coordinates(),
+                RuntimeEventKind::Recovery {
+                    action: "recover_tool_invocation_monitor_panic".to_string(),
+                    reason: format!(
+                        "{}/{}: {message}",
+                        recovery_witness.tool_call.id, recovery_witness.tool_call.name
+                    ),
+                },
+            );
+            eprintln!(
+                "cooldis tool invocation monitor panicked for {}/{}: {message}",
+                recovery_witness.tool_call.id, recovery_witness.tool_call.name
+            );
+            match recovery_settlement.compare_exchange(
+                TOOL_INVOCATION_AWAITED,
+                TOOL_INVOCATION_SETTLED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Err(TOOL_INVOCATION_ABANDONED) => {}
+                Ok(_) | Err(TOOL_INVOCATION_SETTLED) => {
+                    let outcome = if recovery_cancellation.is_cancelled() {
+                        cancelled_tool_call_outcome(
+                            &recovery_witness,
+                            recovery_finish_order.fetch_add(1, Ordering::SeqCst),
+                            ToolCallCancellation::CancelledAcknowledged,
+                            "cancelled tool invocation monitor panicked",
+                        )
+                    } else {
+                        failed_tool_call_outcome(
+                            &recovery_witness,
+                            recovery_finish_order.fetch_add(1, Ordering::SeqCst),
+                            "tool invocation monitor panicked",
+                        )
+                    };
+                    append_detached_tool_call_outcome_until_recorded(
+                        &recovery_services,
+                        &recovery_turn_context,
+                        recovery_turn_context.coordinates().thread_id,
+                        &recovery_events,
+                        Ok(outcome),
+                    )
+                    .await;
+                }
+                Err(state) => {
+                    eprintln!(
+                        "cooldis tool invocation monitor recovery found unexpected settlement state {state}"
+                    );
+                }
+            }
+            (index, ToolCallMonitorOutcome::Abandoned)
+        }
+    }
+}
+
+/// Runs each launched invocation in an owned task and only awaits monitor
+/// handles. Dropping the batch future therefore cannot cancel an invocation in
+/// the middle of its own completion write.
 async fn execute_tool_call_batch(
     interceptor: &ToolExecutionInterceptor,
     services: &RuntimeServices,
@@ -3220,19 +3913,36 @@ async fn execute_tool_call_batch(
     events: &broadcast::Sender<ThreadEvent>,
     calls: Vec<WitnessedToolCall>,
     wait_edges: Vec<Vec<usize>>,
+    cancellation_grace: Duration,
 ) -> Vec<CooldisResult<PreparedToolCallOutcome>> {
     let call_count = calls.len();
+    let witnesses = calls.clone();
     let mut calls = calls.into_iter().map(Some).collect::<Vec<_>>();
     let mut launched = vec![false; call_count];
     let mut completed = vec![false; call_count];
     let mut outcomes = (0..call_count).map(|_| None).collect::<Vec<_>>();
     let finish_order = Arc::new(AtomicU64::new(0));
-    let mut running: FuturesUnordered<
-        BoxFuture<'_, (usize, CooldisResult<PreparedToolCallOutcome>)>,
-    > = FuturesUnordered::new();
+    let mut running = FuturesUnordered::new();
     let mut completed_count = 0;
 
     while completed_count < call_count {
+        if turn_context.cancellation.is_cancelled() {
+            for index in 0..call_count {
+                if launched[index] {
+                    continue;
+                }
+                launched[index] = true;
+                completed[index] = true;
+                completed_count += 1;
+                outcomes[index] = Some(Ok(cancelled_tool_call_outcome(
+                    &witnesses[index],
+                    finish_order.fetch_add(1, Ordering::SeqCst),
+                    ToolCallCancellation::CancelledAcknowledged,
+                    "tool call was cancelled before its hold dependencies released",
+                )));
+            }
+        }
+
         for index in 0..call_count {
             if launched[index]
                 || !wait_edges[index]
@@ -3250,27 +3960,70 @@ async fn execute_tool_call_batch(
                 ))));
                 continue;
             };
-            let finish_order = Arc::clone(&finish_order);
-            running.push(
-                prepare_tool_call(
-                    interceptor,
-                    services,
-                    turn_context,
-                    events,
-                    call,
-                    finish_order,
-                )
-                .map(move |outcome| (index, outcome))
-                .boxed(),
+            let witness = witnesses[index].clone();
+            let invocation_cancellation = ToolInvocationCancellation::new(
+                turn_context.cancellation.child_token(),
+                cancellation_grace,
             );
+            let settlement = Arc::new(AtomicU8::new(TOOL_INVOCATION_AWAITED));
+            let invocation = tokio::spawn(run_owned_tool_invocation(
+                interceptor.clone(),
+                services.clone(),
+                turn_context.clone(),
+                events.clone(),
+                call,
+                witness.clone(),
+                Arc::clone(&finish_order),
+                invocation_cancellation.clone(),
+                Arc::clone(&settlement),
+            ));
+            running.push(tokio::spawn(monitor_owned_tool_invocation(
+                index,
+                invocation,
+                witness,
+                Arc::clone(&finish_order),
+                invocation_cancellation,
+                settlement,
+                services.clone(),
+                turn_context.clone(),
+                events.clone(),
+            )));
         }
 
-        let Some((index, outcome)) = running.next().await else {
+        let Some(joined) = running.next().await else {
             break;
+        };
+        let (index, outcome) = match joined {
+            Ok(settled) => settled,
+            Err(err) => {
+                return witnesses
+                    .iter()
+                    .enumerate()
+                    .map(|(index, witness)| {
+                        if completed[index] {
+                            match outcomes[index].take() {
+                                Some(outcome) => outcome,
+                                None => Err(CooldisError::RuntimeExecution(format!(
+                                    "tool batch scheduler lost the completed outcome for {}/{}",
+                                    witness.tool_call.id, witness.tool_call.name,
+                                ))),
+                            }
+                        } else {
+                            Err(CooldisError::RuntimeExecution(format!(
+                                "tool invocation monitor failed for {}/{}: {err}",
+                                witness.tool_call.id, witness.tool_call.name,
+                            )))
+                        }
+                    })
+                    .collect();
+            }
         };
         completed[index] = true;
         completed_count += 1;
-        outcomes[index] = Some(outcome);
+        outcomes[index] = Some(match outcome {
+            ToolCallMonitorOutcome::Settled(outcome) => outcome,
+            ToolCallMonitorOutcome::Abandoned => Ok(PreparedToolCallOutcome::Abandoned),
+        });
     }
 
     outcomes
@@ -3293,6 +4046,7 @@ async fn prepare_tool_call(
     events: &broadcast::Sender<ThreadEvent>,
     call: WitnessedToolCall,
     finish_counter: Arc<AtomicU64>,
+    cancellation: ToolInvocationCancellation,
 ) -> CooldisResult<PreparedToolCallOutcome> {
     let call_id = call.tool_call.id;
     let tool_name = call.tool_call.name;
@@ -3367,6 +4121,7 @@ async fn prepare_tool_call(
         &call_id,
         &tool_name,
         arguments,
+        cancellation,
     )
     .await?;
     Ok(PreparedToolCallOutcome::Completed {
@@ -3375,8 +4130,243 @@ async fn prepare_tool_call(
         snapshot_id: call.snapshot_id,
         source_event_id: call.request_event_id,
         finish_order: finish_counter.fetch_add(1, Ordering::SeqCst),
+        cancellation: None,
         outcome,
     })
+}
+
+fn settle_prepared_for_cancellation(
+    outcome: CooldisResult<PreparedToolCallOutcome>,
+    witness: &WitnessedToolCall,
+    finish_counter: &AtomicU64,
+    cancellation: ToolCallCancellation,
+) -> CooldisResult<PreparedToolCallOutcome> {
+    match outcome {
+        Ok(PreparedToolCallOutcome::Completed {
+            call_id,
+            tool_name,
+            snapshot_id,
+            source_event_id,
+            finish_order,
+            outcome,
+            ..
+        }) => Ok(PreparedToolCallOutcome::Completed {
+            call_id,
+            tool_name,
+            snapshot_id,
+            source_event_id,
+            finish_order,
+            cancellation: Some(cancellation),
+            outcome,
+        }),
+        Ok(PreparedToolCallOutcome::Denied {
+            finish_order,
+            reason,
+            ..
+        }) => Ok(cancelled_tool_call_outcome(
+            witness,
+            finish_order,
+            cancellation,
+            &reason,
+        )),
+        Ok(PreparedToolCallOutcome::Suspended { reason, .. }) => Ok(cancelled_tool_call_outcome(
+            witness,
+            finish_counter.fetch_add(1, Ordering::SeqCst),
+            cancellation,
+            reason
+                .as_deref()
+                .unwrap_or("tool call was cancelled while awaiting a controller decision"),
+        )),
+        Ok(PreparedToolCallOutcome::Abandoned) => Ok(PreparedToolCallOutcome::Abandoned),
+        Err(err) => Ok(cancelled_tool_call_outcome(
+            witness,
+            finish_counter.fetch_add(1, Ordering::SeqCst),
+            cancellation,
+            &format!("cancelled tool invocation failed: {err}"),
+        )),
+    }
+}
+
+fn cancelled_tool_call_outcome(
+    witness: &WitnessedToolCall,
+    finish_order: u64,
+    cancellation: ToolCallCancellation,
+    reason: &str,
+) -> PreparedToolCallOutcome {
+    PreparedToolCallOutcome::Completed {
+        call_id: witness.tool_call.id.clone(),
+        tool_name: witness.tool_call.name.clone(),
+        snapshot_id: witness.snapshot_id.clone(),
+        source_event_id: witness.request_event_id,
+        finish_order,
+        cancellation: Some(cancellation),
+        outcome: ToolExecutionOutcome {
+            result: CanonicalMessage::tool_result(
+                witness.tool_call.id.clone(),
+                witness.tool_call.name.clone(),
+                reason,
+                true,
+            ),
+            hook_records: Vec::new(),
+            pre_model_contexts: Vec::new(),
+            post_model_contexts: Vec::new(),
+            permission_decision: None,
+            duration_ms: 0,
+        },
+    }
+}
+
+fn failed_tool_call_outcome(
+    witness: &WitnessedToolCall,
+    finish_order: u64,
+    reason: &str,
+) -> PreparedToolCallOutcome {
+    let mut outcome = cancelled_tool_call_outcome(
+        witness,
+        finish_order,
+        ToolCallCancellation::CancelledAcknowledged,
+        reason,
+    );
+    if let PreparedToolCallOutcome::Completed { cancellation, .. } = &mut outcome {
+        *cancellation = None;
+    }
+    outcome
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    "non-string panic payload".to_string()
+}
+
+/// Appends the completion from inside an invocation that outlived its grace.
+/// All witnessing inputs are captured before the batch monitor can abandon it.
+async fn append_detached_tool_call_outcome(
+    services: &RuntimeServices,
+    turn_context: &TurnContext,
+    thread_id: crate::ThreadId,
+    events: &broadcast::Sender<ThreadEvent>,
+    outcome: CooldisResult<PreparedToolCallOutcome>,
+) -> CooldisResult<()> {
+    let PreparedToolCallOutcome::Completed {
+        call_id,
+        tool_name,
+        snapshot_id,
+        source_event_id,
+        finish_order,
+        cancellation,
+        outcome,
+    } = outcome?
+    else {
+        return Ok(());
+    };
+    append_tool_execution_outcome(
+        services,
+        turn_context,
+        thread_id,
+        events,
+        call_id,
+        tool_name,
+        snapshot_id,
+        source_event_id,
+        Some(finish_order),
+        cancellation,
+        outcome,
+        true,
+    )
+    .await
+}
+
+async fn append_detached_tool_call_outcome_until_recorded(
+    services: &RuntimeServices,
+    turn_context: &TurnContext,
+    thread_id: crate::ThreadId,
+    events: &broadcast::Sender<ThreadEvent>,
+    outcome: CooldisResult<PreparedToolCallOutcome>,
+) {
+    let prepared = match outcome {
+        Ok(prepared @ PreparedToolCallOutcome::Completed { .. }) => prepared,
+        Ok(_) => return,
+        Err(err) => {
+            eprintln!("cooldis detached tool completion was not prepared: {err}");
+            return;
+        }
+    };
+    let PreparedToolCallOutcome::Completed {
+        ref call_id,
+        ref tool_name,
+        ..
+    } = prepared
+    else {
+        return;
+    };
+    loop {
+        match tool_call_completed_exists(
+            services,
+            turn_context.coordinates(),
+            &turn_context.turn_id,
+            call_id,
+        )
+        .await
+        {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(err) => {
+                report_detached_completion_retry(
+                    events,
+                    turn_context.coordinates(),
+                    call_id,
+                    tool_name,
+                    &err,
+                );
+                tokio::time::sleep(DETACHED_COMPLETION_RETRY_DELAY).await;
+                continue;
+            }
+        }
+        match append_detached_tool_call_outcome(
+            services,
+            turn_context,
+            thread_id,
+            events,
+            Ok(prepared.clone()),
+        )
+        .await
+        {
+            Ok(()) => return,
+            Err(err) => {
+                report_detached_completion_retry(
+                    events,
+                    turn_context.coordinates(),
+                    call_id,
+                    tool_name,
+                    &err,
+                );
+                tokio::time::sleep(DETACHED_COMPLETION_RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
+fn report_detached_completion_retry(
+    events: &broadcast::Sender<ThreadEvent>,
+    coordinates: &crate::ThreadCoordinates,
+    call_id: &str,
+    tool_name: &str,
+    error: &CooldisError,
+) {
+    emit_runtime_event(
+        events,
+        coordinates,
+        RuntimeEventKind::Recovery {
+            action: "retry_detached_tool_completion".to_string(),
+            reason: format!("{call_id}/{tool_name}: {error}"),
+        },
+    );
+    eprintln!("cooldis detached tool completion append failed for {call_id}/{tool_name}: {error}");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3407,6 +4397,7 @@ async fn execute_resumed_tool_call_with_interceptor(
         &call_id,
         &tool_name,
         arguments,
+        ToolInvocationCancellation::never(),
     )
     .await?;
     append_tool_execution_outcome(
@@ -3419,7 +4410,9 @@ async fn execute_resumed_tool_call_with_interceptor(
         snapshot_id,
         source_event_id,
         Some(0),
+        None,
         outcome,
+        false,
     )
     .await
 }
@@ -3433,16 +4426,18 @@ async fn execute_tool_call_with_interceptor(
     call_id: &str,
     tool_name: &str,
     arguments: Value,
+    cancellation: ToolInvocationCancellation,
 ) -> CooldisResult<ToolExecutionOutcome> {
     let witness_coordinates = turn_context.coordinates().clone();
     interceptor
-        .execute_with_witnessing(
+        .execute_with_witnessing_cancellable(
             ToolExecutionRequest {
                 turn_context,
                 call_id: call_id.to_string(),
                 tool_name: tool_name.to_string(),
                 arguments,
             },
+            cancellation,
             |spec| emit_hook_started(events, turn_context.coordinates(), spec),
             |witnesses| {
                 let coordinates = witness_coordinates.clone();
@@ -3465,7 +4460,9 @@ async fn append_tool_execution_outcome(
     snapshot_id: String,
     source_event_id: EventRecordId,
     finish_order: Option<u64>,
+    cancellation: Option<ToolCallCancellation>,
     outcome: ToolExecutionOutcome,
+    idempotent_result_append: bool,
 ) -> CooldisResult<()> {
     emit_hook_records(events, turn_context.coordinates(), &outcome.hook_records);
     if let Some(permission_decision) = &outcome.permission_decision {
@@ -3535,7 +4532,9 @@ async fn append_tool_execution_outcome(
         outcome.result,
         Some(outcome.duration_ms),
         finish_order,
+        cancellation,
         source_event_id,
+        idempotent_result_append,
     )
     .await?;
     append_hook_contexts(
@@ -3729,6 +4728,7 @@ async fn append_denied_tool_result(
     snapshot_id: String,
     reason: String,
     finish_order: Option<u64>,
+    cancellation: Option<ToolCallCancellation>,
     source_event_id: EventRecordId,
 ) -> CooldisResult<()> {
     emit_runtime_event(
@@ -3758,7 +4758,9 @@ async fn append_denied_tool_result(
         result,
         Some(0),
         finish_order,
+        cancellation,
         source_event_id,
+        false,
     )
     .await
 }
@@ -3931,16 +4933,21 @@ async fn tool_call_batch_completed(
                     )));
                 }
             }
-            EventKind::ToolCallCompleted => {
+            EventKind::ToolCallCompleted
+                if event
+                    .payload
+                    .get("subject")
+                    .and_then(|subject| subject.get("turn_id"))
+                    .and_then(Value::as_str)
+                    == Some(turn_id) =>
+            {
                 let payload = serde_json::from_value::<ToolCallCompletedPayload>(event.payload)
                     .map_err(|err| {
                         CooldisError::History(format!(
                             "tool.call.completed payload is invalid: {err}"
                         ))
                     })?;
-                if payload.subject.turn_id == turn_id {
-                    completed_subjects.insert(payload.subject);
-                }
+                completed_subjects.insert(payload.subject);
             }
             _ => {}
         }
@@ -3964,19 +4971,74 @@ async fn tool_call_completed_exists(
         .read_events(&EventStreamId::for_thread(coordinates), None)
         .await
         .map_err(|err| CooldisError::History(err.to_string()))?;
-    for event in events
-        .into_iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
-    {
+    for event in events.into_iter().filter(|event| {
+        event.kind == EventKind::ToolCallCompleted
+            && event
+                .payload
+                .get("subject")
+                .and_then(|subject| subject.get("turn_id"))
+                .and_then(Value::as_str)
+                == Some(turn_id)
+            && event
+                .payload
+                .get("subject")
+                .and_then(|subject| subject.get("call_id"))
+                .and_then(Value::as_str)
+                == Some(call_id)
+    }) {
         let payload = serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone())
             .map_err(|err| {
                 CooldisError::History(format!("tool.call.completed payload is invalid: {err}"))
             })?;
-        if payload.subject.turn_id == turn_id && payload.subject.call_id == call_id {
-            return Ok(true);
-        }
+        debug_assert_eq!(payload.subject.turn_id, turn_id);
+        debug_assert_eq!(payload.subject.call_id, call_id);
+        return Ok(true);
     }
     Ok(false)
+}
+
+async fn existing_tool_result_message(
+    services: &RuntimeServices,
+    coordinates: &crate::ThreadCoordinates,
+    source_event_id: EventRecordId,
+    call_id: &str,
+) -> CooldisResult<Option<CanonicalMessage>> {
+    let result_entry_ids = services
+        .runtime_store()
+        .read_events(&EventStreamId::for_thread(coordinates), None)
+        .await
+        .map_err(|err| CooldisError::History(err.to_string()))?
+        .into_iter()
+        .filter(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.provenance.source_event_ids.contains(&source_event_id)
+        })
+        .filter_map(|event| {
+            event
+                .payload
+                .get("entry_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<HashSet<_>>();
+    if result_entry_ids.is_empty() {
+        return Ok(None);
+    }
+    let context = services.build_session_context(coordinates).await?;
+    Ok(context.entries.into_iter().find_map(|entry| {
+        if !result_entry_ids.contains(&entry.entry_id.to_string()) {
+            return None;
+        }
+        match entry.kind {
+            SessionEntryKind::Message {
+                message:
+                    ref message @ CanonicalMessage::ToolResult {
+                        ref tool_call_id, ..
+                    },
+            } if tool_call_id == call_id => Some(message.clone()),
+            _ => None,
+        }
+    }))
 }
 
 async fn tool_call_suspension_exists(
@@ -4021,56 +5083,127 @@ async fn append_tool_result_message(
     result: CanonicalMessage,
     duration_ms: Option<u64>,
     finish_order: Option<u64>,
+    cancellation: Option<ToolCallCancellation>,
     source_event_id: EventRecordId,
+    idempotent_result_append: bool,
 ) -> CooldisResult<()> {
+    let existing_result = if idempotent_result_append {
+        existing_tool_result_message(services, coordinates, source_event_id, &call_id).await?
+    } else {
+        None
+    };
+    let result_already_persisted = existing_result.is_some();
+    let result = existing_result.unwrap_or(result);
     let success = match &result {
         CanonicalMessage::ToolResult { is_error, .. } => !is_error,
         _ => false,
     };
     let output = text_from_message(&result);
-    let entry = services
-        .append_agent_loop_session_entry(
+    if !result_already_persisted {
+        let entry = services
+            .append_agent_loop_session_entry(
+                coordinates,
+                None,
+                SessionEntryKind::Message { message: result },
+                vec![source_event_id],
+            )
+            .await?;
+        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+        emit_runtime_event(
+            events,
             coordinates,
-            None,
-            SessionEntryKind::Message {
-                message: result.clone(),
+            RuntimeEventKind::ToolCallResult {
+                call_id: call_id.clone(),
+                output,
+                success,
+                duration_ms,
             },
-            vec![source_event_id],
-        )
-        .await?;
-    let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
-    emit_runtime_event(
-        events,
+        );
+    }
+    append_tool_completion_event(
+        services,
         coordinates,
-        RuntimeEventKind::ToolCallResult {
-            call_id: call_id.clone(),
-            output,
+        turn_id,
+        call_id,
+        snapshot_id,
+        tool_name,
+        success,
+        duration_ms,
+        finish_order,
+        cancellation,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_tool_completion_event(
+    services: &RuntimeServices,
+    coordinates: &crate::ThreadCoordinates,
+    turn_id: String,
+    call_id: String,
+    snapshot_id: String,
+    tool_name: String,
+    success: bool,
+    duration_ms: Option<u64>,
+    finish_order: Option<u64>,
+    cancellation: Option<ToolCallCancellation>,
+) -> CooldisResult<()> {
+    let subject = ToolCallSubject { turn_id, call_id };
+    let record = NewEventRecord::witnessed(
+        coordinates.clone(),
+        EventKind::ToolCallCompleted,
+        serde_json::to_value(ToolCallCompletedPayload {
+            subject: subject.clone(),
+            snapshot_id,
+            tool_name,
             success,
             duration_ms,
-        },
+            finish_order,
+            cancellation,
+        })
+        .map_err(|err| {
+            CooldisError::History(format!("tool completion payload codec failed: {err}"))
+        })?,
     );
-    services
-        .append_thread_event(
-            coordinates,
-            NewEventRecord::witnessed(
-                coordinates.clone(),
-                EventKind::ToolCallCompleted,
-                serde_json::to_value(ToolCallCompletedPayload {
-                    subject: ToolCallSubject { turn_id, call_id },
-                    snapshot_id,
-                    tool_name,
-                    success,
-                    duration_ms,
-                    finish_order,
-                    cancellation: None,
-                })
-                .map_err(|err| {
-                    CooldisError::History(format!("tool completion payload codec failed: {err}"))
-                })?,
-            ),
-        )
-        .await?;
-    Ok(())
+    let stream_id = EventStreamId::for_thread(coordinates);
+    loop {
+        let existing = services
+            .runtime_store()
+            .read_events(&stream_id, None)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        for event in existing
+            .iter()
+            .filter(|event| event.kind == EventKind::ToolCallCompleted)
+            .filter(|event| {
+                event.payload["subject"]["turn_id"] == subject.turn_id
+                    && event.payload["subject"]["call_id"] == subject.call_id
+            })
+        {
+            serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone()).map_err(
+                |err| {
+                    CooldisError::History(format!(
+                        "tool.call.completed {} payload is invalid: {err}",
+                        event.id
+                    ))
+                },
+            )?;
+            return Ok(());
+        }
+        let expected_next_sequence = existing
+            .last()
+            .map(|event| EventSequence::new(event.sequence.get().saturating_add(1)))
+            .unwrap_or_else(|| EventSequence::new(1));
+        match services
+            .runtime_store()
+            .append_events_fenced(&stream_id, expected_next_sequence, vec![record.clone()])
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(HistoryError::AppendFenceConflict { .. }) => continue,
+            Err(err) => return Err(CooldisError::History(err.to_string())),
+        }
+    }
 }
 
 async fn append_hook_contexts(

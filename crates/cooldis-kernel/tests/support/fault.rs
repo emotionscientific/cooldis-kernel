@@ -129,6 +129,12 @@ impl<S> FaultingRuntimeStore<S> {
         self
     }
 
+    pub fn panic_next(&self, operation: &'static str, message: impl Into<String>) {
+        let nth = self.faults.call_count(operation).saturating_add(1);
+        self.faults
+            .fail_nth(operation, nth, format!("test panic: {}", message.into()));
+    }
+
     pub fn delay_nth(self, operation: &'static str, nth: usize, delay: Duration) -> Self {
         self.faults.delay_nth(operation, nth, delay);
         self
@@ -159,7 +165,10 @@ impl<S> FaultingRuntimeStore<S> {
 
     async fn start(&self, operation: &'static str) -> HistoryResult<Option<AfterAction<String>>> {
         match self.faults.next(operation) {
-            Some(FaultAction::Fail(message)) => Err(HistoryError::Storage(message)),
+            Some(FaultAction::Fail(message)) => match message.strip_prefix("test panic: ") {
+                Some(message) => panic!("{message}"),
+                None => Err(HistoryError::Storage(message)),
+            },
             Some(FaultAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
                 Ok(None)

@@ -261,14 +261,11 @@ impl LiveProcessBackend for BashkitLiveBackend {
             let mut harness = BashkitExecutionHarness::new(config)
                 .await
                 .map_err(|err| CooldisProcessError::Execution(err.to_string()))?;
-            let cancellation_flag = harness.cancellation_flag();
-            let cancellation_task = tokio::spawn(async move {
-                cancellation.cancelled().await;
-                cancellation_flag.store(true, Ordering::SeqCst);
-            });
-            let result: CooldisVirtualBashResult<CooldisProcessHandle> =
-                harness.execute_process(&script).await;
-            cancellation_task.abort();
+            let execution_cancellation = cancellation.clone();
+            let result: CooldisVirtualBashResult<CooldisProcessHandle> = harness
+                .execute_process_cancellable(&script, execution_cancellation)
+                .await;
+            let cancelled = cancellation.is_cancelled();
             match result {
                 Ok(handle) => {
                     let output = handle.output();
@@ -289,12 +286,15 @@ impl LiveProcessBackend for BashkitLiveBackend {
                             stderr: output.stderr_truncated,
                         });
                     }
-                    process.record(match exit_code {
-                        124 => CooldisProcessEventKind::TimedOut {
+                    process.record(match (cancelled, exit_code) {
+                        (true, _) => CooldisProcessEventKind::Cancelled {
+                            reason: "virtual bash execution cancelled".to_string(),
+                        },
+                        (false, 124) => CooldisProcessEventKind::TimedOut {
                             timeout_ms: Some(request.deadline.timeout_ms()),
                             message: "virtual bash execution timed out".to_string(),
                         },
-                        code => CooldisProcessEventKind::Completed {
+                        (false, code) => CooldisProcessEventKind::Completed {
                             status: CooldisProcessExitStatus::exited(code),
                         },
                     });
@@ -442,9 +442,50 @@ impl BashkitExecutionHarness {
         Ok(VirtualCommandOutput::from(&process.output()))
     }
 
+    /// Executes one script while exposing the caller's cancellation token to
+    /// process-backed routes. The in-interpreter path continues to observe
+    /// bashkit's existing atomic cancellation flag.
+    pub async fn execute_full_output_cancellable(
+        &mut self,
+        script: &str,
+        cancellation: CancellationToken,
+    ) -> CooldisVirtualBashResult<VirtualCommandOutput> {
+        let process = self
+            .execute_process_cancellable(script, cancellation)
+            .await?;
+        Ok(VirtualCommandOutput::from(&process.output()))
+    }
+
     pub async fn execute_process(
         &mut self,
         script: &str,
+    ) -> CooldisVirtualBashResult<CooldisProcessHandle> {
+        self.execute_process_inner(script, None).await
+    }
+
+    pub async fn execute_process_cancellable(
+        &mut self,
+        script: &str,
+        cancellation: CancellationToken,
+    ) -> CooldisVirtualBashResult<CooldisProcessHandle> {
+        let cancellation_flag = self.cancellation_flag();
+        let cancellation_wait = cancellation.cancelled();
+        let execution = self.execute_process_inner(script, Some(cancellation.clone()));
+        tokio::pin!(cancellation_wait);
+        tokio::pin!(execution);
+        tokio::select! {
+            result = &mut execution => result,
+            _ = &mut cancellation_wait => {
+                cancellation_flag.store(true, Ordering::SeqCst);
+                execution.await
+            }
+        }
+    }
+
+    async fn execute_process_inner(
+        &mut self,
+        script: &str,
+        cancellation: Option<CancellationToken>,
     ) -> CooldisVirtualBashResult<CooldisProcessHandle> {
         self.cancellation.store(false, Ordering::SeqCst);
         let deadline = ExecutionDeadline::from_now(self.execution_timeout);
@@ -453,9 +494,13 @@ impl BashkitExecutionHarness {
                 if let Some(shell_commands) = self.operation_shell_commands.as_mut() {
                     shell_commands.sync().await;
                 }
+                let mut extensions = ExecutionExtensions::new().with(deadline.clone());
+                if let Some(cancellation) = cancellation.clone() {
+                    extensions = extensions.with(cancellation);
+                }
                 let output = self
                     .shell
-                    .exec_with_extensions(script, ExecutionExtensions::new().with(deadline.clone()))
+                    .exec_with_extensions(script, extensions)
                     .await
                     .map(virtual_command_output_from_exec_result)
                     .map_err(execution_error)?;
@@ -481,10 +526,15 @@ impl BashkitExecutionHarness {
                     deadline,
                     max_output_bytes: SPILL_RETENTION_MAX_BYTES,
                 };
-                let mut result = executor
-                    .exec(request.clone())
-                    .await
-                    .map_err(execution_error)?;
+                let mut result = match cancellation {
+                    Some(cancellation) => {
+                        executor
+                            .exec_cancellable(request.clone(), cancellation)
+                            .await
+                    }
+                    None => executor.exec(request.clone()).await,
+                }
+                .map_err(execution_error)?;
                 result.output = enforce_output_limit(result.output, SPILL_RETENTION_MAX_BYTES);
                 apply_external_file_writes(self.vfs.as_ref(), &result).await?;
                 self.vfs.flush().await.map_err(execution_error)?;
@@ -783,7 +833,11 @@ impl Builtin for ExternalCommandProxyBuiltin {
             max_output_bytes: SPILL_RETENTION_MAX_BYTES,
         };
 
-        let result = match executor.exec(request).await {
+        let execution = match ctx.execution_extension::<CancellationToken>().cloned() {
+            Some(cancellation) => executor.exec_cancellable(request, cancellation).await,
+            None => executor.exec(request).await,
+        };
+        let result = match execution {
             Ok(result) => result,
             Err(err) => return Ok(ExecResult::err(format!("cooldis: {err}\n"), 1)),
         };

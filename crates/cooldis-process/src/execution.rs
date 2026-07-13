@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VirtualCommandOutput {
@@ -108,6 +109,15 @@ pub trait ExternalCommandExecutor: Send + Sync + 'static {
         &self,
         request: ExternalCommandRequest,
     ) -> CooldisProcessResult<ExternalCommandResult>;
+
+    async fn exec_cancellable(
+        &self,
+        request: ExternalCommandRequest,
+        cancellation: CancellationToken,
+    ) -> CooldisProcessResult<ExternalCommandResult> {
+        let _ = cancellation;
+        self.exec(request).await
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -216,13 +226,11 @@ impl HostBashExecutor {
         }
         self.config.workspace_root.clone()
     }
-}
 
-#[async_trait]
-impl ExternalCommandExecutor for HostBashExecutor {
-    async fn exec(
+    async fn exec_with_cancellation(
         &self,
         request: ExternalCommandRequest,
+        cancellation: Option<CancellationToken>,
     ) -> CooldisProcessResult<ExternalCommandResult> {
         if request.executor != ExternalExecutorKind::HostBash {
             return Ok(ExternalCommandResult::new(VirtualCommandOutput {
@@ -263,8 +271,20 @@ impl ExternalCommandExecutor for HostBashExecutor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
         let mut child = command.spawn().map_err(process_error)?;
+        let child_id = child.id();
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupKillGuard::new(child_id);
         let stdout = child
             .stdout
             .take()
@@ -284,24 +304,205 @@ impl ExternalCommandExecutor for HostBashExecutor {
                 .map_err(process_error)?;
         }
 
-        let status = match tokio::time::timeout(request.deadline.remaining(), child.wait()).await {
-            Ok(status) => status.map_err(process_error)?,
-            Err(_) => {
-                let _ = child.kill().await;
-                stdout_task.abort();
-                stderr_task.abort();
-                return Ok(external_timeout_result("host bash exec timed out\n"));
+        enum HostExit {
+            Exited(std::process::ExitStatus),
+            TimedOut,
+            Cancelled,
+        }
+        let cancellation_wait = async {
+            match &cancellation {
+                Some(cancellation) => cancellation.cancelled().await,
+                None => std::future::pending::<()>().await,
             }
         };
-        let (stdout, stdout_truncated) = stdout_task.await.map_err(process_error)??;
-        let (stderr, stderr_truncated) = stderr_task.await.map_err(process_error)??;
-        Ok(ExternalCommandResult::new(VirtualCommandOutput {
+        let mut exit = tokio::select! {
+            status = child.wait() => HostExit::Exited(status.map_err(process_error)?),
+            _ = tokio::time::sleep(request.deadline.remaining()) => {
+                terminate_external_child(&mut child, child_id).await;
+                HostExit::TimedOut
+            }
+            _ = cancellation_wait => {
+                terminate_external_child(&mut child, child_id).await;
+                HostExit::Cancelled
+            }
+        };
+        #[cfg(unix)]
+        if matches!(&exit, HostExit::Exited(_)) {
+            process_group_guard.disarm_if_group_gone();
+        }
+        let mut stdout_task = stdout_task;
+        let mut stderr_task = stderr_task;
+        let mut drained_output = None;
+        if matches!(&exit, HostExit::Exited(_)) {
+            let output_drain = async {
+                let stdout = (&mut stdout_task).await.map_err(process_error)?;
+                let stderr = (&mut stderr_task).await.map_err(process_error)?;
+                Ok::<_, crate::CooldisProcessError>((stdout, stderr))
+            };
+            tokio::pin!(output_drain);
+            exit = tokio::select! {
+                drained = &mut output_drain => {
+                    drained_output = Some(drained?);
+                    exit
+                }
+                _ = async {
+                    match &cancellation {
+                        Some(cancellation) => cancellation.cancelled().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    terminate_reaped_external_group(child_id).await;
+                    HostExit::Cancelled
+                }
+                _ = tokio::time::sleep(request.deadline.remaining()) => {
+                    terminate_reaped_external_group(child_id).await;
+                    HostExit::TimedOut
+                }
+            };
+        }
+        let (stdout, stderr) = match drained_output {
+            Some(output) => output,
+            None => (
+                stdout_task.await.map_err(process_error)?,
+                stderr_task.await.map_err(process_error)?,
+            ),
+        };
+        let (stdout, stdout_truncated) = stdout?;
+        let (mut stderr, stderr_truncated) = stderr?;
+        let exit_code = match exit {
+            HostExit::Exited(status) => status.code().unwrap_or(1),
+            HostExit::TimedOut => {
+                stderr.push_str("host bash exec timed out\n");
+                124
+            }
+            HostExit::Cancelled => {
+                stderr.push_str("host bash exec cancelled\n");
+                130
+            }
+        };
+        let result = ExternalCommandResult::new(VirtualCommandOutput {
             stdout,
             stderr,
-            exit_code: status.code().unwrap_or(1),
+            exit_code,
             stdout_truncated,
             stderr_truncated,
-        }))
+        });
+        #[cfg(unix)]
+        process_group_guard.disarm();
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl ExternalCommandExecutor for HostBashExecutor {
+    async fn exec(
+        &self,
+        request: ExternalCommandRequest,
+    ) -> CooldisProcessResult<ExternalCommandResult> {
+        self.exec_with_cancellation(request, None).await
+    }
+
+    async fn exec_cancellable(
+        &self,
+        request: ExternalCommandRequest,
+        cancellation: CancellationToken,
+    ) -> CooldisProcessResult<ExternalCommandResult> {
+        self.exec_with_cancellation(request, Some(cancellation))
+            .await
+    }
+}
+
+async fn terminate_external_child(child: &mut tokio::process::Child, child_id: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(child_id) = child_id {
+        unsafe {
+            libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        unsafe {
+            libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.wait().await;
+        reap_adopted_process_group(child_id as libc::pid_t).await;
+        return;
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+async fn terminate_reaped_external_group(child_id: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(child_id) = child_id {
+        unsafe {
+            libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        unsafe {
+            libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
+        }
+        reap_adopted_process_group(child_id as libc::pid_t).await;
+    }
+    #[cfg(not(unix))]
+    let _ = child_id;
+}
+
+#[cfg(unix)]
+async fn reap_adopted_process_group(process_group: libc::pid_t) {
+    // When Cooldis itself is container PID 1, killed grandchildren can be
+    // reparented here. Reap only children in the process group we just killed;
+    // ordinary deployments get ECHILD and return immediately.
+    for _ in 0..10 {
+        loop {
+            let mut status = 0;
+            let reaped = unsafe { libc::waitpid(-process_group, &mut status, libc::WNOHANG) };
+            if reaped <= 0 {
+                break;
+            }
+        }
+        if unsafe { libc::killpg(process_group, 0) } == -1 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(unix)]
+struct ProcessGroupKillGuard {
+    process_group: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupKillGuard {
+    fn new(child_id: Option<u32>) -> Self {
+        Self {
+            process_group: child_id.map(|id| id as libc::pid_t),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.process_group = None;
+    }
+
+    fn disarm_if_group_gone(&mut self) {
+        let Some(process_group) = self.process_group else {
+            return;
+        };
+        if unsafe { libc::killpg(process_group, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            self.disarm();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupKillGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.process_group {
+            unsafe {
+                libc::killpg(process_group, libc::SIGKILL);
+            }
+        }
     }
 }
 
@@ -474,5 +675,194 @@ mod tests {
 
         assert_eq!(text.as_bytes(), input);
         assert!(!truncated);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_group_guard_disarms_after_reaping_an_empty_group() {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("exit 0");
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let mut guard = ProcessGroupKillGuard::new(child.id());
+        child.wait().await.unwrap();
+
+        guard.disarm_if_group_gone();
+
+        assert!(guard.process_group.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellable_host_bash_returns_partial_output_and_kills_the_process_group() {
+        let executor = HostBashExecutor::new("/");
+        let cancellation = CancellationToken::new();
+        let request = ExternalCommandRequest {
+            invocation: ExternalCommandInvocation::Script(
+                "echo ready; trap '' TERM; (trap '' TERM; while :; do sleep 1; done) & echo child=$!; wait"
+                    .to_string(),
+            ),
+            executor: ExternalExecutorKind::HostBash,
+            cwd: PathBuf::from("/workspace"),
+            stdin: None,
+            deadline: ExecutionDeadline::from_now(Duration::from_secs(10)),
+            max_output_bytes: 4096,
+        };
+        let run = tokio::spawn({
+            let cancellation = cancellation.clone();
+            async move { executor.exec_cancellable(request, cancellation).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("host bash cancellation should return promptly")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.output.exit_code, 130);
+        assert!(result.output.stdout.contains("ready\n"));
+        let child = result
+            .output
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("child="))
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(child, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_after_the_group_leader_exits_still_kills_pipe_holding_members() {
+        let root = std::env::temp_dir().join(format!(
+            "cooldis-host-reaped-leader-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let leader_path = root.join("leader.pid");
+        let child_path = root.join("child.pid");
+        let executor = HostBashExecutor::new(&root);
+        let cancellation = CancellationToken::new();
+        let request = ExternalCommandRequest {
+            invocation: ExternalCommandInvocation::Script(
+                "echo $$ > leader.pid; (trap '' HUP TERM; while :; do sleep 1; done) & echo $! > child.pid; exit 0"
+                    .to_string(),
+            ),
+            executor: ExternalExecutorKind::HostBash,
+            cwd: PathBuf::from("/workspace"),
+            stdin: None,
+            deadline: ExecutionDeadline::from_now(Duration::from_secs(10)),
+            max_output_bytes: 4096,
+        };
+        let mut run = tokio::spawn({
+            let cancellation = cancellation.clone();
+            async move { executor.exec_cancellable(request, cancellation).await }
+        });
+        let (leader, child) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let leader = std::fs::read_to_string(&leader_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok());
+                let child = std::fs::read_to_string(&child_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok());
+                if let (Some(leader), Some(child)) = (leader, child)
+                    && unsafe { libc::kill(leader, 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    break (leader, child);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host bash leader was not reaped before cancellation");
+
+        cancellation.cancel();
+        let result = match tokio::time::timeout(Duration::from_secs(2), &mut run).await {
+            Ok(joined) => joined.unwrap().unwrap(),
+            Err(_) => {
+                run.abort();
+                let _ = run.await;
+                unsafe {
+                    libc::kill(child, libc::SIGKILL);
+                }
+                panic!("cancellation was ignored after leader {leader} exited");
+            }
+        };
+        let child_is_dead = unsafe {
+            libc::kill(child, 0) == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        };
+        if !child_is_dead {
+            unsafe {
+                libc::kill(child, libc::SIGKILL);
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+
+        assert_eq!(result.output.exit_code, 130);
+        assert!(child_is_dead, "pipe-holding process-group member survived");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_host_bash_execution_kills_the_owned_process_group() {
+        let root = std::env::temp_dir().join(format!("cooldis-host-drop-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_path = root.join("child.pid");
+        let executor = HostBashExecutor::new(&root);
+        let request = ExternalCommandRequest {
+            invocation: ExternalCommandInvocation::Script(
+                "(trap '' TERM; while :; do sleep 1; done) & echo $! > child.pid; wait".to_string(),
+            ),
+            executor: ExternalExecutorKind::HostBash,
+            cwd: PathBuf::from("/workspace"),
+            stdin: None,
+            deadline: ExecutionDeadline::from_now(Duration::from_secs(10)),
+            max_output_bytes: 4096,
+        };
+        let run = tokio::spawn(async move { executor.exec(request).await });
+        let child = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_path)
+                    && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
+                {
+                    break pid;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host bash did not expose its child pid");
+
+        run.abort();
+        let _ = run.await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if unsafe { libc::kill(child, 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping host bash left a process-group member alive");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

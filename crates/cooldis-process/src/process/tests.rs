@@ -275,6 +275,131 @@ async fn async_manager_writes_to_stdin_capable_host_command() {
     assert!(manager.acknowledge_terminal(process_id).await.unwrap());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn host_process_termination_kills_term_ignoring_process_group_members() {
+    let pid_file =
+        std::env::temp_dir().join(format!("cooldis-process-tree-{}.pid", uuid::Uuid::now_v7()));
+    let script = format!(
+        "trap '' TERM; /bin/sh -c 'trap \"\" TERM; echo $$ > {}; while :; do sleep 1; done' & wait",
+        pid_file.display()
+    );
+    let manager = AsyncExecutionManager::default();
+    let request = AsyncProcessStartRequest::host_command(
+        vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        std::env::current_dir().unwrap(),
+    )
+    .with_deadline(ExecutionDeadline::from_now(Duration::from_secs(30)))
+    .with_yield_time(Duration::from_millis(10))
+    .with_output_cap_bytes(1024)
+    .retain_terminal_until_acknowledged();
+    let started = manager
+        .start(Arc::new(HostBashLiveBackend), request)
+        .await
+        .unwrap();
+    let process_id = started.snapshot.process_id.unwrap();
+
+    let child_pid = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                break pid.trim().parse::<libc::pid_t>().unwrap();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("term-ignoring process-tree child did not start");
+
+    let terminated = manager
+        .terminate(process_id, "interrupt", Duration::from_secs(1), 1024)
+        .await
+        .unwrap();
+    let child_is_dead = unsafe {
+        libc::kill(child_pid, 0) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    };
+    if !child_is_dead {
+        unsafe {
+            libc::kill(child_pid, libc::SIGKILL);
+        }
+    }
+    let _ = std::fs::remove_file(pid_file);
+
+    assert_eq!(terminated.snapshot.status, ProcessSnapshotStatus::Cancelled);
+    assert!(child_is_dead, "process-group member survived termination");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn host_process_termination_still_works_after_the_group_leader_exits() {
+    let root = std::env::temp_dir().join(format!(
+        "cooldis-live-reaped-leader-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let leader_file = root.join("leader.pid");
+    let child_file = root.join("child.pid");
+    let script = format!(
+        "echo $$ > {}; (trap '' HUP TERM; while :; do sleep 1; done) & echo $! > {}; exit 0",
+        leader_file.display(),
+        child_file.display(),
+    );
+    let manager = AsyncExecutionManager::default();
+    let request = AsyncProcessStartRequest::host_command(
+        vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        std::env::current_dir().unwrap(),
+    )
+    .with_deadline(ExecutionDeadline::from_now(Duration::from_secs(30)))
+    .with_yield_time(Duration::from_millis(10))
+    .with_output_cap_bytes(1024)
+    .retain_terminal_until_acknowledged();
+    let started = manager
+        .start(Arc::new(HostBashLiveBackend), request)
+        .await
+        .unwrap();
+    let process_id = started.snapshot.process_id.unwrap();
+    let (leader_pid, child_pid) = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let leader = std::fs::read_to_string(&leader_file)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok());
+            let child = std::fs::read_to_string(&child_file)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok());
+            if let (Some(leader), Some(child)) = (leader, child)
+                && unsafe { libc::kill(leader, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break (leader, child);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("host process leader was not reaped before termination");
+
+    let terminated = manager
+        .terminate(process_id, "interrupt", Duration::from_secs(2), 1024)
+        .await
+        .unwrap();
+    let child_is_dead = unsafe {
+        libc::kill(child_pid, 0) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    };
+    if !child_is_dead {
+        unsafe {
+            libc::kill(child_pid, libc::SIGKILL);
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+
+    assert_eq!(terminated.snapshot.status, ProcessSnapshotStatus::Cancelled);
+    assert!(
+        child_is_dead,
+        "process-group member survived after leader {leader_pid} exited"
+    );
+}
+
 #[tokio::test]
 async fn async_manager_records_timeout_and_output_truncation() {
     let manager = AsyncExecutionManager::default();

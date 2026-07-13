@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 const TERMINAL_MONITOR_INTERVAL: Duration = Duration::from_millis(25);
 const SETUP_FAILURE_MAX_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -117,6 +118,51 @@ impl ProcessHandleDispatcher {
         manager: AsyncExecutionManager,
         backend: Arc<dyn LiveProcessBackend>,
         request: AsyncProcessStartRequest,
+    ) -> CooldisResult<AsyncProcessOutcome> {
+        self.dispatch_start_inner(
+            consumer,
+            dispatch_id,
+            command_digest,
+            manager,
+            backend,
+            request,
+            None,
+        )
+        .await
+    }
+
+    pub async fn dispatch_start_cancellable(
+        &self,
+        consumer: &ThreadCoordinates,
+        dispatch_id: DispatchId,
+        command_digest: String,
+        manager: AsyncExecutionManager,
+        backend: Arc<dyn LiveProcessBackend>,
+        request: AsyncProcessStartRequest,
+        cancellation: CancellationToken,
+    ) -> CooldisResult<AsyncProcessOutcome> {
+        self.dispatch_start_inner(
+            consumer,
+            dispatch_id,
+            command_digest,
+            manager,
+            backend,
+            request,
+            Some(cancellation),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_start_inner(
+        &self,
+        consumer: &ThreadCoordinates,
+        dispatch_id: DispatchId,
+        command_digest: String,
+        manager: AsyncExecutionManager,
+        backend: Arc<dyn LiveProcessBackend>,
+        request: AsyncProcessStartRequest,
+        cancellation: Option<CancellationToken>,
     ) -> CooldisResult<AsyncProcessOutcome> {
         let dispatch_lock = {
             let mut locks = self.inner.locks.lock().await;
@@ -207,15 +253,18 @@ impl ProcessHandleDispatcher {
         let start_manager = manager.clone();
         let start_dispatch_lock = Arc::clone(&dispatch_lock);
         let start = tokio::spawn(async move {
-            match start_manager
-                .start(
-                    backend,
-                    request
-                        .with_process_id(process_id)
-                        .retain_terminal_until_acknowledged(),
-                )
-                .await
-            {
+            let request = request
+                .with_process_id(process_id)
+                .retain_terminal_until_acknowledged();
+            let started = match cancellation {
+                Some(cancellation) => {
+                    start_manager
+                        .start_cancellable(backend, request, cancellation)
+                        .await
+                }
+                None => start_manager.start(backend, request).await,
+            };
+            match started {
                 Ok(outcome) => {
                     this.ensure_terminal_monitor(
                         start_binding,

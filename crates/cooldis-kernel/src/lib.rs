@@ -293,8 +293,8 @@ pub use agent::agent_process::{
 };
 pub use agent::agent_tool_router::{
     AgentKernelPendingToolCall, AgentKernelToolCall, AgentKernelToolOutcome,
-    AgentKernelToolProvider, AgentToolRouter, DEFAULT_TOOL_CANCELLATION_GRACE,
-    OperationToolAlias, RoutedAgentToolCall, ToolInvocationCancellation,
+    AgentKernelToolProvider, AgentToolRouter, DEFAULT_TOOL_CANCELLATION_GRACE, OperationToolAlias,
+    RoutedAgentToolCall, ToolInvocationCancellation,
 };
 pub use agent::contracts::{
     AGENT_CONTRACT_KIND, AGENT_CONTRACT_SOURCE_FORMAT, AGENT_CONTRACT_VERSION,
@@ -460,13 +460,13 @@ pub use kernel::control_decision::{
     MandateSchedulePayload, MandateStartedPayload, MandateSubject, PendingToolCallSuspension,
     PlacementDecision, PlacementDecisionPayload, PlacementDecisionRequest, PlacementSubject,
     PlacementTarget, ToolCallCancellation, ToolCallCompletedPayload, ToolCallDecision,
-    ToolCallDecisionOutcomePayload,
-    ToolCallDecisionPayload, ToolCallRequestedPayload, ToolCallSubject, ToolCallSuspendedPayload,
-    ToolControllerBinding, ToolDecisionRequest, TurnContinuationAcceptedPayload,
-    TurnContinuationDecision, TurnContinuationDecisionRequest, TurnContinuationRejectedPayload,
-    TurnContinuationSubject, TurnContinueRequestedPayload, active_manifest_bind_receipt,
-    active_tool_controller_for_request, control_stream_id, decide_placement, decide_tool_call,
-    decide_turn_continuation, list_pending_tool_call_suspensions,
+    ToolCallDecisionOutcomePayload, ToolCallDecisionPayload, ToolCallRequestedPayload,
+    ToolCallSubject, ToolCallSuspendedPayload, ToolControllerBinding, ToolDecisionRequest,
+    TurnContinuationAcceptedPayload, TurnContinuationDecision, TurnContinuationDecisionRequest,
+    TurnContinuationRejectedPayload, TurnContinuationSubject, TurnContinueRequestedPayload,
+    active_manifest_bind_receipt, active_tool_controller_for_request, control_stream_id,
+    decide_placement, decide_tool_call, decide_turn_continuation,
+    list_pending_tool_call_suspensions,
 };
 pub use kernel::coupling_scheduler::{
     CouplingActivation, CouplingBudgetSpent, CouplingDischarge, CouplingExecutionResult,

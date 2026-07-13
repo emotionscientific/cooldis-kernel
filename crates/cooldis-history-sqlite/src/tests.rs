@@ -1101,7 +1101,14 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
                     NewEventRecord::witnessed(
                         coordinates.clone(),
                         EventKind::ToolCallCompleted,
-                        serde_json::json!({"schema": "cooldis.event.tool.call.completed/1", "call_id": "call-1"}),
+                        serde_json::json!({
+                            "schema": "cooldis.event.tool.call.completed/1",
+                            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+                            "snapshot_id": "snapshot-1",
+                            "tool_name": "bash",
+                            "success": false,
+                            "cancellation": "cancelled_exceeded_grace"
+                        }),
                     ),
                     NewEventRecord::witnessed(
                         coordinates,
@@ -1128,6 +1135,10 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
         vec![2, 3]
     );
     assert_eq!(replay[0].kind, EventKind::ToolCallCompleted);
+    assert_eq!(
+        replay[0].payload["cancellation"],
+        serde_json::json!("cancelled_exceeded_grace")
+    );
     assert_eq!(replay[1].kind, EventKind::TurnCompleted);
 
     let tampered = StreamCursorV1 {

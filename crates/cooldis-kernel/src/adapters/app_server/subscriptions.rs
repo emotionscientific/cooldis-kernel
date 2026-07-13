@@ -34,6 +34,12 @@ struct ResyncedTurnProjection {
     items: Vec<ResyncedTurnItem>,
 }
 
+struct ResyncedTurnFacts {
+    entry_id: String,
+    completions: HashMap<String, ToolCallCompletedPayload>,
+    result_entry_ids: HashMap<String, String>,
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 pub(super) struct ThreadResyncTestGate {
@@ -411,7 +417,7 @@ pub(super) async fn resynchronize_thread_after_lag(
                 return false;
             }
         };
-        if let Some((entry_id, completions)) = facts {
+        if let Some(facts) = facts {
             let context = match handle.session_context().await {
                 Ok(context) => context,
                 Err(err) => {
@@ -420,9 +426,12 @@ pub(super) async fn resynchronize_thread_after_lag(
                     return false;
                 }
             };
-            let Some(projection) =
-                resynced_turn_projection(&context.entries, &entry_id, &completions)
-            else {
+            let Some(projection) = resynced_turn_projection(
+                &context.entries,
+                &facts.entry_id,
+                &facts.completions,
+                &facts.result_entry_ids,
+            ) else {
                 notify_thread_resync_failed(
                     app,
                     thread_id,
@@ -504,6 +513,7 @@ fn resynced_turn_projection(
     entries: &[SessionEntry],
     entry_id: &str,
     completions: &HashMap<String, ToolCallCompletedPayload>,
+    result_entry_ids: &HashMap<String, String>,
 ) -> Option<ResyncedTurnProjection> {
     let user_index = entries.iter().position(|entry| {
         entry.entry_id.to_string() == entry_id
@@ -608,13 +618,62 @@ fn resynced_turn_projection(
             }
         }
     }
+    // Detached completions may be appended after the next user entry. Apply
+    // full-stream completion facts and their canonical result content instead
+    // of leaving the interrupted turn's dynamic tool stuck in progress.
+    for item in &mut projection.items {
+        let ResyncedTurnItem::DynamicTool(item) = item else {
+            continue;
+        };
+        let Some(call_id) = item.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        let Some(completion) = completions.get(&call_id) else {
+            continue;
+        };
+        item["status"] = Value::String(
+            if completion.success {
+                "completed"
+            } else {
+                "failed"
+            }
+            .to_string(),
+        );
+        item["success"] = Value::Bool(completion.success);
+        item["durationMs"] = completion
+            .duration_ms
+            .map(Value::from)
+            .unwrap_or(Value::Null);
+        let result_entry_id = result_entry_ids.get(&call_id);
+        if let Some(content) = entries.iter().find_map(|entry| match &entry.kind {
+            SessionEntryKind::Message {
+                message:
+                    CanonicalMessage::ToolResult {
+                        tool_call_id,
+                        content,
+                        ..
+                    },
+            } if tool_call_id == &call_id
+                && result_entry_id
+                    .is_some_and(|entry_id| entry.entry_id.to_string() == entry_id.as_str()) =>
+            {
+                Some(content)
+            }
+            _ => None,
+        }) {
+            item["contentItems"] = json!([{
+                "type": "inputText",
+                "text": text_from_canonical_content(content),
+            }]);
+        }
+    }
     Some(projection)
 }
 
 fn resynced_turn_facts(
     events: &[EventRecord],
     turn_id: &str,
-) -> Result<Option<(String, HashMap<String, ToolCallCompletedPayload>)>, String> {
+) -> Result<Option<ResyncedTurnFacts>, String> {
     let submitted = events
         .iter()
         .filter(|event| {
@@ -634,20 +693,64 @@ fn resynced_turn_facts(
     };
 
     let mut completions = HashMap::new();
+    let mut request_calls = HashMap::new();
     for event in events {
         match event.kind {
-            EventKind::ToolCallCompleted => {
+            EventKind::ToolCallRequested
+                if event
+                    .payload
+                    .get("subject")
+                    .and_then(|subject| subject.get("turn_id"))
+                    .and_then(Value::as_str)
+                    == Some(turn_id) =>
+            {
+                let call_id = event
+                    .payload
+                    .get("subject")
+                    .and_then(|subject| subject.get("call_id"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("tool.call.requested {} has no call id", event.id))?;
+                request_calls.insert(event.id, call_id.to_string());
+            }
+            EventKind::ToolCallCompleted
+                if event
+                    .payload
+                    .get("subject")
+                    .and_then(|subject| subject.get("turn_id"))
+                    .and_then(Value::as_str)
+                    == Some(turn_id) =>
+            {
                 let payload =
                     serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone())
                         .map_err(|err| format!("tool.call.completed payload is invalid: {err}"))?;
-                if payload.subject.turn_id == turn_id {
-                    completions.insert(payload.subject.call_id.clone(), payload);
-                }
+                completions.insert(payload.subject.call_id.clone(), payload);
             }
             _ => {}
         }
     }
-    Ok(Some((entry_id, completions)))
+    let mut result_entry_ids = HashMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind == EventKind::SessionEntryAppended)
+    {
+        let Some(call_id) = event
+            .provenance
+            .source_event_ids
+            .iter()
+            .find_map(|source| request_calls.get(source))
+        else {
+            continue;
+        };
+        let Some(result_entry_id) = event.payload.get("entry_id").and_then(Value::as_str) else {
+            continue;
+        };
+        result_entry_ids.insert(call_id.clone(), result_entry_id.to_string());
+    }
+    Ok(Some(ResyncedTurnFacts {
+        entry_id,
+        completions,
+        result_entry_ids,
+    }))
 }
 
 fn apply_resynced_turn_projection(
@@ -1641,5 +1744,124 @@ pub(super) async fn fail_active_turn(
             json!({ "threadId": thread_id, "turn": turn }),
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CanonicalStopReason, ProviderApi, SessionEntry, ThreadCoordinates, ToolCallCancellation,
+        ToolCallSubject,
+    };
+
+    #[test]
+    fn resync_projects_a_detached_completion_appended_after_the_next_user_entry() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "late-completion");
+        let old_user = SessionEntry::new(
+            coordinates.clone(),
+            None,
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("older turn"),
+            },
+        );
+        let old_result = SessionEntry::new(
+            coordinates.clone(),
+            Some(old_user.entry_id),
+            SessionEntryKind::Message {
+                message: CanonicalMessage::tool_result(
+                    "call-late",
+                    "bash",
+                    "older result with a reused call id",
+                    false,
+                ),
+            },
+        );
+        let user = SessionEntry::new(
+            coordinates.clone(),
+            Some(old_result.entry_id),
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("first turn"),
+            },
+        );
+        let assistant = SessionEntry::new(
+            coordinates.clone(),
+            Some(user.entry_id),
+            SessionEntryKind::Message {
+                message: CanonicalMessage::assistant(
+                    "test",
+                    ProviderApi::OpenAIResponses,
+                    "model",
+                    vec![CanonicalContent::tool_call(
+                        "call-late",
+                        "bash",
+                        json!({"command": "slow"}),
+                    )],
+                    CanonicalStopReason::ToolUse,
+                ),
+            },
+        );
+        let next_user = SessionEntry::new(
+            coordinates.clone(),
+            Some(assistant.entry_id),
+            SessionEntryKind::Message {
+                message: CanonicalMessage::user_text("replacement turn"),
+            },
+        );
+        let late_result = SessionEntry::new(
+            coordinates,
+            Some(next_user.entry_id),
+            SessionEntryKind::Message {
+                message: CanonicalMessage::tool_result(
+                    "call-late",
+                    "bash",
+                    "cancelled after grace",
+                    true,
+                ),
+            },
+        );
+        let late_result_entry_id = late_result.entry_id.to_string();
+        let completion: ToolCallCompletedPayload = serde_json::from_value(
+            serde_json::to_value(ToolCallCompletedPayload {
+                subject: ToolCallSubject {
+                    turn_id: "turn-first".to_string(),
+                    call_id: "call-late".to_string(),
+                },
+                snapshot_id: "snapshot".to_string(),
+                tool_name: "bash".to_string(),
+                success: false,
+                duration_ms: Some(12),
+                finish_order: Some(0),
+                cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let projection = resynced_turn_projection(
+            &[
+                old_user,
+                old_result,
+                user.clone(),
+                assistant,
+                next_user,
+                late_result,
+            ],
+            &user.entry_id.to_string(),
+            &HashMap::from([("call-late".to_string(), completion)]),
+            &HashMap::from([("call-late".to_string(), late_result_entry_id)]),
+        )
+        .unwrap();
+        let tool = projection
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ResyncedTurnItem::DynamicTool(tool) => Some(tool),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(tool["status"], "failed");
+        assert_eq!(tool["success"], false);
+        assert_eq!(tool["durationMs"], 12);
+        assert_eq!(tool["contentItems"][0]["text"], "cancelled after grace");
     }
 }
