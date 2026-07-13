@@ -44,7 +44,7 @@ tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "proc
 tokio-tungstenite = "0.28"
 tokio-util = "0.7"
 toml = "0.9"
-uuid = { version = "1", features = ["serde", "v7"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
 futures-executor = "0.3"

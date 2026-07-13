@@ -19,10 +19,19 @@
 //! bearing the old lease is rejected fail-closed, witnessed, no window in
 //! which both leases pass the fence.
 
-use crate::{CooldisResult, EventSequence, EventStreamId, NewEventRecord, StreamAppendAckV1};
+use super::endpoint::CooldisDaemonSyncConfig;
+use crate::{
+    CooldisError, CooldisResult, DaemonClock, EventSequence, EventStreamId, HistoryError,
+    NewEventRecord, SqliteSessionStore, StreamAckClass, StreamAppendAckV1,
+};
 use async_trait::async_trait;
 use cooldis_runtime_contracts::DispatchId;
+use cooldis_sqlite::{Connection, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::future::Future;
+use std::sync::Arc;
+use uuid::Uuid;
 
 /// Wire schema identifier for [`StreamLeaseGrantV1`].
 pub const SYNC_STREAM_LEASE_SCHEMA_V1: &str = "cooldis.stream.sync_lease/1";
@@ -278,10 +287,723 @@ pub trait SyncCredentialAuthority: Send + Sync {
     async fn revoke_credential(&self, credential_id: &str) -> CooldisResult<()>;
 }
 
+/// SQLite-backed durable authority for stream leases and their scoped write
+/// credentials.
+///
+/// The authority shares the [`SqliteSessionStore`]'s engine handle so lease
+/// rows, credential revocations, and event rows participate in one SQLite
+/// writer order. Every read-then-write operation starts an `Immediate`
+/// transaction before reading authority state. The only retained in-memory
+/// values are immutable configuration and the injected clock; fence decisions
+/// are always re-derived from durable rows.
+#[derive(Clone)]
+pub struct SqliteStreamLeaseAuthority {
+    store: SqliteSessionStore,
+    clock: Arc<dyn DaemonClock>,
+    lease_ttl_ms: i64,
+}
+
+impl std::fmt::Debug for SqliteStreamLeaseAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteStreamLeaseAuthority")
+            .field("lease_ttl_ms", &self.lease_ttl_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SqliteStreamLeaseAuthority {
+    /// Initialize the daemon-owned authority tables in `store`.
+    ///
+    /// `clock` is the sole source of grant, renewal, release, revocation, and
+    /// expiry time. Tests inject it; production passes [`crate::SystemDaemonClock`].
+    pub async fn new(
+        store: SqliteSessionStore,
+        config: CooldisDaemonSyncConfig,
+        clock: Arc<dyn DaemonClock>,
+    ) -> CooldisResult<Self> {
+        config.validate()?;
+        let lease_ttl_ms = i64::from(config.lease_ttl_secs)
+            .checked_mul(1_000)
+            .ok_or_else(|| authority_error("daemon sync lease TTL overflows milliseconds"))?;
+        let authority = Self {
+            store,
+            clock,
+            lease_ttl_ms,
+        };
+        authority.init_schema().await?;
+        Ok(authority)
+    }
+
+    async fn init_schema(&self) -> CooldisResult<()> {
+        let store = self.store.clone();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage_error)?;
+            transaction
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS cooldis_stream_leases (
+                        lease_id TEXT PRIMARY KEY NOT NULL,
+                        scope TEXT NOT NULL,
+                        scope_generation INTEGER NOT NULL,
+                        holder_dispatch_id TEXT NOT NULL,
+                        predecessor_lease_id TEXT REFERENCES cooldis_stream_leases(lease_id),
+                        granted_at_ms INTEGER NOT NULL,
+                        expires_at_ms INTEGER NOT NULL,
+                        released_at_ms INTEGER,
+                        UNIQUE(scope, scope_generation)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_cooldis_stream_leases_scope_latest
+                        ON cooldis_stream_leases(scope, scope_generation DESC);
+
+                    CREATE TABLE IF NOT EXISTS cooldis_stream_write_credentials (
+                        credential_id TEXT PRIMARY KEY NOT NULL,
+                        token_digest TEXT UNIQUE NOT NULL,
+                        scope TEXT NOT NULL,
+                        lease_id TEXT NOT NULL REFERENCES cooldis_stream_leases(lease_id),
+                        minted_at_ms INTEGER NOT NULL,
+                        revoked_at_ms INTEGER
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_cooldis_stream_write_credentials_lease
+                        ON cooldis_stream_write_credentials(lease_id, revoked_at_ms);
+                    "#,
+                )
+                .await
+                .map_err(storage_error)?;
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DurableLease {
+    lease_id: StreamLeaseId,
+    scope: StreamPrefixScope,
+    scope_generation: i64,
+    holder_dispatch_id: DispatchId,
+    predecessor_lease_id: Option<StreamLeaseId>,
+    granted_at_ms: i64,
+    expires_at_ms: i64,
+    released_at_ms: Option<i64>,
+}
+
+impl DurableLease {
+    fn grant(&self) -> StreamLeaseGrantV1 {
+        StreamLeaseGrantV1 {
+            schema: SYNC_STREAM_LEASE_SCHEMA_V1.to_string(),
+            lease_id: self.lease_id.clone(),
+            scope: self.scope.clone(),
+            holder_dispatch_id: self.holder_dispatch_id.clone(),
+            lineage: StreamLeaseLineage {
+                superseded_lease_id: self.predecessor_lease_id.clone(),
+            },
+            granted_at_ms: self.granted_at_ms,
+            expires_at_ms: self.expires_at_ms,
+        }
+    }
+}
+
+#[async_trait]
+impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
+    async fn grant_lease(
+        &self,
+        scope: &StreamPrefixScope,
+        holder_dispatch_id: &DispatchId,
+        lineage: StreamLeaseLineage,
+    ) -> CooldisResult<StreamLeaseGrantV1> {
+        if scope.as_str().is_empty() {
+            return Err(authority_error("cannot grant an empty stream scope"));
+        }
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let lease_ttl_ms = self.lease_ttl_ms;
+        let scope = scope.clone();
+        let holder_dispatch_id = holder_dispatch_id.clone();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage_error)?;
+            let now_ms = clock.now().timestamp_millis();
+            let expires_at_ms = lease_expiry(now_ms, lease_ttl_ms)?;
+
+            let predecessor = latest_lease_for_scope(&transaction, &scope).await?;
+            let lineage_matches = match (&predecessor, &lineage.superseded_lease_id) {
+                (None, None) => true,
+                (Some(previous), Some(named)) => previous.lease_id == *named,
+                _ => false,
+            };
+            if !lineage_matches {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Err(authority_error(
+                    "lease lineage does not name the immediately preceding grant",
+                ));
+            }
+
+            for live in latest_unreleased_leases(&transaction).await? {
+                if live.scope != scope && scopes_overlap(&live.scope, &scope) {
+                    transaction.rollback().await.map_err(storage_error)?;
+                    return Err(authority_error(
+                        "stream lease scope overlaps a different live scope",
+                    ));
+                }
+            }
+
+            let scope_generation = predecessor.as_ref().map_or(Ok(1), |previous| {
+                previous
+                    .scope_generation
+                    .checked_add(1)
+                    .ok_or_else(|| authority_error("lease scope generation overflow"))
+            })?;
+            let lease_id = StreamLeaseId::new(format!("lease_{}", Uuid::new_v4()));
+            transaction
+                .execute(
+                    "INSERT INTO cooldis_stream_leases (
+                        lease_id, scope, scope_generation, holder_dispatch_id,
+                        predecessor_lease_id, granted_at_ms, expires_at_ms, released_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                    params![
+                        lease_id.as_str(),
+                        scope.as_str(),
+                        scope_generation,
+                        holder_dispatch_id.as_str(),
+                        lineage
+                            .superseded_lease_id
+                            .as_ref()
+                            .map(StreamLeaseId::as_str),
+                        now_ms,
+                        expires_at_ms,
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            if let Some(previous) = &predecessor {
+                revoke_lease_credentials(&transaction, &previous.lease_id, now_ms).await?;
+            }
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(StreamLeaseGrantV1 {
+                schema: SYNC_STREAM_LEASE_SCHEMA_V1.to_string(),
+                lease_id,
+                scope,
+                holder_dispatch_id,
+                lineage,
+                granted_at_ms: now_ms,
+                expires_at_ms,
+            })
+        })
+        .await
+    }
+
+    async fn renew_lease(&self, lease_id: &StreamLeaseId) -> CooldisResult<StreamLeaseGrantV1> {
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let lease_ttl_ms = self.lease_ttl_ms;
+        let lease_id = lease_id.clone();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage_error)?;
+            let Some(mut lease) = lease_by_id(&transaction, &lease_id).await? else {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Err(authority_error("cannot renew an unknown stream lease"));
+            };
+            let latest = latest_lease_for_scope(&transaction, &lease.scope).await?;
+            if lease.released_at_ms.is_some()
+                || latest.as_ref().map(|row| &row.lease_id) != Some(&lease_id)
+            {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Err(authority_error(
+                    "cannot renew a superseded or released stream lease",
+                ));
+            }
+            let now_ms = clock.now().timestamp_millis();
+            let expires_at_ms = lease_expiry(now_ms, lease_ttl_ms)?.max(lease.expires_at_ms);
+            transaction
+                .execute(
+                    "UPDATE cooldis_stream_leases
+                     SET expires_at_ms = ?2
+                     WHERE lease_id = ?1",
+                    params![lease_id.as_str(), expires_at_ms],
+                )
+                .await
+                .map_err(storage_error)?;
+            transaction.commit().await.map_err(storage_error)?;
+            lease.expires_at_ms = expires_at_ms;
+            Ok(lease.grant())
+        })
+        .await
+    }
+
+    async fn release_lease(&self, lease_id: &StreamLeaseId) -> CooldisResult<()> {
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let lease_id = lease_id.clone();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage_error)?;
+            let now_ms = clock.now().timestamp_millis();
+            if let Some(lease) = lease_by_id(&transaction, &lease_id).await? {
+                let latest = latest_lease_for_scope(&transaction, &lease.scope).await?;
+                if lease.released_at_ms.is_none()
+                    && latest.as_ref().map(|row| &row.lease_id) == Some(&lease_id)
+                {
+                    transaction
+                        .execute(
+                            "UPDATE cooldis_stream_leases
+                             SET released_at_ms = ?2
+                             WHERE lease_id = ?1",
+                            params![lease_id.as_str(), now_ms],
+                        )
+                        .await
+                        .map_err(storage_error)?;
+                    revoke_lease_credentials(&transaction, &lease_id, now_ms).await?;
+                }
+            }
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn check_fence(
+        &self,
+        stream_id: &EventStreamId,
+        presented: &StreamLeaseId,
+    ) -> CooldisResult<LeaseFenceDecision> {
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let stream_id = stream_id.clone();
+        let presented = presented.clone();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .await
+                .map_err(storage_error)?;
+            let now_ms = clock.now().timestamp_millis();
+            let decision = fence_decision(&transaction, &stream_id, &presented, now_ms).await?;
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(decision)
+        })
+        .await
+    }
+
+    async fn append_if_current(
+        &self,
+        stream_id: &EventStreamId,
+        presented: &StreamLeaseId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> CooldisResult<LeaseFencedAppendOutcome> {
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let stream_id = stream_id.clone();
+        let presented = presented.clone();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage_error)?;
+            let now_ms = clock.now().timestamp_millis();
+            let decision = fence_decision(&transaction, &stream_id, &presented, now_ms).await?;
+            if decision != LeaseFenceDecision::Current {
+                transaction.commit().await.map_err(storage_error)?;
+                return Ok(LeaseFencedAppendOutcome::LeaseRejected { fence: decision });
+            }
+
+            let append = store
+                .append_events_fenced_in_transaction(
+                    &transaction,
+                    &stream_id,
+                    expected_next_sequence,
+                    records,
+                )
+                .await;
+            let appended = match append {
+                Ok(appended) => appended,
+                Err(HistoryError::AppendFenceConflict {
+                    actual_next_sequence,
+                    ..
+                }) => {
+                    transaction.commit().await.map_err(storage_error)?;
+                    return Ok(LeaseFencedAppendOutcome::SequenceFenceConflict {
+                        actual_next_sequence: EventSequence::new(actual_next_sequence),
+                    });
+                }
+                Err(error) => {
+                    transaction.rollback().await.map_err(storage_error)?;
+                    return Err(CooldisError::History(error.to_string()));
+                }
+            };
+            let ack = match StreamAppendAckV1::from_appended(
+                stream_id,
+                &appended,
+                vec![
+                    StreamAckClass::StreamCommitted,
+                    StreamAckClass::QueryProjected,
+                ],
+            ) {
+                Ok(ack) => ack,
+                Err(error) => {
+                    transaction.rollback().await.map_err(storage_error)?;
+                    return Err(CooldisError::History(error.to_string()));
+                }
+            };
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(LeaseFencedAppendOutcome::Appended { ack })
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl SyncCredentialAuthority for SqliteStreamLeaseAuthority {
+    async fn mint_credential(
+        &self,
+        grant: &StreamLeaseGrantV1,
+    ) -> CooldisResult<(StreamWriteCredentialV1, String)> {
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let grant = grant.clone();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage_error)?;
+            let now_ms = clock.now().timestamp_millis();
+            let durable = lease_by_id(&transaction, &grant.lease_id).await?;
+            let latest = latest_lease_for_scope(&transaction, &grant.scope).await?;
+            if grant.schema != SYNC_STREAM_LEASE_SCHEMA_V1
+                || durable.as_ref().is_none_or(|lease| {
+                    lease.released_at_ms.is_some() || lease.scope != grant.scope
+                })
+                || latest.as_ref().map(|lease| &lease.lease_id) != Some(&grant.lease_id)
+            {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Err(authority_error(
+                    "cannot mint a credential for a non-current stream lease grant",
+                ));
+            }
+
+            let credential_id = format!("credential_{}", Uuid::new_v4());
+            let token = format!(
+                "cooldis_sync_{}{}",
+                Uuid::new_v4().simple(),
+                Uuid::new_v4().simple()
+            );
+            let token_digest = token_digest(&token);
+            transaction
+                .execute(
+                    "INSERT INTO cooldis_stream_write_credentials (
+                        credential_id, token_digest, scope, lease_id, minted_at_ms, revoked_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                    params![
+                        credential_id.as_str(),
+                        token_digest,
+                        grant.scope.as_str(),
+                        grant.lease_id.as_str(),
+                        now_ms,
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            transaction.commit().await.map_err(storage_error)?;
+            Ok((
+                StreamWriteCredentialV1 {
+                    schema: SYNC_STREAM_WRITE_CREDENTIAL_SCHEMA_V1.to_string(),
+                    credential_id,
+                    scope: grant.scope,
+                    lease_id: grant.lease_id,
+                    minted_at_ms: now_ms,
+                },
+                token,
+            ))
+        })
+        .await
+    }
+
+    async fn verify_token(&self, token: &str) -> CooldisResult<Option<VerifiedPushIdentity>> {
+        let database = self.store.sqlite_database();
+        let connection = database.connect().await.map_err(storage_error)?;
+        let digest = token_digest(token);
+        let mut rows = connection
+            .query(
+                "SELECT credential_id, scope, lease_id
+                 FROM cooldis_stream_write_credentials AS credential
+                 WHERE credential.token_digest = ?1
+                   AND credential.revoked_at_ms IS NULL
+                   AND EXISTS (
+                       SELECT 1
+                       FROM cooldis_stream_leases AS lease
+                       WHERE lease.lease_id = credential.lease_id
+                         AND lease.scope = credential.scope
+                         AND lease.released_at_ms IS NULL
+                         AND lease.scope_generation = (
+                             SELECT MAX(latest.scope_generation)
+                             FROM cooldis_stream_leases AS latest
+                             WHERE latest.scope = lease.scope
+                         )
+                   )
+                 LIMIT 1",
+                params![digest],
+            )
+            .await
+            .map_err(storage_error)?;
+        let identity = match rows.next().await.map_err(storage_error)? {
+            Some(row) => Some(VerifiedPushIdentity {
+                credential_id: row.get(0).map_err(storage_error)?,
+                scope: StreamPrefixScope::new(row.get::<String>(1).map_err(storage_error)?),
+                lease_id: StreamLeaseId::new(row.get::<String>(2).map_err(storage_error)?),
+            }),
+            None => None,
+        };
+        Ok(identity)
+    }
+
+    async fn revoke_credential(&self, credential_id: &str) -> CooldisResult<()> {
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let credential_id = credential_id.to_string();
+        cancellation_safe(async move {
+            let database = store.sqlite_database();
+            let mut connection = database.connect().await.map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage_error)?;
+            let now_ms = clock.now().timestamp_millis();
+            transaction
+                .execute(
+                    "UPDATE cooldis_stream_write_credentials
+                     SET revoked_at_ms = COALESCE(revoked_at_ms, ?2)
+                     WHERE credential_id = ?1",
+                    params![credential_id, now_ms],
+                )
+                .await
+                .map_err(storage_error)?;
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+async fn fence_decision(
+    connection: &Connection,
+    stream_id: &EventStreamId,
+    presented: &StreamLeaseId,
+    now_ms: i64,
+) -> CooldisResult<LeaseFenceDecision> {
+    let Some(lease) = lease_by_id(connection, presented).await? else {
+        return Ok(LeaseFenceDecision::Unknown);
+    };
+    if !lease.scope.authorizes(stream_id) {
+        return Ok(LeaseFenceDecision::Unknown);
+    }
+    let latest = latest_lease_for_scope(connection, &lease.scope).await?;
+    if lease.released_at_ms.is_some() || latest.as_ref().map(|row| &row.lease_id) != Some(presented)
+    {
+        return Ok(LeaseFenceDecision::Superseded);
+    }
+    let covering = latest_unreleased_leases(connection)
+        .await?
+        .into_iter()
+        .filter(|candidate| candidate.scope.authorizes(stream_id))
+        .collect::<Vec<_>>();
+    if covering.len() != 1 || covering[0].lease_id != *presented {
+        return Ok(LeaseFenceDecision::Superseded);
+    }
+    if now_ms >= lease.expires_at_ms {
+        return Ok(LeaseFenceDecision::Expired);
+    }
+    Ok(LeaseFenceDecision::Current)
+}
+
+async fn lease_by_id(
+    connection: &Connection,
+    lease_id: &StreamLeaseId,
+) -> CooldisResult<Option<DurableLease>> {
+    let mut rows = connection
+        .query(
+            "SELECT lease_id, scope, scope_generation, holder_dispatch_id,
+                    predecessor_lease_id, granted_at_ms, expires_at_ms, released_at_ms
+             FROM cooldis_stream_leases
+             WHERE lease_id = ?1
+             LIMIT 1",
+            params![lease_id.as_str()],
+        )
+        .await
+        .map_err(storage_error)?;
+    rows.next()
+        .await
+        .map_err(storage_error)?
+        .as_ref()
+        .map(durable_lease_from_row)
+        .transpose()
+}
+
+async fn latest_lease_for_scope(
+    connection: &Connection,
+    scope: &StreamPrefixScope,
+) -> CooldisResult<Option<DurableLease>> {
+    let mut rows = connection
+        .query(
+            "SELECT lease_id, scope, scope_generation, holder_dispatch_id,
+                    predecessor_lease_id, granted_at_ms, expires_at_ms, released_at_ms
+             FROM cooldis_stream_leases
+             WHERE scope = ?1
+             ORDER BY scope_generation DESC
+             LIMIT 1",
+            params![scope.as_str()],
+        )
+        .await
+        .map_err(storage_error)?;
+    rows.next()
+        .await
+        .map_err(storage_error)?
+        .as_ref()
+        .map(durable_lease_from_row)
+        .transpose()
+}
+
+async fn latest_unreleased_leases(connection: &Connection) -> CooldisResult<Vec<DurableLease>> {
+    let mut rows = connection
+        .query(
+            "SELECT lease.lease_id, lease.scope, lease.scope_generation,
+                    lease.holder_dispatch_id, lease.predecessor_lease_id,
+                    lease.granted_at_ms, lease.expires_at_ms, lease.released_at_ms
+             FROM cooldis_stream_leases AS lease
+             WHERE lease.released_at_ms IS NULL
+               AND lease.scope_generation = (
+                   SELECT MAX(latest.scope_generation)
+                   FROM cooldis_stream_leases AS latest
+                   WHERE latest.scope = lease.scope
+               )
+             ORDER BY lease.scope",
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+    let mut leases = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage_error)? {
+        leases.push(durable_lease_from_row(&row)?);
+    }
+    Ok(leases)
+}
+
+fn durable_lease_from_row(row: &Row) -> CooldisResult<DurableLease> {
+    Ok(DurableLease {
+        lease_id: StreamLeaseId::new(row.get::<String>(0).map_err(storage_error)?),
+        scope: StreamPrefixScope::new(row.get::<String>(1).map_err(storage_error)?),
+        scope_generation: row.get(2).map_err(storage_error)?,
+        holder_dispatch_id: DispatchId::new(row.get::<String>(3).map_err(storage_error)?),
+        predecessor_lease_id: row
+            .get::<Option<String>>(4)
+            .map_err(storage_error)?
+            .map(StreamLeaseId::new),
+        granted_at_ms: row.get(5).map_err(storage_error)?,
+        expires_at_ms: row.get(6).map_err(storage_error)?,
+        released_at_ms: row.get(7).map_err(storage_error)?,
+    })
+}
+
+async fn revoke_lease_credentials(
+    connection: &Connection,
+    lease_id: &StreamLeaseId,
+    revoked_at_ms: i64,
+) -> CooldisResult<()> {
+    connection
+        .execute(
+            "UPDATE cooldis_stream_write_credentials
+             SET revoked_at_ms = COALESCE(revoked_at_ms, ?2)
+             WHERE lease_id = ?1",
+            params![lease_id.as_str(), revoked_at_ms],
+        )
+        .await
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn scopes_overlap(left: &StreamPrefixScope, right: &StreamPrefixScope) -> bool {
+    prefix_contains(left.as_str(), right.as_str()) || prefix_contains(right.as_str(), left.as_str())
+}
+
+fn prefix_contains(prefix: &str, candidate: &str) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    let Some(suffix) = candidate.strip_prefix(prefix) else {
+        return false;
+    };
+    suffix.is_empty() || suffix.starts_with(':')
+}
+
+fn token_digest(token: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn lease_expiry(now_ms: i64, lease_ttl_ms: i64) -> CooldisResult<i64> {
+    now_ms
+        .checked_add(lease_ttl_ms)
+        .ok_or_else(|| authority_error("lease expiry timestamp overflow"))
+}
+
+fn authority_error(message: impl Into<String>) -> CooldisError {
+    CooldisError::History(message.into())
+}
+
+fn storage_error(error: impl std::fmt::Display) -> CooldisError {
+    CooldisError::History(error.to_string())
+}
+
+async fn cancellation_safe<T>(
+    future: impl Future<Output = CooldisResult<T>> + Send + 'static,
+) -> CooldisResult<T>
+where
+    T: Send + 'static,
+{
+    tokio::spawn(future).await.map_err(|error| {
+        CooldisError::History(format!("sqlite authority transaction task failed: {error}"))
+    })?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct FixedClock {
+        now_ms: i64,
+    }
+
+    impl DaemonClock for FixedClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::from_timestamp_millis(self.now_ms)
+                .expect("test timestamp should be representable")
+        }
+    }
 
     #[test]
     fn prefix_scope_authorizes_only_its_prefix() {
@@ -322,7 +1044,75 @@ mod tests {
 
         assert_eq!(grant.lineage, StreamLeaseLineage::default());
         let encoded = serde_json::to_value(grant).expect("grant should encode");
-        assert!(encoded.get("lineage").is_none());
-        assert!(encoded.get("future_optional_field").is_none());
+        assert_eq!(
+            encoded,
+            json!({
+                "schema": SYNC_STREAM_LEASE_SCHEMA_V1,
+                "lease_id": "lease-1",
+                "scope": "thread:child-7",
+                "holder_dispatch_id": "dispatch-1",
+                "granted_at_ms": 10,
+                "expires_at_ms": 70,
+            })
+        );
+    }
+
+    #[test]
+    fn write_credential_v1_encoding_is_stable_and_forward_decodable() {
+        let fixture = json!({
+            "schema": SYNC_STREAM_WRITE_CREDENTIAL_SCHEMA_V1,
+            "credential_id": "credential-1",
+            "scope": "thread:child-7",
+            "lease_id": "lease-1",
+            "minted_at_ms": 10,
+            "future_optional_field": "ignored",
+        });
+        let credential: StreamWriteCredentialV1 =
+            serde_json::from_value(fixture).expect("V1 credential fixture should decode");
+
+        assert_eq!(
+            serde_json::to_value(credential).expect("credential should encode"),
+            json!({
+                "schema": SYNC_STREAM_WRITE_CREDENTIAL_SCHEMA_V1,
+                "credential_id": "credential-1",
+                "scope": "thread:child-7",
+                "lease_id": "lease-1",
+                "minted_at_ms": 10,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_authority_uses_the_injected_clock_for_durable_grants() {
+        let store = SqliteSessionStore::in_memory().await.unwrap();
+        let authority = SqliteStreamLeaseAuthority::new(
+            store,
+            CooldisDaemonSyncConfig {
+                lease_ttl_secs: 5,
+                ..CooldisDaemonSyncConfig::default()
+            },
+            Arc::new(FixedClock { now_ms: 12_000 }),
+        )
+        .await
+        .unwrap();
+        let scope = StreamPrefixScope::new("thread:unit-child");
+        let grant = authority
+            .grant_lease(
+                &scope,
+                &DispatchId::new("dispatch-unit"),
+                StreamLeaseLineage::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(grant.granted_at_ms, 12_000);
+        assert_eq!(grant.expires_at_ms, 17_000);
+        assert_eq!(
+            authority
+                .check_fence(&EventStreamId::new(scope.as_str()), &grant.lease_id)
+                .await
+                .unwrap(),
+            LeaseFenceDecision::Current
+        );
     }
 }

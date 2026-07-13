@@ -81,6 +81,52 @@ impl SqliteSessionStore {
         self.inner.connect().await.map_err(storage_error)
     }
 
+    /// Clone the engine-owner handle for daemon-owned tables that must share
+    /// one transaction with the history stream.
+    ///
+    /// This is plumbing for store-primary protocols, not an alternate event
+    /// append surface. Callers must retain the one-engine-per-file rule from
+    /// `cooldis-sqlite` and use [`Self::append_events_fenced_in_transaction`]
+    /// rather than duplicating the event schema.
+    #[doc(hidden)]
+    pub fn sqlite_database(&self) -> Db {
+        self.inner.clone()
+    }
+
+    /// Apply the ordinary expected-tail fence and append inside a transaction
+    /// the caller already owns.
+    ///
+    /// # Correctness
+    ///
+    /// The transaction must be `Immediate`, opened before any authority read
+    /// whose result gates this append. A `Deferred` transaction can lose the
+    /// writer race after taking its snapshot, so using one here violates the
+    /// read-then-write policy even if the eventual insert happens to succeed.
+    /// This seam does not begin or commit the transaction on the caller's
+    /// behalf.
+    #[doc(hidden)]
+    pub async fn append_events_fenced_in_transaction(
+        &self,
+        transaction: &Connection,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> HistoryResult<Vec<EventRecord>> {
+        let actual_next_sequence = sqlite_next_event_sequence(transaction, stream_id).await?;
+        if actual_next_sequence != expected_next_sequence.get() {
+            return Err(HistoryError::AppendFenceConflict {
+                stream_id: stream_id.clone(),
+                expected_next_sequence: expected_next_sequence.get(),
+                actual_next_sequence,
+            });
+        }
+        let mut appended = Vec::with_capacity(records.len());
+        for record in records {
+            appended.push(sqlite_insert_event(transaction, stream_id, record).await?);
+        }
+        Ok(appended)
+    }
+
     pub async fn list_control_stream_coordinates(&self) -> HistoryResult<Vec<ThreadCoordinates>> {
         let connection = self.connect().await?;
         let mut rows = connection
@@ -508,18 +554,14 @@ impl EventStore for SqliteSessionStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
-            let actual_next_sequence = sqlite_next_event_sequence(&tx, stream_id).await?;
-            if actual_next_sequence != expected_next_sequence.get() {
-                return Err(HistoryError::AppendFenceConflict {
-                    stream_id: stream_id.clone(),
-                    expected_next_sequence: expected_next_sequence.get(),
-                    actual_next_sequence,
-                });
-            }
-            let mut appended = Vec::with_capacity(records.len());
-            for record in records {
-                appended.push(sqlite_insert_event(&tx, stream_id, record).await?);
-            }
+            let appended = store
+                .append_events_fenced_in_transaction(
+                    &tx,
+                    stream_id,
+                    expected_next_sequence,
+                    records,
+                )
+                .await?;
             tx.commit().await.map_err(storage_error)?;
             Ok(appended)
         })
