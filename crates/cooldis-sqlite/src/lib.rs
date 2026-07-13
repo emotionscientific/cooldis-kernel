@@ -7,13 +7,18 @@
 //! (tursodatabase/turso, pinned exactly), and backing it out is an internal
 //! change here, not a store migration.
 //!
-//! Rules carried by this crate (see ADR 0005):
+//! Rules carried by this crate (ADR 0005 plus the EMO-427 transaction policy):
 //! - WAL is the default journal mode; `JournalMode::Mvcc` requires a
 //!   per-store justification because it makes the file a Turso extension
 //!   until checkpointed back.
 //! - One engine per database file: never open a file owned by a running
 //!   cooldis process with stock SQLite tooling (`sqlite3` CLI, rusqlite
 //!   builds). Post-migration debugging goes through `tursodb` or daemon RPC.
+//! - Production write transactions use [`TransactionBehavior::Immediate`],
+//!   allowing competing writers to serialize through the configured busy
+//!   timeout. A deferred transaction that reads before writing can instead
+//!   receive `BusySnapshot` when a peer commits after its snapshot read; such
+//!   callers must roll back the whole transaction and retry with a bound.
 //! - The DST seam is [`Db::open_with_io`]: scenario harnesses drive the
 //!   engine through simulated, fault-injectable, deterministic IO.
 
@@ -573,8 +578,11 @@ mod tests {
     async fn concurrent_transaction_commit_regression() {
         // Turso 0.6.1 returned `cannot commit - no transaction is active` from
         // Transaction::commit under concurrent read-then-upsert traffic; fixed
-        // in the 0.7 line (verified on 0.7.0-pre.18, EMO-412). Runs un-ignored
-        // as the regression guard for every future engine pin change.
+        // in the 0.7 line (verified on 0.7.0-pre.18, EMO-412). Turso 0.7 can
+        // legitimately reject a deferred write upgrade with BusySnapshot, so
+        // this guard rolls back and retries only that typed error. Every other
+        // error, including the 0.6.1 commit failure, remains fatal.
+        const MAX_ATTEMPTS_PER_WORKER: usize = 4;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("transaction-repro.sqlite3");
         let db = Db::open(&path, DbConfig::default()).await.unwrap();
@@ -582,57 +590,202 @@ mod tests {
         conn.execute(
             "CREATE TABLE records (
                 id INTEGER PRIMARY KEY,
-                record_json TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL
+                committed_workers INTEGER NOT NULL
             )",
             (),
         )
         .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO records VALUES (1, '{\"created_at_ms\":1}', 1)",
-            (),
-        )
-        .await
-        .unwrap();
+        conn.execute("INSERT INTO records VALUES (1, 0)", ())
+            .await
+            .unwrap();
         drop(conn);
 
         let workers = 2;
-        let barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let start_barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let first_snapshot_barrier = Arc::new(tokio::sync::Barrier::new(workers));
         let mut handles = Vec::new();
         for worker in 0..workers {
             let db = db.clone();
-            let barrier = barrier.clone();
+            let start_barrier = start_barrier.clone();
+            let first_snapshot_barrier = first_snapshot_barrier.clone();
             handles.push(tokio::spawn(async move {
-                barrier.wait().await;
                 let mut conn = db.connect().await.unwrap();
-                let tx = conn.transaction().await.unwrap();
-                let mut rows = tx
-                    .query("SELECT created_at_ms FROM records WHERE id = 1", ())
+                start_barrier.wait().await;
+                let mut busy_snapshot_retries = 0;
+
+                for attempt in 1..=MAX_ATTEMPTS_PER_WORKER {
+                    let tx = conn
+                        .transaction_with_behavior(TransactionBehavior::Deferred)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("worker {worker} attempt {attempt} begin failed: {error:?}")
+                        });
+                    let mut rows = tx
+                        .query("SELECT committed_workers FROM records WHERE id = 1", ())
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("worker {worker} attempt {attempt} read failed: {error:?}")
+                        });
+                    let committed_workers = rows
+                        .next()
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("worker {worker} attempt {attempt} row read failed: {error:?}")
+                        })
+                        .expect("records row must exist")
+                        .get::<i64>(0)
+                        .unwrap();
+                    drop(rows);
+
+                    if attempt == 1 {
+                        // Both workers now own the same deferred snapshot. One
+                        // write upgrade must lose the race and retry.
+                        first_snapshot_barrier.wait().await;
+                    }
+
+                    let worker_bit = 1_i64 << worker;
+                    match tx
+                        .execute(
+                            "INSERT INTO records VALUES (1, ?1)
+                             ON CONFLICT(id) DO UPDATE
+                             SET committed_workers = excluded.committed_workers",
+                            [committed_workers | worker_bit],
+                        )
+                        .await
+                    {
+                        Ok(1) => {}
+                        Ok(changed) => panic!(
+                            "worker {worker} attempt {attempt} updated {changed} rows, expected one"
+                        ),
+                        Err(turso::Error::BusySnapshot(_)) => {
+                            busy_snapshot_retries += 1;
+                            tx.rollback().await.unwrap_or_else(|error| {
+                                panic!(
+                                    "worker {worker} attempt {attempt} BusySnapshot rollback failed: {error:?}"
+                                )
+                            });
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                        Err(error) => {
+                            panic!("worker {worker} attempt {attempt} write failed: {error:?}")
+                        }
+                    }
+
+                    // In pinned Turso, BusySnapshot is produced only while a
+                    // statement upgrades a stale read snapshot to a writer.
+                    // A successful write already owns the WAL write lock, so
+                    // COMMIT has no BusySnapshot path to retry here.
+                    tx.commit().await.unwrap_or_else(|error| {
+                        panic!("worker {worker} attempt {attempt} commit failed: {error:?}")
+                    });
+                    return (attempt, busy_snapshot_retries);
+                }
+
+                panic!("worker {worker} exhausted {MAX_ATTEMPTS_PER_WORKER} attempts")
+            }));
+        }
+
+        let mut total_attempts = 0;
+        let mut total_busy_snapshot_retries = 0;
+        for handle in handles {
+            let (attempts, busy_snapshot_retries) = handle.await.unwrap();
+            total_attempts += attempts;
+            total_busy_snapshot_retries += busy_snapshot_retries;
+        }
+        assert_eq!(
+            total_busy_snapshot_retries, 1,
+            "forced same-snapshot race must produce exactly one BusySnapshot"
+        );
+        assert_eq!(
+            total_attempts,
+            workers + total_busy_snapshot_retries,
+            "each BusySnapshot must account for exactly one whole-transaction retry"
+        );
+        assert!(
+            total_attempts <= workers * MAX_ATTEMPTS_PER_WORKER,
+            "deferred retry bound exceeded: {total_attempts} total attempts"
+        );
+
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query("SELECT committed_workers FROM records WHERE id = 1", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0b11,
+            "both workers' effects must survive their successful commits"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn immediate_transactions_serialize_without_busy_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("immediate-serialization.sqlite3");
+        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        db.connect()
+            .await
+            .unwrap()
+            .execute("CREATE TABLE counter (value INTEGER NOT NULL)", ())
+            .await
+            .unwrap();
+        db.connect()
+            .await
+            .unwrap()
+            .execute("INSERT INTO counter VALUES (0)", ())
+            .await
+            .unwrap();
+
+        let workers = 2;
+        let begin_barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let mut handles = Vec::new();
+        for worker in 0..workers {
+            let db = db.clone();
+            let begin_barrier = begin_barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let mut conn = db.connect().await.unwrap();
+                // Force both workers to contend at BEGIN IMMEDIATE. The loser
+                // must busy-wait under DbConfig::default(), not take a stale
+                // deferred snapshot.
+                begin_barrier.wait().await;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
                     .await
+                    .unwrap_or_else(|error| {
+                        panic!("worker {worker} BEGIN IMMEDIATE failed: {error:?}")
+                    });
+                let mut rows = tx.query("SELECT value FROM counter", ()).await.unwrap();
+                let value = rows
+                    .next()
+                    .await
+                    .unwrap()
+                    .expect("counter row must exist")
+                    .get::<i64>(0)
                     .unwrap();
-                assert_eq!(
-                    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-                    1
-                );
                 drop(rows);
-                tx.execute(
-                    "INSERT INTO records VALUES (1, ?1, ?2)
-                     ON CONFLICT(id) DO UPDATE SET record_json = excluded.record_json",
-                    params![format!("{{\"worker\":{worker}}}"), worker as i64 + 2],
-                )
-                .await
-                .unwrap();
-                let commit = tx.commit().await;
-                assert!(
-                    commit.is_ok(),
-                    "Turso 0.6.1 concurrent transaction commit failed: {commit:?}"
-                );
+                tx.execute("UPDATE counter SET value = ?1", [value + 1])
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("worker {worker} Immediate write failed: {error:?}")
+                    });
+                tx.commit().await.unwrap_or_else(|error| {
+                    panic!("worker {worker} Immediate commit failed: {error:?}")
+                });
             }));
         }
 
         for handle in handles {
             handle.await.unwrap();
         }
+
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn.query("SELECT value FROM counter", ()).await.unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            2,
+            "Immediate transactions must serialize both increments"
+        );
     }
 }
