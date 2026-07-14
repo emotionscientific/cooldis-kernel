@@ -172,6 +172,8 @@ reset_call_environment() {
   CALLER_BUILD_TARGET=
   CALLER_INCREMENTAL_SET=0
   CALLER_INCREMENTAL=
+  CALLER_LANE_INCREMENTAL_SET=0
+  CALLER_LANE_INCREMENTAL=
   CALLER_DEV_DEBUG_SET=0
   CALLER_DEV_DEBUG=
   CALLER_TEST_DEBUG_SET=0
@@ -193,7 +195,8 @@ prepare_call_environment() {
   unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
   unset CARGO_PROFILE_TEST_DEBUG CARGO_BUILD_JOBS RUSTC_WRAPPER
   unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE COOLDIS_REAL_CARGO COOLDIS_CARGO_LANE_SCRIPT
-  unset CARGO_ALIAS_ESCAPE
+  unset COOLDIS_CARGO_SHIM_DIR
+  unset COOLDIS_CARGO_LANE_INCREMENTAL CARGO_ALIAS_ESCAPE
 
   export PATH="$TEST_PATH"
   if ((USE_LANE_ROOT_OVERRIDE)); then
@@ -225,6 +228,9 @@ prepare_call_environment() {
   fi
   if ((CALLER_INCREMENTAL_SET)); then
     export CARGO_INCREMENTAL="$CALLER_INCREMENTAL"
+  fi
+  if ((CALLER_LANE_INCREMENTAL_SET)); then
+    export COOLDIS_CARGO_LANE_INCREMENTAL="$CALLER_LANE_INCREMENTAL"
   fi
   if ((CALLER_DEV_DEBUG_SET)); then
     export CARGO_PROFILE_DEV_DEBUG="$CALLER_DEV_DEBUG"
@@ -310,6 +316,10 @@ mkdir -p "$CARGO_TARGET_DIR" "$(dirname "$FAKE_CARGO_RECORD")" "$FAKE_CARGO_STAT
   printf 'rustc_wrapper=%s\n' "${RUSTC_WRAPPER-<unset>}"
   printf 'sccache_basedirs=%s\n' "${SCCACHE_BASEDIRS-<unset>}"
   printf 'sccache_cache_size=%s\n' "${SCCACHE_CACHE_SIZE-<unset>}"
+  printf 'cargo_path=%s\n' "$(type -P cargo 2>/dev/null || true)"
+  printf 'lane_script=%s\n' "${COOLDIS_CARGO_LANE_SCRIPT-<unset>}"
+  printf 'shim_dir=%s\n' "${COOLDIS_CARGO_SHIM_DIR-<unset>}"
+  printf 'real_cargo=%s\n' "${COOLDIS_REAL_CARGO-<unset>}"
   for arg in "$@"; do
     printf 'arg=%s\n' "$arg"
   done
@@ -460,6 +470,60 @@ assert_no_path "$CALLER_BUILD_TARGET" 'caller config target alias path was not c
 assert_no_path "$FEATURE_A/target" 'checkout-local target was not created'
 assert_no_path "$TMP_DIR/.cargo-target/cooldis" 'old shared target was not created'
 
+# Incremental mode uses a separate lane instance and never invokes sccache.
+reset_call_environment
+TEST_PATH="$PATH_WITHOUT_SCCACHE"
+CALLER_LANE_INCREMENTAL_SET=1
+CALLER_LANE_INCREMENTAL=1
+CALLER_INCREMENTAL_SET=1
+CALLER_INCREMENTAL=0
+CALLER_WRAPPER_SET=1
+CALLER_WRAPPER="$TMP_DIR/stale-wrapper"
+CALLER_BASEDIRS_SET=1
+CALLER_BASEDIRS="$TMP_DIR/stale-sccache-basedirs"
+CALLER_CACHE_SIZE_SET=1
+CALLER_CACHE_SIZE=99G
+run_lane "$FEATURE_A" "$ENV_ROOT" "$TMP_DIR/incremental-env.record" "$TMP_DIR/incremental-env.out" "$TMP_DIR/incremental-env.err" check --locked
+assert_eq 0 "$?" 'incremental mode invocation succeeded'
+assert_file_line "$TMP_DIR/incremental-env.record" "target=$ENV_ROOT/targets/feature-incremental" 'incremental mode selected a separate target'
+assert_file_line "$TMP_DIR/incremental-env.record" 'incremental=1' 'incremental mode enabled incremental output'
+assert_file_line "$TMP_DIR/incremental-env.record" 'rustc_wrapper=<unset>' 'incremental mode cleared the compiler wrapper'
+assert_file_line "$TMP_DIR/incremental-env.record" 'sccache_basedirs=<unset>' 'incremental mode cleared stale sccache base directories'
+assert_file_line "$TMP_DIR/incremental-env.record" 'sccache_cache_size=<unset>' 'incremental mode cleared stale sccache cache size'
+assert_file_line "$TMP_DIR/incremental-env.record" 'dev_debug=line-tables-only' 'incremental mode preserved dev debug settings'
+assert_file_line "$TMP_DIR/incremental-env.record" 'test_debug=line-tables-only' 'incremental mode preserved test debug settings'
+assert_file_line "$TMP_DIR/incremental-env.record" 'jobs=8' 'incremental mode preserved the build jobs default'
+assert_path_exists "$ENV_ROOT/targets/feature" 'default mode target remained present'
+assert_path_exists "$ENV_ROOT/targets/feature-incremental" 'incremental mode created its distinct target'
+if grep -Fq 'warning: sccache not found' "$TMP_DIR/incremental-env.err"; then
+  fail 'incremental mode probed for missing sccache'
+fi
+assert_path_exists "$ENV_ROOT/feature-incremental.owner" 'incremental mode kept a separate owner record'
+
+reset_call_environment
+
+# Incremental mode deactivates the dispatch Cargo shim before entering Cargo.
+TEST_PATH="$TMP_DIR/fake-shim-bin:$PATH_WITH_SCCACHE"
+CALLER_LANE_INCREMENTAL_SET=1
+CALLER_LANE_INCREMENTAL=1
+CALLER_LANE_SCRIPT_SET=1
+CALLER_LANE_SCRIPT="$LANE_SCRIPT"
+mkdir -p "$TMP_DIR/fake-shim-bin"
+cat >"$TMP_DIR/fake-shim-bin/cargo" <<'SHIM'
+#!/usr/bin/env bash
+exit 91
+SHIM
+chmod +x "$TMP_DIR/fake-shim-bin/cargo"
+run_lane "$FEATURE_A" "$ENV_ROOT" "$TMP_DIR/incremental-shim.record" "$TMP_DIR/incremental-shim.out" "$TMP_DIR/incremental-shim.err" check
+assert_eq 0 "$?" 'incremental dispatch-shim invocation succeeded'
+assert_file_line "$TMP_DIR/incremental-shim.record" "target=$ENV_ROOT/targets/feature-incremental" 'incremental dispatch shim preserved its lane instance'
+assert_file_line "$TMP_DIR/incremental-shim.record" "cargo_path=$FAKE_CARGO" 'incremental dispatch shim was removed from PATH'
+assert_file_line "$TMP_DIR/incremental-shim.record" 'lane_script=<unset>' 'incremental dispatch shim cleared its script contract'
+assert_file_line "$TMP_DIR/incremental-shim.record" 'shim_dir=<unset>' 'incremental dispatch shim cleared its directory contract'
+assert_file_line "$TMP_DIR/incremental-shim.record" 'real_cargo=<unset>' 'incremental dispatch shim cleared its real Cargo contract'
+
+reset_call_environment
+
 run_lane "$FEATURE_A" "$ENV_ROOT" "$TMP_DIR/config-env.record" "$TMP_DIR/config-env.out" "$TMP_DIR/config-env.err" \
   check --config "build.target-dir=\"$CALLER_TARGET\"" -- from-test
 assert_eq 0 "$?" 'caller Cargo config invocation succeeded'
@@ -543,6 +607,22 @@ assert_file_contains "$TMP_DIR/reject-alias.err" 'does not allow CARGO_ALIAS_ESC
 assert_no_path "$TMP_DIR/reject-alias.record" 'Cargo alias target-dir rejection did not invoke Cargo'
 assert_no_path "$TMP_DIR/alias-target" 'Cargo alias target path was not created'
 
+# Incremental target overrides also fail before lock acquisition or rotation.
+reset_call_environment
+CALLER_LANE_INCREMENTAL_SET=1
+CALLER_LANE_INCREMENTAL=1
+mkdir -p "$REJECT_ROOT/targets/feature-incremental"
+: >"$REJECT_ROOT/targets/feature-incremental/preserved"
+run_lane "$FEATURE_A" "$REJECT_ROOT" "$TMP_DIR/reject-incremental.record" "$TMP_DIR/reject-incremental.out" "$TMP_DIR/reject-incremental.err" check --target-dir "$TMP_DIR/rejected-incremental"
+status=$?
+if ((status == 0)); then
+  fail 'incremental target-dir override unexpectedly succeeded'
+fi
+assert_file_contains "$TMP_DIR/reject-incremental.err" 'does not allow --target-dir' 'incremental target-dir rejection explained the error'
+assert_no_path "$TMP_DIR/reject-incremental.record" 'incremental target-dir rejection did not invoke Cargo'
+assert_path_exists "$REJECT_ROOT/targets/feature-incremental/preserved" 'incremental target-dir rejection did not rotate target'
+assert_no_path "$REJECT_ROOT/feature-incremental.lock" 'incremental target-dir rejection did not acquire a lane lock'
+
 # A dead holder is reclaimed before Cargo runs.
 reset_call_environment
 STALE_ROOT="$TMP_DIR/lanes-stale"
@@ -560,6 +640,41 @@ touch -t 200001010000 "$EMPTY_ROOT/feature.lock"
 run_lane "$FEATURE_A" "$EMPTY_ROOT" "$TMP_DIR/empty-stale.record" "$TMP_DIR/empty-stale.out" "$TMP_DIR/empty-stale.err" check
 assert_eq 0 "$?" 'empty stale lock was reclaimed after initialization grace'
 wait_for_no_path "$EMPTY_ROOT/feature.lock" 'empty stale recovery released the lane lock'
+
+INCREMENTAL_STALE_ROOT="$TMP_DIR/lanes-incremental-stale"
+mkdir -p "$INCREMENTAL_STALE_ROOT/feature-incremental.lock/reclaim"
+printf '99999999\n' >"$INCREMENTAL_STALE_ROOT/feature-incremental.lock/pid"
+printf 'stale-incremental-token\n' >"$INCREMENTAL_STALE_ROOT/feature-incremental.lock/token"
+touch -t 200001010000 "$INCREMENTAL_STALE_ROOT/feature-incremental.lock/reclaim"
+CALLER_LANE_INCREMENTAL_SET=1
+CALLER_LANE_INCREMENTAL=1
+run_lane "$FEATURE_A" "$INCREMENTAL_STALE_ROOT" "$TMP_DIR/incremental-stale.record" "$TMP_DIR/incremental-stale.out" "$TMP_DIR/incremental-stale.err" check
+assert_eq 0 "$?" 'stale incremental holder was reclaimed'
+wait_for_no_path "$INCREMENTAL_STALE_ROOT/feature-incremental.lock" 'stale incremental recovery released the lane lock'
+
+# Incremental owner rotation is isolated from the default owner and target.
+ROTATE_INCREMENTAL_ROOT="$TMP_DIR/lanes-rotate-incremental"
+reset_call_environment
+run_lane "$FEATURE_A" "$ROTATE_INCREMENTAL_ROOT" "$TMP_DIR/rotate-default.record" "$TMP_DIR/rotate-default.out" "$TMP_DIR/rotate-default.err" check
+assert_eq 0 "$?" 'default target for incremental rotation check succeeded'
+mkdir -p "$ROTATE_INCREMENTAL_ROOT/targets/feature"
+: >"$ROTATE_INCREMENTAL_ROOT/targets/feature/default-preserved"
+
+CALLER_LANE_INCREMENTAL_SET=1
+CALLER_LANE_INCREMENTAL=1
+run_lane "$FEATURE_A" "$ROTATE_INCREMENTAL_ROOT" "$TMP_DIR/rotate-incremental-first.record" "$TMP_DIR/rotate-incremental-first.out" "$TMP_DIR/rotate-incremental-first.err" check
+assert_eq 0 "$?" 'first incremental owner invocation succeeded'
+mkdir -p "$ROTATE_INCREMENTAL_ROOT/targets/feature-incremental"
+: >"$ROTATE_INCREMENTAL_ROOT/targets/feature-incremental/rotate-sentinel"
+TEST_LABEL=incremental-rotation-check
+TEST_FORBID_PATH="$ROTATE_INCREMENTAL_ROOT/targets/feature-incremental/rotate-sentinel"
+run_lane "$FEATURE_B" "$ROTATE_INCREMENTAL_ROOT" "$TMP_DIR/rotate-incremental-second.record" "$TMP_DIR/rotate-incremental-second.out" "$TMP_DIR/rotate-incremental-second.err" check
+assert_eq 0 "$?" 'different incremental owner invocation succeeded'
+assert_no_path "$ROTATE_INCREMENTAL_ROOT/targets/feature-incremental/rotate-sentinel" 'different incremental owner removed the previous incremental target'
+assert_no_path "$FAKE_STATE/forbidden-path-present-incremental-rotation-check" 'incremental target was rotated before Cargo entered'
+assert_path_exists "$ROTATE_INCREMENTAL_ROOT/targets/feature/default-preserved" 'incremental owner rotation preserved the default target'
+expected_owner="$FEATURE_B"$'\n''feature/beta'
+assert_eq "$expected_owner" "$(<"$ROTATE_INCREMENTAL_ROOT/feature-incremental.owner")" 'incremental owner record contains worktree and branch'
 
 # Same-lane commands serialize and a waiter reports why it is blocked.
 SERIAL_ROOT="$TMP_DIR/lanes-serial"
@@ -604,6 +719,45 @@ wait_for_pid "$parallel_feature_pid" 0 'parallel feature command succeeded'
 wait_for_pid "$parallel_integration_pid" 0 'parallel integration command succeeded'
 assert_no_path "$FAKE_STATE/overlap-feature" 'parallel test observed no feature overlap'
 assert_no_path "$FAKE_STATE/overlap-integration" 'parallel test observed no integration overlap'
+
+# Default and incremental instances run concurrently, while incremental peers serialize.
+MODE_PARALLEL_ROOT="$TMP_DIR/lanes-mode-parallel"
+reset_call_environment
+TEST_MODE=hold
+TEST_LABEL=parallel-default
+start_lane "$FEATURE_A" "$MODE_PARALLEL_ROOT" "$TMP_DIR/parallel-default.record" "$TMP_DIR/parallel-default.out" "$TMP_DIR/parallel-default.err" check
+parallel_default_pid=$STARTED_PID
+wait_for_path "$FAKE_STATE/started-parallel-default" 'parallel default command started'
+
+CALLER_LANE_INCREMENTAL_SET=1
+CALLER_LANE_INCREMENTAL=1
+TEST_LABEL=parallel-incremental-one
+start_lane "$FEATURE_A" "$MODE_PARALLEL_ROOT" "$TMP_DIR/parallel-incremental-one.record" "$TMP_DIR/parallel-incremental-one.out" "$TMP_DIR/parallel-incremental-one.err" check
+parallel_incremental_one_pid=$STARTED_PID
+wait_for_path "$FAKE_STATE/started-parallel-incremental-one" 'incremental command started while default instance was held'
+
+TEST_LABEL=parallel-incremental-two
+start_lane "$FEATURE_B" "$MODE_PARALLEL_ROOT" "$TMP_DIR/parallel-incremental-two.record" "$TMP_DIR/parallel-incremental-two.out" "$TMP_DIR/parallel-incremental-two.err" check
+parallel_incremental_two_pid=$STARTED_PID
+wait_for_text "$TMP_DIR/parallel-incremental-two.err" 'waiting for feature-incremental Cargo lane' 'incremental waiter named its lane instance'
+assert_no_path "$FAKE_STATE/started-parallel-incremental-two" 'second incremental command did not overlap its peer'
+if ! kill -0 "$parallel_default_pid" 2>/dev/null; then
+  fail 'default command exited while incremental instance was active'
+fi
+: >"$FAKE_STATE/release-parallel-incremental-one"
+wait_for_pid "$parallel_incremental_one_pid" 0 'first incremental command succeeded'
+wait_for_path "$FAKE_STATE/started-parallel-incremental-two" 'second incremental command started after its peer released the lock'
+if ! kill -0 "$parallel_default_pid" 2>/dev/null; then
+  fail 'default command did not remain independent of incremental owner rotation'
+fi
+: >"$FAKE_STATE/release-parallel-default"
+: >"$FAKE_STATE/release-parallel-incremental-two"
+wait_for_pid "$parallel_default_pid" 0 'parallel default command succeeded'
+wait_for_pid "$parallel_incremental_two_pid" 0 'second incremental command succeeded'
+assert_no_path "$FAKE_STATE/overlap-feature" 'mode parallel test observed no default overlap'
+assert_no_path "$FAKE_STATE/overlap-feature-incremental" 'mode parallel test observed no incremental overlap'
+wait_for_no_path "$MODE_PARALLEL_ROOT/feature.lock" 'parallel default lock was released'
+wait_for_no_path "$MODE_PARALLEL_ROOT/feature-incremental.lock" 'parallel incremental lock was released'
 
 # Interrupting a holder terminates Cargo and releases only its lock generation.
 SIGNAL_ROOT="$TMP_DIR/lanes-signal"

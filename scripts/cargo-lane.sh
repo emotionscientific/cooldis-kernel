@@ -3,6 +3,9 @@
 # Run Cargo through one of the repository's bounded, exclusive build lanes.
 # Implementation contract: workspace ticket 0071 and
 # plans/bounded-cargo-build-lanes-2026-07.md.
+#
+# Set COOLDIS_CARGO_LANE_INCREMENTAL=1 for an incremental, sccache-free edit
+# loop backed by a separate target directory, lock, and owner record.
 
 set -euo pipefail
 
@@ -13,6 +16,7 @@ GIT_COMMON_DIR=
 GIT_BRANCH=
 SCCACHE_BASEDIRS_DEFAULT=
 LANE=
+LANE_INSTANCE=
 LANE_ROOT=
 TARGETS_DIR=
 TARGET_DIR=
@@ -199,11 +203,16 @@ select_lane() {
       ;;
   esac
 
-  TARGET_DIR="$TARGETS_DIR/$LANE"
-  LOCK_DIR="$LANE_ROOT/$LANE.lock"
-  OWNER_FILE="$LANE_ROOT/$LANE.owner"
+  LANE_INSTANCE=$LANE
+  if [[ "${COOLDIS_CARGO_LANE_INCREMENTAL:-}" == 1 ]]; then
+    LANE_INSTANCE="$LANE-incremental"
+  fi
 
-  if [[ "$TARGET_DIR" != "$LANE_ROOT/targets/$LANE" ]]; then
+  TARGET_DIR="$TARGETS_DIR/$LANE_INSTANCE"
+  LOCK_DIR="$LANE_ROOT/$LANE_INSTANCE.lock"
+  OWNER_FILE="$LANE_ROOT/$LANE_INSTANCE.owner"
+
+  if [[ "$TARGET_DIR" != "$LANE_ROOT/targets/$LANE_INSTANCE" ]]; then
     die 'Cargo lane target is not the expected lane-root child'
   fi
 }
@@ -404,17 +413,17 @@ acquire_lane_lock() {
       trap 'handle_signal TERM 143' TERM
 
       if ! printf '%s\n' "$LOCK_TOKEN" >"$LOCK_DIR/token"; then
-        die "could not write $LANE Cargo lane lock token"
+        die "could not write $LANE_INSTANCE Cargo lane lock token"
       fi
       if ! printf '%s\n' "$$" >"$LOCK_DIR/pid"; then
-        die "could not write $LANE Cargo lane holder PID"
+        die "could not write $LANE_INSTANCE Cargo lane holder PID"
       fi
       LOCK_READY=1
       return
     fi
 
     if [[ -L "$LOCK_DIR" || ( -e "$LOCK_DIR" && ! -d "$LOCK_DIR" ) ]]; then
-      die "refusing unexpected $LANE Cargo lane lock path: $LOCK_DIR"
+      die "refusing unexpected $LANE_INSTANCE Cargo lane lock path: $LOCK_DIR"
     fi
     if [[ ! -d "$LOCK_DIR" ]]; then
       if [[ ! -w "$LANE_ROOT" ]]; then
@@ -429,10 +438,10 @@ acquire_lane_lock() {
     if ((printed_wait == 0)); then
       if valid_holder_pid "$holder_pid"; then
         printf 'cargo-lane: waiting for %s Cargo lane (holder pid %s)\n' \
-          "$LANE" "$holder_pid" >&2
+          "$LANE_INSTANCE" "$holder_pid" >&2
       else
         printf 'cargo-lane: waiting for %s Cargo lane (holder initializing)\n' \
-          "$LANE" >&2
+          "$LANE_INSTANCE" >&2
       fi
       printed_wait=1
     fi
@@ -492,11 +501,15 @@ rotate_lane_owner() {
     return
   fi
 
-  if [[ "$LANE" != feature && "$LANE" != integration ]]; then
-    die "refusing to rotate unknown Cargo lane: $LANE"
-  fi
+  case "$LANE_INSTANCE" in
+    feature | feature-incremental | integration | integration-incremental)
+      ;;
+    *)
+      die "refusing to rotate unknown Cargo lane: $LANE_INSTANCE"
+      ;;
+  esac
   if [[ "$TARGETS_DIR" != "$LANE_ROOT/targets" \
-    || "$TARGET_DIR" != "$TARGETS_DIR/$LANE" ]]; then
+    || "$TARGET_DIR" != "$TARGETS_DIR/$LANE_INSTANCE" ]]; then
     die 'refusing to delete an unexpected Cargo target path'
   fi
 
@@ -526,22 +539,28 @@ run_cargo() {
 
   export CARGO_TARGET_DIR="$TARGET_DIR"
   unset CARGO_BUILD_TARGET_DIR
-  export CARGO_INCREMENTAL=0
   export CARGO_PROFILE_DEV_DEBUG=line-tables-only
   export CARGO_PROFILE_TEST_DEBUG=line-tables-only
   if [[ -z "${CARGO_BUILD_JOBS+x}" ]]; then
     export CARGO_BUILD_JOBS=8
   fi
 
-  export SCCACHE_BASEDIRS="$SCCACHE_BASEDIRS_DEFAULT"
-  if [[ -z "${SCCACHE_CACHE_SIZE+x}" ]]; then
-    export SCCACHE_CACHE_SIZE=10G
-  fi
-  if sccache=$(type -P sccache 2>/dev/null); then
-    export RUSTC_WRAPPER="$sccache"
-  else
+  if [[ "${COOLDIS_CARGO_LANE_INCREMENTAL:-}" == 1 ]]; then
+    export CARGO_INCREMENTAL=1
     unset RUSTC_WRAPPER
-    printf 'warning: sccache not found; continuing without compiler cache\n' >&2
+    unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE
+  else
+    export CARGO_INCREMENTAL=0
+    export SCCACHE_BASEDIRS="$SCCACHE_BASEDIRS_DEFAULT"
+    if [[ -z "${SCCACHE_CACHE_SIZE+x}" ]]; then
+      export SCCACHE_CACHE_SIZE=10G
+    fi
+    if sccache=$(type -P sccache 2>/dev/null); then
+      export RUSTC_WRAPPER="$sccache"
+    else
+      unset RUSTC_WRAPPER
+      printf 'warning: sccache not found; continuing without compiler cache\n' >&2
+    fi
   fi
 
   if [[ -n "$ACTIVE_CARGO_SHIM_DIR" ]]; then
