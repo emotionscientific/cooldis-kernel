@@ -79,6 +79,8 @@ The V1 work is focused on runtime primitives:
 - blob resource publication and folder-first prompt lowering;
 - skill-package publication with floating author refs pinned in bind receipts,
   static indexes, and read-only VFS bodies;
+- opt-in workspace skill discovery with bind-time hashes, path-bearing static
+  indexes, and durable resume/fork witnesses without a second skill mount;
 - manifest-declared workspace requirements with operator-bound read-only or
   read-write host directories mounted through the virtual VFS;
 - custom Wasm coupling execution, macro scaffolding, and offline replay for

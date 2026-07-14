@@ -29,7 +29,8 @@ use crate::kernel::coupling_executor_registry::{
 use crate::{
     COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, DeclaredSkillPackageRef, EventKind,
     LlmProviderRecord, LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry,
-    ProviderCapabilityRecord, PublishedOperationSource, THREADS_SPAWN_CAPABILITY,
+    ProviderCapabilityRecord, PublishedOperationSource, SkillPackageEntry,
+    THREADS_SPAWN_CAPABILITY,
 };
 use cooldis_abi::{
     COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, WasmOperationDefinition,
@@ -39,6 +40,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::{CStr, CString, OsString};
+use std::fs::File;
+use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// `discharged_by` coupling names and `function` versions for the two
@@ -51,6 +64,7 @@ pub const MANIFEST_BINDER_FUNCTION: &str = "bind/v1";
 pub const THREAD_AGENT_SKILL_PACKAGES_METADATA: &str = "cooldis.agent.skill_packages";
 pub const THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA: &str =
     "cooldis.agent.skill_context_segments";
+pub const THREAD_AGENT_SKILL_DISCOVERY_METADATA: &str = "cooldis.agent.skill_discovery";
 pub const THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA: &str =
     "cooldis.agent.static_context_segments";
 
@@ -174,6 +188,7 @@ pub struct AgentManifestBoundThread {
     pub operation_names: Vec<String>,
     pub operation_bindings: Vec<AgentManifestOperationBinding>,
     pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
+    pub skill_discovery: Option<AgentManifestSkillDiscovery>,
     pub static_context_segments: Vec<AgentManifestStaticContextSegment>,
     pub skill_context_segments: Vec<AgentManifestStaticContextSegment>,
     /// Witnessed universe bindings for the thread's protocol tool imports;
@@ -280,6 +295,8 @@ pub async fn bind_published_agent_record_with_placement(
         workspace_override,
         remote_event_store_served,
         None,
+        None,
+        false,
     )
     .await
 }
@@ -301,6 +318,8 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
     remote_event_store_served: bool,
     skill_package_witness: Option<&[AgentManifestSkillPackageBinding]>,
+    skill_discovery_witness: Option<&AgentManifestSkillDiscovery>,
+    rehydrating_from_witness: bool,
 ) -> CooldisResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
     let placement = resolve_manifest_placement(
@@ -364,6 +383,17 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         }
         None => bind_skill_resources(&manifest.resources, skill_registry_root)?,
     };
+    let (skill_discovery, discovery_context_segment) = bind_workspace_skill_discovery(
+        &manifest,
+        workspace.as_ref(),
+        skill_discovery_witness,
+        rehydrating_from_witness,
+        &bound_skills.skill_names,
+    )?;
+    let mut skill_context_segments = bound_skills.context_segments;
+    if let Some(segment) = discovery_context_segment {
+        skill_context_segments.push(segment);
+    }
     let couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
     enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings, &couplings)?;
     let operation_names = bound_tools
@@ -389,6 +419,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         tool_ids: bound_tools.tool_ids,
         operation_bindings: bound_tools.operation_bindings.clone(),
         skill_packages: bound_skills.package_bindings.clone(),
+        skill_discovery: skill_discovery.clone(),
         static_context_segments: static_context_segments.clone(),
         tool_universes: bound_tools
             .tool_universes
@@ -411,8 +442,9 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         operation_names,
         operation_bindings: bound_tools.operation_bindings,
         skill_packages: bound_skills.package_bindings,
+        skill_discovery,
         static_context_segments,
-        skill_context_segments: bound_skills.context_segments,
+        skill_context_segments,
         tool_universes: bound_tools.tool_universes,
     })
 }
@@ -434,6 +466,7 @@ struct BoundTools {
 struct BoundSkills {
     package_bindings: Vec<AgentManifestSkillPackageBinding>,
     context_segments: Vec<AgentManifestStaticContextSegment>,
+    skill_names: BTreeSet<String>,
 }
 
 fn bind_static_context_sources(
@@ -653,6 +686,7 @@ fn bind_skill_resources(
         return Ok(BoundSkills {
             package_bindings: Vec::new(),
             context_segments: Vec::new(),
+            skill_names: BTreeSet::new(),
         });
     }
     let registry_root = skill_registry_root.ok_or_else(|| {
@@ -699,6 +733,7 @@ fn bind_skill_resources(
     Ok(BoundSkills {
         package_bindings,
         context_segments,
+        skill_names: mounted_skill_names,
     })
 }
 
@@ -722,6 +757,7 @@ fn bind_skill_resources_from_witness(
         return Ok(BoundSkills {
             package_bindings: Vec::new(),
             context_segments: Vec::new(),
+            skill_names: BTreeSet::new(),
         });
     }
     let mut bindings_by_resource = BTreeMap::new();
@@ -760,11 +796,12 @@ fn bind_skill_resources_from_witness(
         }
         package_bindings.push(binding.clone());
     }
-    let context_segments =
-        skill_context_segments_for_bindings(&package_bindings, skill_registry_root)?;
+    let (context_segments, skill_names) =
+        skill_context_segments_and_names_for_bindings(&package_bindings, skill_registry_root)?;
     Ok(BoundSkills {
         package_bindings,
         context_segments,
+        skill_names,
     })
 }
 
@@ -808,12 +845,33 @@ fn append_bound_skill(
     Ok(())
 }
 
-pub(crate) fn skill_context_segments_for_bindings(
+pub(crate) fn skill_context_segments_for_witnesses(
     bindings: &[AgentManifestSkillPackageBinding],
     skill_registry_root: Option<&Path>,
+    discovery: Option<&AgentManifestSkillDiscovery>,
 ) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    let (mut segments, skill_names) =
+        skill_context_segments_and_names_for_bindings(bindings, skill_registry_root)?;
+    if let Some(discovery) = discovery {
+        let normalized_path = normalize_workspace_relative_path(&discovery.path);
+        if discovery.path != normalized_path {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill discovery witness path {:?} is not canonical",
+                discovery.path
+            )));
+        }
+        validate_skill_discovery_witness(discovery, &normalized_path, &skill_names)?;
+        segments.push(skill_discovery_context_segment(discovery));
+    }
+    Ok(segments)
+}
+
+fn skill_context_segments_and_names_for_bindings(
+    bindings: &[AgentManifestSkillPackageBinding],
+    skill_registry_root: Option<&Path>,
+) -> CooldisResult<(Vec<AgentManifestStaticContextSegment>, BTreeSet<String>)> {
     if bindings.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), BTreeSet::new()));
     }
     let registry_root = skill_registry_root.ok_or_else(|| {
         CooldisError::RuntimeFactory(
@@ -847,7 +905,7 @@ pub(crate) fn skill_context_segments_for_bindings(
             )));
         }
     }
-    Ok(context_segments)
+    Ok((context_segments, mounted_skill_names))
 }
 
 pub(crate) fn skill_package_bindings_match(
@@ -876,6 +934,699 @@ pub(crate) fn skill_package_bindings_match(
     left.sort_unstable_by_key(|binding| key(binding));
     right.sort_unstable_by_key(|binding| key(binding));
     left == right
+}
+
+fn bind_workspace_skill_discovery(
+    manifest: &AgentManifestSchema,
+    workspace: Option<&AgentManifestResolvedWorkspaceMount>,
+    witness: Option<&AgentManifestSkillDiscovery>,
+    rehydrating: bool,
+    registry_skill_names: &BTreeSet<String>,
+) -> CooldisResult<(
+    Option<AgentManifestSkillDiscovery>,
+    Option<AgentManifestStaticContextSegment>,
+)> {
+    if !manifest.skills.discover {
+        if witness.is_some() {
+            return Err(CooldisError::RuntimeFactory(
+                "stored skill discovery witness exists, but the manifest disables workspace skill discovery"
+                    .to_string(),
+            ));
+        }
+        return Ok((None, None));
+    }
+
+    let workspace = workspace.ok_or_else(|| {
+        CooldisError::RuntimeFactory(
+            "agent manifest skill discovery requires a resolved workspace binding".to_string(),
+        )
+    })?;
+    let resolved_path = normalize_workspace_relative_path(&manifest.skills.path);
+    let discovery = match witness {
+        Some(witness) => {
+            validate_skill_discovery_witness(witness, &resolved_path, registry_skill_names)?;
+            witness.clone()
+        }
+        None if rehydrating => {
+            return Err(CooldisError::RuntimeFactory(
+                "manifest enables workspace skill discovery, but the durable bind receipt has no skill discovery witness"
+                    .to_string(),
+            ));
+        }
+        None => discover_workspace_skills(workspace, &resolved_path, registry_skill_names)?,
+    };
+    let segment = skill_discovery_context_segment(&discovery);
+    Ok((Some(discovery), Some(segment)))
+}
+
+fn discover_workspace_skills(
+    workspace: &AgentManifestResolvedWorkspaceMount,
+    resolved_path: &str,
+    registry_skill_names: &BTreeSet<String>,
+) -> CooldisResult<AgentManifestSkillDiscovery> {
+    let discovery_root = workspace.host_path.join(resolved_path);
+    let canonical_discovery_root = match std::fs::canonicalize(&discovery_root) {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AgentManifestSkillDiscovery {
+                path: resolved_path.to_string(),
+                skills: Vec::new(),
+            });
+        }
+        Err(err) => {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "failed to resolve workspace skill discovery directory {}: {err}",
+                discovery_root.display()
+            )));
+        }
+    };
+    if !canonical_discovery_root.starts_with(&workspace.host_path) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "workspace skill discovery path {resolved_path:?} resolves outside the witnessed workspace"
+        )));
+    }
+    let skill_dirs =
+        open_workspace_skill_directories(&workspace.host_path, &canonical_discovery_root)?;
+
+    let mut skills = Vec::new();
+    let mut names = registry_skill_names.clone();
+    for skill_dir in skill_dirs {
+        let skill_file = skill_dir.path.join("SKILL.md");
+        let canonical_skill_file = match std::fs::canonicalize(&skill_file) {
+            Ok(path) => path,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "failed to resolve discovered workspace skill file {}: {err}",
+                    skill_file.display()
+                )));
+            }
+        };
+        if !canonical_skill_file.starts_with(&workspace.host_path) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "discovered workspace skill file {} resolves outside the witnessed workspace",
+                skill_file.display()
+            )));
+        }
+        let Some(file) = open_workspace_skill_file(&skill_dir, &skill_file).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to open discovered workspace skill file {}: {err}",
+                skill_file.display()
+            ))
+        })?
+        else {
+            continue;
+        };
+        let body = read_opened_workspace_skill_file(&workspace.host_path, &skill_file, file)?;
+        let entry = SkillPackageEntry::from_skill_body(&skill_dir.path, body)?;
+        if !names.insert(entry.name.clone()) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "workspace skill discovery found duplicate skill name {:?} across discovered entries or registry-bound skill packages",
+                entry.name
+            )));
+        }
+        let directory_name = skill_dir
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(format!(
+                    "workspace skill directory {} has no unicode name",
+                    skill_dir.path.display()
+                ))
+            })?;
+        skills.push(AgentManifestDiscoveredSkill {
+            name: entry.name,
+            path: discovered_skill_path(resolved_path, directory_name),
+            content_sha256: sha256_prefixed(entry.body.as_bytes()),
+            description: entry.description,
+        });
+    }
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    let discovery = AgentManifestSkillDiscovery {
+        path: resolved_path.to_string(),
+        skills,
+    };
+    validate_skill_discovery_witness(&discovery, resolved_path, registry_skill_names)?;
+    Ok(discovery)
+}
+
+struct WorkspaceSkillDirectory {
+    path: PathBuf,
+    #[cfg(unix)]
+    file: File,
+}
+
+#[cfg(unix)]
+fn open_workspace_skill_directories(
+    workspace_host_path: &Path,
+    discovery_root: &Path,
+) -> CooldisResult<Vec<WorkspaceSkillDirectory>> {
+    let mut options = File::options();
+    options
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    let directory = options.open(discovery_root).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to open workspace skill discovery directory {}: {err}",
+            discovery_root.display()
+        ))
+    })?;
+    validate_opened_workspace_directory(workspace_host_path, discovery_root, &directory)?;
+    let names = read_opened_directory_names(&directory).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to read opened workspace skill discovery directory {}: {err}",
+            discovery_root.display()
+        ))
+    })?;
+    let mut skill_dirs = Vec::new();
+    for name in names {
+        if let Some(file) = open_directory_at(&directory, &name).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to inspect workspace skill discovery entry {}: {err}",
+                discovery_root.join(&name).display()
+            ))
+        })? {
+            skill_dirs.push(WorkspaceSkillDirectory {
+                path: discovery_root.join(name),
+                file,
+            });
+        }
+    }
+    Ok(skill_dirs)
+}
+
+#[cfg(not(unix))]
+fn open_workspace_skill_directories(
+    _workspace_host_path: &Path,
+    discovery_root: &Path,
+) -> CooldisResult<Vec<WorkspaceSkillDirectory>> {
+    let entries = std::fs::read_dir(discovery_root).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to read workspace skill discovery directory {}: {err}",
+            discovery_root.display()
+        ))
+    })?;
+    let mut skill_dirs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read an entry in workspace skill discovery directory {}: {err}",
+                discovery_root.display()
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to inspect workspace skill discovery entry {}: {err}",
+                entry.path().display()
+            ))
+        })?;
+        if file_type.is_dir() {
+            skill_dirs.push(WorkspaceSkillDirectory { path: entry.path() });
+        }
+    }
+    skill_dirs.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(skill_dirs)
+}
+
+#[cfg(unix)]
+fn validate_opened_workspace_directory(
+    workspace_host_path: &Path,
+    discovery_root: &Path,
+    directory: &File,
+) -> CooldisResult<()> {
+    let resolved = std::fs::canonicalize(discovery_root).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to re-resolve opened workspace skill discovery directory {}: {err}",
+            discovery_root.display()
+        ))
+    })?;
+    if !resolved.starts_with(workspace_host_path) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "opened workspace skill discovery directory {} resolves outside the witnessed workspace",
+            discovery_root.display()
+        )));
+    }
+    let opened_metadata = directory.metadata().map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to inspect opened workspace skill discovery directory {}: {err}",
+            discovery_root.display()
+        ))
+    })?;
+    let resolved_metadata = std::fs::metadata(&resolved).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to inspect resolved workspace skill discovery directory {}: {err}",
+            resolved.display()
+        ))
+    })?;
+    if !opened_metadata.is_dir() || !same_file_identity(&opened_metadata, &resolved_metadata) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "workspace skill discovery directory {} changed while it was opened",
+            discovery_root.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_directory_at(parent: &File, name: &std::ffi::OsStr) -> std::io::Result<Option<File>> {
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "directory entry contains a nul byte",
+        )
+    })?;
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor >= 0 {
+        return Ok(Some(unsafe { File::from_raw_fd(descriptor) }));
+    }
+    let err = std::io::Error::last_os_error();
+    if matches!(
+        err.raw_os_error(),
+        Some(libc::ENOENT) | Some(libc::ENOTDIR) | Some(libc::ELOOP)
+    ) {
+        Ok(None)
+    } else {
+        Err(err)
+    }
+}
+
+#[cfg(unix)]
+struct DirectoryStream(*mut libc::DIR);
+
+#[cfg(unix)]
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_opened_directory_names(directory: &File) -> std::io::Result<Vec<OsString>> {
+    let descriptor = unsafe { libc::dup(directory.as_raw_fd()) };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(descriptor) };
+    if stream.is_null() {
+        let err = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(descriptor);
+        }
+        return Err(err);
+    }
+    let stream = DirectoryStream(stream);
+    let mut names = Vec::new();
+    loop {
+        clear_directory_errno();
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            if let Some(err) = directory_errno() {
+                return Err(err);
+            }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(OsString::from_vec(name.to_vec()));
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn clear_directory_errno() {
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn directory_errno() -> Option<std::io::Error> {
+    let errno = unsafe { *libc::__errno_location() };
+    (errno != 0).then(|| std::io::Error::from_raw_os_error(errno))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn clear_directory_errno() {
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn directory_errno() -> Option<std::io::Error> {
+    let errno = unsafe { *libc::__error() };
+    (errno != 0).then(|| std::io::Error::from_raw_os_error(errno))
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))
+))]
+fn clear_directory_errno() {}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))
+))]
+fn directory_errno() -> Option<std::io::Error> {
+    None
+}
+
+#[cfg(unix)]
+fn open_workspace_skill_file(
+    skill_dir: &WorkspaceSkillDirectory,
+    _path: &Path,
+) -> std::io::Result<Option<File>> {
+    let descriptor = unsafe {
+        libc::openat(
+            skill_dir.file.as_raw_fd(),
+            c"SKILL.md".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor >= 0 {
+        return Ok(Some(unsafe { File::from_raw_fd(descriptor) }));
+    }
+    let err = std::io::Error::last_os_error();
+    if err.kind() == std::io::ErrorKind::NotFound {
+        Ok(None)
+    } else {
+        Err(err)
+    }
+}
+
+#[cfg(not(unix))]
+fn open_workspace_skill_file(
+    _skill_dir: &WorkspaceSkillDirectory,
+    path: &Path,
+) -> std::io::Result<Option<File>> {
+    let mut options = File::options();
+    options.read(true);
+    match options.open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn read_opened_workspace_skill_file(
+    workspace_host_path: &Path,
+    skill_file: &Path,
+    mut file: File,
+) -> CooldisResult<String> {
+    let canonical_skill_file = std::fs::canonicalize(skill_file).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to re-resolve opened workspace skill file {}: {err}",
+            skill_file.display()
+        ))
+    })?;
+    if !canonical_skill_file.starts_with(workspace_host_path) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "opened workspace skill file {} resolves outside the witnessed workspace",
+            skill_file.display()
+        )));
+    }
+    let opened_metadata = file.metadata().map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to inspect opened workspace skill file {}: {err}",
+            skill_file.display()
+        ))
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "discovered workspace skill path {} is not a regular file",
+            skill_file.display()
+        )));
+    }
+    let resolved_metadata = std::fs::metadata(&canonical_skill_file).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to inspect resolved workspace skill file {}: {err}",
+            canonical_skill_file.display()
+        ))
+    })?;
+    if !same_file_identity(&opened_metadata, &resolved_metadata) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "workspace skill file {} changed while it was opened",
+            skill_file.display()
+        )));
+    }
+    let mut body = String::new();
+    file.read_to_string(&mut body).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to read opened workspace skill file {}: {err}",
+            skill_file.display()
+        ))
+    })?;
+    Ok(body)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.volume_serial_number() == right.volume_serial_number()
+        && left.file_index() == right.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn discovered_skill_path(resolved_path: &str, directory_name: &str) -> String {
+    if resolved_path == "." {
+        format!("{directory_name}/SKILL.md")
+    } else {
+        format!("{resolved_path}/{directory_name}/SKILL.md")
+    }
+}
+
+fn normalize_workspace_relative_path(path: &str) -> String {
+    let parts = Path::new(path)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            std::path::Component::CurDir => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn validate_skill_discovery_witness(
+    witness: &AgentManifestSkillDiscovery,
+    resolved_path: &str,
+    registry_skill_names: &BTreeSet<String>,
+) -> CooldisResult<()> {
+    if witness.path != resolved_path {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "stored skill discovery witness path {:?} does not match manifest path {:?}",
+            witness.path, resolved_path
+        )));
+    }
+    if witness.path.chars().any(char::is_control) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "stored skill discovery witness path {:?} is unsafe",
+            witness.path
+        )));
+    }
+    let mut names = registry_skill_names.clone();
+    let path_prefix = if resolved_path == "." {
+        String::new()
+    } else {
+        format!("{resolved_path}/")
+    };
+    let mut paths = BTreeSet::new();
+    for skill in &witness.skills {
+        if skill.name.trim().is_empty()
+            || skill.name.contains('/')
+            || skill.name.contains('\0')
+            || skill.name == "."
+            || skill.name == ".."
+            || skill.name.chars().any(char::is_control)
+        {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill discovery witness contains unsafe skill name {:?}",
+                skill.name
+            )));
+        }
+        if !names.insert(skill.name.clone()) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill discovery witness contains duplicate skill name {:?} across discovered entries or registry-bound skill packages",
+                skill.name
+            )));
+        }
+        if skill.description.trim().is_empty() || skill.description.chars().any(char::is_control) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill discovery witness entry {:?} has an empty or unsafe description",
+                skill.name
+            )));
+        }
+        let hash = skill.content_sha256.strip_prefix("sha256:").unwrap_or("");
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill discovery witness entry {:?} has non-canonical content sha256 {:?}",
+                skill.name, skill.content_sha256
+            )));
+        }
+        let skill_path = Path::new(&skill.path);
+        let unsafe_path = skill_path.is_absolute()
+            || skill_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+        let relative_path = if resolved_path == "." {
+            Some(skill.path.as_str())
+        } else {
+            skill.path.strip_prefix(&path_prefix)
+        };
+        let direct_child_path = relative_path.and_then(|relative_path| {
+            let mut components = Path::new(relative_path).components();
+            let directory = match components.next() {
+                Some(std::path::Component::Normal(directory)) => directory.to_str(),
+                _ => None,
+            }?;
+            let filename = match components.next() {
+                Some(std::path::Component::Normal(filename)) => filename.to_str(),
+                _ => None,
+            }?;
+            if components.next().is_none()
+                && filename == "SKILL.md"
+                && !directory.chars().any(char::is_control)
+                && skill.path == discovered_skill_path(resolved_path, directory)
+            {
+                Some(())
+            } else {
+                None
+            }
+        });
+        if unsafe_path || !paths.insert(skill.path.as_str()) || direct_child_path.is_none() {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill discovery witness entry {:?} path {:?} is not a canonical direct child of discovery path {:?}",
+                skill.name, skill.path, resolved_path
+            )));
+        }
+    }
+    if witness
+        .skills
+        .windows(2)
+        .any(|pair| pair[0].name > pair[1].name)
+    {
+        return Err(CooldisError::RuntimeFactory(
+            "stored skill discovery witness entries are not sorted by skill name".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_skill_discovery_witness_for_manifest(
+    manifest: &AgentManifestSchema,
+    witness: Option<&AgentManifestSkillDiscovery>,
+) -> CooldisResult<()> {
+    if !manifest.skills.discover {
+        if witness.is_some() {
+            return Err(CooldisError::RuntimeFactory(
+                "stored skill discovery witness exists, but the manifest disables workspace skill discovery"
+                    .to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    let witness = witness.ok_or_else(|| {
+        CooldisError::RuntimeFactory(
+            "manifest enables workspace skill discovery, but the durable bind receipt has no skill discovery witness"
+                .to_string(),
+        )
+    })?;
+    let resolved_path = normalize_workspace_relative_path(&manifest.skills.path);
+    validate_skill_discovery_witness(witness, &resolved_path, &BTreeSet::new())
+}
+
+fn skill_discovery_context_segment(
+    discovery: &AgentManifestSkillDiscovery,
+) -> AgentManifestStaticContextSegment {
+    let mut content = String::new();
+    for skill in &discovery.skills {
+        content.push_str(&skill.name);
+        content.push_str(" — ");
+        content.push_str(&skill.description);
+        content.push_str(" — ");
+        content.push_str(&skill.path);
+        content.push('\n');
+    }
+    let ref_uri = if discovery.path == "." {
+        "workspace:///".to_string()
+    } else {
+        format!("workspace:///{}", discovery.path.trim_start_matches('/'))
+    };
+    AgentManifestStaticContextSegment {
+        id: "skill-discovery-index".to_string(),
+        assembler: KERNEL_ASSEMBLER_STATIC.to_string(),
+        input: discovery.path.clone(),
+        pinned: true,
+        budget_share: None,
+        ref_uri,
+        content_sha256: sha256_prefixed(content.as_bytes()),
+        content,
+    }
 }
 
 fn bind_couplings(
@@ -1796,6 +2547,11 @@ pub struct AgentManifestBindReceipt {
     /// Exact skill packages mounted for this manifest-backed thread.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
+    /// Workspace skill entries traversed exactly once through the resolved
+    /// workspace binding. `None` means discovery was disabled or this is a
+    /// legacy receipt from before discovery witnesses existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_discovery: Option<AgentManifestSkillDiscovery>,
     /// Exact static context sources mounted as provider system blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_context_segments: Vec<AgentManifestStaticContextSegment>,
@@ -1986,6 +2742,24 @@ pub struct AgentManifestSkillPackageBinding {
     pub package_digest: String,
     pub skill_count: usize,
     pub index_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestSkillDiscovery {
+    /// Normalized path relative to the witnessed workspace root.
+    pub path: String,
+    pub skills: Vec<AgentManifestDiscoveredSkill>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestDiscoveredSkill {
+    pub name: String,
+    /// Workspace-relative path to the live skill body.
+    pub path: String,
+    pub content_sha256: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -4,8 +4,8 @@ use super::threads::{
     AppServerTurnState, app_server_turns_from_session_entries, append_bound_agent_metadata,
     apply_manifest_operation_grants, apply_manifest_runtime_metadata, finalize_turn_payload,
     record_bound_agent_receipts, thread_manifest_operation_bindings,
-    thread_manifest_skill_packages, thread_metadata_thinking, turn_input_from_values,
-    user_input_preview,
+    thread_manifest_skill_discovery, thread_manifest_skill_packages, thread_metadata_thinking,
+    turn_input_from_values, user_input_preview,
 };
 use super::*;
 use crate::{
@@ -3368,6 +3368,239 @@ streaming = false
         binding["index_sha256"].as_str(),
         segment["content_sha256"].as_str()
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn workspace_skill_discovery_is_pinned_across_resume_and_fork_but_body_reads_stay_live() {
+    let root = unique_test_root("app-server-workspace-skill-discovery");
+    let app_cwd = root.join("app-cwd");
+    let host_workspace = root.join("host-workspace");
+    std::fs::create_dir_all(&app_cwd).unwrap();
+    write_skill_fixture(
+        &host_workspace.join(".agents/skills"),
+        "alpha",
+        r#"---
+name: alpha
+description: Original discovery description.
+---
+# Alpha
+
+Original discovery body.
+"#,
+    );
+    let agent_registry_root = root.join("agents");
+    let manifest_path = root.join("workspace-skill-runner.cooldis.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        r#"
+[agent]
+name = "workspace-skill-runner"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[workspace]
+guest_path = "/work"
+min_mode = "rw"
+
+[skills]
+discover = true
+
+[runtime]
+default_cwd = "/work"
+streaming = false
+"#,
+    )
+    .unwrap();
+    LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path(&manifest_path)
+        .unwrap();
+
+    let client = Arc::new(WorkspaceSkillDiscoveryClient::default());
+    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+        "cooldis-workspace-skill-discovery-{}.sock",
+        Uuid::now_v7()
+    )));
+    let mut config = CooldisAppServerConfig::local(listen, &app_cwd);
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = agent_registry_root;
+    config.default_workspace = Some(AgentManifestWorkspaceBinding {
+        host_path: host_workspace.clone(),
+        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+    });
+    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    runtime_config.max_tokens = 128;
+    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
+        runtime_config,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server compatibility config field
+        config.capsule_bindings.clone(),
+        None,
+        &config,
+    );
+    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+        .await
+        .unwrap();
+    let app = CooldisAppServer::with_runtime_factory_and_metadata_store(
+        config,
+        runtime_factory,
+        metadata_store,
+    )
+    .await
+    .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone());
+    initialize_for_test(&connection).await;
+
+    let thread = app
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(json!({ "agentRef": "agent://workspace-skill-runner@latest" })),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let initial_handle = app.handle_for_thread(&thread_id).await.unwrap();
+    let (_, initial_bind_receipt) = active_manifest_receipt_payloads(&initial_handle)
+        .await
+        .unwrap()
+        .expect("initial bind receipt");
+    let original_hash = initial_bind_receipt["skill_discovery"]["skills"][0]["content_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(original_hash.starts_with("sha256:"));
+
+    std::fs::write(
+        host_workspace.join(".agents/skills/alpha/SKILL.md"),
+        r#"---
+name: alpha
+description: Changed discovery description.
+---
+# Alpha
+
+Changed discovery body marker.
+"#,
+    )
+    .unwrap();
+    let parsed_thread_id = ThreadId::parse_str(&thread_id).unwrap();
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(parsed_thread_id)
+        .await
+        .unwrap()
+        .expect("thread/start should persist discovery metadata");
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&lifecycle.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "thread/resume",
+        Some(json!({
+            "threadId": thread_id,
+            "excludeTurns": true,
+        })),
+    )
+    .await
+    .unwrap();
+
+    let resumed_handle = app.handle_for_thread(&thread_id).await.unwrap();
+    let resumed_discovery = thread_manifest_skill_discovery(resumed_handle.context())
+        .unwrap()
+        .expect("resumed discovery metadata");
+    assert_eq!(resumed_discovery.skills[0].content_sha256, original_hash);
+    assert_eq!(
+        resumed_discovery.skills[0].description,
+        "Original discovery description."
+    );
+    let (_, resumed_bind_receipt) = active_manifest_receipt_payloads(&resumed_handle)
+        .await
+        .unwrap()
+        .expect("resumed bind receipt");
+    assert_eq!(
+        resumed_bind_receipt["skill_discovery"]["skills"][0]["content_sha256"].as_str(),
+        Some(original_hash.as_str())
+    );
+
+    let checkpoint = app
+        .inner
+        .supervisor
+        .create_checkpoint_at(
+            &resumed_handle.context().coordinates,
+            None,
+            Some("workspace-skill-explicit-fork".to_string()),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    let fork = app
+        .dispatch_request(
+            &connection,
+            "thread/fork",
+            Some(json!({
+                "threadId": thread_id,
+                "checkpointId": checkpoint.id.to_string(),
+            })),
+        )
+        .await
+        .unwrap();
+    let fork_id = fork["thread"]["id"].as_str().unwrap();
+    let fork_handle = app.handle_for_thread(fork_id).await.unwrap();
+    let fork_discovery = thread_manifest_skill_discovery(fork_handle.context())
+        .unwrap()
+        .expect("fork discovery metadata");
+    assert_eq!(fork_discovery.skills[0].content_sha256, original_hash);
+    let (_, fork_bind_receipt) = active_manifest_receipt_payloads(&fork_handle)
+        .await
+        .unwrap()
+        .expect("fork bind receipt");
+    assert_eq!(
+        fork_bind_receipt["skill_discovery"]["skills"][0]["content_sha256"].as_str(),
+        Some(original_hash.as_str())
+    );
+
+    let turn = app
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "read the discovered skill", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    wait_for_provider_requests(&client, 2).await;
+    wait_for_turn_completed_notification(
+        &mut outbound_rx,
+        &thread_id,
+        turn["turn"]["id"].as_str().unwrap(),
+    )
+    .await;
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first_request_text = text_from_canonical_messages(&requests[0].messages);
+    assert!(
+        first_request_text
+            .contains("alpha — Original discovery description. — .agents/skills/alpha/SKILL.md")
+    );
+    assert!(!first_request_text.contains("Changed discovery description."));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -12427,6 +12660,58 @@ impl ProviderClient for SkillResourceClient {
             usage: CanonicalUsage::default(),
             stop_reason: CanonicalStopReason::EndTurn,
         })
+    }
+}
+
+#[derive(Default)]
+struct WorkspaceSkillDiscoveryClient {
+    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for WorkspaceSkillDiscoveryClient {
+    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let text = text_from_canonical_messages(&request.messages);
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+        if !has_tool_result {
+            assert!(
+                text.contains(
+                    "alpha — Original discovery description. — .agents/skills/alpha/SKILL.md"
+                ),
+                "provider request did not include the witnessed workspace skill index: {text}"
+            );
+            assert!(tool_names(request).contains(&"bash".to_string()));
+            return Ok(ProviderResponse {
+                content: vec![CanonicalContent::tool_call(
+                    "call_bash_workspace_skill",
+                    "bash",
+                    json!({
+                        "command": "cat /work/.agents/skills/alpha/SKILL.md"
+                    }),
+                )],
+                usage: CanonicalUsage::default(),
+                stop_reason: CanonicalStopReason::ToolUse,
+            });
+        }
+        assert!(
+            text.contains("Changed discovery body marker."),
+            "workspace bash did not read the live edited skill body: {text}"
+        );
+        Ok(ProviderResponse {
+            content: vec![CanonicalContent::text("workspace skill read completed")],
+            usage: CanonicalUsage::default(),
+            stop_reason: CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
+impl ProviderRequestRecorder for WorkspaceSkillDiscoveryClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
     }
 }
 

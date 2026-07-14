@@ -461,6 +461,13 @@ impl SkillPackageEntry {
                 file.display()
             ))
         })?;
+        Self::from_skill_body(skill_dir, body)
+    }
+
+    /// Parse already-read `SKILL.md` contents without reopening the path.
+    /// Host binders use this after they have confined and pinned the file.
+    pub fn from_skill_body(skill_dir: &Path, body: String) -> CooldisResult<Self> {
+        let file = skill_dir.join("SKILL.md");
         let dirname = skill_dir
             .file_name()
             .and_then(|name| name.to_str())

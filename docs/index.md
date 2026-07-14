@@ -30,6 +30,8 @@ allowed to exercise.
 - Publish static prompt and context files as immutable blob resources.
 - Publish local skill directories, author manifests against a package name, and
   receive a content hash in the bind receipt.
+- Opt into conventional workspace skill discovery and retain the exact bind
+  witness across resume/fork while later workspace reads remain live.
 - Run the agent through a governed runtime instead of a one-off app server.
 - Inspect events, tool calls, receipts, and artifacts.
 - Resume work from durable records.
@@ -78,8 +80,9 @@ agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
 couplings, witnessed OpenAPI operation imports, offline coupling replay,
 local runtime execution, provider adapters,
 virtual bash, VFS-backed oversized-output spill receipts,
-skill-package resources with bind-time name pinning, bind-plane local
-host-workspace mounts, daemon/RPC surfaces, daemon-embedded store-primary
+skill-package resources with bind-time name pinning, witnessed workspace skill
+discovery without a second mount, bind-plane local host-workspace mounts,
+daemon/RPC surfaces, daemon-embedded store-primary
 stream propagation, store-backed remote child placement, and the proof path for
 packageable local agents.
 

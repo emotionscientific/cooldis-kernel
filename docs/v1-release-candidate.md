@@ -4,6 +4,9 @@ This document describes the public V1 release-candidate gate for the Cooldis
 kernel repo. Historical private live-provider runs and internal planning notes
 are intentionally not part of this OSS tree.
 
+<!-- TODO(release): current plan cuts 0.1 (no rc tag) at the close of the
+local-swap phase. This is a provisional decision; the cut line may move. -->
+
 ## Default Gate
 
 Run:

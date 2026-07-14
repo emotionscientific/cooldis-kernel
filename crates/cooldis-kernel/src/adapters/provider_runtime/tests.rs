@@ -343,6 +343,7 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 tool_universes: Vec::new(),
                 couplings: Vec::new(),
                 skill_packages: Vec::new(),
+                skill_discovery: None,
                 static_context_segments: Vec::new(),
                 granted: vec!["threads.read".to_string()],
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
@@ -5715,6 +5716,7 @@ async fn append_tool_controller_bind_receipt(
         tool_ids: Vec::new(),
         operation_bindings: Vec::new(),
         skill_packages: Vec::new(),
+        skill_discovery: None,
         static_context_segments: Vec::new(),
         tool_universes: Vec::new(),
         couplings: vec![AgentManifestCouplingBinding {
@@ -5772,6 +5774,7 @@ async fn append_manifest_runtime_grace(
         tool_ids: Vec::new(),
         operation_bindings: Vec::new(),
         skill_packages: Vec::new(),
+        skill_discovery: None,
         static_context_segments: Vec::new(),
         tool_universes: Vec::new(),
         couplings: Vec::new(),

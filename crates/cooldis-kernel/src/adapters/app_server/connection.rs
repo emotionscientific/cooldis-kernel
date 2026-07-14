@@ -2663,6 +2663,8 @@ impl CooldisAppServer {
             })?;
         let skill_packages =
             thread_manifest_skill_packages(source_handle.context()).map_err(internal_error)?;
+        let skill_discovery =
+            thread_manifest_skill_discovery(source_handle.context()).map_err(internal_error)?;
         let skill_context_segments =
             thread_manifest_skill_context_segments(source_handle.context())
                 .map_err(internal_error)?;
@@ -2671,6 +2673,11 @@ impl CooldisAppServer {
             .metadata
             .get(THREAD_AGENT_SKILL_PACKAGES_METADATA)
             .cloned();
+        let skill_discovery_metadata = source_handle
+            .context()
+            .metadata
+            .get(THREAD_AGENT_SKILL_DISCOVERY_METADATA)
+            .cloned();
         let skill_context_metadata = source_handle
             .context()
             .metadata
@@ -2678,6 +2685,7 @@ impl CooldisAppServer {
             .cloned();
         let inherited_manifest_receipts = if workspace.is_some()
             || !skill_packages.is_empty()
+            || skill_discovery.is_some()
             || !skill_context_segments.is_empty()
         {
             let missing_witness = if workspace.is_some() {
@@ -2727,15 +2735,78 @@ impl CooldisAppServer {
                         .to_string(),
                 )));
             }
+            let witnessed_skill_discovery = bind_payload
+                .get("skill_discovery")
+                .cloned()
+                .map(serde_json::from_value::<AgentManifestSkillDiscovery>)
+                .transpose()
+                .map_err(|err| {
+                    internal_error(CooldisError::RuntimeFactory(format!(
+                        "source thread manifest skill discovery witness is invalid: {err}"
+                    )))
+                })?;
+            let source_agent_ref = source_handle
+                .context()
+                .metadata
+                .get(THREAD_AGENT_REF_METADATA)
+                .ok_or_else(|| {
+                    internal_error(CooldisError::RuntimeFactory(
+                        "source thread with manifest witnesses is missing its agent ref metadata"
+                            .to_string(),
+                    ))
+                })?;
+            let source_manifest_hash = source_handle
+                .context()
+                .metadata
+                .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+                .ok_or_else(|| {
+                    internal_error(CooldisError::RuntimeFactory(
+                        "source thread with manifest witnesses is missing its manifest hash metadata"
+                            .to_string(),
+                    ))
+                })?;
+            if bind_payload.get("ref_uri").and_then(Value::as_str)
+                != Some(source_agent_ref.as_str())
+                || bind_payload.get("manifest_hash").and_then(Value::as_str)
+                    != Some(source_manifest_hash.as_str())
+            {
+                return Err(internal_error(CooldisError::RuntimeFactory(
+                    "source thread manifest identity metadata disagrees with its durable bind witness"
+                        .to_string(),
+                )));
+            }
+            let source_record = LocalAgentRegistry::new(self.inner.agent_registry_root.clone())
+                .load_ref(source_agent_ref)
+                .map_err(internal_error)?;
+            if source_record.manifest_hash != *source_manifest_hash {
+                return Err(internal_error(CooldisError::RuntimeFactory(format!(
+                    "source thread stored manifest hash {} but {:?} loaded {}",
+                    source_manifest_hash, source_agent_ref, source_record.manifest_hash
+                ))));
+            }
+            let (source_manifest, _) = crate::compile_published_agent_record(&source_record, None)
+                .map_err(internal_error)?;
+            crate::agent::manifest_bind::validate_skill_discovery_witness_for_manifest(
+                &source_manifest,
+                witnessed_skill_discovery.as_ref(),
+            )
+            .map_err(internal_error)?;
+            if witnessed_skill_discovery.as_ref() != skill_discovery.as_ref() {
+                return Err(internal_error(CooldisError::RuntimeFactory(
+                    "source thread skill discovery metadata disagrees with its durable manifest bind witness"
+                        .to_string(),
+                )));
+            }
             let witnessed_skill_context_segments =
-                crate::agent::manifest_bind::skill_context_segments_for_bindings(
+                crate::agent::manifest_bind::skill_context_segments_for_witnesses(
                     &witnessed_skill_packages,
                     Some(self.inner.skill_registry_root.as_path()),
+                    witnessed_skill_discovery.as_ref(),
                 )
                 .map_err(internal_error)?;
             if witnessed_skill_context_segments != skill_context_segments {
                 return Err(internal_error(CooldisError::RuntimeFactory(
-                    "source thread skill context metadata disagrees with its pinned skill packages"
+                    "source thread skill context metadata disagrees with its durable skill witnesses"
                         .to_string(),
                 )));
             }
@@ -2749,6 +2820,12 @@ impl CooldisAppServer {
         if let Some(raw) = &skill_packages_metadata {
             checkpoint_metadata.insert(
                 THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(),
+                raw.clone(),
+            );
+        }
+        if let Some(raw) = &skill_discovery_metadata {
+            checkpoint_metadata.insert(
+                THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(),
                 raw.clone(),
             );
         }
@@ -2797,6 +2874,11 @@ impl CooldisAppServer {
             checkpoint
                 .metadata
                 .insert(THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(), raw);
+        }
+        if let Some(raw) = skill_discovery_metadata {
+            checkpoint
+                .metadata
+                .insert(THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(), raw);
         }
         if let Some(raw) = skill_context_metadata {
             checkpoint.metadata.insert(

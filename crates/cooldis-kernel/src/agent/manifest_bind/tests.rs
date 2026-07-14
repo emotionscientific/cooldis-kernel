@@ -9,6 +9,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -1683,6 +1685,636 @@ ref = "skill://second-skills"
     let _ = fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn workspace_skill_discovery_witnesses_entries_and_a_deterministic_index() {
+    let root = temp_dir("manifest-bind-workspace-skill-discovery");
+    let workspace = root.join("workspace");
+    write_skill_file(
+        &workspace.join(".agents/skills"),
+        "zeta-dir",
+        r#"---
+name: alpha
+description: Alpha workspace skill.
+---
+# Alpha
+
+Alpha body.
+"#,
+    );
+    write_skill_file(
+        &workspace.join(".agents/skills"),
+        "beta",
+        "# Beta\n\nBeta workspace skill.\n\nBeta body.\n",
+    );
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+"#,
+            minimal_manifest("workspace_skill_agent")
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+    let workspace_binding = AgentManifestWorkspaceBinding {
+        host_path: workspace.clone(),
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+
+    let bound = bind_published_agent_record_with_placement(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        None,
+        None,
+        None,
+        Some(&workspace_binding),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let discovery = bound
+        .bind_receipt
+        .skill_discovery
+        .as_ref()
+        .expect("enabled discovery must always be witnessed");
+    assert_eq!(discovery.path, ".agents/skills");
+    assert_eq!(discovery.skills.len(), 2);
+    assert_eq!(discovery.skills[0].name, "alpha");
+    assert_eq!(discovery.skills[0].path, ".agents/skills/zeta-dir/SKILL.md");
+    assert_eq!(discovery.skills[0].description, "Alpha workspace skill.");
+    assert!(discovery.skills[0].content_sha256.starts_with("sha256:"));
+    assert_eq!(discovery.skills[1].name, "beta");
+    assert_eq!(discovery.skills[1].path, ".agents/skills/beta/SKILL.md");
+
+    let segment = bound.skill_context_segments.last().unwrap();
+    assert_eq!(segment.id, "skill-discovery-index");
+    assert_eq!(segment.assembler, KERNEL_ASSEMBLER_STATIC);
+    assert_eq!(segment.input, ".agents/skills");
+    assert!(segment.pinned);
+    assert_eq!(
+        segment.content,
+        "alpha — Alpha workspace skill. — .agents/skills/zeta-dir/SKILL.md\n\
+         beta — Beta workspace skill. — .agents/skills/beta/SKILL.md\n"
+    );
+    assert!(segment.content_sha256.starts_with("sha256:"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn workspace_skill_discovery_witnesses_missing_and_empty_directories() {
+    for (label, create_directory) in [("missing", false), ("empty", true)] {
+        let root = temp_dir(&format!("manifest-bind-workspace-skill-{label}"));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        if create_directory {
+            fs::create_dir_all(workspace.join("custom-skills")).unwrap();
+        }
+        let record = publish_agent_manifest(
+            &root,
+            &format!(
+                r#"{}
+
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+path = "custom-skills"
+"#,
+                minimal_manifest(&format!("workspace_skill_{label}"))
+            ),
+        );
+        let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+            .with_supports_streaming(false);
+        let workspace_binding = AgentManifestWorkspaceBinding {
+            host_path: workspace,
+            mode: AgentManifestWorkspaceMode::ReadWrite,
+        };
+
+        let bound = bind_published_agent_record_with_placement(
+            &record,
+            None,
+            &surface,
+            None,
+            None,
+            None,
+            &BTreeSet::new(),
+            None,
+            &AgentManifestModelProfileSelection::default(),
+            &AgentManifestBindOverrides::default(),
+            None,
+            None,
+            None,
+            Some(&workspace_binding),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let discovery = bound.bind_receipt.skill_discovery.unwrap();
+        assert_eq!(discovery.path, "custom-skills");
+        assert!(discovery.skills.is_empty());
+        assert_eq!(bound.skill_context_segments.len(), 1);
+        assert!(bound.skill_context_segments[0].content.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[tokio::test]
+async fn workspace_skill_discovery_fails_closed_on_duplicate_names() {
+    let root = temp_dir("manifest-bind-workspace-skill-duplicates");
+    let workspace = root.join("workspace");
+    write_skill_file(
+        &workspace.join(".agents/skills"),
+        "first",
+        "---\nname: shared\ndescription: First.\n---\nFirst body.\n",
+    );
+    write_skill_file(
+        &workspace.join(".agents/skills"),
+        "second",
+        "---\nname: shared\ndescription: Second.\n---\nSecond body.\n",
+    );
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+"#,
+            minimal_manifest("duplicate_workspace_skills")
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+    let workspace_binding = AgentManifestWorkspaceBinding {
+        host_path: workspace.clone(),
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+
+    let err = bind_published_agent_record_with_placement(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        None,
+        None,
+        None,
+        Some(&workspace_binding),
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate skill name \"shared\""), "{err}");
+
+    fs::remove_dir_all(workspace.join(".agents/skills/second")).unwrap();
+    let skill_registry_root = root.join("registry-skills");
+    let package_dir = root.join("skill-src/registry-package");
+    write_skill_file(
+        &package_dir,
+        "shared",
+        "# Shared\n\nRegistry-bound description.\n",
+    );
+    LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+
+[[resources]]
+name = "registry_skills"
+kind = "skill"
+ref = "skill://registry-package"
+"#,
+            minimal_manifest("workspace_registry_duplicate_skills")
+        ),
+    );
+    let err = bind_published_agent_record_with_placement(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_registry_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        None,
+        None,
+        None,
+        Some(&workspace_binding),
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate skill name \"shared\""), "{err}");
+    assert!(err.contains("registry-bound skill packages"), "{err}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn workspace_skill_discovery_rehydrate_rejects_a_registry_duplicate() {
+    let root = temp_dir("manifest-bind-workspace-skill-rehydrate-duplicate");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let skill_registry_root = root.join("registry-skills");
+    let package_dir = root.join("skill-src/registry-package");
+    write_skill_file(
+        &package_dir,
+        "shared",
+        "# Shared\n\nRegistry-bound description.\n",
+    );
+    LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+
+[[resources]]
+name = "registry_skills"
+kind = "skill"
+ref = "skill://registry-package"
+"#,
+            minimal_manifest("workspace_skill_rehydrate_duplicate")
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+    let workspace_binding = AgentManifestWorkspaceBinding {
+        host_path: workspace,
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+    let initial = bind_published_agent_record_with_placement(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_registry_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        None,
+        None,
+        None,
+        Some(&workspace_binding),
+        false,
+    )
+    .await
+    .unwrap();
+    let forged_discovery = AgentManifestSkillDiscovery {
+        path: ".agents/skills".to_string(),
+        skills: vec![AgentManifestDiscoveredSkill {
+            name: "shared".to_string(),
+            path: ".agents/skills/shared/SKILL.md".to_string(),
+            content_sha256: format!("sha256:{}", "a".repeat(64)),
+            description: "Discovered description.".to_string(),
+        }],
+    };
+
+    let err = bind_published_agent_record_with_placement_and_skill_witness(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_registry_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        None,
+        None,
+        None,
+        Some(&workspace_binding),
+        false,
+        Some(&initial.skill_packages),
+        Some(&forged_discovery),
+        true,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("duplicate skill name \"shared\""), "{err}");
+    assert!(err.contains("registry-bound skill packages"), "{err}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_skill_discovery_witness_rejects_paths_fresh_discovery_cannot_emit() {
+    let witness = AgentManifestSkillDiscovery {
+        path: ".agents/skills".to_string(),
+        skills: vec![AgentManifestDiscoveredSkill {
+            name: "alpha".to_string(),
+            path: ".agents/skills/alpha/nested/SKILL.md".to_string(),
+            content_sha256: format!("sha256:{}", "a".repeat(64)),
+            description: "Alpha skill.".to_string(),
+        }],
+    };
+
+    let err = skill_context_segments_for_witnesses(&[], None, Some(&witness))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("path"), "{err}");
+    assert!(err.contains("direct child"), "{err}");
+
+    let witness = AgentManifestSkillDiscovery {
+        path: "skills\nforged-index".to_string(),
+        skills: Vec::new(),
+    };
+    let err = skill_context_segments_for_witnesses(&[], None, Some(&witness))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unsafe"), "{err}");
+}
+
+#[test]
+fn workspace_skill_discovery_witness_rejects_noncanonical_index_fields() {
+    for (field, replacement) in [
+        ("hash", format!("sha256:{}", "A".repeat(64))),
+        ("name", "alpha\nforged — entry".to_string()),
+        ("description", "Alpha skill.\nforged — entry".to_string()),
+    ] {
+        let mut skill = AgentManifestDiscoveredSkill {
+            name: "alpha".to_string(),
+            path: ".agents/skills/alpha/SKILL.md".to_string(),
+            content_sha256: format!("sha256:{}", "a".repeat(64)),
+            description: "Alpha skill.".to_string(),
+        };
+        match field {
+            "hash" => skill.content_sha256 = replacement,
+            "name" => skill.name = replacement,
+            "description" => skill.description = replacement,
+            _ => unreachable!(),
+        }
+        let witness = AgentManifestSkillDiscovery {
+            path: ".agents/skills".to_string(),
+            skills: vec![skill],
+        };
+
+        let err = skill_context_segments_for_witnesses(&[], None, Some(&witness))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("canonical") || err.contains("unsafe"),
+            "expected {field} to fail canonical witness validation: {err}"
+        );
+    }
+}
+
+#[test]
+fn workspace_skill_discovery_witness_must_match_the_compiled_manifest() {
+    let root = temp_dir("manifest-bind-workspace-skill-manifest-witness");
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+path = "expected-skills"
+"#,
+            minimal_manifest("workspace_skill_manifest_witness")
+        ),
+    );
+    let (manifest, _) = compile_published_agent_record(&record, None).unwrap();
+    let wrong_path = AgentManifestSkillDiscovery {
+        path: "other-skills".to_string(),
+        skills: Vec::new(),
+    };
+
+    let err = validate_skill_discovery_witness_for_manifest(&manifest, Some(&wrong_path))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not match manifest path"), "{err}");
+    let err = validate_skill_discovery_witness_for_manifest(&manifest, None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has no skill discovery witness"), "{err}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn workspace_root_discovery_emits_a_normalized_relative_skill_path() {
+    let root = temp_dir("manifest-bind-workspace-root-skill-discovery");
+    let workspace = root.join("workspace");
+    write_skill_file(&workspace, "alpha", "# Alpha\n\nAlpha workspace skill.\n");
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+path = "."
+"#,
+            minimal_manifest("workspace_root_skill_agent")
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+    let workspace_binding = AgentManifestWorkspaceBinding {
+        host_path: workspace,
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+
+    let bound = bind_published_agent_record_with_placement(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        None,
+        None,
+        None,
+        Some(&workspace_binding),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let discovery = bound.skill_discovery.unwrap();
+    assert_eq!(discovery.path, ".");
+    assert_eq!(discovery.skills[0].path, "alpha/SKILL.md");
+    assert_eq!(bound.skill_context_segments[0].ref_uri, "workspace:///");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_skill_read_rejects_a_symlink_swapped_after_open() {
+    let root = temp_dir("manifest-bind-workspace-skill-swap");
+    let workspace = root.join("workspace");
+    let skill_dir = workspace.join(".agents/skills/alpha");
+    let inside = workspace.join("inside.md");
+    let outside = root.join("outside.md");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(&inside, "inside").unwrap();
+    fs::write(&outside, "outside").unwrap();
+    let skill_file = skill_dir.join("SKILL.md");
+    symlink(&outside, &skill_file).unwrap();
+    let opened = fs::File::open(&skill_file).unwrap();
+    fs::remove_file(&skill_file).unwrap();
+    symlink(&inside, &skill_file).unwrap();
+
+    let canonical_workspace = fs::canonicalize(&workspace).unwrap();
+    let err = read_opened_workspace_skill_file(&canonical_workspace, &skill_file, opened)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("changed while it was opened"), "{err}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_skill_directory_listing_stays_on_the_opened_root() {
+    let root = temp_dir("manifest-bind-workspace-skill-root-swap");
+    let discovery_root = root.join("workspace/.agents/skills");
+    let moved_root = root.join("workspace/.agents/original-skills");
+    let outside_root = root.join("outside-skills");
+    fs::create_dir_all(discovery_root.join("inside")).unwrap();
+    fs::create_dir_all(outside_root.join("outside")).unwrap();
+    let opened = fs::File::open(&discovery_root).unwrap();
+    fs::rename(&discovery_root, &moved_root).unwrap();
+    symlink(&outside_root, &discovery_root).unwrap();
+
+    let names = read_opened_directory_names(&opened).unwrap();
+
+    assert_eq!(names, vec![std::ffi::OsString::from("inside")]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_skill_discovery_confines_each_symlink_layer() {
+    let root = temp_dir("manifest-bind-workspace-skill-symlinks");
+    let workspace = root.join("workspace");
+    let discovery_root = workspace.join(".agents/skills");
+    let outside_root = root.join("outside-skills");
+    write_skill_file(
+        &outside_root,
+        "outside",
+        "# Outside\n\nOutside workspace skill.\n",
+    );
+    fs::create_dir_all(discovery_root.parent().unwrap()).unwrap();
+    symlink(&outside_root, &discovery_root).unwrap();
+    let resolved_workspace = AgentManifestResolvedWorkspaceMount {
+        guest_path: PathBuf::from("/workspace"),
+        host_path: fs::canonicalize(&workspace).unwrap(),
+        mode: AgentManifestWorkspaceMode::ReadWrite,
+    };
+
+    let err = discover_workspace_skills(&resolved_workspace, ".agents/skills", &BTreeSet::new())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("outside the witnessed workspace"), "{err}");
+
+    fs::remove_file(&discovery_root).unwrap();
+    fs::create_dir_all(&discovery_root).unwrap();
+    symlink(
+        outside_root.join("outside"),
+        discovery_root.join("linked-dir"),
+    )
+    .unwrap();
+    let discovery =
+        discover_workspace_skills(&resolved_workspace, ".agents/skills", &BTreeSet::new()).unwrap();
+    assert!(discovery.skills.is_empty());
+
+    let skill_dir = discovery_root.join("alpha");
+    fs::create_dir_all(&skill_dir).unwrap();
+    symlink(
+        outside_root.join("outside/SKILL.md"),
+        skill_dir.join("SKILL.md"),
+    )
+    .unwrap();
+    let err = discover_workspace_skills(&resolved_workspace, ".agents/skills", &BTreeSet::new())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("outside the witnessed workspace"), "{err}");
+
+    fs::remove_file(skill_dir.join("SKILL.md")).unwrap();
+    let inside_body = workspace.join("inside-skill.md");
+    fs::write(&inside_body, "# Alpha\n\nInside workspace skill.\n").unwrap();
+    symlink(&inside_body, skill_dir.join("SKILL.md")).unwrap();
+    let discovery =
+        discover_workspace_skills(&resolved_workspace, ".agents/skills", &BTreeSet::new()).unwrap();
+    assert_eq!(discovery.skills.len(), 1);
+    assert_eq!(discovery.skills[0].name, "alpha");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn skill_binding_witness_comparison_is_order_independent_but_exact() {
     let alpha = AgentManifestSkillPackageBinding {
@@ -2437,32 +3069,34 @@ fn wat_bytes(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn bind_receipt_placement_is_optional_on_the_wire() {
-    // Receipts witnessed before ADR 0006 have no placement field; that
-    // exact wire shape must keep decoding, with absent meaning local.
-    let legacy_wire = serde_json::json!({
-        "ref_uri": "cooldis://agents/karl",
-        "manifest_hash": "sha256-manifest",
-        "model_profile_id": "default",
-        "provider_id": "anthropic",
-        "model_id": "claude-sonnet-5",
-        "tool_ids": ["threads/spawn"],
-        "operation_bindings": [],
-        "granted": [THREADS_SPAWN_CAPABILITY],
-        "effective_runtime": {
-            "default_cwd": "workspace",
-            "streaming": true,
-            "turn_timeout_ms": 1000,
-            "cancellation_grace_ms": null,
-            "compaction": {"auto_at_text_bytes": 500},
-            "overrides": {"allow": []}
-        },
-        "overridden_keys": []
-    });
-    let legacy_receipt: AgentManifestBindReceipt =
-        serde_json::from_value(legacy_wire.clone()).unwrap();
+fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
+    // This is the raw wire shape written before placement, workspace, skill
+    // packages, and workspace skill discovery existed.
+    let legacy_wire = format!(
+        r#"{{
+            "ref_uri":"cooldis://agents/karl",
+            "manifest_hash":"sha256-manifest",
+            "model_profile_id":"default",
+            "provider_id":"anthropic",
+            "model_id":"claude-sonnet-5",
+            "tool_ids":["threads/spawn"],
+            "operation_bindings":[],
+            "granted":["{THREADS_SPAWN_CAPABILITY}"],
+            "effective_runtime":{{
+                "default_cwd":"workspace",
+                "streaming":true,
+                "turn_timeout_ms":1000,
+                "cancellation_grace_ms":null,
+                "compaction":{{"auto_at_text_bytes":500}},
+                "overrides":{{"allow":[]}}
+            }},
+            "overridden_keys":[]
+        }}"#
+    );
+    let legacy_receipt: AgentManifestBindReceipt = serde_json::from_str(&legacy_wire).unwrap();
     assert_eq!(legacy_receipt.placement, None);
     assert_eq!(legacy_receipt.workspace, None);
+    assert_eq!(legacy_receipt.skill_discovery, None);
     assert_eq!(legacy_receipt.ref_uri, "cooldis://agents/karl");
     assert_eq!(legacy_receipt.tool_ids, vec!["threads/spawn"]);
     assert!(
@@ -2478,6 +3112,13 @@ fn bind_receipt_placement_is_optional_on_the_wire() {
             .get("workspace")
             .is_none(),
         "absent workspace must serialize to the legacy wire shape"
+    );
+    assert!(
+        serde_json::to_value(&legacy_receipt)
+            .unwrap()
+            .get("skill_discovery")
+            .is_none(),
+        "absent skill discovery must serialize to the legacy wire shape"
     );
 
     let placed = AgentManifestBindReceipt {

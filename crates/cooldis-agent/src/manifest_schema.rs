@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 /// schema. Compile rejects each by name so the error states the deferral
 /// instead of reporting an unknown key.
 pub const RESERVED_MANIFEST_SECTIONS: &[&str] =
-    &["views", "hooks", "topology", "io", "persistence", "skills"];
+    &["views", "hooks", "topology", "io", "persistence"];
 
 /// Resource kinds reserved for later versions (audit section 5). Compile
 /// rejects them with an error naming the deferral.
@@ -51,6 +51,10 @@ pub struct AgentManifestSchema {
     /// supply the machine-local host directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<AgentManifestWorkspaceRequirement>,
+    /// Optional workspace skill discovery. The schema default is off so
+    /// manifests must opt in explicitly before bind traverses the workspace.
+    #[serde(default, skip_serializing_if = "AgentManifestSkills::is_default")]
+    pub skills: AgentManifestSkills,
     /// `None` means the source omitted `[context]`; use
     /// [`AgentManifestSchema::effective_context_pipeline`] to get the
     /// synthesized default instead of reading this directly.
@@ -92,6 +96,7 @@ impl AgentManifestSchema {
                     | "tools"
                     | "resources"
                     | "workspace"
+                    | "skills"
                     | "context"
                     | "couplings"
                     | "policies"
@@ -110,6 +115,7 @@ impl AgentManifestSchema {
         let tools = optional_section(value, "tools")?.unwrap_or_default();
         let resources = optional_section(value, "resources")?.unwrap_or_default();
         let workspace = optional_section(value, "workspace")?;
+        let skills = optional_section(value, "skills")?.unwrap_or_default();
         let couplings = optional_section(value, "couplings")?.unwrap_or_default();
         let context = match value.get("context") {
             Some(section) => {
@@ -132,6 +138,7 @@ impl AgentManifestSchema {
             tools,
             resources,
             workspace,
+            skills,
             context,
             couplings,
             policies,
@@ -359,6 +366,7 @@ impl AgentManifestSchema {
         if let Some(workspace) = &self.workspace {
             validate_workspace_requirement(workspace)?;
         }
+        validate_skill_discovery(&self.skills, self.workspace.as_ref())?;
 
         if let Some(context) = &self.context {
             validate_context_pipeline(context)?;
@@ -666,6 +674,36 @@ pub struct AgentManifestWorkspaceRequirement {
     pub guest_path: String,
     #[serde(default)]
     pub min_mode: AgentManifestWorkspaceMode,
+}
+
+/// Layer-2 declaration for conventional workspace skill discovery.
+/// Discovery is intentionally opt-in and never creates a separate mount.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestSkills {
+    #[serde(default)]
+    pub discover: bool,
+    #[serde(default = "default_skill_discovery_path")]
+    pub path: String,
+}
+
+impl AgentManifestSkills {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl Default for AgentManifestSkills {
+    fn default() -> Self {
+        Self {
+            discover: false,
+            path: default_skill_discovery_path(),
+        }
+    }
+}
+
+fn default_skill_discovery_path() -> String {
+    ".agents/skills".to_string()
 }
 
 /// Access modes shared by workspace requirements, operator bindings, and
@@ -1425,6 +1463,43 @@ fn validate_workspace_requirement(
             "workspace guest_path {:?} must be normalized",
             workspace.guest_path
         )));
+    }
+    Ok(())
+}
+
+fn validate_skill_discovery(
+    skills: &AgentManifestSkills,
+    workspace: Option<&AgentManifestWorkspaceRequirement>,
+) -> CooldisResult<()> {
+    let path = Path::new(&skills.path);
+    if skills.path.is_empty() || path.is_absolute() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "agent manifest skills.path {:?} must be a non-empty workspace-relative path",
+            skills.path
+        )));
+    }
+    if skills.path.chars().any(char::is_control) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "agent manifest skills.path {:?} must be a workspace-relative path without control characters",
+            skills.path
+        )));
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "agent manifest skills.path {:?} must not contain `..` and must remain workspace-relative",
+            skills.path
+        )));
+    }
+    if skills.discover && workspace.is_none() {
+        return Err(CooldisError::RuntimeFactory(
+            "agent manifest skills.discover = true requires a workspace requirement ([workspace]) so bind can resolve the discovery scope"
+                .to_string(),
+        ));
     }
     Ok(())
 }

@@ -180,11 +180,51 @@ themselves make the resource model-visible or writable.
 
 ### Skills
 
-A skill is a published markdown resource package. In V1 it is declared as a
-`[[resources]]` row with `kind = "skill"`. The ref may be floating as
-`skill://<package>` or pinned as `skill://<package>@sha256:<hash>`. The
-`[skills]` manifest section remains reserved until skills need their own grants
-or executable entrypoints.
+Skills have two declarative lanes. Workspace discovery gives local coding
+agents conventional-directory ergonomics. Published packages give manifests an
+immutable registry lane that is portable outside one workspace. The lanes may
+be used together, but skill names must be unique across both.
+
+Workspace discovery is off by default:
+
+```toml
+[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+path = ".agents/skills" # optional default
+```
+
+`skills.path` is relative to the resolved workspace root and cannot contain a
+`..` component or control characters. Enabling discovery without a `[workspace]`
+requirement is invalid. At bind, the kernel traverses
+`<workspace>/<skills.path>` once for conventional `<skill>/SKILL.md` entries and
+applies the same frontmatter and fallback parsing as package publication.
+Symlinked skill directories are not followed; the discovery root and any
+symlinked `SKILL.md` target must resolve inside the witnessed workspace, and the
+opened file identity is checked again before its contents are parsed. A missing
+or empty directory is a valid, witnessed empty discovery because the scope is
+user-provisioned.
+
+Discovery does not create a skill mount. The files remain in the live workspace
+and the injected index points to workspace-relative `SKILL.md` paths that
+existing workspace bash/read surfaces can open. Mounting a bind-time snapshot
+beside that live tree would expose two versions of one workspace scope and
+violate workspace law.
+
+The bind receipt's `skill_discovery` field records the normalized discovery
+path and, for every entry, its name, description, workspace-relative path, and
+content SHA-256. Resume and fork rehydrate that witness and its deterministic
+index without traversing the directory again. A later workspace read may see
+edited content; this drift is allowed and provable by comparing the bind
+witness with later read receipts. Cooldis witnesses workspace state at bind; it
+does not police subsequent edits.
+
+The published-package lane is declared as a `[[resources]]` row with
+`kind = "skill"`. The ref may be floating as `skill://<package>` or pinned as
+`skill://<package>@sha256:<hash>`.
 
 ```text
 publish lane: cooldis skill publish <dir>
@@ -200,8 +240,9 @@ ref resolves the active local registry record once, and the pinned ref and
 package digest are recorded in the bind receipt. A pinned ref loads that exact
 immutable version without consulting the active record. Existing bound threads
 keep their witnessed version across resume and fork; a later bind resolves the
-then-current active version. Unknown names and duplicate `/skills/<name>.md`
-mounts fail closed. The kernel renders a deterministic static index:
+then-current active version. Unknown names and duplicate names within or across
+registry packages and workspace discovery fail closed. The kernel renders a
+deterministic package index:
 
 ```text
 <skill name> — <description>
@@ -212,6 +253,12 @@ segment. Skill bodies are not all pinned into model context; they are mounted
 read-only in the thread VFS at `/skills/<name>.md`, where existing virtual bash
 commands such as `cat` or `view` can read them. Skill resources grant no
 ambient host authority.
+
+The workspace-discovery index adds the workspace-relative body path:
+
+```text
+<skill name> — <description> — <skills.path>/<directory>/SKILL.md
+```
 
 ### Context
 

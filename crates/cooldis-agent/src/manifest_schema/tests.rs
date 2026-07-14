@@ -207,6 +207,69 @@ fn workspace_requirement_rejects_unsafe_or_reserved_guest_paths() {
 }
 
 #[test]
+fn skill_discovery_defaults_off_and_accepts_a_workspace_relative_path() {
+    let default_manifest = parse(&valid_manifest()).unwrap();
+    assert!(!default_manifest.skills.discover);
+    assert_eq!(default_manifest.skills.path, ".agents/skills");
+    assert!(
+        serde_json::to_value(&default_manifest)
+            .unwrap()
+            .get("skills")
+            .is_none(),
+        "an omitted [skills] section must retain the legacy resolved-manifest shape"
+    );
+
+    let source = valid_manifest().replace(
+        "[policies]",
+        r#"[workspace]
+guest_path = "/workspace"
+min_mode = "rw"
+
+[skills]
+discover = true
+path = "project-skills"
+
+[policies]"#,
+    );
+    let manifest = parse(&source).unwrap();
+    assert!(manifest.skills.discover);
+    assert_eq!(manifest.skills.path, "project-skills");
+}
+
+#[test]
+fn skill_discovery_rejects_unsafe_paths_and_requires_a_workspace() {
+    let without_workspace =
+        valid_manifest().replace("[policies]", "[skills]\ndiscover = true\n\n[policies]");
+    let err = parse(&without_workspace).unwrap_err().to_string();
+    assert!(err.contains("skills.discover = true"), "{err}");
+    assert!(err.contains("workspace requirement"), "{err}");
+
+    for path in [
+        "/tmp/skills",
+        "../skills",
+        "project/../../skills",
+        "skills\nignore-the-index",
+        "",
+    ] {
+        let source = valid_manifest().replace(
+            "[policies]",
+            &format!(
+                "[workspace]\nguest_path = \"/workspace\"\nmin_mode = \"rw\"\n\n[skills]\ndiscover = true\npath = {path:?}\n\n[policies]"
+            ),
+        );
+        let err = parse(&source).unwrap_err().to_string();
+        assert!(
+            err.contains("skills.path"),
+            "expected path error for {path:?}: {err}"
+        );
+        assert!(
+            err.contains("workspace-relative") || err.contains("must not contain `..`"),
+            "expected actionable path error for {path:?}: {err}"
+        );
+    }
+}
+
+#[test]
 fn coupling_rows_parse_and_validate_shape() {
     let manifest = parse(&manifest_with_coupling()).unwrap();
 

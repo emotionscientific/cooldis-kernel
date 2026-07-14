@@ -101,6 +101,12 @@ Manifests may use either ref. Authors and manifests speak names; receipts speak
 hashes: a floating name resolves once at bind and the bind receipt witnesses
 the pinned ref. Pinned refs never follow the active name.
 
+Publication is the portable registry lane. Local agents may instead opt into
+bind-time workspace discovery with `[skills] discover = true` and an optional
+workspace-relative `path` (default `.agents/skills`); this does not publish or
+mount the files. See [Agent Manifest Ontology — Skills](agent-manifest-ontology.md#skills)
+for the two-lane model, no-mount rule, and durable witness semantics.
+
 `list` and `show` inspect published records from the local registry. They are the
 minimum discovery surface required once publication exists.
 

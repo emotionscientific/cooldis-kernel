@@ -306,6 +306,7 @@ impl CooldisAppServer {
             .as_ref()
             .map(AgentManifestResolvedWorkspaceMount::binding);
         let stored_skill_packages = thread_manifest_skill_packages(handle.context())?;
+        let stored_skill_discovery = thread_manifest_skill_discovery(handle.context())?;
         let stored_skill_context_segments =
             thread_manifest_skill_context_segments(handle.context())?;
         let runtime_store = self
@@ -313,12 +314,18 @@ impl CooldisAppServer {
             .supervisor
             .runtime_store(&handle.context().coordinates.tenant_id)
             .await?;
-        let witnessed_skill_packages = crate::active_manifest_bind_receipt(
+        let durable_bind_receipt = crate::active_manifest_bind_receipt(
             runtime_store.as_ref(),
             &handle.context().coordinates,
         )
         .await?
-        .map(|(_, receipt)| receipt.skill_packages);
+        .map(|(_, receipt)| receipt);
+        let witnessed_skill_packages = durable_bind_receipt
+            .as_ref()
+            .map(|receipt| receipt.skill_packages.clone());
+        let witnessed_skill_discovery = durable_bind_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.skill_discovery.clone());
         match witnessed_skill_packages.as_deref() {
             Some(witness)
                 if crate::agent::manifest_bind::skill_package_bindings_match(
@@ -339,6 +346,19 @@ impl CooldisAppServer {
                     handle.context().coordinates.thread_id
                 )));
             }
+        }
+        match (
+            witnessed_skill_discovery.as_ref(),
+            stored_skill_discovery.as_ref(),
+        ) {
+            (Some(witness), Some(stored)) if witness == stored => {}
+            (Some(_), _) | (_, Some(_)) => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "stored skill discovery metadata disagrees with the durable manifest bind witness for thread {}",
+                    handle.context().coordinates.thread_id
+                )));
+            }
+            (None, None) => {}
         }
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
@@ -381,6 +401,8 @@ impl CooldisAppServer {
             workspace_binding.as_ref(),
             self.remote_event_store_served(),
             witnessed_skill_packages.as_deref(),
+            witnessed_skill_discovery.as_ref(),
+            true,
         )
         .await?;
         if bound.bind_receipt.workspace != stored_workspace {
@@ -1417,6 +1439,15 @@ pub(super) fn append_bound_agent_metadata(
         })?;
         metadata.insert(THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(), encoded);
     }
+    if let Some(discovery) = &bound.skill_discovery {
+        let encoded = serde_json::to_string(discovery).map_err(|err| {
+            jsonrpc_error(
+                -32602,
+                format!("failed to encode manifest skill discovery witness: {err}"),
+            )
+        })?;
+        metadata.insert(THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(), encoded);
+    }
     if !bound.skill_context_segments.is_empty() {
         let encoded = serde_json::to_string(&bound.skill_context_segments).map_err(|err| {
             jsonrpc_error(
@@ -1802,6 +1833,22 @@ pub(super) fn thread_manifest_skill_packages(
             ))
         })?;
     Ok(bindings)
+}
+
+pub(super) fn thread_manifest_skill_discovery(
+    context: &ThreadContext,
+) -> CooldisResult<Option<AgentManifestSkillDiscovery>> {
+    context
+        .metadata
+        .get(THREAD_AGENT_SKILL_DISCOVERY_METADATA)
+        .map(|raw| {
+            serde_json::from_str(raw).map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "thread manifest skill discovery witness is invalid: {err}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 pub(super) fn thread_manifest_skill_context_segments(
