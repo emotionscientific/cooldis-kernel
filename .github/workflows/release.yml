@@ -116,3 +116,14 @@ jobs:
           esac
 
           gh release create "$GITHUB_REF_NAME" dist/* "${release_args[@]}"
+
+      - name: Trigger Homebrew tap update
+        env:
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+        run: |
+          # Keep releases green while the cross-repo dispatch token is unprovisioned.
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "TAP_DISPATCH_TOKEN not configured; skipping tap dispatch"
+            exit 0
+          fi
+          gh workflow run update-cooldis.yml --repo emotionscientific/homebrew-tap
