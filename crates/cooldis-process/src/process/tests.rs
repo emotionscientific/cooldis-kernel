@@ -203,7 +203,18 @@ async fn async_manager_keeps_completed_handle_until_owner_acknowledges() {
         .snapshot
         .process_id
         .expect("first process should still be running");
-    tokio::time::sleep(Duration::from_millis(75)).await;
+    let first_completed = manager
+        .poll(first_id, Duration::from_secs(1), 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_completed.snapshot.status,
+        ProcessSnapshotStatus::Completed
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first_completed.snapshot.stdout),
+        "first"
+    );
 
     let second_request = AsyncProcessStartRequest::host_command(
         vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
@@ -218,18 +229,8 @@ async fn async_manager_keeps_completed_handle_until_owner_acknowledges() {
         ProcessSnapshotStatus::Completed
     );
 
-    let first_completed = manager
-        .poll(first_id, Duration::from_secs(1), 1024)
-        .await
-        .unwrap();
-    assert_eq!(
-        first_completed.snapshot.status,
-        ProcessSnapshotStatus::Completed
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&first_completed.snapshot.stdout),
-        "first"
-    );
+    let retained = manager.snapshot(first_id, 1024).await.unwrap();
+    assert_eq!(retained.snapshot, first_completed.snapshot);
 }
 
 #[tokio::test]

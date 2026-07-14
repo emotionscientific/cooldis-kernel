@@ -702,12 +702,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancellable_host_bash_returns_partial_output_and_kills_the_process_group() {
-        let executor = HostBashExecutor::new("/");
+        let root = std::env::temp_dir().join(format!(
+            "cooldis-host-cancellation-ready-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ready_path = root.join("ready");
+        let executor = HostBashExecutor::new(&root);
         let cancellation = CancellationToken::new();
         let request = ExternalCommandRequest {
             invocation: ExternalCommandInvocation::Script(
-                "echo ready; trap '' TERM; (trap '' TERM; while :; do sleep 1; done) & echo child=$!; wait"
-                    .to_string(),
+                "echo ready; trap '' TERM; (trap '' TERM; while :; do sleep 1; done) & echo child=$!; printf ready > ready; wait".to_string(),
             ),
             executor: ExternalExecutorKind::HostBash,
             cwd: PathBuf::from("/workspace"),
@@ -719,7 +724,13 @@ mod tests {
             let cancellation = cancellation.clone();
             async move { executor.exec_cancellable(request, cancellation).await }
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host bash did not signal readiness before cancellation");
         cancellation.cancel();
 
         let result = tokio::time::timeout(Duration::from_secs(2), run)
@@ -737,6 +748,7 @@ mod tests {
             .unwrap()
             .parse::<libc::pid_t>()
             .unwrap();
+        let _ = std::fs::remove_dir_all(root);
         assert_eq!(unsafe { libc::kill(child, 0) }, -1);
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
