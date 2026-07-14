@@ -7,7 +7,8 @@
 //! store IS the push; there is no separate notification to lose.
 //! `thread_status` / `thread_wait` fold the same durable child stream.
 //!
-//! Engine caveat (pinned turso 0.7.0-pre.18): a held connection can retain
+//! Engine caveat (observed on turso 0.7.0-pre.18; pin now pre.19, behavior
+//! not re-verified): a held connection can retain
 //! its pre-pull snapshot, so an implementation must reopen or checkpoint
 //! after each pull before folding the new revision — otherwise the tail
 //! reads a stale tail forever while records sit committed behind it.

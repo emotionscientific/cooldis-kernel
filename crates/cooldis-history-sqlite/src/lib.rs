@@ -17,10 +17,13 @@ use cooldis_sqlite::{
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::{Mutex, MutexGuard};
 
 #[derive(Clone)]
 pub struct SqliteSessionStore {
     inner: Db,
+    writer: Arc<Mutex<()>>,
 }
 
 async fn cancellation_safe<T>(
@@ -52,7 +55,10 @@ impl SqliteSessionStore {
         )
         .await
         .map_err(storage_error)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            writer: Arc::new(Mutex::new(())),
+        })
     }
 
     pub async fn in_memory() -> HistoryResult<Self> {
@@ -69,9 +75,15 @@ impl SqliteSessionStore {
     /// trait and applies the same schema initialization as [`Self::open`].
     pub async fn from_db(inner: Db) -> HistoryResult<Self> {
         cancellation_safe(async move {
-            let store = Self { inner };
-            let mut connection = store.connect().await?;
-            init_sqlite_schema(&mut connection).await?;
+            let store = Self {
+                inner,
+                writer: Arc::new(Mutex::new(())),
+            };
+            {
+                let _writer = store.write_guard().await;
+                let mut connection = store.connect().await?;
+                init_sqlite_schema(&mut connection).await?;
+            }
             Ok(store)
         })
         .await
@@ -79,6 +91,18 @@ impl SqliteSessionStore {
 
     async fn connect(&self) -> HistoryResult<Connection> {
         self.inner.connect().await.map_err(storage_error)
+    }
+
+    /// Admit one history mutation at a time across every clone of this store.
+    ///
+    /// Reads still use independent Turso connections. Writers wait on Tokio's
+    /// fair FIFO mutex before opening their per-operation connection and hold
+    /// the guard through transaction commit, so daemon bursts cannot turn 200
+    /// concurrent RPC tasks into 200 competing WAL writers. Each mutation
+    /// keeps its existing immediate transaction and commit boundary; this gate
+    /// changes concurrency only, not durability or journal ordering.
+    async fn write_guard(&self) -> MutexGuard<'_, ()> {
+        self.writer.lock().await
     }
 
     /// Clone the engine-owner handle for daemon-owned tables that must share
@@ -103,7 +127,10 @@ impl SqliteSessionStore {
     /// writer race after taking its snapshot, so using one here violates the
     /// read-then-write policy even if the eventual insert happens to succeed.
     /// This seam does not begin or commit the transaction on the caller's
-    /// behalf.
+    /// behalf, and deliberately does not reacquire the store's writer gate:
+    /// the caller already holds the database write lock. A caller must not
+    /// invoke an ordinary store mutation before ending that transaction,
+    /// because ordinary mutations acquire the gate before the database lock.
     #[doc(hidden)]
     pub async fn append_events_fenced_in_transaction(
         &self,
@@ -208,6 +235,7 @@ impl SessionStore for SqliteSessionStore {
         cancellation_safe(async move {
             let coordinates = &coordinates;
             let turn_id = turn_id.as_str();
+            let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -279,6 +307,7 @@ impl SessionStore for SqliteSessionStore {
         let coordinates = coordinates.clone();
         cancellation_safe(async move {
             let coordinates = &coordinates;
+            let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -357,6 +386,7 @@ impl SessionStore for SqliteSessionStore {
         cancellation_safe(async move {
             let source_coordinates = &source_coordinates;
             let target_coordinates = &target_coordinates;
+            let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -423,6 +453,7 @@ impl SessionStore for SqliteSessionStore {
         cancellation_safe(async move {
             let source_coordinates = &source_coordinates;
             let target_coordinates = &target_coordinates;
+            let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -470,6 +501,7 @@ impl SqliteSessionStore {
         let coordinates = coordinates.clone();
         cancellation_safe(async move {
             let coordinates = &coordinates;
+            let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -524,6 +556,7 @@ impl EventStore for SqliteSessionStore {
         let stream_id = stream_id.clone();
         cancellation_safe(async move {
             let stream_id = &stream_id;
+            let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -549,6 +582,7 @@ impl EventStore for SqliteSessionStore {
         let stream_id = stream_id.clone();
         cancellation_safe(async move {
             let stream_id = &stream_id;
+            let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -584,8 +618,13 @@ impl ObservationStore for SqliteSessionStore {
         &self,
         record: NewObservationRecord,
     ) -> HistoryResult<ObservationRecord> {
-        let connection = self.connect().await?;
-        sqlite_insert_observation(&connection, record).await
+        let store = self.clone();
+        cancellation_safe(async move {
+            let _writer = store.write_guard().await;
+            let connection = store.connect().await?;
+            sqlite_insert_observation(&connection, record).await
+        })
+        .await
     }
 
     async fn list_observations(

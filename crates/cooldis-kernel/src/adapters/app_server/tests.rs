@@ -229,6 +229,83 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_new_thread_turn_burst_surfaces_no_history_lock_errors() {
+    const THREAD_STARTS: usize = 200;
+    let root = unique_test_root("app-server-history-contention");
+    let app = test_app_at_root(&root).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(THREAD_STARTS));
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..THREAD_STARTS {
+        let app = app.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.spawn(async move {
+            let (connection, _outbound_rx) = test_connection(app.clone());
+            initialize_for_test(&connection).await;
+            barrier.wait().await;
+            let thread = app
+                .dispatch_request(&connection, "thread/start", Some(json!({})))
+                .await
+                .map_err(|error| format!("thread/start: {}", error.message))?;
+            let thread_id = thread["thread"]["id"]
+                .as_str()
+                .expect("thread/start response missing thread id")
+                .to_string();
+            app.dispatch_request(
+                &connection,
+                "turn/start",
+                Some(json!({
+                    "threadId": thread_id.clone(),
+                    "input": [{
+                        "type": "text",
+                        "text": "history contention probe",
+                        "text_elements": [],
+                    }],
+                })),
+            )
+            .await
+            .map_err(|error| format!("turn/start: {}", error.message))?;
+            Ok::<_, String>(())
+        });
+    }
+
+    let burst = async {
+        let mut failures = Vec::new();
+        while let Some(task) = tasks.join_next().await {
+            match task {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(error),
+                Err(error) => failures.push(format!("new-thread turn task failed: {error}")),
+            }
+        }
+        failures
+    };
+
+    let burst_result = tokio::time::timeout(std::time::Duration::from_secs(60), burst).await;
+    let task_shutdown_result =
+        tokio::time::timeout(std::time::Duration::from_secs(10), tasks.shutdown()).await;
+    let shutdown_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        app.inner.supervisor.shutdown_all(),
+    )
+    .await;
+    drop(app);
+    let cleanup_result = std::fs::remove_dir_all(root);
+
+    let failures = burst_result.expect("200 in-process new-thread turns exceeded the 60s bound");
+    task_shutdown_result.expect("new-thread turn task shutdown exceeded the 10s bound");
+    shutdown_result
+        .expect("app-server shutdown exceeded the 10s bound")
+        .unwrap();
+    cleanup_result.unwrap();
+    assert!(
+        failures.is_empty(),
+        "new-thread turn burst surfaced {} RPC errors: {failures:#?}",
+        failures.len()
+    );
+}
+
 #[test]
 fn assistant_content_projection_concatenates_thinking_chunks_like_streaming() {
     let messages = vec![
@@ -11362,10 +11439,12 @@ async fn unsupported_methods_return_method_not_found() {
 }
 
 async fn test_app() -> CooldisAppServer {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("cooldis-app-server-test-{}.sock", Uuid::now_v7())),
-    );
     let root = std::env::temp_dir().join(format!("cooldis-app-server-test-{}", Uuid::now_v7()));
+    test_app_at_root(&root).await
+}
+
+async fn test_app_at_root(root: &Path) -> CooldisAppServer {
+    let listen = AppServerListenAddr::Unix(root.join("app-server.sock"));
     let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");

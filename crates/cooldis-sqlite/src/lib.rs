@@ -126,7 +126,8 @@ pub struct DbConfig {
     pub foreign_keys: bool,
     pub busy_timeout: Duration,
     /// Applied per connection with `PRAGMA query_only`. ADVISORY, not
-    /// enforced: Turso 0.7.0-pre.18 has no local read-only open flag, and a
+    /// enforced: the pinned Turso 0.7 pre-releases have no local read-only
+    /// open flag (checked on pre.18; pin now pre.19), and a
     /// caller can flip the pragma back on a connection it holds. This catches
     /// accidental writes (they error), which is the contract our read-only
     /// paths need today.

@@ -254,10 +254,22 @@ async fn concurrent_legacy_store_opens_apply_additive_migrations_idempotently() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_store_appends_serialize_stream_sequence_without_interleaving() {
     let path = temp_db_path("cooldis-history-concurrent-appends");
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let db = Db::open(
+        &path,
+        DbConfig {
+            busy_timeout: std::time::Duration::ZERO,
+            ..DbConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let store = SqliteSessionStore::from_db(db).await.unwrap();
     let coordinates = coords("tenant-concurrent", "user-concurrent", "session-concurrent");
     let stream_id = EventStreamId::for_thread(&coordinates);
-    let workers = 8;
+    // A zero busy timeout turns this into a serialization contract rather
+    // than a timing test: any second writer admitted while the first owns the
+    // WAL lock fails immediately, even on a fast machine.
+    let workers = 200;
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(workers));
     let mut handles = Vec::new();
 
@@ -296,6 +308,94 @@ async fn concurrent_store_appends_serialize_stream_sequence_without_interleaving
     );
 
     drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn turso_pre19_reopens_pre18_database_with_committed_wal() {
+    let path = temp_db_path("cooldis-history-turso-pre18-wal");
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", path.display()));
+    let decode_fixture = |encoded: &str| {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .unwrap()
+    };
+    std::fs::write(
+        &path,
+        decode_fixture(include_str!(
+            "../tests/fixtures/turso-pre18-compat.sqlite3.base64"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        &wal_path,
+        decode_fixture(include_str!(
+            "../tests/fixtures/turso-pre18-compat.sqlite3-wal.base64"
+        )),
+    )
+    .unwrap();
+    assert!(
+        std::fs::metadata(&wal_path).is_ok_and(|metadata| metadata.len() > 0),
+        "pre.18 fixture must leave a committed WAL for pre.19 to recover"
+    );
+
+    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let database = store.sqlite_database();
+    let connection = database.connect().await.unwrap();
+    let mut rows = connection
+        .query("SELECT value FROM pre18_compat", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "committed-in-pre18-wal");
+    assert!(rows.next().await.unwrap().is_none());
+    drop(rows);
+    drop(connection);
+    drop(database);
+    let coordinates = coords("tenant-pre18", "user-pre18", "session-pre18");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    store
+        .append_events(
+            &stream_id,
+            vec![NewEventRecord::witnessed(
+                coordinates,
+                EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "continued-by-pre19"}),
+            )],
+        )
+        .await
+        .unwrap();
+    drop(store);
+
+    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    assert_eq!(
+        reopened.read_events(&stream_id, None).await.unwrap().len(),
+        1
+    );
+    let database = reopened.sqlite_database();
+    let connection = database.connect().await.unwrap();
+    let mut integrity = connection
+        .query("PRAGMA integrity_check", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        integrity
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "ok"
+    );
+    drop(integrity);
+    drop(connection);
+    drop(database);
+    drop(reopened);
+
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     let _ = std::fs::remove_file(path);
 }
 

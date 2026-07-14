@@ -6,8 +6,8 @@ license = "Apache-2.0"
 description = "Engine-owner crate for cooldis SQLite stores (ADR 0005): configuration, connections, migrations, DST IO hook"
 
 [dependencies]
-turso = "=0.7.0-pre.18"
-turso_core = "=0.7.0-pre.18"
+turso = "=0.7.0-pre.19"
+turso_core = "=0.7.0-pre.19"
 thiserror = "2"
 
 [dev-dependencies]
