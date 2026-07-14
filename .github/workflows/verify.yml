@@ -42,6 +42,24 @@ jobs:
           path: verify-output.log
           if-no-files-found: error
 
+  tests-macmini:
+    name: Workspace tests (macmini)
+    # Public repo + self-hosted runner: never run fork-PR code on our hardware.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macmini]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      # No rust-cache here: the runner is a persistent machine, so the target
+      # directory in its work folder stays warm between runs.
+      - name: Verify workspace
+        shell: bash
+        run: scripts/verify.sh
+
   restart-smoke:
     name: Process restart smoke
     runs-on: ubuntu-latest
