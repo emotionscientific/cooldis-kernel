@@ -3392,8 +3392,8 @@ async fn coalesced_fork_first_attempt_loser_runs_no_recovery_effects() {
         first_bridge
             .submit_coalesced_queued_envelopes(
                 first_envelope.clone(),
-                &[first_envelope.clone()],
-                &[first_envelope.id.clone()],
+                std::slice::from_ref(&first_envelope),
+                std::slice::from_ref(&first_envelope.id),
                 1,
             )
             .await
@@ -3403,8 +3403,8 @@ async fn coalesced_fork_first_attempt_loser_runs_no_recovery_effects() {
     competing_bridge
         .submit_coalesced_queued_envelopes(
             envelope.clone(),
-            &[envelope.clone()],
-            &[envelope.id.clone()],
+            std::slice::from_ref(&envelope),
+            std::slice::from_ref(&envelope.id),
             1,
         )
         .await

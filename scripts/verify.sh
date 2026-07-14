@@ -25,6 +25,9 @@ STUB
 cd "$ROOT"
 
 run cargo fmt --all -- --check
+# Same lint set as scripts/release-v1-candidate.sh so the everyday lane
+# cannot drift green while the release gate fails (EMO-459).
+run cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious -D clippy::perf
 run cargo test --workspace --all-targets --locked
 
 if [[ -z "${COOLDIS_CODEX_BIN:-}" ]]; then

@@ -4020,7 +4020,7 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                         source_event_id: request.id,
                         finish_order: 0,
                         cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
-                        outcome: ToolExecutionOutcome {
+                        outcome: Box::new(ToolExecutionOutcome {
                             result: CanonicalMessage::tool_result(
                                 "call-1",
                                 "thread_status",
@@ -4032,7 +4032,7 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                             post_model_contexts: Vec::new(),
                             permission_decision: None,
                             duration_ms: 0,
-                        },
+                        }),
                     }),
                 )
                 .await;

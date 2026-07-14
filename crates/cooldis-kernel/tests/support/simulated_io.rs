@@ -1049,9 +1049,11 @@ mod tests {
             )
             .unwrap();
 
-            let _ = stale_file
-                .pwrite(0, Arc::new(Buffer::new(vec![1, 2, 3])), write_completion())
-                .unwrap();
+            drop(
+                stale_file
+                    .pwrite(0, Arc::new(Buffer::new(vec![1, 2, 3])), write_completion())
+                    .unwrap(),
+            );
             let sync = stale_file
                 .sync(sync_completion(), FileSyncType::Fsync)
                 .unwrap();
@@ -1065,9 +1067,11 @@ mod tests {
                     .unwrap();
                 assert!(sync.succeeded());
             }
-            let _ = stale_file
-                .pwrite(3, Arc::new(Buffer::new(vec![4])), write_completion())
-                .unwrap();
+            drop(
+                stale_file
+                    .pwrite(3, Arc::new(Buffer::new(vec![4])), write_completion())
+                    .unwrap(),
+            );
             assert!(io.crashed());
 
             let recovered = io.recover().unwrap();
@@ -1108,19 +1112,21 @@ mod tests {
             let file = io
                 .open_file("torn.sqlite3", OpenFlags::Create, false)
                 .unwrap();
-            let _ = file
-                .pwrite(0, Arc::new(Buffer::new(vec![1, 2, 3])), write_completion())
-                .unwrap();
-            let _ = file.sync(sync_completion(), FileSyncType::Fsync).unwrap();
+            drop(
+                file.pwrite(0, Arc::new(Buffer::new(vec![1, 2, 3])), write_completion())
+                    .unwrap(),
+            );
+            drop(file.sync(sync_completion(), FileSyncType::Fsync).unwrap());
             io.arm(IoFaultPlan::crash_after_write(
                 seed,
                 1,
                 CrashSurvival::TornWrite { max_bytes },
             ))
             .unwrap();
-            let _ = file
-                .pwrite(3, Arc::new(Buffer::new(bytes)), write_completion())
-                .unwrap();
+            drop(
+                file.pwrite(3, Arc::new(Buffer::new(bytes)), write_completion())
+                    .unwrap(),
+            );
             drop(file);
 
             let recovered = io.recover().unwrap();

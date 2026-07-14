@@ -2857,7 +2857,7 @@ enum PreparedToolCallOutcome {
         source_event_id: EventRecordId,
         finish_order: u64,
         cancellation: Option<ToolCallCancellation>,
-        outcome: ToolExecutionOutcome,
+        outcome: Box<ToolExecutionOutcome>,
     },
     Denied {
         call_id: String,
@@ -3568,7 +3568,7 @@ async fn append_tool_results(
                     source_event_id,
                     Some(finish_order),
                     cancellation,
-                    outcome,
+                    *outcome,
                     false,
                 )
                 .await?;
@@ -4131,7 +4131,7 @@ async fn prepare_tool_call(
         source_event_id: call.request_event_id,
         finish_order: finish_counter.fetch_add(1, Ordering::SeqCst),
         cancellation: None,
-        outcome,
+        outcome: Box::new(outcome),
     })
 }
 
@@ -4200,7 +4200,7 @@ fn cancelled_tool_call_outcome(
         source_event_id: witness.request_event_id,
         finish_order,
         cancellation: Some(cancellation),
-        outcome: ToolExecutionOutcome {
+        outcome: Box::new(ToolExecutionOutcome {
             result: CanonicalMessage::tool_result(
                 witness.tool_call.id.clone(),
                 witness.tool_call.name.clone(),
@@ -4212,7 +4212,7 @@ fn cancelled_tool_call_outcome(
             post_model_contexts: Vec::new(),
             permission_decision: None,
             duration_ms: 0,
-        },
+        }),
     }
 }
 
@@ -4275,7 +4275,7 @@ async fn append_detached_tool_call_outcome(
         source_event_id,
         Some(finish_order),
         cancellation,
-        outcome,
+        *outcome,
         true,
     )
     .await
@@ -4971,7 +4971,7 @@ async fn tool_call_completed_exists(
         .read_events(&EventStreamId::for_thread(coordinates), None)
         .await
         .map_err(|err| CooldisError::History(err.to_string()))?;
-    for event in events.into_iter().filter(|event| {
+    if let Some(event) = events.into_iter().find(|event| {
         event.kind == EventKind::ToolCallCompleted
             && event
                 .payload
@@ -5172,14 +5172,11 @@ async fn append_tool_completion_event(
             .read_events(&stream_id, None)
             .await
             .map_err(|err| CooldisError::History(err.to_string()))?;
-        for event in existing
-            .iter()
-            .filter(|event| event.kind == EventKind::ToolCallCompleted)
-            .filter(|event| {
-                event.payload["subject"]["turn_id"] == subject.turn_id
-                    && event.payload["subject"]["call_id"] == subject.call_id
-            })
-        {
+        if let Some(event) = existing.iter().find(|event| {
+            event.kind == EventKind::ToolCallCompleted
+                && event.payload["subject"]["turn_id"] == subject.turn_id
+                && event.payload["subject"]["call_id"] == subject.call_id
+        }) {
             serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone()).map_err(
                 |err| {
                     CooldisError::History(format!(
