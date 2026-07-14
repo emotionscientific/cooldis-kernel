@@ -246,6 +246,7 @@ pub mod operations {
     pub mod operation_registry;
     pub mod operation_store;
     pub mod plugins;
+    pub mod skill_import;
     pub mod skill_package;
     pub mod tool_package;
 }
@@ -595,6 +596,7 @@ pub use operations::operation_store::{
 pub use operations::plugins::{
     LocalPluginCatalog, LocalPluginCatalogConfig, LocalPluginCatalogRecord, PluginMount,
 };
+pub use operations::skill_import::{PublishedSkillImport, SkillImportAsset, SkillImportPlan};
 pub use operations::skill_package::{
     DeclaredSkillPackageRef, LocalSkillRegistry, PublishSkillPackageRequest,
     PublishedSkillPackageRecord, SkillPackage, SkillPackageEntry, SkillPackageRef,

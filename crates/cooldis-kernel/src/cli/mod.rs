@@ -23,17 +23,18 @@ use crate::{
     McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, NewEventRecord,
     OperationImportPlan, PublishOperationRequest, PublishSkillPackageRequest, PublishedAgentRecord,
     PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
-    RustWasmBuildOptions, SecretSourceKind, SqliteMcpSourceRegistry, SqliteMetadataStore,
-    SqliteSecretStore, SqliteSessionStore, StreamRecordEnvelopeV1, SystemDaemonClock,
-    TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId, ToolBuildReceipt,
-    ToolCommandContract, ToolFixtureRun, ToolInterfaceContract, ToolManualExitStatus,
-    ToolOperationInterface, ToolOperationManual, ToolPackageIdentity, ToolPackageSource,
-    ToolRuntimeContract, WasmOperationManifest, WasmOperationValueKind, WasmRuntimeArtifact,
-    WasmRuntimeConfig, WasmRuntimeFactory, agent::agent_tool_router::AgentKernelToolProvider,
-    build_rust_wasm_module, default_blob_registry_root,
-    default_blob_registry_root_for_agent_registry_root, default_operations_registry_root,
-    discover_cooldis_daemon_config_path, discover_cooldis_project, install_cooldis_daemon_service,
-    load_cooldis_daemon_config, load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
+    RustWasmBuildOptions, SecretSourceKind, SkillImportPlan, SqliteMcpSourceRegistry,
+    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, StreamRecordEnvelopeV1,
+    SystemDaemonClock, TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId,
+    ToolBuildReceipt, ToolCommandContract, ToolFixtureRun, ToolInterfaceContract,
+    ToolManualExitStatus, ToolOperationInterface, ToolOperationManual, ToolPackageIdentity,
+    ToolPackageSource, ToolRuntimeContract, WasmOperationManifest, WasmOperationValueKind,
+    WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
+    agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
+    default_blob_registry_root, default_blob_registry_root_for_agent_registry_root,
+    default_operations_registry_root, discover_cooldis_daemon_config_path,
+    discover_cooldis_project, install_cooldis_daemon_service, load_cooldis_daemon_config,
+    load_cooldis_daemon_config_layers, render_cooldis_daemon_service,
     render_openapi_import_artifact, required_secret_names, resolve_manifest_secret_resolution,
     uninstall_cooldis_daemon_service, wasm_sha256,
 };
@@ -174,6 +175,9 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         [command] if command == "skill" => print_skill_help(),
         [command, subcommand] if command == "skill" && subcommand == "publish" => {
             print_skill_publish_help()
+        }
+        [command, subcommand] if command == "skill" && subcommand == "import" => {
+            print_skill_import_help()
         }
         [command, subcommand] if command == "tool" && subcommand == "build" => {
             print_tool_build_help()
@@ -2674,12 +2678,14 @@ async fn run_skill(mut args: Vec<OsString>) -> CooldisResult<()> {
     {
         match subcommand.to_string_lossy().as_ref() {
             "publish" => print_skill_publish_help(),
+            "import" => print_skill_import_help(),
             other => return Err(usage_error(format!("unknown skill subcommand {other:?}"))),
         }
         return Ok(());
     }
     match subcommand.to_string_lossy().as_ref() {
         "publish" => skill_publish(args).await,
+        "import" => skill_import(args).await,
         _ => Err(usage_error(format!(
             "unknown skill subcommand {subcommand:?}"
         ))),
@@ -2966,6 +2972,62 @@ async fn skill_publish(args: Vec<OsString>) -> CooldisResult<()> {
     for skill in record.package.skills {
         println!("skill {}", skill.name);
     }
+    Ok(())
+}
+
+async fn skill_import(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_skill_import_args(args)?;
+    if options.help {
+        print_skill_import_help();
+        return Ok(());
+    }
+    let skill_dir = options
+        .skill_dir
+        .ok_or_else(|| usage_error("skill import requires <dir>"))?;
+    let skill_registry_root = skill_registry_root(options.registry_root);
+    let blob_registry_root = options
+        .blob_registry_root
+        .unwrap_or_else(default_blob_registry_root);
+    let plan = SkillImportPlan::from_directory(&skill_dir, options.name.as_deref())?;
+
+    let record_path = if options.dry_run {
+        println!("dry-run {}", plan.package.name);
+        None
+    } else {
+        let skill_registry = LocalSkillRegistry::new(&skill_registry_root);
+        let published = plan.publish(
+            &skill_registry,
+            &LocalBlobRegistry::new(&blob_registry_root),
+        )?;
+        println!("published {}", published.skill.name);
+        Some(skill_registry.record_path(&published.skill.name)?)
+    };
+    println!("artifact {}", plan.artifact_hash()?);
+    println!("ref {}", plan.pinned_ref()?);
+    println!("floating {}", plan.floating_ref());
+    if let Some(record_path) = record_path {
+        println!("record {}", record_path.display());
+    }
+    for skill in &plan.package.skills {
+        println!("skill {}", skill.name);
+    }
+    for reference in &plan.references {
+        println!("reference {reference} appended");
+    }
+    for asset in &plan.assets {
+        println!("blob {} {}", asset.relative_path, asset.ref_uri);
+    }
+    for script in &plan.omitted_scripts {
+        println!("omitted script {script}");
+    }
+    for hook in &plan.ignored_hooks {
+        println!("ignored hook {hook}");
+    }
+    for file in &plan.skipped_files {
+        println!("skipped file {file}");
+    }
+    println!("manifest fragment:");
+    print!("{}", plan.manifest_fragment()?);
     Ok(())
 }
 
@@ -4139,6 +4201,16 @@ struct SkillPublishArgs {
 }
 
 #[derive(Debug)]
+struct SkillImportArgs {
+    skill_dir: Option<PathBuf>,
+    name: Option<String>,
+    registry_root: Option<PathBuf>,
+    blob_registry_root: Option<PathBuf>,
+    dry_run: bool,
+    help: bool,
+}
+
+#[derive(Debug)]
 struct BlobPublishArgs {
     file: Option<PathBuf>,
     name: Option<String>,
@@ -5255,6 +5327,48 @@ fn parse_skill_publish_args(args: Vec<OsString>) -> CooldisResult<SkillPublishAr
         package_dir,
         name,
         registry_root,
+        help,
+    })
+}
+
+fn parse_skill_import_args(args: Vec<OsString>) -> CooldisResult<SkillImportArgs> {
+    let mut skill_dir = None;
+    let mut name = None;
+    let mut registry_root = None;
+    let mut blob_registry_root = None;
+    let mut dry_run = false;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--registry-root" => {
+                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+            }
+            "--blob-registry-root" => {
+                blob_registry_root = Some(required_path_value(&mut iter, "--blob-registry-root")?)
+            }
+            "--dry-run" => dry_run = true,
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown skill import argument {other:?}"
+                )));
+            }
+            _ => {
+                if skill_dir.is_some() {
+                    return Err(usage_error("skill import accepts exactly one <dir>"));
+                }
+                skill_dir = Some(PathBuf::from(arg));
+            }
+        }
+    }
+    Ok(SkillImportArgs {
+        skill_dir,
+        name,
+        registry_root,
+        blob_registry_root,
+        dry_run,
         help,
     })
 }
@@ -8105,6 +8219,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis tool run <published-name> <operation> --input <text> [--registry-root .cooldis/operations] [--state-home .cooldis/state]",
     "cooldis tool manual <published-name> [operation] [--json] [--registry-root .cooldis/operations]",
     "cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]",
+    "cooldis skill import <dir> [--registry-root .cooldis/skills] [--blob-registry-root .cooldis/blobs] [--name <package>] [--dry-run]",
     "cooldis tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <secret-name>] [--include-tool <tool>] [--state-home .cooldis/state]",
     "cooldis tool source discover <name> [--state-home .cooldis/state]",
     "cooldis tool source list [--json] [--state-home .cooldis/state]",
@@ -8318,10 +8433,12 @@ fn print_skill_help() {
 \n\
 Usage:\n\
   cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]\n\
+  cooldis skill import <dir> [--registry-root .cooldis/skills] [--blob-registry-root .cooldis/blobs] [--name <package>] [--dry-run]\n\
 \n\
 Skills are markdown context resources. Publishing turns a directory of\n\
 <name>/SKILL.md files into one content-addressed skill:// package for agent\n\
-manifest resource rows.\n"
+manifest resource rows. Import compiles one ecosystem SKILL.md directory into\n\
+the same package and blob registries.\n"
     );
 }
 
@@ -8376,6 +8493,24 @@ Optional frontmatter may declare name, description, and trigger_hint; without\n\
 frontmatter, the skill name is the directory name and the description is the\n\
 first non-heading markdown line. Prints both the pinned content-addressed ref\n\
 and the floating package-name ref.\n"
+    );
+}
+
+fn print_skill_import_help() {
+    println!(
+        "cooldis skill import\n\
+\n\
+Usage:\n\
+  cooldis skill import <dir> [--registry-root .cooldis/skills] [--blob-registry-root .cooldis/blobs] [--name <package>] [--dry-run]\n\
+\n\
+Compiles one conventional SKILL.md directory into an ordinary published skill\n\
+package. Markdown files directly under references/ are appended to the skill\n\
+body and assets/ files publish as immutable blobs. Scripts are not converted;\n\
+their paths are written into the body and model-visible index as degradation.\n\
+Hook and MCP configuration remains inert and is reported as ignored. Files\n\
+outside those classes are skipped and reported. Prints\n\
+pinned and floating skill refs, blob refs, and ready-to-paste [[resources]]\n\
+rows. --dry-run prints the same deterministic plan without registry writes.\n"
     );
 }
 

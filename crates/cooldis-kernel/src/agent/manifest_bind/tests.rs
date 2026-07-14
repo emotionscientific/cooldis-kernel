@@ -4,8 +4,9 @@ use crate::agent::manifest_schema::{
 };
 use crate::{
     AgentManifestCompactionDefaults, AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol,
-    LocalSkillRegistry, PublishSkillPackageRequest, STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
-    THREADS_SPAWN_CAPABILITY, ToolDefinition, ToolUniverseDiscovery, WitnessedToolContract,
+    LocalBlobRegistry, LocalSkillRegistry, PublishSkillPackageRequest,
+    STD_SUPERVISOR_SPAWN_TEMPLATE_ID, SkillImportPlan, THREADS_SPAWN_CAPABILITY, ToolDefinition,
+    ToolUniverseDiscovery, WitnessedToolContract,
 };
 use async_trait::async_trait;
 use std::fs;
@@ -1447,6 +1448,63 @@ ref = "{}"
         first.bind_receipt.skill_packages,
         second.bind_receipt.skill_packages
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn imported_skill_omission_is_model_visible_at_bind() {
+    let root = temp_dir("manifest-bind-imported-skill");
+    let skill_dir = root.join("skill-src/fixture-skill");
+    fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "# Fixture Skill\n\nFixture description.\n",
+    )
+    .unwrap();
+    fs::write(skill_dir.join("scripts/check.py"), "print('check')\n").unwrap();
+    let skill_root = root.join("skills");
+    let plan = SkillImportPlan::from_directory(&skill_dir, None).unwrap();
+    let imported = plan
+        .publish(
+            &LocalSkillRegistry::new(&skill_root),
+            &LocalBlobRegistry::new(root.join("blobs")),
+        )
+        .unwrap();
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[[resources]]
+name = "fixture_skill"
+kind = "skill"
+ref = "{}"
+"#,
+            minimal_manifest("imported_skill_agent"),
+            imported.skill.ref_uri()
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    let index = &bound.skill_context_segments[0].content;
+    assert!(index.contains("scripts omitted"), "{index}");
+    assert!(index.contains("scripts/check.py"), "{index}");
     let _ = fs::remove_dir_all(root);
 }
 

@@ -276,6 +276,7 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(commands.contains("cooldis debug rpc call"));
     assert!(commands.contains("cooldis tool manual"));
     assert!(commands.contains("cooldis skill publish"));
+    assert!(commands.contains("cooldis skill import"));
     assert!(commands.contains("cooldis auth set"));
     assert_no_command(&commands, &["dev"]);
     assert_no_command(&commands, &["operator"]);
@@ -300,6 +301,13 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(skill_publish_help.contains("cooldis skill publish <dir>"));
     assert!(skill_publish_help.contains("--registry-root"));
     assert!(skill_publish_help.contains("floating package-name ref"));
+
+    let skill_import_help = run_cooldis(["skill", "import", "--help"]);
+    assert!(skill_import_help.contains("cooldis skill import <dir>"));
+    assert!(skill_import_help.contains("--blob-registry-root"));
+    assert!(skill_import_help.contains("--dry-run"));
+    assert!(skill_import_help.contains("model-visible index"));
+    assert!(skill_import_help.contains("skipped and reported"));
 
     let help_debug_rpc = run_cooldis(["help", "debug", "rpc"]);
     assert!(help_debug_rpc.contains("cooldis debug rpc"));
@@ -728,6 +736,109 @@ Unicode description line.
     assert_eq!(
         record.package.render_index(),
         "frontmatter-skill — Uses declared metadata.\nplain — First plain description line.\n設計 — Unicode description line.\n"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cooldis_cli_skill_import_dry_run_and_publish_are_deterministic() {
+    let root = temp_dir("skill-import-cli");
+    let skill_dir = root.join("fixture-skill");
+    fs::create_dir_all(skill_dir.join("references")).unwrap();
+    fs::create_dir_all(skill_dir.join("assets")).unwrap();
+    fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "# Fixture Skill\n\nFixture description.\n",
+    )
+    .unwrap();
+    fs::write(skill_dir.join("references/guide.md"), "# Guide\n").unwrap();
+    fs::write(skill_dir.join("assets/icon.bin"), [0_u8, 1, 2, 3]).unwrap();
+    fs::write(skill_dir.join("scripts/check.py"), "print('check')\n").unwrap();
+    fs::write(skill_dir.join("hooks.json"), r#"{"hooks": []}"#).unwrap();
+    fs::write(skill_dir.join("README.md"), "not imported\n").unwrap();
+    let skill_registry = root.join("skills");
+    let blob_registry = root.join("blobs");
+
+    let dry_run = run_cooldis([
+        "skill",
+        "import",
+        skill_dir.to_str().unwrap(),
+        "--registry-root",
+        skill_registry.to_str().unwrap(),
+        "--blob-registry-root",
+        blob_registry.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert!(dry_run.contains("dry-run fixture-skill"));
+    assert!(dry_run.contains("omitted script scripts/check.py"));
+    assert!(dry_run.contains("ignored hook hooks.json"));
+    assert!(dry_run.contains("skipped file README.md"));
+    assert!(dry_run.contains("blob assets/icon.bin resource://artifact/sha256:"));
+    assert!(dry_run.contains("[[resources]]"));
+    assert!(dry_run.contains("kind = \"skill\""));
+    assert!(dry_run.contains("kind = \"blob\""));
+    assert!(!skill_registry.exists());
+    assert!(!blob_registry.exists());
+
+    let invalid_skill_dir = root.join("invalid-skill");
+    fs::create_dir_all(&invalid_skill_dir).unwrap();
+    fs::write(invalid_skill_dir.join("SKILL.md"), "").unwrap();
+    let invalid_skill_registry = root.join("invalid-skills");
+    let invalid_blob_registry = root.join("invalid-blobs");
+    let failed_dry_run = run_cooldis_failed([
+        "skill",
+        "import",
+        invalid_skill_dir.to_str().unwrap(),
+        "--registry-root",
+        invalid_skill_registry.to_str().unwrap(),
+        "--blob-registry-root",
+        invalid_blob_registry.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert!(stderr(&failed_dry_run).contains("is empty"));
+    assert!(!invalid_skill_registry.exists());
+    assert!(!invalid_blob_registry.exists());
+
+    let first = run_cooldis([
+        "skill",
+        "import",
+        skill_dir.to_str().unwrap(),
+        "--registry-root",
+        skill_registry.to_str().unwrap(),
+        "--blob-registry-root",
+        blob_registry.to_str().unwrap(),
+    ]);
+    let second = run_cooldis([
+        "skill",
+        "import",
+        skill_dir.to_str().unwrap(),
+        "--registry-root",
+        skill_registry.to_str().unwrap(),
+        "--blob-registry-root",
+        blob_registry.to_str().unwrap(),
+    ]);
+    let first_hash = skill_artifact_hash(&first);
+    let second_hash = skill_artifact_hash(&second);
+    assert_eq!(first, second);
+    assert_eq!(first_hash, second_hash);
+    assert!(first.contains("published fixture-skill"));
+    assert!(first.contains(&format!("ref skill://fixture-skill@sha256:{first_hash}")));
+    assert!(first.contains(&format!(
+        "record {}",
+        skill_registry.join("records/fixture-skill.json").display()
+    )));
+    assert_eq!(
+        fs::read_dir(skill_registry.join("versions/fixture-skill"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_dir(blob_registry.join("records/artifact"))
+            .unwrap()
+            .count(),
+        1
     );
     let _ = fs::remove_dir_all(root);
 }

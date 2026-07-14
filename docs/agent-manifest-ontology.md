@@ -235,6 +235,14 @@ fallbacks: name from dirname, description from first non-heading line
 output: pinned skill://<package>@sha256:<hash> and floating skill://<package>
 ```
 
+Conventional external `SKILL.md` directories can be compiled into this same
+published-package lane with `cooldis skill import`. The importer appends direct
+markdown references, publishes assets as blob resources, makes omitted scripts
+visible as deterministic degradation text, and leaves hook/MCP configuration
+inert. See [Cooldis Agent CLI — Importing external skill
+directories](agent-cli.md#importing-external-skill-directories) for the conversion
+and dry-run contract.
+
 Authors and manifests speak names; receipts speak hashes. At bind, a floating
 ref resolves the active local registry record once, and the pinned ref and
 package digest are recorded in the bind receipt. A pinned ref loads that exact

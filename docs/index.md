@@ -30,6 +30,8 @@ allowed to exercise.
 - Publish static prompt and context files as immutable blob resources.
 - Publish local skill directories, author manifests against a package name, and
   receive a content hash in the bind receipt.
+- Import conventional external `SKILL.md` directories into ordinary skill and
+  blob records with explicit script degradation and inert hook configuration.
 - Opt into conventional workspace skill discovery and retain the exact bind
   witness across resume/fork while later workspace reads remain live.
 - Run the agent through a governed runtime instead of a one-off app server.

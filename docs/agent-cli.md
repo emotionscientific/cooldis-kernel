@@ -18,6 +18,7 @@ cooldis agent publish release-verifier/cooldis.agent.toml \
   --resolve-ops --operations-registry-root .cooldis/operations
 cooldis blob publish release-verifier/prompts/system.md --name identity
 cooldis skill publish release-verifier/skills
+cooldis skill import ~/.agents/skills/release-checker --dry-run
 cooldis agent list
 cooldis agent show agent://release-verifier@0.1.0
 cooldis agent run agent://release-verifier@latest --input "check the branch"
@@ -100,6 +101,34 @@ changed content advances the active name while preserving prior versions.
 Manifests may use either ref. Authors and manifests speak names; receipts speak
 hashes: a floating name resolves once at bind and the bind receipt witnesses
 the pinned ref. Pinned refs never follow the active name.
+
+### Importing external skill directories
+
+`cooldis skill import <dir> [--registry-root .cooldis/skills]
+[--blob-registry-root .cooldis/blobs] [--name <package>] [--dry-run]` is the
+publisher-side converter for one conventional skill directory whose
+`SKILL.md` is at its root. It produces only existing registry records:
+
+- root `SKILL.md` frontmatter and body become one skill entry;
+- direct `references/*.md` files are appended to that entry under deterministic
+  `Imported references` sections, keeping the registry's one-entry shape;
+- recursive `assets/**` files publish through the blob registry and appear in
+  the output as `resource://artifact/sha256:<hash>` refs;
+- recursive `scripts/**` files are not converted or published. Their sorted
+  paths are written into an `Import degradation` body section and into the
+  imported entry description, so the existing bind-time model-visible skill
+  index also states what is unavailable;
+- hook and MCP configuration-shaped files are ignored and reported. Import
+  never turns their content into standing authority;
+- other files, including package-root files and nested/non-markdown reference
+  files, are not converted and are reported as skipped.
+
+The command prints pinned and floating skill refs, every blob ref, and a
+ready-to-paste manifest fragment containing `[[resources]]` rows for the pinned
+skill package and blobs. Re-importing identical content reuses the same skill
+and blob hashes without creating new immutable versions. `--dry-run` computes
+and prints that same plan without creating either registry root. Symlinks in the
+input tree are rejected instead of followed.
 
 Publication is the portable registry lane. Local agents may instead opt into
 bind-time workspace discovery with `[skills] discover = true` and an optional

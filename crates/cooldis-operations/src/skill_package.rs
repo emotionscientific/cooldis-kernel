@@ -35,6 +35,13 @@ impl LocalSkillRegistry {
         request: PublishSkillPackageRequest,
     ) -> CooldisResult<PublishedSkillPackageRecord> {
         let package = SkillPackage::from_directory(&request.package_dir, request.name.as_deref())?;
+        self.publish_package(package)
+    }
+
+    pub fn publish_package(
+        &self,
+        package: SkillPackage,
+    ) -> CooldisResult<PublishedSkillPackageRecord> {
         let bytes = package.to_artifact_bytes()?;
         let hash = self.blobs.put(&bytes)?;
         let record = PublishedSkillPackageRecord {
@@ -313,6 +320,20 @@ pub struct SkillPackage {
 }
 
 impl SkillPackage {
+    pub(crate) fn from_entries(
+        name: &str,
+        mut skills: Vec<SkillPackageEntry>,
+    ) -> CooldisResult<Self> {
+        skills.sort_by(|left, right| left.name.cmp(&right.name));
+        let package = Self {
+            schema_version: SKILL_PACKAGE_SCHEMA_VERSION,
+            name: validate_record_name(name)?,
+            skills,
+        };
+        package.validate()?;
+        Ok(package)
+    }
+
     pub fn from_directory(package_dir: &Path, name: Option<&str>) -> CooldisResult<Self> {
         let metadata = fs::metadata(package_dir).map_err(|err| {
             CooldisError::RuntimeFactory(format!(
@@ -368,14 +389,7 @@ impl SkillPackage {
         for skill_dir in skill_dirs {
             skills.push(SkillPackageEntry::from_skill_dir(&skill_dir)?);
         }
-        skills.sort_by(|left, right| left.name.cmp(&right.name));
-        let package = Self {
-            schema_version: SKILL_PACKAGE_SCHEMA_VERSION,
-            name: package_name,
-            skills,
-        };
-        package.validate()?;
-        Ok(package)
+        Self::from_entries(&package_name, skills)
     }
 
     pub fn to_artifact_bytes(&self) -> CooldisResult<Vec<u8>> {
