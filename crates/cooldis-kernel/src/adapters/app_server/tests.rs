@@ -282,21 +282,25 @@ async fn concurrent_new_thread_turn_burst_surfaces_no_history_lock_errors() {
         failures
     };
 
-    let burst_result = tokio::time::timeout(std::time::Duration::from_secs(60), burst).await;
+    // Timeouts here are hang detectors, not performance assertions: shutdown of
+    // 200 threads does O(n) serialized history writes and took >10s on a 2-core
+    // CI runner, so bounds carry an order of magnitude of headroom over the
+    // fast-path time.
+    let burst_result = tokio::time::timeout(std::time::Duration::from_secs(120), burst).await;
     let task_shutdown_result =
-        tokio::time::timeout(std::time::Duration::from_secs(10), tasks.shutdown()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), tasks.shutdown()).await;
     let shutdown_result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(60),
         app.inner.supervisor.shutdown_all(),
     )
     .await;
     drop(app);
     let cleanup_result = std::fs::remove_dir_all(root);
 
-    let failures = burst_result.expect("200 in-process new-thread turns exceeded the 60s bound");
-    task_shutdown_result.expect("new-thread turn task shutdown exceeded the 10s bound");
+    let failures = burst_result.expect("200 in-process new-thread turns exceeded the 120s bound");
+    task_shutdown_result.expect("new-thread turn task shutdown exceeded the 60s bound");
     shutdown_result
-        .expect("app-server shutdown exceeded the 10s bound")
+        .expect("app-server shutdown exceeded the 60s bound")
         .unwrap();
     cleanup_result.unwrap();
     assert!(
