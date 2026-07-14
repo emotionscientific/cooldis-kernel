@@ -19,6 +19,7 @@ members = [
     "crates/cooldis-io-core",
     "crates/cooldis-io-pgqrs",
     "crates/cooldis-io-telegram",
+    "tools/trace-ab",
 ]
 default-members = ["crates/cooldis-kernel"]
 resolver = "3"

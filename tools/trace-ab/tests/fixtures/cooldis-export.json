@@ -1,0 +1,44 @@
+{
+  "schema": "cooldis.debug.thread_export/1",
+  "threadId": "018f0000-0000-7000-8000-000000000001",
+  "generatedAtMs": 2000,
+  "redaction": {"enabled": true, "mode": "secret-shaped-json-keys", "redactedKeys": []},
+  "receipts": [
+    {"eventId":"event-context-1","kind":"context.compile.completed","origin":"discharged","payloadSchema":"cooldis.event.context.compile.completed/1","sequence":2,"streamId":"thread:fixture"}
+  ],
+  "thread": {
+    "id": "018f0000-0000-7000-8000-000000000001",
+    "turns": [{
+      "id": "turn-a",
+      "durationMs": 50,
+      "items": [
+        {"type":"userMessage","id":"user-a","content":[{"type":"text","text":"Update fixture.txt"}]},
+        {"type":"dynamicToolCall","id":"call-edit-1","tool":"edit","arguments":{"edits":[{"oldText":"before","newText":"after"}]},"success":false,"durationMs":5,"contentItems":[{"type":"inputText","text":"path is required"}]},
+        {"type":"dynamicToolCall","id":"call-edit-2","tool":"edit","arguments":{"path":"fixture.txt","edits":[{"oldText":"before","newText":"after"}]},"success":true,"durationMs":6,"contentItems":[{"type":"inputText","text":"updated fixture.txt"}]},
+        {"type":"agentMessage","id":"assistant-a","text":"Done.","content":[{"type":"text","text":"Done."}]}
+      ]
+    }]
+  },
+  "streams": [{
+    "selector": "control",
+    "streamId": "control:fixture",
+    "data": [
+      {"schema":"cooldis.stream.record/1","event_id":"event-manifest","stream_id":"control:fixture","sequence":1,"created_at_ms":995,"kind":"manifest.bind.completed","origin":"discharged","provenance":{"discharged_by":"manifest:bind"},"payload":{"schema":"cooldis.event.manifest.bind.completed/1","agent_ref":"agent://fixture@1.0.0"}}
+    ]
+  }, {
+    "selector": "thread",
+    "streamId": "thread:fixture",
+    "data": [
+      {"schema":"cooldis.stream.record/1","event_id":"event-turn-start","stream_id":"thread:fixture","sequence":1,"created_at_ms":1000,"kind":"turn.submitted","origin":"witnessed","provenance":{},"payload":{"schema":"cooldis.event.turn.submitted/1","turn_id":"turn-a","input_text":"Update fixture.txt"}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-context-1","stream_id":"thread:fixture","sequence":2,"created_at_ms":1005,"kind":"context.compile.completed","origin":"discharged","provenance":{"discharged_by":"context:compile","source_event_ids":["event-turn-start"]},"payload":{"schema":"cooldis.event.context.compile.completed/1","selected_entry_ids":["entry-user"]}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-assistant-1","stream_id":"thread:fixture","sequence":3,"created_at_ms":1010,"kind":"session.entry.appended","origin":"discharged","provenance":{"discharged_by":"session-store:append"},"payload":{"entry_id":"entry-assistant-1","entry_kind":"message","turn_id":"turn-a","usage":{"input_tokens":40,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-call-1","stream_id":"thread:fixture","sequence":4,"created_at_ms":1011,"kind":"tool.call.requested","origin":"witnessed","provenance":{},"payload":{"subject":{"turn_id":"turn-a","call_id":"call-edit-1"},"snapshot_id":"snap-1","tool_name":"edit","arguments":{"edits":[{"oldText":"before","newText":"after"}]}}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-result-1","stream_id":"thread:fixture","sequence":5,"created_at_ms":1016,"kind":"tool.call.completed","origin":"witnessed","provenance":{},"payload":{"subject":{"turn_id":"turn-a","call_id":"call-edit-1"},"snapshot_id":"snap-1","tool_name":"edit","success":false,"duration_ms":5}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-context-2","stream_id":"thread:fixture","sequence":6,"created_at_ms":1020,"kind":"context.compile.completed","origin":"discharged","provenance":{"discharged_by":"context:compile","source_event_ids":["event-result-1"]},"payload":{"schema":"cooldis.event.context.compile.completed/1","selected_entry_ids":["entry-user","entry-assistant-1","entry-result-1"]}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-assistant-2","stream_id":"thread:fixture","sequence":7,"created_at_ms":1030,"kind":"session.entry.appended","origin":"discharged","provenance":{"discharged_by":"session-store:append"},"payload":{"entry_id":"entry-assistant-2","entry_kind":"message","turn_id":"turn-a","usage":{"input_tokens":50,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-call-2","stream_id":"thread:fixture","sequence":8,"created_at_ms":1031,"kind":"tool.call.requested","origin":"witnessed","provenance":{},"payload":{"subject":{"turn_id":"turn-a","call_id":"call-edit-2"},"snapshot_id":"snap-2","tool_name":"edit","arguments":{"path":"fixture.txt","edits":[{"oldText":"before","newText":"after"}]}}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-result-2","stream_id":"thread:fixture","sequence":9,"created_at_ms":1037,"kind":"tool.call.completed","origin":"witnessed","provenance":{},"payload":{"subject":{"turn_id":"turn-a","call_id":"call-edit-2"},"snapshot_id":"snap-2","tool_name":"edit","success":true,"duration_ms":6}},
+      {"schema":"cooldis.stream.record/1","event_id":"event-turn-end","stream_id":"thread:fixture","sequence":10,"created_at_ms":1050,"kind":"turn.completed","origin":"witnessed","provenance":{},"payload":{"schema":"cooldis.event.turn.completed/1","turn_id":"turn-a","status":"completed"}}
+    ]
+  }]
+}

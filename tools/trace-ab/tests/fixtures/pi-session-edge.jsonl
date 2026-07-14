@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"edge-session","timestamp":"2026-07-13T00:00:00Z","cwd":"/fixture"}
+{"type":"message","id":"user-1","message":{"role":"user","content":"first","timestamp":1000}}
+{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"stopped"},{"type":"futureBlock","payload":{"kept":true}}],"stopReason":"aborted","timestamp":1020}}
+{"type":"model_change","id":"model-change","provider":"fixture","model":"next"}
+{"type":"message","id":"user-2","message":{"role":"user","content":"second","timestamp":2000}}
+{"type":"message","id":"result-before-call","message":{"role":"toolResult","toolCallId":"late-call","toolName":"edit","content":"already failed","isError":true,"timestamp":2010}}
+{"type":"message","id":"assistant-2","message":{"role":"assistant","content":[{"type":"toolCall","id":"late-call","name":"edit","arguments":{"path":"fixture.txt"}}],"usage":{"input":3,"output":4},"timestamp":2020}}
+{"type":"message","id":"unknown-role","message":{"role":"futureRole","content":{"kept":true},"timestamp":2030}}
