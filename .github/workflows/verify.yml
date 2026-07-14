@@ -55,7 +55,28 @@ jobs:
           components: rustfmt
           targets: wasm32-unknown-unknown
       # No rust-cache here: the runner is a persistent machine, so the target
-      # directory in its work folder stays warm between runs.
+      # directory in its work folder stays warm between runs. Cargo never
+      # garbage-collects stale artifacts, so bound the persistent state before
+      # each build; a cold rebuild costs ~20 minutes, a full disk stops the
+      # machine.
+      - name: Bound persistent cargo state
+        shell: bash
+        run: |
+          target_root="$(dirname "$GITHUB_WORKSPACE")/.cargo-target"
+          target_cap_gb=40
+          min_free_gb=25
+
+          used_gb=0
+          if [[ -d "$target_root" ]]; then
+            used_gb=$(($(du -sk "$target_root" | cut -f1) / 1024 / 1024))
+          fi
+          free_gb=$(($(df -k / | awk 'NR==2 {print $4}') / 1024 / 1024))
+          echo "cargo target: ${used_gb}G (cap ${target_cap_gb}G), disk free: ${free_gb}G (min ${min_free_gb}G)"
+
+          if (( used_gb > target_cap_gb )) || (( free_gb < min_free_gb )); then
+            echo "pruning $target_root"
+            rm -rf "$target_root"
+          fi
       - name: Verify workspace
         shell: bash
         run: scripts/verify.sh
