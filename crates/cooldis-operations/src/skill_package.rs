@@ -522,24 +522,41 @@ pub struct SkillPackageRef {
     pub artifact_hash: String,
 }
 
-impl SkillPackageRef {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeclaredSkillPackageRef {
+    Floating { name: String },
+    Pinned(SkillPackageRef),
+}
+
+impl DeclaredSkillPackageRef {
     pub fn parse(reference: &str) -> CooldisResult<Self> {
         let body = reference.strip_prefix("skill://").ok_or_else(|| {
             CooldisError::RuntimeFactory(format!(
                 "skill ref {reference:?} must start with skill://"
             ))
         })?;
-        let (name, hash) = body.split_once("@sha256:").ok_or_else(|| {
-            CooldisError::RuntimeFactory(format!(
-                "skill ref {reference:?} must be content-addressed as skill://<package>@sha256:<hash>"
-            ))
-        })?;
+        let Some((name, hash)) = body.split_once("@sha256:") else {
+            return Ok(Self::Floating {
+                name: validate_record_name(body)?,
+            });
+        };
         let name = validate_record_name(name)?;
         validate_skill_hash(hash)?;
-        Ok(Self {
+        Ok(Self::Pinned(SkillPackageRef {
             name,
             artifact_hash: hash.to_string(),
-        })
+        }))
+    }
+}
+
+impl SkillPackageRef {
+    pub fn parse(reference: &str) -> CooldisResult<Self> {
+        match DeclaredSkillPackageRef::parse(reference)? {
+            DeclaredSkillPackageRef::Pinned(reference) => Ok(reference),
+            DeclaredSkillPackageRef::Floating { .. } => Err(CooldisError::RuntimeFactory(format!(
+                "skill ref {reference:?} must be content-addressed as skill://<package>@sha256:<hash>"
+            ))),
+        }
     }
 }
 

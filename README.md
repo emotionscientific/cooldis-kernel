@@ -77,8 +77,8 @@ The V1 work is focused on runtime primitives:
 - agent manifest planning, publishing, listing, showing, and local running;
 - operation publication and ABI-backed invocation;
 - blob resource publication and folder-first prompt lowering;
-- skill-package publication, manifest binding, static indexes, and read-only
-  VFS bodies;
+- skill-package publication with floating author refs pinned in bind receipts,
+  static indexes, and read-only VFS bodies;
 - manifest-declared workspace requirements with operator-bound read-only or
   read-write host directories mounted through the virtual VFS;
 - custom Wasm coupling execution, macro scaffolding, and offline replay for

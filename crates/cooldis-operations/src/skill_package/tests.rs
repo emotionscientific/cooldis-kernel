@@ -45,6 +45,8 @@ Unicode description line.
             name: None,
         })
         .unwrap();
+    let active_record_path = registry.record_path("karl-skills").unwrap();
+    let first_active_record = fs::read(&active_record_path).unwrap();
     let second = registry
         .publish_directory(PublishSkillPackageRequest {
             package_dir,
@@ -53,6 +55,11 @@ Unicode description line.
         .unwrap();
 
     assert_eq!(first.active_artifact_hash, second.active_artifact_hash);
+    assert_eq!(
+        fs::read(&active_record_path).unwrap(),
+        first_active_record,
+        "an identical re-publish must leave the active record stable"
+    );
     assert_eq!(
         first.ref_uri(),
         format!("skill://karl-skills@sha256:{}", first.active_artifact_hash)
@@ -85,7 +92,79 @@ Unicode description line.
             .package,
         first.package
     );
+    assert_eq!(
+        fs::read_dir(root.join("skills-registry/versions/karl-skills"))
+            .unwrap()
+            .count(),
+        1,
+        "an identical re-publish must not create another version record"
+    );
+
+    let plain_file = root.join("karl-skills/plain/SKILL.md");
+    fs::write(
+        &plain_file,
+        "# Plain Skill\n\nChanged description.\n\nChanged body.\n",
+    )
+    .unwrap();
+    let changed = registry
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir: root.join("karl-skills"),
+            name: None,
+        })
+        .unwrap();
+
+    assert_ne!(changed.active_artifact_hash, first.active_artifact_hash);
+    assert_eq!(
+        registry
+            .load_record("karl-skills")
+            .unwrap()
+            .active_artifact_hash,
+        changed.active_artifact_hash
+    );
+    assert_eq!(
+        registry
+            .load_version_record("karl-skills", &first.active_artifact_hash)
+            .unwrap()
+            .package,
+        first.package,
+        "publishing a new latest version must preserve prior pinned versions"
+    );
+    assert_eq!(
+        fs::read_dir(root.join("skills-registry/versions/karl-skills"))
+            .unwrap()
+            .count(),
+        2
+    );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn declared_skill_refs_distinguish_floating_and_pinned_without_masking_hash_errors() {
+    let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    assert_eq!(
+        DeclaredSkillPackageRef::parse("skill://karl-skills").unwrap(),
+        DeclaredSkillPackageRef::Floating {
+            name: "karl-skills".to_string(),
+        }
+    );
+    assert_eq!(
+        DeclaredSkillPackageRef::parse(&format!("skill://karl-skills@sha256:{hash}")).unwrap(),
+        DeclaredSkillPackageRef::Pinned(SkillPackageRef {
+            name: "karl-skills".to_string(),
+            artifact_hash: hash.to_string(),
+        })
+    );
+
+    let bad_hash = DeclaredSkillPackageRef::parse("skill://karl-skills@sha256:short")
+        .unwrap_err()
+        .to_string();
+    assert!(bad_hash.contains("artifact hash"), "{bad_hash}");
+    assert!(bad_hash.contains("sha256 hex digest"), "{bad_hash}");
+    let bad_name = DeclaredSkillPackageRef::parse("skill://bad/name")
+        .unwrap_err()
+        .to_string();
+    assert!(bad_name.contains("record name"), "{bad_name}");
 }
 
 #[test]

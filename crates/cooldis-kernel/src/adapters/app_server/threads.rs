@@ -305,6 +305,41 @@ impl CooldisAppServer {
         let workspace_binding = stored_workspace
             .as_ref()
             .map(AgentManifestResolvedWorkspaceMount::binding);
+        let stored_skill_packages = thread_manifest_skill_packages(handle.context())?;
+        let stored_skill_context_segments =
+            thread_manifest_skill_context_segments(handle.context())?;
+        let runtime_store = self
+            .inner
+            .supervisor
+            .runtime_store(&handle.context().coordinates.tenant_id)
+            .await?;
+        let witnessed_skill_packages = crate::active_manifest_bind_receipt(
+            runtime_store.as_ref(),
+            &handle.context().coordinates,
+        )
+        .await?
+        .map(|(_, receipt)| receipt.skill_packages);
+        match witnessed_skill_packages.as_deref() {
+            Some(witness)
+                if crate::agent::manifest_bind::skill_package_bindings_match(
+                    witness,
+                    &stored_skill_packages,
+                ) => {}
+            Some(_) => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "stored skill package metadata disagrees with the durable manifest bind witness for thread {}",
+                    handle.context().coordinates.thread_id
+                )));
+            }
+            None if stored_skill_packages.is_empty()
+                && stored_skill_context_segments.is_empty() => {}
+            None => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "stored skill package metadata has no durable manifest bind witness for thread {}",
+                    handle.context().coordinates.thread_id
+                )));
+            }
+        }
         let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         if &record.manifest_hash != expected_hash {
@@ -329,7 +364,7 @@ impl CooldisAppServer {
             .get(THREAD_AGENT_MODEL_PROFILE_ID_METADATA)
             .map(|profile_id| AgentManifestModelProfileSelection::profile_id(profile_id.clone()))
             .unwrap_or_default();
-        let bound = bind_published_agent_record_with_placement(
+        let bound = crate::agent::manifest_bind::bind_published_agent_record_with_placement_and_skill_witness(
             &record,
             alias,
             &provider_surface,
@@ -345,11 +380,20 @@ impl CooldisAppServer {
             None,
             workspace_binding.as_ref(),
             self.remote_event_store_served(),
+            witnessed_skill_packages.as_deref(),
         )
         .await?;
         if bound.bind_receipt.workspace != stored_workspace {
             return Err(CooldisError::RuntimeFactory(format!(
                 "stored manifest workspace binding drifted for thread {}",
+                handle.context().coordinates.thread_id
+            )));
+        }
+        if witnessed_skill_packages.is_some()
+            && bound.skill_context_segments != stored_skill_context_segments
+        {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill context metadata disagrees with the pinned skill packages for thread {}",
                 handle.context().coordinates.thread_id
             )));
         }
@@ -1758,6 +1802,22 @@ pub(super) fn thread_manifest_skill_packages(
             ))
         })?;
     Ok(bindings)
+}
+
+pub(super) fn thread_manifest_skill_context_segments(
+    context: &ThreadContext,
+) -> CooldisResult<Vec<crate::AgentManifestStaticContextSegment>> {
+    let Some(raw) = context
+        .metadata
+        .get(THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+    else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(raw).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "thread manifest skill context segments are invalid: {err}"
+        ))
+    })
 }
 
 pub(super) struct CapsuleBindingRuntimeFactory {

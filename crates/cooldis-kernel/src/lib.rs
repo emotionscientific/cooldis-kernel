@@ -595,8 +595,8 @@ pub use operations::plugins::{
     LocalPluginCatalog, LocalPluginCatalogConfig, LocalPluginCatalogRecord, PluginMount,
 };
 pub use operations::skill_package::{
-    LocalSkillRegistry, PublishSkillPackageRequest, PublishedSkillPackageRecord, SkillPackage,
-    SkillPackageEntry, SkillPackageRef,
+    DeclaredSkillPackageRef, LocalSkillRegistry, PublishSkillPackageRequest,
+    PublishedSkillPackageRecord, SkillPackage, SkillPackageEntry, SkillPackageRef,
 };
 pub use operations::tool_package::{
     TOOL_BUILD_RECEIPT_KIND, TOOL_BUILD_RECEIPT_SCHEMA_VERSION, TOOL_PACKAGE_KIND,

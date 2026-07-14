@@ -2961,6 +2961,7 @@ async fn skill_publish(args: Vec<OsString>) -> CooldisResult<()> {
     println!("published {}", record.name);
     println!("artifact {}", record.active_artifact_hash);
     println!("ref {}", record.ref_uri());
+    println!("floating skill://{}", record.name);
     println!("record {}", registry.record_path(&record.name)?.display());
     for skill in record.package.skills {
         println!("skill {}", skill.name);
@@ -8373,7 +8374,8 @@ Usage:\n\
 Publishes a deterministic skill package from <dir>/<skill>/SKILL.md files.\n\
 Optional frontmatter may declare name, description, and trigger_hint; without\n\
 frontmatter, the skill name is the directory name and the description is the\n\
-first non-heading markdown line.\n"
+first non-heading markdown line. Prints both the pinned content-addressed ref\n\
+and the floating package-name ref.\n"
     );
 }
 

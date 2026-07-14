@@ -3,8 +3,9 @@ use super::subscriptions::*;
 use super::threads::{
     AppServerTurnState, app_server_turns_from_session_entries, append_bound_agent_metadata,
     apply_manifest_operation_grants, apply_manifest_runtime_metadata, finalize_turn_payload,
-    record_bound_agent_receipts, thread_manifest_operation_bindings, thread_metadata_thinking,
-    turn_input_from_values, user_input_preview,
+    record_bound_agent_receipts, thread_manifest_operation_bindings,
+    thread_manifest_skill_packages, thread_metadata_thinking, turn_input_from_values,
+    user_input_preview,
 };
 use super::*;
 use crate::{
@@ -3147,15 +3148,14 @@ Alpha body marker.
     );
     let skill_record = LocalSkillRegistry::new(&skill_registry_root)
         .publish_directory(PublishSkillPackageRequest {
-            package_dir,
+            package_dir: package_dir.clone(),
             name: None,
         })
         .unwrap();
     let manifest_path = root.join("skill-runner.cooldis.agent.toml");
     std::fs::write(
         &manifest_path,
-        format!(
-            r#"
+        r#"
 [agent]
 name = "skill-runner"
 version = "0.1.0"
@@ -3170,14 +3170,12 @@ model_ref = "model://local_offline/echo"
 [[resources]]
 name = "karl_skills"
 kind = "skill"
-ref = "{}"
+ref = "skill://karl-skills"
 
 [runtime]
 default_cwd = "."
 streaming = false
 "#,
-            skill_record.ref_uri()
-        ),
     )
     .unwrap();
     LocalAgentRegistry::new(&agent_registry_root)
@@ -3229,6 +3227,85 @@ streaming = false
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    std::fs::write(
+        package_dir.join("alpha/SKILL.md"),
+        "# Alpha\n\nChanged description.\n\nChanged body marker.\n",
+    )
+    .unwrap();
+    let changed_skill_record = LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    assert_ne!(
+        changed_skill_record.active_artifact_hash,
+        skill_record.active_artifact_hash
+    );
+    let parsed_thread_id = ThreadId::parse_str(&thread_id).unwrap();
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(parsed_thread_id)
+        .await
+        .unwrap()
+        .expect("thread/start should persist the skill-bound lifecycle");
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&lifecycle.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "thread/resume",
+        Some(json!({
+            "threadId": thread_id,
+            "excludeTurns": true,
+        })),
+    )
+    .await
+    .unwrap();
+    let resumed_handle = app.handle_for_thread(&thread_id).await.unwrap();
+    let (_, resumed_bind_receipt) = active_manifest_receipt_payloads(&resumed_handle)
+        .await
+        .unwrap()
+        .expect("the resumed thread must retain a manifest bind witness");
+    assert_eq!(
+        resumed_bind_receipt["skill_packages"][0]["artifact_hash"].as_str(),
+        Some(skill_record.active_artifact_hash.as_str()),
+        "resume must retain the source thread's pinned skill binding"
+    );
+    let fork = app
+        .dispatch_request(
+            &connection,
+            "thread/fork",
+            Some(json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    let fork_id = fork["thread"]["id"].as_str().unwrap();
+    let fork_handle = app.handle_for_thread(fork_id).await.unwrap();
+    let fork_bindings = thread_manifest_skill_packages(fork_handle.context()).unwrap();
+    assert_eq!(fork_bindings.len(), 1);
+    assert_eq!(
+        fork_bindings[0].artifact_hash, skill_record.active_artifact_hash,
+        "an ordinary fork must inherit the source thread's pinned skill binding"
+    );
+    assert!(
+        fork_handle
+            .context()
+            .metadata
+            .contains_key(THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+    );
+    let (_, fork_bind_receipt) = active_manifest_receipt_payloads(&fork_handle)
+        .await
+        .unwrap()
+        .expect("an ordinary fork must inherit the source manifest receipts");
+    assert_eq!(
+        fork_bind_receipt["skill_packages"][0]["artifact_hash"].as_str(),
+        Some(skill_record.active_artifact_hash.as_str())
+    );
     let turn = app
         .dispatch_request(
             &connection,

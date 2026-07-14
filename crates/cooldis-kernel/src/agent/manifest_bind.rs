@@ -27,9 +27,9 @@ use crate::kernel::coupling_executor_registry::{
     RegisteredCouplingExecutorKind, registered_coupling_executor_for_id,
 };
 use crate::{
-    COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, EventKind, LlmProviderRecord,
-    LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry, ProviderCapabilityRecord,
-    PublishedOperationSource, SkillPackageRef, THREADS_SPAWN_CAPABILITY,
+    COOLDIS_THREADS_PACKAGE, CooldisError, CooldisResult, DeclaredSkillPackageRef, EventKind,
+    LlmProviderRecord, LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry,
+    ProviderCapabilityRecord, PublishedOperationSource, THREADS_SPAWN_CAPABILITY,
 };
 use cooldis_abi::{
     COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, WasmOperationDefinition,
@@ -263,6 +263,45 @@ pub async fn bind_published_agent_record_with_placement(
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
     remote_event_store_served: bool,
 ) -> CooldisResult<AgentManifestBoundThread> {
+    bind_published_agent_record_with_placement_and_skill_witness(
+        record,
+        alias,
+        provider_surface,
+        operation_registry_root,
+        blob_registry_root,
+        skill_registry_root,
+        configured_mcp_server_refs,
+        tool_universe_discoverer,
+        model_selection,
+        overrides,
+        default_placement,
+        placement_override,
+        default_workspace,
+        workspace_override,
+        remote_event_store_served,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness(
+    record: &PublishedAgentRecord,
+    alias: Option<AgentAliasResolutionReceipt>,
+    provider_surface: &AgentManifestProviderSurface,
+    operation_registry_root: Option<&Path>,
+    blob_registry_root: Option<&Path>,
+    skill_registry_root: Option<&Path>,
+    configured_mcp_server_refs: &BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    model_selection: &AgentManifestModelProfileSelection,
+    overrides: &AgentManifestBindOverrides,
+    default_placement: Option<&AgentManifestPlacementBinding>,
+    placement_override: Option<&AgentManifestPlacementBinding>,
+    default_workspace: Option<&AgentManifestWorkspaceBinding>,
+    workspace_override: Option<&AgentManifestWorkspaceBinding>,
+    remote_event_store_served: bool,
+    skill_package_witness: Option<&[AgentManifestSkillPackageBinding]>,
+) -> CooldisResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
     let placement = resolve_manifest_placement(
         default_placement,
@@ -319,7 +358,12 @@ pub async fn bind_published_agent_record_with_placement(
     )
     .await?;
     let static_context_segments = bind_static_context_sources(&manifest, blob_registry_root)?;
-    let bound_skills = bind_skill_resources(&manifest.resources, skill_registry_root)?;
+    let bound_skills = match skill_package_witness {
+        Some(witness) => {
+            bind_skill_resources_from_witness(&manifest.resources, skill_registry_root, witness)?
+        }
+        None => bind_skill_resources(&manifest.resources, skill_registry_root)?,
+    };
     let couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
     enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings, &couplings)?;
     let operation_names = bound_tools
@@ -621,55 +665,217 @@ fn bind_skill_resources(
     let mut context_segments = Vec::new();
     let mut mounted_skill_names = BTreeSet::new();
     for resource in skill_resources {
-        let parsed = SkillPackageRef::parse(&resource.reference).map_err(|err| {
+        let parsed = DeclaredSkillPackageRef::parse(&resource.reference).map_err(|err| {
             CooldisError::RuntimeFactory(format!(
                 "skill resource {:?} ref {:?} is invalid: {err}",
                 resource.name, resource.reference
             ))
         })?;
-        let record = registry
-            .load_version_record(&parsed.name, &parsed.artifact_hash)
-            .map_err(|err| {
+        let record = match &parsed {
+            DeclaredSkillPackageRef::Floating { name } => registry.load_record(name).map_err(|err| {
                 CooldisError::RuntimeFactory(format!(
-                    "skill resource {:?} ref {:?} was not found in the local skill registry: {err}; publish the skill package or replace the ref with a hash from the registry",
+                    "skill resource {:?} floating ref {:?} was not found in the local skill registry: {err}; publish it first with `cooldis skill publish <dir>`",
                     resource.name, resource.reference
                 ))
-            })?;
-        for skill in &record.package.skills {
-            if !mounted_skill_names.insert(skill.name.clone()) {
-                return Err(CooldisError::RuntimeFactory(format!(
-                    "skill resource {:?} package {:?} would mount duplicate /skills/{}.md; skill names must be unique across bound packages",
-                    resource.name, record.name, skill.name
-                )));
-            }
+            }),
+            DeclaredSkillPackageRef::Pinned(reference) => registry
+                .load_version_record(&reference.name, &reference.artifact_hash)
+                .map_err(|err| {
+                    CooldisError::RuntimeFactory(format!(
+                        "skill resource {:?} ref {:?} was not found in the local skill registry: {err}; publish the skill package or replace the ref with a hash from the registry",
+                        resource.name, resource.reference
+                    ))
+                }),
         }
-        let index = record.package.render_index();
-        let index_sha256 = sha256_prefixed(index.as_bytes());
-        let ref_uri = record.ref_uri();
-        context_segments.push(AgentManifestStaticContextSegment {
-            id: format!("skill-index:{}", resource.name),
-            assembler: KERNEL_ASSEMBLER_STATIC.to_string(),
-            input: resource.name.clone(),
-            pinned: true,
-            budget_share: None,
-            ref_uri: ref_uri.clone(),
-            content_sha256: index_sha256.clone(),
-            content: index,
-        });
-        package_bindings.push(AgentManifestSkillPackageBinding {
-            resource_name: resource.name.clone(),
-            package_name: record.name.clone(),
-            ref_uri,
-            artifact_hash: record.active_artifact_hash.clone(),
-            package_digest: format!("sha256:{}", parsed.artifact_hash),
-            skill_count: record.package.skills.len(),
-            index_sha256,
-        });
+        ?;
+        append_bound_skill(
+            &resource.name,
+            &record,
+            &mut mounted_skill_names,
+            &mut package_bindings,
+            &mut context_segments,
+        )?;
     }
     Ok(BoundSkills {
         package_bindings,
         context_segments,
     })
+}
+
+fn bind_skill_resources_from_witness(
+    resources: &[AgentManifestResource],
+    skill_registry_root: Option<&Path>,
+    witness: &[AgentManifestSkillPackageBinding],
+) -> CooldisResult<BoundSkills> {
+    let skill_resources = resources
+        .iter()
+        .filter(|resource| resource.kind == AgentManifestResourceKind::Skill)
+        .collect::<Vec<_>>();
+    if skill_resources.len() != witness.len() {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "stored skill package witness has {} bindings for {} manifest skill resources",
+            witness.len(),
+            skill_resources.len()
+        )));
+    }
+    if skill_resources.is_empty() {
+        return Ok(BoundSkills {
+            package_bindings: Vec::new(),
+            context_segments: Vec::new(),
+        });
+    }
+    let mut bindings_by_resource = BTreeMap::new();
+    for binding in witness {
+        if bindings_by_resource
+            .insert(binding.resource_name.as_str(), binding)
+            .is_some()
+        {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill package witness repeats resource {:?}",
+                binding.resource_name
+            )));
+        }
+    }
+    let mut package_bindings = Vec::new();
+    for resource in skill_resources {
+        let binding = bindings_by_resource
+            .remove(resource.name.as_str())
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(format!(
+                    "stored skill package witness has no binding for manifest resource {:?}",
+                    resource.name
+                ))
+            })?;
+        match DeclaredSkillPackageRef::parse(&resource.reference)? {
+            DeclaredSkillPackageRef::Floating { name } if name == binding.package_name => {}
+            DeclaredSkillPackageRef::Pinned(reference)
+                if reference.name == binding.package_name
+                    && reference.artifact_hash == binding.artifact_hash => {}
+            _ => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "stored skill package binding for resource {:?} does not match manifest ref {:?}",
+                    resource.name, resource.reference
+                )));
+            }
+        }
+        package_bindings.push(binding.clone());
+    }
+    let context_segments =
+        skill_context_segments_for_bindings(&package_bindings, skill_registry_root)?;
+    Ok(BoundSkills {
+        package_bindings,
+        context_segments,
+    })
+}
+
+fn append_bound_skill(
+    resource_name: &str,
+    record: &crate::PublishedSkillPackageRecord,
+    mounted_skill_names: &mut BTreeSet<String>,
+    package_bindings: &mut Vec<AgentManifestSkillPackageBinding>,
+    context_segments: &mut Vec<AgentManifestStaticContextSegment>,
+) -> CooldisResult<()> {
+    for skill in &record.package.skills {
+        if !mounted_skill_names.insert(skill.name.clone()) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "skill resource {resource_name:?} package {:?} would mount duplicate /skills/{}.md; skill names must be unique across bound packages",
+                record.name, skill.name
+            )));
+        }
+    }
+    let index = record.package.render_index();
+    let index_sha256 = sha256_prefixed(index.as_bytes());
+    let ref_uri = record.ref_uri();
+    context_segments.push(AgentManifestStaticContextSegment {
+        id: format!("skill-index:{resource_name}"),
+        assembler: KERNEL_ASSEMBLER_STATIC.to_string(),
+        input: resource_name.to_string(),
+        pinned: true,
+        budget_share: None,
+        ref_uri: ref_uri.clone(),
+        content_sha256: index_sha256.clone(),
+        content: index,
+    });
+    package_bindings.push(AgentManifestSkillPackageBinding {
+        resource_name: resource_name.to_string(),
+        package_name: record.name.clone(),
+        ref_uri,
+        artifact_hash: record.active_artifact_hash.clone(),
+        package_digest: format!("sha256:{}", record.active_artifact_hash),
+        skill_count: record.package.skills.len(),
+        index_sha256,
+    });
+    Ok(())
+}
+
+pub(crate) fn skill_context_segments_for_bindings(
+    bindings: &[AgentManifestSkillPackageBinding],
+    skill_registry_root: Option<&Path>,
+) -> CooldisResult<Vec<AgentManifestStaticContextSegment>> {
+    if bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+    let registry_root = skill_registry_root.ok_or_else(|| {
+        CooldisError::RuntimeFactory(
+            "skill package bindings require an app-server skill registry root".to_string(),
+        )
+    })?;
+    let registry = LocalSkillRegistry::new(registry_root);
+    let mut actual_bindings = Vec::new();
+    let mut context_segments = Vec::new();
+    let mut mounted_skill_names = BTreeSet::new();
+    for binding in bindings {
+        let record = registry
+            .load_version_record(&binding.package_name, &binding.artifact_hash)
+            .map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "stored skill package binding {:?}@sha256:{} was not found: {err}",
+                    binding.package_name, binding.artifact_hash
+                ))
+            })?;
+        append_bound_skill(
+            &binding.resource_name,
+            &record,
+            &mut mounted_skill_names,
+            &mut actual_bindings,
+            &mut context_segments,
+        )?;
+        if actual_bindings.last() != Some(binding) {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "stored skill package binding for resource {:?} disagrees with immutable registry content",
+                binding.resource_name
+            )));
+        }
+    }
+    Ok(context_segments)
+}
+
+pub(crate) fn skill_package_bindings_match(
+    left: &[AgentManifestSkillPackageBinding],
+    right: &[AgentManifestSkillPackageBinding],
+) -> bool {
+    fn key(
+        binding: &AgentManifestSkillPackageBinding,
+    ) -> (&str, &str, &str, &str, &str, usize, &str) {
+        (
+            &binding.resource_name,
+            &binding.package_name,
+            &binding.ref_uri,
+            &binding.artifact_hash,
+            &binding.package_digest,
+            binding.skill_count,
+            &binding.index_sha256,
+        )
+    }
+
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left = left.iter().collect::<Vec<_>>();
+    let mut right = right.iter().collect::<Vec<_>>();
+    left.sort_unstable_by_key(|binding| key(binding));
+    right.sort_unstable_by_key(|binding| key(binding));
+    left == right
 }
 
 fn bind_couplings(

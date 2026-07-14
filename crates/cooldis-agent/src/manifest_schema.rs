@@ -12,7 +12,7 @@
 
 use crate::tool_ref::PinnedToolRef;
 use crate::{CooldisAgentError as CooldisError, CooldisResult};
-use cooldis_operations::validate_record_name;
+use cooldis_operations::{DeclaredSkillPackageRef, validate_record_name};
 use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
@@ -1032,7 +1032,7 @@ pub enum AgentManifestRefStatus {
 
 impl AgentManifestResolvedRef {
     pub fn validate(&self) -> CooldisResult<()> {
-        validate_artifact_ref(&self.declared)?;
+        validate_compile_time_artifact_ref(&self.declared)?;
         match self.status {
             AgentManifestRefStatus::Resolved => {
                 let Some(content_hash) = &self.content_hash else {
@@ -1044,7 +1044,7 @@ impl AgentManifestResolvedRef {
                 validate_hash_label("content_hash", content_hash)?;
                 let resolved = self.resolved.as_deref().unwrap_or(&self.declared);
                 if resolved != self.declared {
-                    validate_artifact_ref(resolved)?;
+                    validate_compile_time_artifact_ref(resolved)?;
                 }
                 let expected_hash = content_hash_from_ref(resolved)
                     .or_else(|| content_hash_from_ref(&self.declared))
@@ -1133,30 +1133,20 @@ fn validate_ref_scheme(label: &str, value: &str, scheme: &str) -> CooldisResult<
 }
 
 fn validate_skill_resource_ref(value: &str) -> CooldisResult<()> {
-    let body = value.strip_prefix("skill://").ok_or_else(|| {
-        CooldisError::RuntimeFactory(format!(
-            "skill resource ref {value:?} must start with skill://"
-        ))
-    })?;
-    let (name, hash) = body.split_once("@sha256:").ok_or_else(|| {
-        CooldisError::RuntimeFactory(format!(
-            "skill resource ref {value:?} must be content-addressed as skill://<package>@sha256:<hash>"
-        ))
-    })?;
-    validate_record_name(name)?;
-    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(CooldisError::RuntimeFactory(format!(
-            "skill resource ref {value:?} has an invalid sha256 artifact hash"
-        )));
-    }
-    Ok(())
+    DeclaredSkillPackageRef::parse(value)
+        .map(|_| ())
+        .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))
 }
 
 fn validate_artifact_ref(value: &str) -> CooldisResult<()> {
+    if value.starts_with("skill://") {
+        return DeclaredSkillPackageRef::parse(value)
+            .map(|_| ())
+            .map_err(|err| CooldisError::RuntimeFactory(err.to_string()));
+    }
     if (value.starts_with("op://") && value.len() > "op://".len())
         || (value.starts_with("mcp://") && value.len() > "mcp://".len())
         || (value.starts_with("resource://") && value.len() > "resource://".len())
-        || (value.starts_with("skill://") && value.len() > "skill://".len())
     {
         Ok(())
     } else {
@@ -1166,7 +1156,27 @@ fn validate_artifact_ref(value: &str) -> CooldisResult<()> {
     }
 }
 
+fn validate_compile_time_artifact_ref(value: &str) -> CooldisResult<()> {
+    if value.starts_with("skill://") {
+        return match DeclaredSkillPackageRef::parse(value)? {
+            DeclaredSkillPackageRef::Floating { .. } => Err(CooldisError::RuntimeFactory(format!(
+                "floating skill ref {value:?} resolves only at bind time and must not appear in compile-time resolved_refs"
+            ))),
+            DeclaredSkillPackageRef::Pinned(_) => Ok(()),
+        };
+    }
+    validate_artifact_ref(value)
+}
+
 fn content_hash_from_ref(reference: &str) -> Option<String> {
+    if reference.starts_with("skill://") {
+        return match DeclaredSkillPackageRef::parse(reference).ok()? {
+            DeclaredSkillPackageRef::Floating { .. } => None,
+            DeclaredSkillPackageRef::Pinned(reference) => {
+                Some(format!("sha256:{}", reference.artifact_hash))
+            }
+        };
+    }
     if let Some(hash) = reference.strip_prefix("resource://artifact/sha256:")
         && hash.len() == 64
     {

@@ -1449,6 +1449,272 @@ ref = "{}"
 }
 
 #[tokio::test]
+async fn floating_skill_resource_pins_latest_at_each_bind_and_preserves_prior_binding() {
+    let root = temp_dir("manifest-bind-floating-skill-resource");
+    let skill_root = root.join("skills");
+    let package_dir = root.join("skill-src").join("karl-skills");
+    write_skill_file(
+        &package_dir,
+        "alpha",
+        "# Alpha\n\nFirst description.\n\nFirst body.\n",
+    );
+    let registry = LocalSkillRegistry::new(&skill_root);
+    let first_package = registry
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir: package_dir.clone(),
+            name: None,
+        })
+        .unwrap();
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[[resources]]
+name = "karl_skills"
+kind = "skill"
+ref = "skill://karl-skills"
+"#,
+            minimal_manifest("floating_skill_agent")
+        ),
+    );
+    assert_eq!(record.resource_count, 1);
+    assert!(
+        record.resolved_refs.is_empty(),
+        "floating skill refs must be absent from compile-time resolved_refs"
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let first_bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+    let first_binding = first_bound.bind_receipt.skill_packages[0].clone();
+    assert_eq!(first_binding.ref_uri, first_package.ref_uri());
+    assert_eq!(
+        first_binding.package_digest,
+        format!("sha256:{}", first_package.active_artifact_hash)
+    );
+
+    fs::write(
+        package_dir.join("alpha/SKILL.md"),
+        "# Alpha\n\nSecond description.\n\nSecond body.\n",
+    )
+    .unwrap();
+    let second_package = registry
+        .publish_directory(PublishSkillPackageRequest {
+            package_dir,
+            name: None,
+        })
+        .unwrap();
+    assert_ne!(
+        first_package.active_artifact_hash,
+        second_package.active_artifact_hash
+    );
+
+    let second_bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+    let second_binding = &second_bound.bind_receipt.skill_packages[0];
+    assert_eq!(second_binding.ref_uri, second_package.ref_uri());
+    assert_eq!(
+        second_binding.package_digest,
+        format!("sha256:{}", second_package.active_artifact_hash)
+    );
+    assert_eq!(
+        first_bound.bind_receipt.skill_packages[0], first_binding,
+        "an existing bound thread must retain its witnessed version"
+    );
+    assert_eq!(
+        first_bound.skill_context_segments[0].content,
+        "alpha — First description.\n"
+    );
+    assert_eq!(
+        second_bound.skill_context_segments[0].content,
+        "alpha — Second description.\n"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn floating_skill_resource_fails_closed_for_unknown_package_and_duplicate_skill_names() {
+    let root = temp_dir("manifest-bind-floating-skill-failures");
+    let skill_root = root.join("skills");
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+    let unknown = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[[resources]]
+name = "missing_skills"
+kind = "skill"
+ref = "skill://missing-skills"
+"#,
+            minimal_manifest("missing_skill_agent")
+        ),
+    );
+    let err = bind_published_agent_record(
+        &unknown,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("missing-skills"), "{err}");
+    assert!(
+        err.contains("not found in the local skill registry"),
+        "{err}"
+    );
+    assert!(err.contains("cooldis skill publish"), "{err}");
+    assert!(!err.contains("replace the ref with a hash"), "{err}");
+
+    let missing_hash = "0".repeat(64);
+    let pinned_unknown = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[[resources]]
+name = "missing_pinned_skills"
+kind = "skill"
+ref = "skill://missing-skills@sha256:{missing_hash}"
+"#,
+            minimal_manifest("missing_pinned_skill_agent")
+        ),
+    );
+    let err = bind_published_agent_record(
+        &pinned_unknown,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("publish the skill package"), "{err}");
+    assert!(err.contains("replace the ref with a hash"), "{err}");
+
+    for package_name in ["first-skills", "second-skills"] {
+        let package_dir = root.join("skill-src").join(package_name);
+        write_skill_file(
+            &package_dir,
+            "shared",
+            &format!("# Shared\n\nDescription from {package_name}.\n"),
+        );
+        LocalSkillRegistry::new(&skill_root)
+            .publish_directory(PublishSkillPackageRequest {
+                package_dir,
+                name: None,
+            })
+            .unwrap();
+    }
+    let duplicate = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"{}
+
+[[resources]]
+name = "first"
+kind = "skill"
+ref = "skill://first-skills"
+
+[[resources]]
+name = "second"
+kind = "skill"
+ref = "skill://second-skills"
+"#,
+            minimal_manifest("duplicate_skill_agent")
+        ),
+    );
+    let err = bind_published_agent_record(
+        &duplicate,
+        None,
+        &surface,
+        None,
+        None,
+        Some(&skill_root),
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate /skills/shared.md"), "{err}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn skill_binding_witness_comparison_is_order_independent_but_exact() {
+    let alpha = AgentManifestSkillPackageBinding {
+        resource_name: "alpha_resource".to_string(),
+        package_name: "alpha-package".to_string(),
+        ref_uri: format!("skill://alpha-package@sha256:{}", "a".repeat(64)),
+        artifact_hash: "a".repeat(64),
+        package_digest: format!("sha256:{}", "a".repeat(64)),
+        skill_count: 1,
+        index_sha256: format!("sha256:{}", "b".repeat(64)),
+    };
+    let beta = AgentManifestSkillPackageBinding {
+        resource_name: "beta_resource".to_string(),
+        package_name: "beta-package".to_string(),
+        ref_uri: format!("skill://beta-package@sha256:{}", "c".repeat(64)),
+        artifact_hash: "c".repeat(64),
+        package_digest: format!("sha256:{}", "c".repeat(64)),
+        skill_count: 2,
+        index_sha256: format!("sha256:{}", "d".repeat(64)),
+    };
+
+    assert!(skill_package_bindings_match(
+        &[alpha.clone(), beta.clone()],
+        &[beta.clone(), alpha.clone()],
+    ));
+    assert!(!skill_package_bindings_match(
+        &[alpha, beta.clone()],
+        &[beta],
+    ));
+}
+
+#[tokio::test]
 async fn operation_bind_requires_declared_grants() {
     let root = temp_dir("manifest-bind-grants");
     let registry = LocalOperationRegistry::new(&root);

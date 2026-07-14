@@ -2661,15 +2661,35 @@ impl CooldisAppServer {
                     "source thread workspace binding could not be encoded: {err}"
                 )))
             })?;
-        let inherited_manifest_receipts = if let Some(workspace) = &workspace {
+        let skill_packages =
+            thread_manifest_skill_packages(source_handle.context()).map_err(internal_error)?;
+        let skill_context_segments =
+            thread_manifest_skill_context_segments(source_handle.context())
+                .map_err(internal_error)?;
+        let skill_packages_metadata = source_handle
+            .context()
+            .metadata
+            .get(THREAD_AGENT_SKILL_PACKAGES_METADATA)
+            .cloned();
+        let skill_context_metadata = source_handle
+            .context()
+            .metadata
+            .get(THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+            .cloned();
+        let inherited_manifest_receipts = if workspace.is_some()
+            || !skill_packages.is_empty()
+            || !skill_context_segments.is_empty()
+        {
+            let missing_witness = if workspace.is_some() {
+                "source thread workspace binding has no durable manifest bind witness"
+            } else {
+                "source thread skill package binding has no durable manifest bind witness"
+            };
             let (compile_payload, bind_payload) = active_manifest_receipt_payloads(&source_handle)
                 .await
                 .map_err(internal_error)?
                 .ok_or_else(|| {
-                    internal_error(CooldisError::RuntimeFactory(
-                        "source thread workspace binding has no durable manifest bind witness"
-                            .to_string(),
-                    ))
+                    internal_error(CooldisError::RuntimeFactory(missing_witness.to_string()))
                 })?;
             let witnessed_workspace = bind_payload
                 .get("workspace")
@@ -2681,9 +2701,41 @@ impl CooldisAppServer {
                         "source thread manifest workspace witness is invalid: {err}"
                     )))
                 })?;
-            if witnessed_workspace.as_ref() != Some(workspace) {
+            if witnessed_workspace.as_ref() != workspace.as_ref() {
                 return Err(internal_error(CooldisError::RuntimeFactory(
                     "source thread workspace metadata disagrees with its durable manifest bind witness"
+                        .to_string(),
+                )));
+            }
+            let witnessed_skill_packages = bind_payload
+                .get("skill_packages")
+                .cloned()
+                .map(serde_json::from_value::<Vec<AgentManifestSkillPackageBinding>>)
+                .transpose()
+                .map_err(|err| {
+                    internal_error(CooldisError::RuntimeFactory(format!(
+                        "source thread manifest skill package witness is invalid: {err}"
+                    )))
+                })?
+                .unwrap_or_default();
+            if !crate::agent::manifest_bind::skill_package_bindings_match(
+                &witnessed_skill_packages,
+                &skill_packages,
+            ) {
+                return Err(internal_error(CooldisError::RuntimeFactory(
+                    "source thread skill package metadata disagrees with its durable manifest bind witness"
+                        .to_string(),
+                )));
+            }
+            let witnessed_skill_context_segments =
+                crate::agent::manifest_bind::skill_context_segments_for_bindings(
+                    &witnessed_skill_packages,
+                    Some(self.inner.skill_registry_root.as_path()),
+                )
+                .map_err(internal_error)?;
+            if witnessed_skill_context_segments != skill_context_segments {
+                return Err(internal_error(CooldisError::RuntimeFactory(
+                    "source thread skill context metadata disagrees with its pinned skill packages"
                         .to_string(),
                 )));
             }
@@ -2693,6 +2745,18 @@ impl CooldisAppServer {
         };
         if let Some(raw) = &workspace_metadata {
             checkpoint_metadata.insert(THREAD_AGENT_WORKSPACE_METADATA.to_string(), raw.clone());
+        }
+        if let Some(raw) = &skill_packages_metadata {
+            checkpoint_metadata.insert(
+                THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(),
+                raw.clone(),
+            );
+        }
+        if let Some(raw) = &skill_context_metadata {
+            checkpoint_metadata.insert(
+                THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA.to_string(),
+                raw.clone(),
+            );
         }
         let mut checkpoint = match params.checkpoint_id.as_deref() {
             Some(checkpoint_id) => {
@@ -2728,6 +2792,17 @@ impl CooldisAppServer {
             checkpoint
                 .metadata
                 .insert(THREAD_AGENT_WORKSPACE_METADATA.to_string(), raw);
+        }
+        if let Some(raw) = skill_packages_metadata {
+            checkpoint
+                .metadata
+                .insert(THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(), raw);
+        }
+        if let Some(raw) = skill_context_metadata {
+            checkpoint.metadata.insert(
+                THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA.to_string(),
+                raw,
+            );
         }
         let source_cut = thread_source_cut_json(&coordinates, &checkpoint, None);
         let handle = self

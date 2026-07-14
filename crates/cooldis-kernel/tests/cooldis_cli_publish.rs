@@ -299,6 +299,7 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     let skill_publish_help = run_cooldis(["skill", "publish", "--help"]);
     assert!(skill_publish_help.contains("cooldis skill publish <dir>"));
     assert!(skill_publish_help.contains("--registry-root"));
+    assert!(skill_publish_help.contains("floating package-name ref"));
 
     let help_debug_rpc = run_cooldis(["help", "debug", "rpc"]);
     assert!(help_debug_rpc.contains("cooldis debug rpc"));
@@ -718,6 +719,7 @@ Unicode description line.
     assert!(first.contains("skill plain"));
     assert!(first.contains("skill 設計"));
     assert!(first.contains(&format!("ref skill://karl-skills@sha256:{first_hash}")));
+    assert!(first.contains("floating skill://karl-skills"));
 
     let record = LocalSkillRegistry::new(&registry_root)
         .load_record("karl-skills")

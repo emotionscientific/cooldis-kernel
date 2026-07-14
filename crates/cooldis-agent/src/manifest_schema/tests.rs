@@ -340,8 +340,70 @@ fn reserved_and_deferred_resource_kinds_are_named() {
     .unwrap();
     assert_eq!(manifest.resources[0].reference, skill_ref);
 
+    let floating_ref = "skill://karl-skills";
+    let manifest = parse(
+        &valid_manifest()
+            .replace("kind = \"blob\"", "kind = \"skill\"")
+            .replace(
+                "resource://system-prompt@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                floating_ref,
+            ),
+    )
+    .unwrap();
+    assert_eq!(manifest.resources[0].reference, floating_ref);
+
+    let malformed_hash = parse(
+        &valid_manifest()
+            .replace("kind = \"blob\"", "kind = \"skill\"")
+            .replace(
+                "resource://system-prompt@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "skill://karl-skills@sha256:short",
+            ),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        malformed_hash.contains("artifact hash") && malformed_hash.contains("sha256 hex digest"),
+        "{malformed_hash}"
+    );
+
     let err = parse(&valid_manifest().replace("kind = \"blob\"", "kind = \"skill\"")).unwrap_err();
     assert!(err.to_string().contains("skill://"));
+}
+
+#[test]
+fn resolved_ref_validation_uses_the_declared_skill_ref_authority() {
+    let malformed = AgentManifestResolvedRef {
+        declared: "skill://karl-skills@sha256:garbage".to_string(),
+        resolved: None,
+        content_hash: None,
+        status: AgentManifestRefStatus::UnresolvedOffline,
+    };
+
+    let err = malformed.validate().unwrap_err().to_string();
+    assert!(err.contains("skill package artifact hash"), "{err}");
+    assert!(err.contains("sha256 hex digest"), "{err}");
+
+    let floating = AgentManifestResolvedRef {
+        declared: "skill://karl-skills".to_string(),
+        resolved: None,
+        content_hash: None,
+        status: AgentManifestRefStatus::UnresolvedOffline,
+    };
+    let err = floating.validate().unwrap_err().to_string();
+    assert!(err.contains("bind time"), "{err}");
+    assert!(err.contains("resolved_refs"), "{err}");
+
+    let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let resolved_to_floating = AgentManifestResolvedRef {
+        declared: format!("resource://system-prompt@sha256:{hash}"),
+        resolved: Some("skill://karl-skills".to_string()),
+        content_hash: Some(format!("sha256:{hash}")),
+        status: AgentManifestRefStatus::Resolved,
+    };
+    let err = resolved_to_floating.validate().unwrap_err().to_string();
+    assert!(err.contains("bind time"), "{err}");
+    assert!(err.contains("resolved_refs"), "{err}");
 }
 
 #[test]

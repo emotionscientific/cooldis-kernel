@@ -181,9 +181,10 @@ themselves make the resource model-visible or writable.
 ### Skills
 
 A skill is a published markdown resource package. In V1 it is declared as a
-`[[resources]]` row with `kind = "skill"` and a content-addressed
-`skill://<package>@sha256:<hash>` ref. The `[skills]` manifest section remains
-reserved until skills need their own grants or executable entrypoints.
+`[[resources]]` row with `kind = "skill"`. The ref may be floating as
+`skill://<package>` or pinned as `skill://<package>@sha256:<hash>`. The
+`[skills]` manifest section remains reserved until skills need their own grants
+or executable entrypoints.
 
 ```text
 publish lane: cooldis skill publish <dir>
@@ -191,11 +192,16 @@ registry: .cooldis/skills
 package shape: <name>/SKILL.md files
 metadata: optional frontmatter name, description, trigger_hint
 fallbacks: name from dirname, description from first non-heading line
+output: pinned skill://<package>@sha256:<hash> and floating skill://<package>
 ```
 
-At bind, the skill package is loaded from the registry, the package digest is
-recorded in the bind receipt, and the kernel renders a deterministic static
-index:
+Authors and manifests speak names; receipts speak hashes. At bind, a floating
+ref resolves the active local registry record once, and the pinned ref and
+package digest are recorded in the bind receipt. A pinned ref loads that exact
+immutable version without consulting the active record. Existing bound threads
+keep their witnessed version across resume and fork; a later bind resolves the
+then-current active version. Unknown names and duplicate `/skills/<name>.md`
+mounts fail closed. The kernel renders a deterministic static index:
 
 ```text
 <skill name> — <description>

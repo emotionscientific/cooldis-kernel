@@ -4,7 +4,9 @@ use crate::agent::manifest_schema::{
     AgentManifestResource, AgentManifestResourceKind, AgentManifestResourceMode,
     AgentManifestResourceMount, AgentManifestSchema, AgentManifestTool, KERNEL_ASSEMBLER_STATIC,
 };
-use crate::{CooldisError, CooldisResult, LocalBlobRegistry, validate_record_name};
+use crate::{
+    CooldisError, CooldisResult, DeclaredSkillPackageRef, LocalBlobRegistry, validate_record_name,
+};
 use cooldis_agent::{validate_namespace, validate_version};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -413,7 +415,8 @@ pub struct AgentPublishPlan {
     #[serde(default)]
     pub tool_refs: Vec<AgentToolRef>,
     pub resource_count: usize,
-    /// Artifact refs compiled from the manifest source.
+    /// Content-addressed artifact refs compiled from the manifest source.
+    /// Floating skill refs are resolved and witnessed only at bind.
     #[serde(default)]
     pub resolved_refs: Vec<AgentManifestResolvedRef>,
     /// Plan-only verification receipts for `op://` rows. Published records do
@@ -520,7 +523,7 @@ impl AgentPublishPlan {
             .unwrap_or_else(|| "0.1.0".to_string());
         validate_version(&version)?;
         let tool_refs = parse_agent_tool_refs(&manifest.tools)?;
-        let resolved_refs = compile_resolved_refs(&manifest);
+        let resolved_refs = compile_resolved_refs(&manifest)?;
         let resolved_manifest = canonical_json_from_schema(&manifest)?;
         let manifest_hash = value_sha256(&resolved_manifest)?;
         let ref_uri = agent_ref_uri(namespace.as_deref(), &name, &version);
@@ -967,7 +970,9 @@ fn validate_tool_ref(value: &str) -> CooldisResult<()> {
     }
 }
 
-fn compile_resolved_refs(manifest: &AgentManifestSchema) -> Vec<AgentManifestResolvedRef> {
+fn compile_resolved_refs(
+    manifest: &AgentManifestSchema,
+) -> CooldisResult<Vec<AgentManifestResolvedRef>> {
     let mut refs = Vec::new();
     for tool in &manifest.tools {
         match tool {
@@ -977,9 +982,23 @@ fn compile_resolved_refs(manifest: &AgentManifestSchema) -> Vec<AgentManifestRes
         }
     }
     for resource in &manifest.resources {
+        if resource.kind == AgentManifestResourceKind::Skill {
+            match DeclaredSkillPackageRef::parse(&resource.reference)? {
+                DeclaredSkillPackageRef::Floating { .. } => continue,
+                DeclaredSkillPackageRef::Pinned(reference) => {
+                    refs.push(AgentManifestResolvedRef {
+                        declared: resource.reference.clone(),
+                        resolved: Some(resource.reference.clone()),
+                        content_hash: Some(format!("sha256:{}", reference.artifact_hash)),
+                        status: AgentManifestRefStatus::Resolved,
+                    });
+                    continue;
+                }
+            }
+        }
         refs.push(resolve_artifact_ref(&resource.reference));
     }
-    refs
+    Ok(refs)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

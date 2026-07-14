@@ -17,6 +17,7 @@ cooldis agent plan release-verifier/cooldis.agent.toml \
 cooldis agent publish release-verifier/cooldis.agent.toml \
   --resolve-ops --operations-registry-root .cooldis/operations
 cooldis blob publish release-verifier/prompts/system.md --name identity
+cooldis skill publish release-verifier/skills
 cooldis agent list
 cooldis agent show agent://release-verifier@0.1.0
 cooldis agent run agent://release-verifier@latest --input "check the branch"
@@ -90,6 +91,15 @@ publishes an arbitrary file as an immutable blob artifact and prints the
 the same digest and is a no-op. Agent manifests consume blob artifacts through
 `[[resources]] kind = "blob"` rows and static context sources whose `input`
 names the resource.
+
+`cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]`
+publishes the directory's `<skill>/SKILL.md` entries into the local skill
+registry and prints both `skill://<package>@sha256:<hash>` and
+`skill://<package>`. Identical content reuses the same immutable version;
+changed content advances the active name while preserving prior versions.
+Manifests may use either ref. Authors and manifests speak names; receipts speak
+hashes: a floating name resolves once at bind and the bind receipt witnesses
+the pinned ref. Pinned refs never follow the active name.
 
 `list` and `show` inspect published records from the local registry. They are the
 minimum discovery surface required once publication exists.
