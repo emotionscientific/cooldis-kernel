@@ -197,6 +197,33 @@ body
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn frontmatter_name_does_not_require_a_directory_name_fallback() {
+    let entry = SkillPackageEntry::from_skill_body(
+        Path::new("/"),
+        "---\nname: declared-skill\ndescription: Declared description.\n---\n# Declared Skill\n"
+            .to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(entry.name, "declared-skill");
+    assert_eq!(entry.description, "Declared description.");
+}
+
+#[test]
+fn missing_frontmatter_name_still_requires_a_directory_name_fallback() {
+    for body in [
+        "# Plain Skill\n\nPlain description.\n",
+        "---\ndescription: Declared description.\n---\n# Declared Skill\n",
+        "---\nname: \"\"\ndescription: Declared description.\n---\n# Declared Skill\n",
+    ] {
+        let error =
+            SkillPackageEntry::from_skill_body(Path::new("/"), body.to_string()).unwrap_err();
+
+        assert!(error.to_string().contains("has no unicode name"), "{error}");
+    }
+}
+
 fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{name}-{}", Uuid::now_v7()))
 }

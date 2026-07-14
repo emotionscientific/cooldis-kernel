@@ -482,15 +482,7 @@ impl SkillPackageEntry {
     /// Host binders use this after they have confined and pinned the file.
     pub fn from_skill_body(skill_dir: &Path, body: String) -> CooldisResult<Self> {
         let file = skill_dir.join("SKILL.md");
-        let dirname = skill_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                CooldisError::RuntimeFactory(format!(
-                    "skill directory {} has no unicode name",
-                    skill_dir.display()
-                ))
-            })?;
+        let dirname = skill_dir.file_name().and_then(|name| name.to_str());
         let metadata = parse_skill_metadata(&file, dirname, &body)?;
         let entry = Self {
             name: metadata.name,
@@ -589,7 +581,7 @@ struct ParsedSkillMetadata {
 
 fn parse_skill_metadata(
     file: &Path,
-    dirname: &str,
+    dirname: Option<&str>,
     body: &str,
 ) -> CooldisResult<ParsedSkillMetadata> {
     if body.trim().is_empty() {
@@ -602,13 +594,17 @@ fn parse_skill_metadata(
         return parse_frontmatter(file, dirname, body);
     }
     Ok(ParsedSkillMetadata {
-        name: dirname.to_string(),
+        name: fallback_skill_name(file, dirname)?,
         description: first_non_heading_line(file, body)?,
         trigger_hint: None,
     })
 }
 
-fn parse_frontmatter(file: &Path, dirname: &str, body: &str) -> CooldisResult<ParsedSkillMetadata> {
+fn parse_frontmatter(
+    file: &Path,
+    dirname: Option<&str>,
+    body: &str,
+) -> CooldisResult<ParsedSkillMetadata> {
     let rest = body
         .strip_prefix("---\n")
         .ok_or_else(|| malformed_frontmatter(file, "missing frontmatter body"))?;
@@ -648,11 +644,22 @@ fn parse_frontmatter(file: &Path, dirname: &str, body: &str) -> CooldisResult<Pa
             malformed_frontmatter(file, "description is required when frontmatter is present")
         })?;
     Ok(ParsedSkillMetadata {
-        name: name
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| dirname.to_string()),
+        name: match name.filter(|value| !value.trim().is_empty()) {
+            Some(name) => name,
+            None => fallback_skill_name(file, dirname)?,
+        },
         description,
         trigger_hint: trigger_hint.filter(|value| !value.trim().is_empty()),
+    })
+}
+
+fn fallback_skill_name(file: &Path, dirname: Option<&str>) -> CooldisResult<String> {
+    dirname.map(str::to_string).ok_or_else(|| {
+        let skill_dir = file.parent().unwrap_or(file);
+        CooldisError::RuntimeFactory(format!(
+            "skill directory {} has no unicode name",
+            skill_dir.display()
+        ))
     })
 }
 
