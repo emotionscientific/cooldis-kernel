@@ -88,10 +88,6 @@ impl TenantRuntimeContext {
         self.config.runtime_home.join("codex-home")
     }
 
-    pub fn sqlite_home(&self) -> PathBuf {
-        self.config.state_home.join("sqlite")
-    }
-
     pub fn session_history_path(&self) -> PathBuf {
         self.config.state_home.join("session_history.sqlite3")
     }
@@ -102,7 +98,6 @@ impl TenantRuntimeContext {
             runtime_home: self.config.runtime_home.clone(),
             state_home: self.config.state_home.clone(),
             codex_home: self.codex_home(),
-            sqlite_home: self.sqlite_home(),
             session_history_path: self.session_history_path(),
             execution_policy: self.execution_policy.clone(),
         }
@@ -120,7 +115,6 @@ pub struct TenantRuntimeContextDescriptor {
     pub runtime_home: PathBuf,
     pub state_home: PathBuf,
     pub codex_home: PathBuf,
-    pub sqlite_home: PathBuf,
     pub session_history_path: PathBuf,
     pub execution_policy: RuntimeExecutionPolicy,
 }
@@ -203,8 +197,6 @@ impl CooldisSupervisor {
         std::fs::create_dir_all(registration.context.state_home())
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
         std::fs::create_dir_all(registration.context.codex_home())
-            .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
-        std::fs::create_dir_all(registration.context.sqlite_home())
             .map_err(|err| CooldisError::RuntimeFactory(err.to_string()))?;
 
         let (context, provided_session_store) = registration.context.take_session_store();

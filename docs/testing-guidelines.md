@@ -146,7 +146,6 @@ For Cooldis runtime changes, use:
 
 ```bash
 scripts/cargo-lane.sh test
-scripts/cargo-lane.sh run --bin cooldis-live-smoke
 scripts/cargo-lane.sh run --bin cooldis-vbash-smoke
 scripts/cargo-lane.sh run --bin cooldis-wasm-smoke
 ```
@@ -157,8 +156,7 @@ Run app-server and MCP smokes when touching their projections.
 
 Pull requests and pushes to `main` run `scripts/verify.sh`. The default CI lane
 checks formatting, runs the locked workspace test suite for all targets, and
-runs the live, virtual-bash, and Wasm smoke binaries. When no Codex binary is
-available, the script supplies its local stub for the live smoke.
+runs the virtual-bash and Wasm smoke binaries.
 
 Two provider-backed lanes remain opt-in and are disabled in regular CI. Set
 `COOLDIS_VERIFY_LIVE_PLUGIN=1` to run the live plugin smoke, or set

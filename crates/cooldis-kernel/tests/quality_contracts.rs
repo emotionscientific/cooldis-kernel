@@ -51,7 +51,6 @@ fn workspace_layout_contract_matches_current_repository_shape() {
         "crates/cooldis-kernel/src/bin/cooldis.rs",
         "crates/cooldis-kernel/src/bin/cooldis-mcp-server.rs",
         "crates/cooldis-kernel/tests/runtime_loop_scenarios.rs",
-        "crates/cooldis-kernel/tests/smokes/cooldis-live-smoke.rs",
         "crates/cooldis-kernel/tests/support_bins/cooldis-mcp-echo-server.rs",
         "apps/console/package.json",
         "apps/console/src/App.svelte",
@@ -99,8 +98,6 @@ fn github_workflow_stays_a_light_remote_sentinel() {
 
     let kernel_manifest = read(repo_root().join("crates/cooldis-kernel/Cargo.toml"));
     assert!(kernel_manifest.contains("autobins = false"));
-    assert!(kernel_manifest.contains("path = \"tests/smokes/cooldis-live-smoke.rs\""));
-    assert!(!kernel_manifest.contains("src/bin/cooldis-live-smoke.rs"));
 }
 
 #[test]

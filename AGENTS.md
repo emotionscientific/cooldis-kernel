@@ -7,7 +7,7 @@ Keep this repo focused on runtime primitives:
 - multi-tenant host and supervisor;
 - thread lifecycle, subthread relationships, events, cancellation, resume, and
   shutdown;
-- Codex runtime adapters;
+- provider runtime adapters;
 - virtual bash, VFS, sandbox, procedure/reducer, and provider adapter seams.
 - ABI docs and contracts: host-facing ABI powers, guest-declared operations,
   and CLI/API/tool projections.
@@ -20,7 +20,6 @@ Keep product logic out:
 Working rules:
 
 - Use `cargo test` before claiming runtime changes are done.
-- Use `cargo run --bin cooldis-live-smoke` for the cheap process-backed smoke.
 - Prefer larger, real lifecycle tests over narrow mocks when the cost is low.
   If a provider-backed path can run in roughly five seconds or less, wire it to
   a generic OpenAI-compatible or Anthropic-compatible provider and exercise the

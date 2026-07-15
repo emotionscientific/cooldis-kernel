@@ -132,8 +132,8 @@ runtime defaults
 
 Cooldis may export, diff, or inspect a resolved "portable harness" as a useful
 read model, but an agent author should not declare `harness = ...` as a separate
-primitive. Codex, Pi, Claude, local app-server, or a sandbox are runtime adapters
-or placements, not harnesses.
+primitive. Things like an external agent CLI (Codex, Claude), Pi, a local
+app-server, or a sandbox are runtime adapters or placements, not harnesses.
 
 ### Tools
 

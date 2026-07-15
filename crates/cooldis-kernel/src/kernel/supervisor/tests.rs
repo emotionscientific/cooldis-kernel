@@ -362,7 +362,6 @@ async fn supervisor_runtime_contexts_keep_tenant_homes_and_stores_isolated() {
     assert_eq!(tenant_a.context.runtime_home, runtime_a);
     assert_eq!(tenant_a.context.state_home, state_a);
     assert_eq!(tenant_a.context.codex_home, runtime_a.join("codex-home"));
-    assert_eq!(tenant_a.context.sqlite_home, state_a.join("sqlite"));
     assert_eq!(
         tenant_a.context.session_history_path,
         state_a.join("session_history.sqlite3")
@@ -370,13 +369,11 @@ async fn supervisor_runtime_contexts_keep_tenant_homes_and_stores_isolated() {
     assert_eq!(tenant_b.context.runtime_home, runtime_b);
     assert_eq!(tenant_b.context.state_home, state_b);
     assert_ne!(tenant_a.context.codex_home, tenant_b.context.codex_home);
-    assert_ne!(tenant_a.context.sqlite_home, tenant_b.context.sqlite_home);
     assert_ne!(
         tenant_a.context.session_history_path,
         tenant_b.context.session_history_path
     );
     assert!(tenant_a.context.codex_home.is_dir());
-    assert!(tenant_a.context.sqlite_home.is_dir());
     assert!(tenant_a.context.session_history_path.is_file());
     assert!(tenant_b.context.session_history_path.is_file());
 

@@ -8,7 +8,6 @@ Clone the repository and run the runtime checks:
 
 ```sh
 cargo test --workspace --all-targets --locked
-cargo run --locked --bin cooldis-live-smoke
 cargo run --locked --bin cooldis-vbash-smoke
 cargo run --locked --bin cooldis-wasm-smoke
 ```

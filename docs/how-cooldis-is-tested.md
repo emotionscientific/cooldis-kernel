@@ -65,11 +65,9 @@ every push:
   recovery, coalescing, dedupe, kill/restart projector coverage;
 - guard rails: repository-level checks that pin invariants no single test
   owns (banned patterns, schema presence, doc/code congruence);
-- live smokes that exercise the provider loop, real wasm guest execution,
-  and real sandboxed command execution end to end; the provider lane runs
-  against a real provider binary when one is installed and a
-  protocol-faithful stub otherwise, so bare CI proves the loop's mechanics,
-  not a live model.
+- process smokes that exercise real wasm guest execution and real sandboxed
+  command execution end to end. The provider-backed plugin lane is opt-in, so
+  bare CI does not claim to prove a live model integration.
 
 A full CI run takes about eight minutes. There is no fast path that skips
 the suite, and environmental excuses are not accepted grounds for a red lane:

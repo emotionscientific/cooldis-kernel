@@ -870,12 +870,6 @@ Run the focused MCP server tests:
 cargo test mcp_server
 ```
 
-Run the cheap process-backed live smoke:
-
-```sh
-cargo run --bin cooldis-live-smoke
-```
-
 Run a one-shot local/offline chat proof:
 
 ```sh

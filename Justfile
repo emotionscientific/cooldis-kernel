@@ -18,9 +18,6 @@ clippy:
 test:
     cargo test --workspace --all-targets --locked
 
-smoke:
-    cargo run --locked --bin cooldis-live-smoke
-
 verify:
     scripts/verify.sh
 
