@@ -1,9 +1,9 @@
 //! Cooldis is a small multi-tenant host boundary for agent runtime loops.
 //!
 //! The crate intentionally starts above provider, shell, sandbox, and product
-//! concerns. A concrete runtime implementation can be Codex, a test runtime, or
-//! a later virtual-shell/procedure backend, but the host owns tenancy,
-//! lifecycle, cancellation, and event routing.
+//! concerns. A concrete runtime implementation can be a provider loop, a test
+//! runtime, or a later virtual-shell/procedure backend, but the host owns
+//! tenancy, lifecycle, cancellation, and event routing.
 
 #[cfg(test)]
 mod test_abort_tripwire;
@@ -168,7 +168,6 @@ fn scenario_thread_load_root_barrier(
 pub mod adapters {
     pub mod acp_agent;
     pub mod app_server;
-    pub mod codex_adapter;
     pub mod codex_tui;
     pub mod mcp_client;
     pub mod mcp_server;
@@ -255,7 +254,6 @@ pub use adapters::app_server::{
     CooldisAppServerConfig, JsonRpcError, JsonRpcErrorError, JsonRpcMessage, JsonRpcNotification,
     JsonRpcRequest, JsonRpcResponse, RequestId,
 };
-pub use adapters::codex_adapter::{CodexCliRuntimeFactory, CodexRuntimeConfig};
 pub use adapters::codex_tui::{
     CODEX_TUI_TEST_CLIENT_NAME, CODEX_TUI_UDS_WEBSOCKET_HANDSHAKE_URL, CodexTuiCompletedTurn,
     CodexTuiConnectConfig, CodexTuiEvent, CodexTuiTestClient, CodexTuiThread, CodexTuiTurn,

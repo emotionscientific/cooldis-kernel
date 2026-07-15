@@ -34,7 +34,7 @@ crates/cooldis-kernel/
 │   ├── cli/                    # Cooldis CLI implementation and unit tests
 │   ├── kernel/                 # lifecycle, history, metadata stores, supervisor, context, compaction
 │   ├── agent/                  # agent tools, hooks, permissions, tool routing
-│   ├── adapters/               # Codex, provider, TUI, app-server, MCP surfaces
+│   ├── adapters/               # provider, TUI, app-server, MCP, and ACP surfaces
 │   ├── capabilities/           # ABI, bridge, process handles, VFS, bash, Wasm
 │   ├── operations/             # build helper, kernel packages, plugin catalog, shims
 │   └── daemon/                 # daemon config and IO workers
