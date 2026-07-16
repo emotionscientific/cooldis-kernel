@@ -122,6 +122,8 @@ stateful product harnesses are future direction. See
   boundary.
 - [Provider adapters](docs/provider-adapters.md): provider runtime boundary.
 - [Daemon and RPC](docs/app-server.md): app-server control plane.
+- [Threat model](docs/threat-model.md): stable threat IDs, current status, and
+  deterministic mitigation guards.
 - [Testing guidelines](docs/testing-guidelines.md): runtime test expectations.
 - [Release guide](RELEASE.md): tags, targets, package smoke tests, and
   installer artifacts.
