@@ -58,6 +58,7 @@ provider adapters, and release gates.
 - [Public API Surface](developers/public-api-surface.md)
 - [Documentation System](developers/documentation-system.md)
 - [Public API Coverage](public-api-coverage.md)
+- [Threat Model](threat-model.md)
 - [Testing Guidelines](testing-guidelines.md)
 - [V1 Release Candidate Gate](v1-release-candidate.md)
 - [ADR 0001: Cooldis Stream Schema V1](adr/0001-stream-schema-v1.md)

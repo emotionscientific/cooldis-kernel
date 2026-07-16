@@ -23,6 +23,7 @@ nav:
       - Protocol Surfaces: developers/protocol-surfaces.md
       - Public API Surface: developers/public-api-surface.md
       - Documentation System: developers/documentation-system.md
+      - Threat Model: threat-model.md
   - Roadmap: roadmap.md
 
 markdown_extensions:
