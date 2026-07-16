@@ -159,6 +159,124 @@ fn full_fixture_manifest_parses_and_validates() {
 }
 
 #[test]
+fn grants_accept_legacy_strings_and_expiring_objects_everywhere() {
+    let expires_at = "2026-07-16T20:00:00Z";
+    let source = manifest_with_coupling()
+        .replace(
+            "grants = [\"fs.read:/workspace\"]",
+            &format!(
+                "grants = [\"fs.read:/workspace\", {{ capability = \"fs.write:/workspace\", expires_at = \"{expires_at}\" }}]"
+            ),
+        )
+        .replace(
+            "grants = [\"net.http:GET:https://example.test\"]",
+            &format!(
+                "grants = [{{ capability = \"net.http:GET:https://example.test\", expires_at = \"{expires_at}\" }}]"
+            ),
+        )
+        .replace(
+            "grants = [\"net.localhost\"]",
+            &format!(
+                "grants = [{{ capability = \"net.localhost\", expires_at = \"{expires_at}\" }}]"
+            ),
+        )
+        .replace(
+            "grants = [\"stream.read:thread\", \"stream.write:control\"]",
+            &format!(
+                "grants = [\"stream.read:thread\", {{ capability = \"stream.write:control\", expires_at = \"{expires_at}\" }}]"
+            ),
+        );
+
+    let manifest = parse(&source).unwrap();
+    let encoded = serde_json::to_value(&manifest).unwrap();
+
+    assert_eq!(encoded["tools"][0]["grants"][0], "fs.read:/workspace");
+    assert_eq!(
+        encoded["tools"][0]["grants"][1],
+        serde_json::json!({
+            "capability": "fs.write:/workspace",
+            "expires_at": expires_at,
+        })
+    );
+    assert_eq!(encoded["tools"][1]["grants"][0]["expires_at"], expires_at);
+    assert_eq!(encoded["tools"][2]["grants"][0]["expires_at"], expires_at);
+    assert_eq!(encoded["couplings"][0]["grants"][0], "stream.read:thread");
+    assert_eq!(
+        encoded["couplings"][0]["grants"][1]["expires_at"],
+        expires_at
+    );
+
+    let decoded: AgentManifestSchema = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+
+    #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+    struct GrantEnvelope {
+        grants: Vec<AgentManifestGrant>,
+    }
+
+    let grant_wire = GrantEnvelope {
+        grants: vec![AgentManifestGrant::Expiring(AgentManifestGrantExpiry {
+            capability: "fs.write:/workspace".to_string(),
+            expires_at: expires_at.to_string(),
+        })],
+    };
+    let first_encoding = toml::to_string(&grant_wire).unwrap();
+    let decoded: GrantEnvelope = toml::from_str(&first_encoding).unwrap();
+    assert_eq!(decoded, grant_wire);
+    assert_eq!(toml::to_string(&decoded).unwrap(), first_encoding);
+}
+
+#[test]
+fn expiring_grants_reject_unknown_fields_invalid_instants_and_non_utc_offsets() {
+    for (grant, expected) in [
+        (
+            r#"{ capability = "fs.read:/workspace", expires_at = "2026-07-16T20:00:00Z", expires_in = "1h" }"#,
+            &["tool \"tailcat\"", "unknown field", "expires_in"][..],
+        ),
+        (
+            r#"{ capability = "fs.read:/workspace", expires_at = "tomorrow" }"#,
+            &["tool \"tailcat\"", "RFC3339"][..],
+        ),
+        (
+            r#"{ capability = "fs.read:/workspace", expires_at = "2026-07-16T13:00:00-07:00" }"#,
+            &["tool \"tailcat\"", "UTC"][..],
+        ),
+        (
+            r#"{ capability = "fs.read:/workspace", expires_at = 123 }"#,
+            &["tool \"tailcat\"", "expires_at", "string"][..],
+        ),
+        (
+            r#"{ capability = "fs.read:/workspace", expires_at = 2026-07-16T20:00:00Z }"#,
+            &[
+                "tool \"tailcat\"",
+                "expires_at",
+                "quoted RFC3339 UTC string",
+            ][..],
+        ),
+    ] {
+        let source = valid_manifest().replace(
+            "grants = [\"fs.read:/workspace\"]",
+            &format!("grants = [{grant}]"),
+        );
+        let err = parse(&source).unwrap_err().to_string();
+        for expected in expected {
+            assert!(
+                err.contains(expected),
+                "expected {expected:?} for {grant}, got {err}"
+            );
+        }
+    }
+
+    let coupling = manifest_with_coupling().replace(
+        "grants = [\"stream.read:thread\", \"stream.write:control\"]",
+        r#"grants = [{ capability = "stream.read:thread", expires_at = 2026-07-16T20:00:00Z }]"#,
+    );
+    let err = parse(&coupling).unwrap_err().to_string();
+    assert!(err.contains("coupling \"bash_regex_gate\""), "{err}");
+    assert!(err.contains("quoted RFC3339 UTC string"), "{err}");
+}
+
+#[test]
 fn workspace_requirement_parses_without_a_host_path() {
     let source = valid_manifest().replace(
         "[policies]",

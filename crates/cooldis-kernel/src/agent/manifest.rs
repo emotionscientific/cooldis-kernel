@@ -1,8 +1,9 @@
 use crate::agent::manifest_bind::verify_operation_ref;
 use crate::agent::manifest_schema::{
-    AgentManifestContextPipeline, AgentManifestRefStatus, AgentManifestResolvedRef,
-    AgentManifestResource, AgentManifestResourceKind, AgentManifestResourceMode,
-    AgentManifestResourceMount, AgentManifestSchema, AgentManifestTool, KERNEL_ASSEMBLER_STATIC,
+    AgentManifestContextPipeline, AgentManifestGrantExpiry, AgentManifestRefStatus,
+    AgentManifestResolvedRef, AgentManifestResource, AgentManifestResourceKind,
+    AgentManifestResourceMode, AgentManifestResourceMount, AgentManifestSchema, AgentManifestTool,
+    KERNEL_ASSEMBLER_STATIC,
 };
 use crate::{
     CooldisError, CooldisResult, DeclaredSkillPackageRef, LocalBlobRegistry, validate_record_name,
@@ -738,6 +739,8 @@ pub struct AgentToolRef {
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
 }
 
 impl AgentToolRef {
@@ -757,6 +760,14 @@ impl AgentToolRef {
             if grant.trim().is_empty() {
                 return Err(CooldisError::RuntimeFactory(format!(
                     "agent tool ref {:?} has an empty grant",
+                    self.name
+                )));
+            }
+        }
+        for expiry in &self.grant_expiries {
+            if expiry.capability.trim().is_empty() || expiry.expires_at.trim().is_empty() {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "agent tool ref {:?} has an invalid grant expiry",
                     self.name
                 )));
             }
@@ -934,21 +945,48 @@ fn parse_agent_tool_refs(tools: &[AgentManifestTool]) -> CooldisResult<Vec<Agent
                 kind: "bash_tool".to_string(),
                 reference: tool.operation_ref.clone(),
                 operation: Some(tool.command.clone()),
-                grants: tool.grants.clone(),
+                grants: tool
+                    .grants
+                    .iter()
+                    .map(|grant| grant.capability().to_string())
+                    .collect(),
+                grant_expiries: tool
+                    .grants
+                    .iter()
+                    .filter_map(|grant| grant.expiry().cloned())
+                    .collect(),
             },
             AgentManifestTool::Direct(tool) => AgentToolRef {
                 name: tool.id.clone(),
                 kind: "direct_tool".to_string(),
                 reference: tool.operation_ref.clone(),
                 operation: Some(tool.tool_name.clone()),
-                grants: tool.grants.clone(),
+                grants: tool
+                    .grants
+                    .iter()
+                    .map(|grant| grant.capability().to_string())
+                    .collect(),
+                grant_expiries: tool
+                    .grants
+                    .iter()
+                    .filter_map(|grant| grant.expiry().cloned())
+                    .collect(),
             },
             AgentManifestTool::ProtocolImport(tool) => AgentToolRef {
                 name: tool.id.clone(),
                 kind: "protocol_tool_import".to_string(),
                 reference: tool.server_ref.clone(),
                 operation: None,
-                grants: tool.grants.clone(),
+                grants: tool
+                    .grants
+                    .iter()
+                    .map(|grant| grant.capability().to_string())
+                    .collect(),
+                grant_expiries: tool
+                    .grants
+                    .iter()
+                    .filter_map(|grant| grant.expiry().cloned())
+                    .collect(),
             },
         };
         tool_ref.validate()?;

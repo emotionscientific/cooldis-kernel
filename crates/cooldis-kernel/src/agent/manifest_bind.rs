@@ -13,10 +13,11 @@ use crate::agent::manifest::{AgentAliasResolutionReceipt, PublishedAgentRecord};
 use crate::agent::manifest_schema::{
     AgentManifestBudgetRest, AgentManifestBudgetShare, AgentManifestContextPipeline,
     AgentManifestCoupling, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
-    AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestMaxToolRounds,
-    AgentManifestModelProfile, AgentManifestProtocolToolImport, AgentManifestResource,
-    AgentManifestResourceKind, AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey,
-    AgentManifestSchema, AgentManifestTool, AgentManifestToolSurface, AgentManifestWorkspaceMode,
+    AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestGrant,
+    AgentManifestGrantExpiry, AgentManifestMaxToolRounds, AgentManifestModelProfile,
+    AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
+    AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey, AgentManifestSchema,
+    AgentManifestTool, AgentManifestToolSurface, AgentManifestWorkspaceMode,
     AgentManifestWorkspaceRequirement, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::agent::tool_universe::{
@@ -235,7 +236,38 @@ pub async fn bind_published_agent_record(
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
 ) -> CooldisResult<AgentManifestBoundThread> {
-    bind_published_agent_record_with_placement(
+    bind_published_agent_record_at(
+        record,
+        alias,
+        provider_surface,
+        operation_registry_root,
+        blob_registry_root,
+        skill_registry_root,
+        configured_mcp_server_refs,
+        tool_universe_discoverer,
+        model_selection,
+        overrides,
+        crate::kernel::history::now_ms(),
+    )
+    .await
+}
+
+/// Compile and bind with caller-supplied time for deterministic authority
+/// checks. Production callers normally use [`bind_published_agent_record`].
+pub async fn bind_published_agent_record_at(
+    record: &PublishedAgentRecord,
+    alias: Option<AgentAliasResolutionReceipt>,
+    provider_surface: &AgentManifestProviderSurface,
+    operation_registry_root: Option<&Path>,
+    blob_registry_root: Option<&Path>,
+    skill_registry_root: Option<&Path>,
+    configured_mcp_server_refs: &BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    model_selection: &AgentManifestModelProfileSelection,
+    overrides: &AgentManifestBindOverrides,
+    now_ms: i64,
+) -> CooldisResult<AgentManifestBoundThread> {
+    bind_published_agent_record_with_placement_at(
         record,
         alias,
         provider_surface,
@@ -251,6 +283,7 @@ pub async fn bind_published_agent_record(
         None,
         None,
         false,
+        now_ms,
     )
     .await
 }
@@ -278,6 +311,46 @@ pub async fn bind_published_agent_record_with_placement(
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
     remote_event_store_served: bool,
 ) -> CooldisResult<AgentManifestBoundThread> {
+    bind_published_agent_record_with_placement_at(
+        record,
+        alias,
+        provider_surface,
+        operation_registry_root,
+        blob_registry_root,
+        skill_registry_root,
+        configured_mcp_server_refs,
+        tool_universe_discoverer,
+        model_selection,
+        overrides,
+        default_placement,
+        placement_override,
+        default_workspace,
+        workspace_override,
+        remote_event_store_served,
+        crate::kernel::history::now_ms(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn bind_published_agent_record_with_placement_at(
+    record: &PublishedAgentRecord,
+    alias: Option<AgentAliasResolutionReceipt>,
+    provider_surface: &AgentManifestProviderSurface,
+    operation_registry_root: Option<&Path>,
+    blob_registry_root: Option<&Path>,
+    skill_registry_root: Option<&Path>,
+    configured_mcp_server_refs: &BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    model_selection: &AgentManifestModelProfileSelection,
+    overrides: &AgentManifestBindOverrides,
+    default_placement: Option<&AgentManifestPlacementBinding>,
+    placement_override: Option<&AgentManifestPlacementBinding>,
+    default_workspace: Option<&AgentManifestWorkspaceBinding>,
+    workspace_override: Option<&AgentManifestWorkspaceBinding>,
+    remote_event_store_served: bool,
+    now_ms: i64,
+) -> CooldisResult<AgentManifestBoundThread> {
     bind_published_agent_record_with_placement_and_skill_witness(
         record,
         alias,
@@ -297,6 +370,7 @@ pub async fn bind_published_agent_record_with_placement(
         None,
         None,
         false,
+        now_ms,
     )
     .await
 }
@@ -320,6 +394,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     skill_package_witness: Option<&[AgentManifestSkillPackageBinding]>,
     skill_discovery_witness: Option<&AgentManifestSkillDiscovery>,
     rehydrating_from_witness: bool,
+    now_ms: i64,
 ) -> CooldisResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
     let placement = resolve_manifest_placement(
@@ -374,6 +449,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         operation_registry_root,
         configured_mcp_server_refs,
         tool_universe_discoverer,
+        now_ms,
     )
     .await?;
     let static_context_segments = bind_static_context_sources(&manifest, blob_registry_root)?;
@@ -394,7 +470,8 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     if let Some(segment) = discovery_context_segment {
         skill_context_segments.push(segment);
     }
-    let couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
+    let bound_couplings = bind_couplings(&manifest.couplings, operation_registry_root, now_ms)?;
+    let couplings = bound_couplings.couplings;
     enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings, &couplings)?;
     let operation_names = bound_tools
         .operation_bindings
@@ -404,11 +481,21 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     let coupling_set = BoundCouplingSet {
         snapshot_id: record.manifest_hash.clone(),
         couplings: couplings.clone(),
+        grant_expiries: bound_couplings.grant_expiries,
     };
     let coupling_bindings = coupling_set
         .couplings
         .iter()
-        .map(AgentManifestCouplingBinding::from_bound)
+        .map(|coupling| {
+            AgentManifestCouplingBinding::from_bound(
+                coupling,
+                coupling_set
+                    .grant_expiries
+                    .get(&coupling.id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        })
         .collect::<Vec<_>>();
     let bind_receipt = AgentManifestBindReceipt {
         ref_uri: record.ref_uri.clone(),
@@ -428,6 +515,11 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
             .collect(),
         couplings: coupling_bindings,
         granted: bound_tools.granted,
+        grant_bindings: bound_tools
+            .grant_bindings
+            .into_iter()
+            .chain(bound_couplings.grant_bindings)
+            .collect(),
         effective_runtime,
         overridden_keys,
         placement: Some(placement),
@@ -459,6 +551,7 @@ struct OperationRef {
 struct BoundTools {
     tool_ids: Vec<String>,
     granted: Vec<String>,
+    grant_bindings: Vec<AgentManifestGrantBindingReceipt>,
     operation_bindings: Vec<AgentManifestOperationBinding>,
     tool_universes: Vec<ToolUniverseBinding>,
 }
@@ -579,6 +672,8 @@ pub enum CouplingRole {
 pub struct BoundCouplingSet {
     pub snapshot_id: String,
     pub couplings: Vec<BoundCoupling>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub grant_expiries: BTreeMap<String, Vec<AgentManifestGrantExpiry>>,
 }
 
 impl BoundCouplingSet {
@@ -586,6 +681,19 @@ impl BoundCouplingSet {
         Self {
             snapshot_id: snapshot_id.into(),
             couplings,
+            grant_expiries: BTreeMap::new(),
+        }
+    }
+
+    pub fn new_with_grant_expiries(
+        snapshot_id: impl Into<String>,
+        couplings: Vec<BoundCoupling>,
+        grant_expiries: BTreeMap<String, Vec<AgentManifestGrantExpiry>>,
+    ) -> Self {
+        Self {
+            snapshot_id: snapshot_id.into(),
+            couplings,
+            grant_expiries,
         }
     }
 }
@@ -635,19 +743,32 @@ pub struct BoundCouplingFunction {
 #[derive(Clone, Debug, Default)]
 struct OperationBindingAccumulator {
     grants: BTreeSet<String>,
+    grant_expiries: BTreeSet<AgentManifestGrantExpiry>,
     operations: BTreeSet<String>,
     direct_tools: BTreeSet<AgentManifestDirectToolBinding>,
     whole_record: bool,
 }
 
 impl OperationBindingAccumulator {
+    #[cfg(test)]
     fn merge(
         &mut self,
         grants: BTreeSet<String>,
         operation: Option<String>,
         direct_tool: Option<AgentManifestDirectToolBinding>,
     ) {
+        self.merge_with_expiries(grants, BTreeSet::new(), operation, direct_tool);
+    }
+
+    fn merge_with_expiries(
+        &mut self,
+        grants: BTreeSet<String>,
+        grant_expiries: BTreeSet<AgentManifestGrantExpiry>,
+        operation: Option<String>,
+        direct_tool: Option<AgentManifestDirectToolBinding>,
+    ) {
         self.grants.extend(grants);
+        self.grant_expiries.extend(grant_expiries);
         if let Some(direct_tool) = direct_tool {
             self.direct_tools.insert(direct_tool);
         }
@@ -1629,14 +1750,42 @@ fn skill_discovery_context_segment(
     }
 }
 
+struct BoundCouplings {
+    couplings: Vec<BoundCoupling>,
+    grant_expiries: BTreeMap<String, Vec<AgentManifestGrantExpiry>>,
+    grant_bindings: Vec<AgentManifestGrantBindingReceipt>,
+}
+
 fn bind_couplings(
     couplings: &[AgentManifestCoupling],
     operation_registry_root: Option<&Path>,
-) -> CooldisResult<Vec<BoundCoupling>> {
-    couplings
-        .iter()
-        .map(|coupling| bind_coupling(coupling, operation_registry_root))
-        .collect()
+    now_ms: i64,
+) -> CooldisResult<BoundCouplings> {
+    let mut bound = Vec::new();
+    let mut expiries = BTreeMap::new();
+    let mut grant_bindings = Vec::new();
+    for coupling in couplings {
+        let mut receipts =
+            grant_binding_receipts("coupling", &coupling.id, &coupling.grants, now_ms)?;
+        if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
+            receipts
+                .iter_mut()
+                .for_each(|receipt| receipt.surface_excluded = true);
+            grant_bindings.extend(receipts);
+            continue;
+        }
+        let coupling_expiries = grant_expiries(&coupling.grants);
+        if !coupling_expiries.is_empty() {
+            expiries.insert(coupling.id.clone(), coupling_expiries);
+        }
+        bound.push(bind_coupling(coupling, operation_registry_root)?);
+        grant_bindings.extend(receipts);
+    }
+    Ok(BoundCouplings {
+        couplings: bound,
+        grant_expiries: expiries,
+        grant_bindings,
+    })
 }
 
 fn bind_coupling(
@@ -1687,11 +1836,12 @@ fn bind_coupling(
     } else {
         CouplingRole::Projection
     };
+    let grants = grant_capabilities(&coupling.grants);
     let verification = verify_operation_ref_for_subject(
         "coupling",
         &coupling.id,
         &coupling.function_ref,
-        &coupling.grants,
+        &grants,
         registry_root,
     )?;
     let operation_name = match executor_kind {
@@ -1904,24 +2054,114 @@ fn write_canonical_json(value: &JsonValue, output: &mut Vec<u8>) -> CooldisResul
     Ok(())
 }
 
+fn grant_capabilities(grants: &[AgentManifestGrant]) -> Vec<String> {
+    grants
+        .iter()
+        .map(|grant| grant.capability().to_string())
+        .collect()
+}
+
+fn grant_expiries(grants: &[AgentManifestGrant]) -> Vec<AgentManifestGrantExpiry> {
+    grants
+        .iter()
+        .filter_map(|grant| grant.expiry().cloned())
+        .collect()
+}
+
+fn grant_binding_receipts(
+    subject_kind: &str,
+    subject_id: &str,
+    grants: &[AgentManifestGrant],
+    now_ms: i64,
+) -> CooldisResult<Vec<AgentManifestGrantBindingReceipt>> {
+    grants
+        .iter()
+        .map(|grant| {
+            let expires_at = grant.expiry().map(|expiry| expiry.expires_at.clone());
+            let lapsed_at_bind = match grant.expiry() {
+                Some(expiry) => now_ms > grant_expiry_timestamp_ms(expiry)?,
+                None => false,
+            };
+            Ok(AgentManifestGrantBindingReceipt {
+                subject_kind: subject_kind.to_string(),
+                subject_id: subject_id.to_string(),
+                capability: grant.capability().to_string(),
+                expires_at,
+                lapsed_at_bind,
+                surface_excluded: false,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn grant_expiry_timestamp_ms(expiry: &AgentManifestGrantExpiry) -> CooldisResult<i64> {
+    chrono::DateTime::parse_from_rfc3339(&expiry.expires_at)
+        .map(|instant| instant.timestamp_millis())
+        .map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "grant {:?} has invalid RFC3339 expiry {:?}: {err}",
+                expiry.capability, expiry.expires_at
+            ))
+        })
+}
+
+/// Enforce manifest authority at the consumption point. A running turn keeps
+/// its bound form snapshot, but authority is live: once `now_ms` passes a
+/// grant expiry, the next tool or coupling invocation fails closed.
+pub(crate) fn ensure_grant_expiries_live(
+    expiries: &[AgentManifestGrantExpiry],
+    now_ms: i64,
+) -> CooldisResult<()> {
+    let mut lapsed = Vec::new();
+    for expiry in expiries {
+        if now_ms > grant_expiry_timestamp_ms(expiry)? {
+            lapsed.push(format!(
+                "{} (expired at {})",
+                expiry.capability, expiry.expires_at
+            ));
+        }
+    }
+    if lapsed.is_empty() {
+        Ok(())
+    } else {
+        Err(CooldisError::RuntimeExecution(format!(
+            "missing capability grants: {}",
+            lapsed.join(", ")
+        )))
+    }
+}
+
 async fn bind_tools(
     tools: &[AgentManifestTool],
     operation_registry_root: Option<&Path>,
     configured_mcp_server_refs: &BTreeSet<String>,
     tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    now_ms: i64,
 ) -> CooldisResult<BoundTools> {
     let mut tool_ids = Vec::new();
     let mut granted = BTreeSet::new();
     let mut operation_bindings = OperationBindingMap::new();
     let mut direct_tool_names = BTreeSet::new();
     let mut tool_universes = Vec::new();
+    let mut grant_bindings = Vec::new();
     for tool in tools {
         match tool {
             AgentManifestTool::Bash(tool) => {
-                bind_operation_ref(
+                let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
+                if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
+                    receipts
+                        .iter_mut()
+                        .for_each(|receipt| receipt.surface_excluded = true);
+                    grant_bindings.extend(receipts);
+                    continue;
+                }
+                let grants = grant_capabilities(&tool.grants);
+                let grant_expiries = grant_expiries(&tool.grants);
+                bind_operation_ref_with_expiries(
                     &tool.id,
                     &tool.operation_ref,
-                    &tool.grants,
+                    &grants,
+                    &grant_expiries,
                     None,
                     operation_registry_root,
                     &mut granted,
@@ -1929,18 +2169,30 @@ async fn bind_tools(
                 )
                 .await?;
                 tool_ids.push(tool.id.clone());
+                grant_bindings.extend(receipts);
             }
             AgentManifestTool::Direct(tool) => {
+                let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
+                if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
+                    receipts
+                        .iter_mut()
+                        .for_each(|receipt| receipt.surface_excluded = true);
+                    grant_bindings.extend(receipts);
+                    continue;
+                }
                 if !direct_tool_names.insert(tool.tool_name.clone()) {
                     return Err(CooldisError::RuntimeFactory(format!(
                         "duplicate direct tool_name surface {:?}",
                         tool.tool_name
                     )));
                 }
-                bind_operation_ref(
+                let grants = grant_capabilities(&tool.grants);
+                let grant_expiries = grant_expiries(&tool.grants);
+                bind_operation_ref_with_expiries(
                     &tool.id,
                     &tool.operation_ref,
-                    &tool.grants,
+                    &grants,
+                    &grant_expiries,
                     Some(&tool.tool_name),
                     operation_registry_root,
                     &mut granted,
@@ -1948,8 +2200,17 @@ async fn bind_tools(
                 )
                 .await?;
                 tool_ids.push(tool.id.clone());
+                grant_bindings.extend(receipts);
             }
             AgentManifestTool::ProtocolImport(tool) => {
+                let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
+                if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
+                    receipts
+                        .iter_mut()
+                        .for_each(|receipt| receipt.surface_excluded = true);
+                    grant_bindings.extend(receipts);
+                    continue;
+                }
                 if !configured_mcp_server_refs.contains(&tool.server_ref) {
                     return Err(CooldisError::RuntimeFactory(format!(
                         "protocol tool {:?} server_ref {:?} is not configured",
@@ -1965,14 +2226,21 @@ async fn bind_tools(
                         pin.tool_name
                     )));
                 }
+                granted.extend(
+                    tool.grants
+                        .iter()
+                        .map(|grant| grant.capability().to_string()),
+                );
                 tool_universes.push(binding);
                 tool_ids.push(tool.id.clone());
+                grant_bindings.extend(receipts);
             }
         }
     }
     Ok(BoundTools {
         tool_ids,
         granted: granted.into_iter().collect(),
+        grant_bindings,
         operation_bindings: operation_bindings_from_map(operation_bindings),
         tool_universes,
     })
@@ -2125,6 +2393,7 @@ fn operation_bindings_from_map(
                 name,
                 artifact_hash,
                 grants: binding.grants.into_iter().collect(),
+                grant_expiries: binding.grant_expiries.into_iter().collect(),
                 operations,
                 direct_tools: binding.direct_tools.into_iter().collect(),
             }
@@ -2201,16 +2470,41 @@ async fn bind_protocol_tool_import(
         server_ref: tool.server_ref.clone(),
         include_tools,
         pin,
+        grant_expiries: grant_expiries(&tool.grants),
         discovery,
     };
     binding.validate()?;
     Ok(binding)
 }
 
+#[cfg(test)]
 async fn bind_operation_ref(
     tool_id: &str,
     operation_ref: &str,
     grants: &[String],
+    direct_tool_name: Option<&str>,
+    operation_registry_root: Option<&Path>,
+    granted: &mut BTreeSet<String>,
+    operation_bindings: &mut OperationBindingMap,
+) -> CooldisResult<()> {
+    bind_operation_ref_with_expiries(
+        tool_id,
+        operation_ref,
+        grants,
+        &[],
+        direct_tool_name,
+        operation_registry_root,
+        granted,
+        operation_bindings,
+    )
+    .await
+}
+
+async fn bind_operation_ref_with_expiries(
+    tool_id: &str,
+    operation_ref: &str,
+    grants: &[String],
+    grant_expiries: &[AgentManifestGrantExpiry],
     direct_tool_name: Option<&str>,
     operation_registry_root: Option<&Path>,
     granted: &mut BTreeSet<String>,
@@ -2233,6 +2527,7 @@ async fn bind_operation_ref(
             Ok::<AgentManifestDirectToolBinding, CooldisError>(AgentManifestDirectToolBinding {
                 tool_name: tool_name.to_string(),
                 operation,
+                grant_expiries: grant_expiries.to_vec(),
             })
         })
         .transpose()?;
@@ -2240,8 +2535,9 @@ async fn bind_operation_ref(
     operation_bindings
         .entry((verification.name, verification.artifact_hash))
         .or_default()
-        .merge(
+        .merge_with_expiries(
             verification.grants,
+            grant_expiries.iter().cloned().collect(),
             verification.operation,
             direct_tool_binding,
         );
@@ -2565,6 +2861,10 @@ pub struct AgentManifestBindReceipt {
     pub couplings: Vec<AgentManifestCouplingBinding>,
     /// The union of effect grants on the bound tool bindings.
     pub granted: Vec<String>,
+    /// Per-row expiry witness for manifest tool and coupling grants. Expired
+    /// rows remain here even though their runtime surface was excluded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_bindings: Vec<AgentManifestGrantBindingReceipt>,
     /// Runtime defaults after allowlisted overrides were applied.
     pub effective_runtime: AgentManifestRuntimeDefaults,
     /// Which override keys the caller actually exercised.
@@ -2578,6 +2878,24 @@ pub struct AgentManifestBindReceipt {
     /// receipts written before workspace binding existed keep decoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<AgentManifestResolvedWorkspaceMount>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestGrantBindingReceipt {
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lapsed_at_bind: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub surface_excluded: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The placement resolved for a manifest-backed thread at bind time.
@@ -2796,12 +3114,14 @@ pub struct AgentManifestCouplingBinding {
     pub operation_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
     pub budget: AgentManifestCouplingBudget,
     pub config_hash: String,
 }
 
 impl AgentManifestCouplingBinding {
-    fn from_bound(coupling: &BoundCoupling) -> Self {
+    fn from_bound(coupling: &BoundCoupling, grant_expiries: Vec<AgentManifestGrantExpiry>) -> Self {
         let source_streams = coupling
             .source_selectors
             .iter()
@@ -2834,6 +3154,7 @@ impl AgentManifestCouplingBinding {
             artifact_hash: coupling.function.artifact_hash.clone(),
             operation_name: coupling.function.operation_name.clone(),
             grants: coupling.grants.clone(),
+            grant_expiries,
             budget: coupling.budget.clone(),
             config_hash: coupling.config_hash.clone(),
         }
@@ -2847,6 +3168,8 @@ pub struct AgentManifestOperationBinding {
     pub artifact_hash: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
     /// Empty means the binding exposes the whole record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<String>,
@@ -2860,6 +3183,8 @@ pub struct AgentManifestOperationBinding {
 pub struct AgentManifestDirectToolBinding {
     pub tool_name: String,
     pub operation: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
 }
 
 /// Apply caller overrides onto the manifest's runtime defaults, enforcing

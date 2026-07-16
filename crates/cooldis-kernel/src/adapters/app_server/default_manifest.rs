@@ -266,7 +266,14 @@ fn default_manifest_tools(
                 let grants = record
                     .manifest
                     .operation(operation_name)
-                    .map(|operation| operation.required_capabilities.clone())
+                    .map(|operation| {
+                        operation
+                            .required_capabilities
+                            .iter()
+                            .cloned()
+                            .map(Into::into)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 tools.push(AgentManifestTool::Direct(AgentManifestDirectTool {
                     id: format!("{COOLDIS_THREADS_PACKAGE}.{operation_name}"),
@@ -312,7 +319,12 @@ fn default_manifest_tools(
         if record.name == COOLDIS_THREADS_PACKAGE {
             continue;
         }
-        let grants = record.capability_grants.iter().cloned().collect::<Vec<_>>();
+        let grants = record
+            .capability_grants
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect::<Vec<_>>();
         for operation in &record.projections.operations {
             tools.push(AgentManifestTool::Bash(AgentManifestBashTool {
                 id: format!("{}.{}", record.name, operation.operation_name),
@@ -506,7 +518,7 @@ struct DefaultManifestToolToml<'a> {
     tool_name: Option<&'a str>,
     operation_ref: &'a str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    grants: &'a Vec<String>,
+    grants: &'a Vec<crate::AgentManifestGrant>,
 }
 
 #[derive(Serialize)]

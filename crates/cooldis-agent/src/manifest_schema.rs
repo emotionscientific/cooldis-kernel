@@ -109,6 +109,7 @@ impl AgentManifestSchema {
         }
 
         reject_reserved_resource_kinds(value)?;
+        validate_raw_grant_shapes(value)?;
 
         let identity = required_section(value, "agent")?;
         let model_profiles = optional_section(value, "model_profiles")?.unwrap_or_default();
@@ -562,7 +563,7 @@ pub struct AgentManifestBashTool {
     /// Effect grants ride on the binding that uses them (audit section 10);
     /// there is no manifest-global grant pool.
     #[serde(default)]
-    pub grants: Vec<String>,
+    pub grants: Vec<AgentManifestGrant>,
 }
 
 /// A structured model/tool-router call exposed outside bash.
@@ -574,7 +575,7 @@ pub struct AgentManifestDirectTool {
     /// `op://...` operation artifact reference.
     pub operation_ref: String,
     #[serde(default)]
-    pub grants: Vec<String>,
+    pub grants: Vec<AgentManifestGrant>,
 }
 
 /// A protocol-shaped tool universe mounted through the search surface. The
@@ -605,7 +606,53 @@ pub struct AgentManifestProtocolToolImport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_tools: Option<Vec<String>>,
     #[serde(default)]
-    pub grants: Vec<String>,
+    pub grants: Vec<AgentManifestGrant>,
+}
+
+/// One effect grant on a manifest tool or coupling row. The untagged string
+/// variant preserves the exact V1 wire shape and content hash for manifests
+/// that do not opt into expiry.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AgentManifestGrant {
+    Capability(String),
+    Expiring(AgentManifestGrantExpiry),
+}
+
+impl AgentManifestGrant {
+    pub fn capability(&self) -> &str {
+        match self {
+            Self::Capability(capability) => capability,
+            Self::Expiring(grant) => &grant.capability,
+        }
+    }
+
+    pub fn expiry(&self) -> Option<&AgentManifestGrantExpiry> {
+        match self {
+            Self::Capability(_) => None,
+            Self::Expiring(grant) => Some(grant),
+        }
+    }
+}
+
+impl From<String> for AgentManifestGrant {
+    fn from(capability: String) -> Self {
+        Self::Capability(capability)
+    }
+}
+
+impl From<&str> for AgentManifestGrant {
+    fn from(capability: &str) -> Self {
+        Self::Capability(capability.to_string())
+    }
+}
+
+/// Absolute UTC expiry attached to one manifest capability grant.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestGrantExpiry {
+    pub capability: String,
+    pub expires_at: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,7 +817,7 @@ pub struct AgentManifestCoupling {
     pub id: String,
     pub function_ref: String,
     #[serde(default)]
-    pub grants: Vec<String>,
+    pub grants: Vec<AgentManifestGrant>,
     pub trigger: AgentManifestCouplingTrigger,
     pub source: AgentManifestCouplingSource,
     pub sink: AgentManifestCouplingSink,
@@ -1158,6 +1205,77 @@ fn reject_reserved_resource_kinds(value: &toml::Value) -> CooldisResult<()> {
     Ok(())
 }
 
+fn validate_raw_grant_shapes(value: &toml::Value) -> CooldisResult<()> {
+    for (section, subject_kind) in [("tools", "tool"), ("couplings", "coupling")] {
+        let Some(subjects) = value.get(section).and_then(toml::Value::as_array) else {
+            continue;
+        };
+        for (subject_index, subject) in subjects.iter().enumerate() {
+            let subject_id = subject
+                .get("id")
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("<row {subject_index}>"));
+            let Some(grants) = subject.get("grants").and_then(toml::Value::as_array) else {
+                continue;
+            };
+            for (grant_index, grant) in grants.iter().enumerate() {
+                if grant.is_str() {
+                    continue;
+                }
+                let Some(grant) = grant.as_table() else {
+                    return Err(CooldisError::RuntimeFactory(format!(
+                        "{subject_kind} {subject_id:?} grant {grant_index} must be a capability string or an expiry object, got {}",
+                        toml_value_kind(grant)
+                    )));
+                };
+                if let Some(field) = grant
+                    .keys()
+                    .find(|field| !matches!(field.as_str(), "capability" | "expires_at"))
+                {
+                    return Err(CooldisError::RuntimeFactory(format!(
+                        "{subject_kind} {subject_id:?} grant {grant_index} object has unknown field {field:?}"
+                    )));
+                }
+                for field in ["capability", "expires_at"] {
+                    match grant.get(field) {
+                        Some(toml::Value::String(_)) => {}
+                        Some(value) => {
+                            let expected = if field == "expires_at" {
+                                "a quoted RFC3339 UTC string"
+                            } else {
+                                "a string"
+                            };
+                            return Err(CooldisError::RuntimeFactory(format!(
+                                "{subject_kind} {subject_id:?} grant {grant_index} {field} must be {expected}, got {}",
+                                toml_value_kind(value)
+                            )));
+                        }
+                        None => {
+                            return Err(CooldisError::RuntimeFactory(format!(
+                                "{subject_kind} {subject_id:?} grant {grant_index} object requires {field:?}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn toml_value_kind(value: &toml::Value) -> &'static str {
+    match value {
+        toml::Value::String(_) => "string",
+        toml::Value::Integer(_) => "integer",
+        toml::Value::Float(_) => "float",
+        toml::Value::Boolean(_) => "boolean",
+        toml::Value::Datetime(_) => "datetime",
+        toml::Value::Array(_) => "array",
+        toml::Value::Table(_) => "table",
+    }
+}
+
 fn validate_ref_scheme(label: &str, value: &str, scheme: &str) -> CooldisResult<()> {
     let rest = value.strip_prefix(scheme).ok_or_else(|| {
         CooldisError::RuntimeFactory(format!("{label} {value:?} must start with {scheme}"))
@@ -1264,12 +1382,15 @@ fn validate_surface(label: &str, value: &str) -> CooldisResult<()> {
     Ok(())
 }
 
-fn validate_grants(id: &str, grants: &[String]) -> CooldisResult<()> {
+fn validate_grants(id: &str, grants: &[AgentManifestGrant]) -> CooldisResult<()> {
     for grant in grants {
-        if grant.trim().is_empty() {
+        if grant.capability().trim().is_empty() {
             return Err(CooldisError::RuntimeFactory(format!(
                 "tool {id:?} has an empty grant"
             )));
+        }
+        if let Some(expiry) = grant.expiry() {
+            validate_grant_expiry("tool", id, expiry)?;
         }
     }
     Ok(())
@@ -1354,13 +1475,43 @@ fn validate_coupling_id(id: &str) -> CooldisResult<()> {
     Ok(())
 }
 
-fn validate_coupling_grants(id: &str, grants: &[String]) -> CooldisResult<()> {
+fn validate_coupling_grants(id: &str, grants: &[AgentManifestGrant]) -> CooldisResult<()> {
     for grant in grants {
-        if grant.trim().is_empty() {
+        if grant.capability().trim().is_empty() {
             return Err(CooldisError::RuntimeFactory(format!(
                 "coupling {id:?} has an empty grant"
             )));
         }
+        if let Some(expiry) = grant.expiry() {
+            validate_grant_expiry("coupling", id, expiry)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_grant_expiry(
+    subject_kind: &str,
+    subject_id: &str,
+    expiry: &AgentManifestGrantExpiry,
+) -> CooldisResult<()> {
+    let parsed = expiry
+        .expires_at
+        .parse::<toml::value::Datetime>()
+        .map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "{subject_kind} {subject_id:?} grant {:?} expires_at must be an RFC3339 UTC instant: {err}",
+                expiry.capability
+            ))
+        })?;
+    let is_utc = matches!(
+        parsed.offset,
+        Some(toml::value::Offset::Z | toml::value::Offset::Custom { minutes: 0 })
+    );
+    if parsed.date.is_none() || parsed.time.is_none() || !is_utc {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "{subject_kind} {subject_id:?} grant {:?} expires_at must be an RFC3339 UTC instant",
+            expiry.capability
+        )));
     }
     Ok(())
 }

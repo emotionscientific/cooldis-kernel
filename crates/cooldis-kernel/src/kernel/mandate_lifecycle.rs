@@ -21,6 +21,7 @@ pub struct MandateStartRequest {
     pub catch_up: Option<MandateCatchUpPolicy>,
     pub input_template: Option<String>,
     pub snapshot_id: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,7 +74,9 @@ pub fn validate_mandate_start_request(
     now: DateTime<Utc>,
 ) -> CooldisResult<()> {
     let catch_up = request.catch_up.unwrap_or_default();
-    validate_schedule(&request.schedule, catch_up, now)
+    validate_schedule(&request.schedule, catch_up, now)?;
+    let _ = mandate_expiry_ms(request.expires_at.as_deref(), now)?;
+    Ok(())
 }
 
 pub async fn start_mandate(
@@ -84,6 +87,7 @@ pub async fn start_mandate(
 ) -> CooldisResult<MandateStartReceipt> {
     validate_mandate_start_request(&request, now)?;
     let catch_up = request.catch_up.unwrap_or_default();
+    let expires_at_ms = mandate_expiry_ms(request.expires_at.as_deref(), now)?;
     let thread_id = coordinates.thread_id.to_string();
     let payload = MandateStartedPayload {
         subject: MandateSubject {
@@ -97,7 +101,7 @@ pub async fn start_mandate(
             .unwrap_or_else(|| SCHEDULE_SNAPSHOT_ID.to_string()),
         thread_id: Some(thread_id),
         max_continuations: None,
-        expires_at_ms: None,
+        expires_at_ms,
         schedule: Some(request.schedule),
         max_occurrences: request.max_occurrences,
         catch_up: Some(catch_up),
@@ -118,6 +122,29 @@ pub async fn start_mandate(
         .pop()
         .ok_or_else(|| CooldisError::History("mandate.start appended no event".to_string()))?;
     Ok(MandateStartReceipt { event, payload })
+}
+
+fn mandate_expiry_ms(expires_at: Option<&str>, now: DateTime<Utc>) -> CooldisResult<Option<i64>> {
+    let Some(expires_at) = expires_at else {
+        return Ok(None);
+    };
+    let parsed = DateTime::parse_from_rfc3339(expires_at).map_err(|err| {
+        CooldisError::RuntimeExecution(format!(
+            "mandate expiry {expires_at:?} must be an RFC3339 UTC instant: {err}"
+        ))
+    })?;
+    if parsed.offset().local_minus_utc() != 0 {
+        return Err(CooldisError::RuntimeExecution(format!(
+            "mandate expiry {expires_at:?} must be an RFC3339 UTC instant"
+        )));
+    }
+    let parsed = parsed.with_timezone(&Utc);
+    if now > parsed {
+        return Err(CooldisError::RuntimeExecution(format!(
+            "mandate expiry {expires_at} is already expired"
+        )));
+    }
+    Ok(Some(parsed.timestamp_millis()))
 }
 
 pub async fn list_active_mandates(
@@ -398,6 +425,7 @@ mod tests {
             catch_up: None,
             input_template: None,
             snapshot_id: None,
+            expires_at: None,
         };
         assert!(validate_mandate_start_request(&malformed_cron, now()).is_err());
 
@@ -410,6 +438,7 @@ mod tests {
             catch_up: None,
             input_template: None,
             snapshot_id: None,
+            expires_at: None,
         };
         assert!(validate_mandate_start_request(&unknown_tz, now()).is_err());
 
@@ -419,6 +448,7 @@ mod tests {
             catch_up: None,
             input_template: None,
             snapshot_id: None,
+            expires_at: None,
         };
         assert!(validate_mandate_start_request(&short_interval, now()).is_err());
 
@@ -431,6 +461,7 @@ mod tests {
             catch_up: None,
             input_template: None,
             snapshot_id: None,
+            expires_at: None,
         };
         assert!(validate_mandate_start_request(&sub_minute_cron, now()).is_err());
     }
@@ -446,6 +477,7 @@ mod tests {
             catch_up: Some(MandateCatchUpPolicy::SkipMissed),
             input_template: None,
             snapshot_id: None,
+            expires_at: None,
         };
         assert!(validate_mandate_start_request(&skip, now()).is_err());
 
@@ -455,6 +487,7 @@ mod tests {
             catch_up: Some(MandateCatchUpPolicy::CoalesceMissed),
             input_template: None,
             snapshot_id: None,
+            expires_at: None,
         };
         validate_mandate_start_request(&coalesce, now()).unwrap();
     }
@@ -472,6 +505,7 @@ mod tests {
                 catch_up: Some(MandateCatchUpPolicy::SkipMissed),
                 input_template: Some("continue".to_string()),
                 snapshot_id: Some("snapshot-a".to_string()),
+                expires_at: Some("2026-07-04T12:05:00Z".to_string()),
             },
             now(),
         )
@@ -479,6 +513,7 @@ mod tests {
         .unwrap();
         assert_eq!(receipt.event.kind, EventKind::MandateStarted);
         assert_eq!(receipt.payload.schedule.is_some(), true);
+        assert_eq!(receipt.payload.expires_at_ms, Some(1_783_166_700_000));
 
         let active = list_active_mandates(&store, &coordinates).await.unwrap();
         assert_eq!(active.len(), 1);
@@ -500,6 +535,37 @@ mod tests {
                 .unwrap()
                 .len(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn mandate_start_rejects_an_already_expired_expiry() {
+        let store = InMemorySessionStore::default();
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let err = start_mandate(
+            &store,
+            &coordinates,
+            MandateStartRequest {
+                schedule: MandateSchedulePayload::Interval { every_ms: 60_000 },
+                max_occurrences: None,
+                catch_up: None,
+                input_template: None,
+                snapshot_id: None,
+                expires_at: Some("2026-07-04T11:59:59Z".to_string()),
+            },
+            now(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mandate expiry"));
+        assert!(err.to_string().contains("2026-07-04T11:59:59Z"));
+        assert!(
+            store
+                .read_events(&control_stream_id(&coordinates), None)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

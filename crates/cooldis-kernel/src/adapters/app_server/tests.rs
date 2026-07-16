@@ -7198,6 +7198,7 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
             grants: vec!["net:https://example.com".to_string()],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]

@@ -3,6 +3,7 @@ use crate::{
     CouplingRole, EventKind, EventOrigin, EventRecord, EventRecordId, EventStore, EventStreamId,
     ThreadCoordinates,
 };
+use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
@@ -580,9 +581,18 @@ pub async fn decide_turn_continuation<S: EventStore + ?Sized>(
     if let Some(expires_at_ms) = mandate.expires_at_ms
         && request.now_ms > expires_at_ms
     {
+        let expires_at = Utc
+            .timestamp_millis_opt(expires_at_ms)
+            .single()
+            .map(|instant| instant.to_rfc3339_opts(SecondsFormat::Millis, true));
         return Ok(TurnContinuationDecision::Reject {
             consumed_request_id: Some(consumed_request_id),
-            reason: "continuation mandate expired".to_string(),
+            reason: match expires_at {
+                Some(expires_at) => {
+                    format!("continuation mandate expired at {expires_at_ms} ({expires_at})")
+                }
+                None => format!("continuation mandate expired at {expires_at_ms}"),
+            },
             fail_closed: false,
         });
     }
@@ -1179,6 +1189,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_request_after_mandate_expiry_rejects_and_names_the_lapse() {
+        let fixture = ToolDecisionFixture::new().await;
+        fixture.append_turn_continue("try again").await;
+        fixture
+            .append_mandate_started(MandateStartedPayload {
+                subject: MandateSubject {
+                    thread_id: None,
+                    loop_id: Some("loop-1".to_string()),
+                },
+                mandate_id: "mandate-1".to_string(),
+                snapshot_id: fixture.snapshot_id.clone(),
+                thread_id: Some(fixture.coordinates.thread_id.to_string()),
+                max_continuations: None,
+                expires_at_ms: Some(999),
+                schedule: None,
+                max_occurrences: None,
+                catch_up: None,
+                input_template: None,
+            })
+            .await;
+
+        let decision = decide_turn_continuation(&fixture.store, fixture.continuation_request())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            decision,
+            TurnContinuationDecision::Reject {
+                consumed_request_id: Some(_),
+                reason,
+                fail_closed: false,
+            } if reason == "continuation mandate expired at 999 (1970-01-01T00:00:00.999Z)"
+        ));
+    }
+
+    #[tokio::test]
     async fn revoked_mandate_rejects_continuation() {
         let fixture = ToolDecisionFixture::new().await;
         fixture.append_turn_continue("try again").await;
@@ -1459,6 +1505,7 @@ mod tests {
                 tool_universes: Vec::new(),
                 couplings,
                 granted: Vec::new(),
+                grant_bindings: Vec::new(),
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
@@ -1537,6 +1584,7 @@ mod tests {
             artifact_hash: "abc".to_string(),
             operation_name: Some("bash_gate".to_string()),
             grants: Vec::new(),
+            grant_expiries: Vec::new(),
             budget: AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }

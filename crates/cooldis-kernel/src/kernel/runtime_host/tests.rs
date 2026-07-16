@@ -2498,6 +2498,102 @@ async fn loop_continuation_accepts_request_and_submits_next_turn_once() {
 }
 
 #[tokio::test]
+async fn catch_up_continuation_fired_before_expiry_is_rejected_after_expiry() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "expired-catch-up"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread.context().coordinates.thread_id;
+    let coordinates = thread.context().coordinates.clone();
+    wait_for_status(&thread, ThreadStatus::Idle).await;
+    let parent = append_loop_parent_completed(store.as_ref(), &coordinates, "turn-1").await;
+    store
+        .append_events(
+            &control_stream_id(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::MandateStarted,
+                serde_json::to_value(MandateStartedPayload {
+                    subject: MandateSubject {
+                        thread_id: Some(coordinates.thread_id.to_string()),
+                        loop_id: Some("loop-catch-up".to_string()),
+                    },
+                    mandate_id: "mandate-catch-up".to_string(),
+                    snapshot_id: "schedule.v1".to_string(),
+                    thread_id: Some(coordinates.thread_id.to_string()),
+                    max_continuations: None,
+                    expires_at_ms: Some(1_000),
+                    schedule: Some(MandateSchedulePayload::Interval { every_ms: 60_000 }),
+                    max_occurrences: None,
+                    catch_up: Some(MandateCatchUpPolicy::CoalesceMissed),
+                    input_template: Some("catch up".to_string()),
+                })
+                .unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+    let mut request = NewEventRecord::discharged(
+        coordinates.clone(),
+        EventKind::TurnContinueRequested,
+        serde_json::to_value(TurnContinueRequestedPayload {
+            subject: TurnContinuationSubject {
+                loop_id: "loop-catch-up".to_string(),
+                parent_turn_id: "turn-1".to_string(),
+            },
+            snapshot_id: "schedule.v1".to_string(),
+            next_turn_input: "catch up".to_string(),
+        })
+        .unwrap(),
+        EventProvenance {
+            source_streams: vec![EventStreamId::for_thread(&coordinates)],
+            source_event_ids: vec![parent.id],
+            discharged_by: Some("coupling:std::schedule.cron".to_string()),
+            function: Some("schedule_continuation/v1".to_string()),
+            ..EventProvenance::default()
+        },
+    );
+    request.created_at_ms = 900;
+    store
+        .append_events(&control_stream_id(&coordinates), vec![request])
+        .await
+        .unwrap();
+
+    let receipt = host
+        .continue_turn_if_requested(thread_id, "loop-catch-up", "turn-1", "turn-2", 1_001, 0)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        receipt,
+        LoopContinuationReceipt::Rejected { reason, .. }
+            if reason == "continuation mandate expired at 1000 (1970-01-01T00:00:01.000Z)"
+    ));
+    let thread_events = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    assert!(thread_events.iter().all(|event| {
+        event.kind != EventKind::TurnSubmitted
+            || event.payload["turn_id"].as_str() != Some("turn-2")
+    }));
+    let control_events = store
+        .read_events(&control_stream_id(&coordinates), None)
+        .await
+        .unwrap();
+    assert!(control_events.iter().any(|event| {
+        event.kind == EventKind::TurnContinuationRejected
+            && event.payload["reason"]
+                == "continuation mandate expired at 1000 (1970-01-01T00:00:01.000Z)"
+    }));
+}
+
+#[tokio::test]
 async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider() {
     let root = std::env::temp_dir()
         .join("cooldis-runtime-host-tests")

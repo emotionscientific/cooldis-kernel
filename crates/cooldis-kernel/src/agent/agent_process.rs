@@ -260,6 +260,7 @@ impl KernelScheduleOperationProvider {
                             catch_up: args.catch_up,
                             input_template: args.input_template,
                             snapshot_id: None,
+                            expires_at: args.expires_at,
                         },
                     )
                     .await?;
@@ -758,6 +759,8 @@ struct MandateStartArgs {
     catch_up: Option<MandateCatchUpPolicy>,
     #[serde(default)]
     input_template: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

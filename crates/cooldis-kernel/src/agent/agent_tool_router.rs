@@ -1,7 +1,7 @@
 use crate::{
-    CanonicalMessage, CooldisError, CooldisResult, OPERATION_METADATA_RUNTIME_KIND,
-    OperationProjection, OperationRegistry, ToolDefinition, TurnContext, TurnContextSnapshot,
-    WasmOperationValueKind,
+    AgentManifestGrantExpiry, CanonicalMessage, CooldisError, CooldisResult,
+    OPERATION_METADATA_RUNTIME_KIND, OperationProjection, OperationRegistry, ToolDefinition,
+    TurnContext, TurnContextSnapshot, WasmOperationValueKind,
 };
 use async_trait::async_trait;
 use cooldis_process::{CooldisProcessBackend, CooldisProcessId};
@@ -16,6 +16,7 @@ pub struct AgentToolRouter {
     operation_registry: Arc<OperationRegistry>,
     kernel_tool_providers: Vec<Arc<dyn AgentKernelToolProvider>>,
     capability_grants: BTreeSet<String>,
+    capability_grant_expiries: Vec<AgentManifestGrantExpiry>,
     tool_aliases: BTreeMap<String, OperationToolAlias>,
 }
 
@@ -101,6 +102,7 @@ pub struct OperationToolAlias {
     pub tool_name: String,
     pub registered_name: String,
     pub operation_name: String,
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
 }
 
 #[async_trait]
@@ -112,11 +114,29 @@ pub trait AgentKernelToolProvider: Send + Sync + 'static {
         call: AgentKernelToolCall,
     ) -> CooldisResult<Option<CanonicalMessage>>;
 
+    async fn invoke_tool_call_at(
+        &self,
+        call: AgentKernelToolCall,
+        _now_ms: i64,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        self.invoke_tool_call(call).await
+    }
+
     async fn invoke_tool_call_outcome(
         &self,
         call: AgentKernelToolCall,
     ) -> CooldisResult<AgentKernelToolOutcome> {
         self.invoke_tool_call(call)
+            .await
+            .map(AgentKernelToolOutcome::Completed)
+    }
+
+    async fn invoke_tool_call_outcome_at(
+        &self,
+        call: AgentKernelToolCall,
+        now_ms: i64,
+    ) -> CooldisResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call_at(call, now_ms)
             .await
             .map(AgentKernelToolOutcome::Completed)
     }
@@ -136,6 +156,15 @@ pub trait AgentKernelToolProvider: Send + Sync + 'static {
         let _ = cancellation;
         self.invoke_tool_call_outcome(call).await
     }
+
+    async fn invoke_tool_call_cancellable_at(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+        _now_ms: i64,
+    ) -> CooldisResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call_cancellable(call, cancellation).await
+    }
 }
 
 impl AgentToolRouter {
@@ -144,6 +173,7 @@ impl AgentToolRouter {
             operation_registry,
             kernel_tool_providers: Vec::new(),
             capability_grants: BTreeSet::new(),
+            capability_grant_expiries: Vec::new(),
             tool_aliases: BTreeMap::new(),
         }
     }
@@ -163,6 +193,19 @@ impl AgentToolRouter {
 
     pub fn with_capability_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
         self.capability_grants.extend(grants);
+        self
+    }
+
+    pub fn with_capability_grant_expiry(mut self, expiry: AgentManifestGrantExpiry) -> Self {
+        self.capability_grant_expiries.push(expiry);
+        self
+    }
+
+    pub fn with_capability_grant_expiries(
+        mut self,
+        expiries: impl IntoIterator<Item = AgentManifestGrantExpiry>,
+    ) -> Self {
+        self.capability_grant_expiries.extend(expiries);
         self
     }
 
@@ -235,10 +278,26 @@ impl AgentToolRouter {
         tool_name: impl Into<String>,
         arguments: Value,
     ) -> CanonicalMessage {
+        self.invoke_tool_call_at(
+            call_id,
+            tool_name,
+            arguments,
+            crate::kernel::history::now_ms(),
+        )
+        .await
+    }
+
+    pub async fn invoke_tool_call_at(
+        &self,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+        now_ms: i64,
+    ) -> CanonicalMessage {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
         match self
-            .invoke_tool_call_message(None, &call_id, &tool_name, arguments)
+            .invoke_tool_call_message(None, &call_id, &tool_name, arguments, now_ms)
             .await
         {
             Ok(message) => message,
@@ -256,7 +315,13 @@ impl AgentToolRouter {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
         match self
-            .invoke_tool_call_message(Some(turn_context), &call_id, &tool_name, arguments)
+            .invoke_tool_call_message(
+                Some(turn_context),
+                &call_id,
+                &tool_name,
+                arguments,
+                crate::kernel::history::now_ms(),
+            )
             .await
         {
             Ok(message) => message,
@@ -281,6 +346,7 @@ impl AgentToolRouter {
                 &tool_name,
                 arguments,
                 Some(cancellation),
+                crate::kernel::history::now_ms(),
             )
             .await
         {
@@ -312,8 +378,15 @@ impl AgentToolRouter {
     ) -> CooldisResult<AgentKernelToolOutcome> {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
-        self.invoke_tool_call_outcome_message(None, &call_id, &tool_name, arguments, None)
-            .await
+        self.invoke_tool_call_outcome_message(
+            None,
+            &call_id,
+            &tool_name,
+            arguments,
+            None,
+            crate::kernel::history::now_ms(),
+        )
+        .await
     }
 
     pub async fn invoke_tool_call_outcome_for_turn(
@@ -331,6 +404,7 @@ impl AgentToolRouter {
             &tool_name,
             arguments,
             None,
+            crate::kernel::history::now_ms(),
         )
         .await
     }
@@ -360,9 +434,17 @@ impl AgentToolRouter {
         call_id: &str,
         tool_name: &str,
         arguments: Value,
+        now_ms: i64,
     ) -> CooldisResult<CanonicalMessage> {
         match self
-            .invoke_tool_call_outcome_message(turn_context, call_id, tool_name, arguments, None)
+            .invoke_tool_call_outcome_message(
+                turn_context,
+                call_id,
+                tool_name,
+                arguments,
+                None,
+                now_ms,
+            )
             .await?
         {
             AgentKernelToolOutcome::Completed(Some(message)) => Ok(message),
@@ -385,6 +467,7 @@ impl AgentToolRouter {
         tool_name: &str,
         arguments: Value,
         cancellation: Option<ToolInvocationCancellation>,
+        now_ms: i64,
     ) -> CooldisResult<AgentKernelToolOutcome> {
         if let Some(projection) = self.projection_for_tool_name(tool_name).await? {
             if projection.abi.has_hidden_durable_sink() {
@@ -393,6 +476,13 @@ impl AgentToolRouter {
                 )));
             }
             self.validate_capability_grants(tool_name, &projection)?;
+            crate::agent::manifest_bind::ensure_grant_expiries_live(
+                self.tool_aliases
+                    .get(tool_name)
+                    .map(|alias| alias.grant_expiries.as_slice())
+                    .unwrap_or(&self.capability_grant_expiries),
+                now_ms,
+            )?;
             let input = encode_tool_input(call_id, tool_name, &projection, arguments)?;
             let process = self
                 .operation_registry
@@ -433,10 +523,14 @@ impl AgentToolRouter {
             let outcome = match cancellation {
                 Some(cancellation) => {
                     kernel_tool_provider
-                        .invoke_tool_call_cancellable(call, cancellation)
+                        .invoke_tool_call_cancellable_at(call, cancellation, now_ms)
                         .await?
                 }
-                None => kernel_tool_provider.invoke_tool_call_outcome(call).await?,
+                None => {
+                    kernel_tool_provider
+                        .invoke_tool_call_outcome_at(call, now_ms)
+                        .await?
+                }
             };
             match outcome {
                 AgentKernelToolOutcome::Completed(Some(_)) | AgentKernelToolOutcome::Pending(_) => {
