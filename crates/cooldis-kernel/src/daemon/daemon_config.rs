@@ -514,9 +514,11 @@ impl CooldisIoRouteConfig {
         }
         if self.kind == "telegram.bot" {
             match &self.telegram {
-                Some(telegram) => {
-                    telegram.validate(&format!("io.routes.{}.telegram", self.id), errors)
-                }
+                Some(telegram) => telegram.validate(
+                    &format!("io.routes.{}.telegram", self.id),
+                    self.enabled,
+                    errors,
+                ),
                 None if self.enabled => errors.push(format!(
                     "io.routes {:?} kind telegram.bot requires a telegram webhook config",
                     self.id
@@ -633,7 +635,7 @@ impl Default for CooldisTelegramRouteConfig {
 }
 
 impl CooldisTelegramRouteConfig {
-    fn validate(&self, scope: &str, errors: &mut Vec<String>) {
+    fn validate(&self, scope: &str, enabled: bool, errors: &mut Vec<String>) {
         if self
             .listen
             .as_deref()
@@ -660,6 +662,11 @@ impl CooldisTelegramRouteConfig {
             .is_some_and(|value| value.trim().is_empty())
         {
             errors.push(format!("{scope}.secret_token_env cannot be empty"));
+        }
+        if enabled && self.secret_token.is_none() && self.secret_token_env.is_none() {
+            errors.push(format!(
+                "{scope}.secret_token or secret_token_env is required when the route is enabled"
+            ));
         }
         if self
             .bot_token
