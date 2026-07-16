@@ -1,4 +1,7 @@
-use cooldis::{AppServerListenAddr, CooldisAppServer, CooldisAppServerConfig};
+use cooldis::{
+    AppServerListenAddr, CooldisAppServer, CooldisAppServerConfig, EventKind, EventStore,
+    EventStreamId, SqliteSessionStore,
+};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -116,6 +119,18 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
         prompt["result"]["cooldis"]["assistantText"],
         "local:process smoke"
     );
+    let store = SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+        .await
+        .unwrap();
+    let control_events = store
+        .read_events(&EventStreamId::new(format!("control:{session_id}")), None)
+        .await
+        .unwrap();
+    let thread_events = store
+        .read_events(&EventStreamId::new(format!("thread:{session_id}")), None)
+        .await
+        .unwrap();
+    assert_admission_precedes_execution(&control_events, &thread_events, "surface:acp-adapter");
 
     send(
         &mut stdin,
@@ -135,6 +150,40 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
     serve_task.abort();
     let _ = serve_task.await;
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn assert_admission_precedes_execution(
+    control_events: &[cooldis::EventRecord],
+    thread_events: &[cooldis::EventRecord],
+    route_id: &str,
+) {
+    let admission = control_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::AdmissionDecided && event.payload["route_id"] == route_id
+        })
+        .expect("control stream missing expected admission.decided");
+    let executed = thread_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["runtime_kind"] != "thread_started"
+        })
+        .expect("thread stream missing executed turn session entry");
+    assert!(
+        (
+            admission.created_at_ms,
+            admission.stream_id.to_string(),
+            admission.sequence.get(),
+            admission.id.to_string(),
+        ) < (
+            executed.created_at_ms,
+            executed.stream_id.to_string(),
+            executed.sequence.get(),
+            executed.id.to_string(),
+        ),
+        "admission.decided must precede executed turn session entry"
+    );
 }
 
 async fn send<W>(writer: &mut W, message: &str)

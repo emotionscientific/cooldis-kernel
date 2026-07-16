@@ -234,7 +234,7 @@ async fn dropped_turn_reservation_releases_turn_id() {
 
     drop(
         supervisor
-            .reserve_turn_to_with_admission(
+            .reserve_admitted_turn_to(
                 coordinates,
                 "turn-retry",
                 TurnInput::text("first"),
