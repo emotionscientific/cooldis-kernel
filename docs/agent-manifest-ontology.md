@@ -369,17 +369,23 @@ runtime command is enqueued. Daemon ingress records its route policy context
 `io.ingress.received` event ids) and then schedules through the already-admitted
 runtime path so it cannot double emit.
 
-Non-daemon turn-starting surfaces use the `surface:<name>` route convention. The
-app-server RPC path records `surface:app-server-rpc`; direct
-`RuntimeHost::submit*` records `surface:host-submit`. Their policy hash is the
-canonical hash of the declared trivial surface policy, not an empty string. The
-current journal schema has queue/steer/interrupt/fork/observe/reject/coalesce
-decision values, so the trivial admitted surface policy lowers to
-`decision = "queue"` with `admissible = ["queue"]`. App-server RPC first
-witnesses the input as `io.ingress.received` and names that event in
-`source_ingress_event_ids`; direct host submit has no ingress event, so its
-source list is intentionally empty. CLI chat submits through the operator RPC
-path and inherits the app-server surface admission record.
+Non-daemon turn-starting surfaces use the `surface:<name>` route convention.
+The app-server RPC path records the surface of the initialized client:
+`surface:mcp-adapter`, `surface:acp-adapter`, and `surface:debug-rpc` for the
+bundled adapters, `surface:app-server-rpc` for any other client. The surface
+label is attribution and provenance only; admission authority is the same
+declared surface policy for all of them. Direct `RuntimeHost::submit*` records
+`surface:host-submit`; kernel thread-to-thread submission records
+`surface:kernel-thread-submit`. Their policy hash is the canonical hash of the
+declared trivial surface policy, not an empty string. The current journal
+schema has queue/steer/interrupt/fork/observe/reject/coalesce decision values,
+so the trivial admitted surface policy lowers to `decision = "queue"` with
+`admissible = ["queue"]`. App-server RPC first witnesses the input as
+`io.ingress.received` and names that event in `source_ingress_event_ids`;
+direct host submit has no ingress event, so its source list is intentionally
+empty. CLI chat submits through the operator RPC path and inherits the
+app-server surface admission record. The registry of turn-entry surfaces and
+the coverage ratchet over them live in `kernel/admission.rs`.
 
 In-loop continuations use the same admission law through the continuation gate:
 `turn.continuation.accepted` or `turn.continuation.rejected` records the

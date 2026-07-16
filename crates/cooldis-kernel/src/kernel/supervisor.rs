@@ -528,7 +528,7 @@ impl CooldisSupervisor {
             .await
     }
 
-    pub(crate) async fn submit_turn_to_with_admission(
+    pub(crate) async fn submit_admitted_turn_to(
         &self,
         coordinates: &ThreadCoordinates,
         turn_id: impl Into<String>,
@@ -537,14 +537,19 @@ impl CooldisSupervisor {
         admission: Option<AdmissionGateContext>,
     ) -> CooldisResult<()> {
         self.get_thread_at(coordinates).await?;
-        self.tenant(&coordinates.tenant_id)
-            .await?
-            .host
-            .submit_turn_with_admission(coordinates.thread_id, turn_id, input, mode, admission)
-            .await
+        let tenant = self.tenant(&coordinates.tenant_id).await?;
+        crate::kernel::admission::submit_turn(
+            &tenant.host,
+            coordinates.thread_id,
+            turn_id,
+            input,
+            mode,
+            admission,
+        )
+        .await
     }
 
-    pub(crate) async fn reserve_turn_to_with_admission(
+    pub(crate) async fn reserve_admitted_turn_to(
         &self,
         coordinates: &ThreadCoordinates,
         turn_id: impl Into<String>,
@@ -553,17 +558,16 @@ impl CooldisSupervisor {
         admission: Option<AdmissionGateContext>,
     ) -> CooldisResult<ReservedTurnSubmission> {
         self.get_thread_at(coordinates).await?;
-        self.tenant(&coordinates.tenant_id)
-            .await?
-            .host
-            .reserve_turn_submission_with_admission(
-                coordinates.thread_id,
-                turn_id,
-                input,
-                mode,
-                admission,
-            )
-            .await
+        let tenant = self.tenant(&coordinates.tenant_id).await?;
+        crate::kernel::admission::reserve_turn(
+            &tenant.host,
+            coordinates.thread_id,
+            turn_id,
+            input,
+            mode,
+            admission,
+        )
+        .await
     }
 
     pub async fn compact_thread_at(

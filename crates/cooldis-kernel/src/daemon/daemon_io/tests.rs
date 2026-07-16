@@ -608,6 +608,9 @@ async fn remote_queue_redelivery_enters_child_ingress_once() {
         .read_events(&control_stream_id(&child_coordinates), None)
         .await
         .unwrap();
+    let admission =
+        crate::kernel::admission::assert_admission_precedes_turn_records(&control, &events);
+    assert_eq!(admission.payload["route_id"], "cooldis.remote:ingress");
     assert_eq!(
         control
             .iter()
@@ -6433,6 +6436,10 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         Some("queue")
     );
     assert_eq!(
+        control_events[admission_pos].payload["route_id"].as_str(),
+        Some("main")
+    );
+    assert_eq!(
         control_events[admission_pos].payload["policy_hash"],
         policy_bound.payload["content_hash"]
     );
@@ -6449,6 +6456,10 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         .read_events(&thread_stream, None)
         .await
         .unwrap();
+    crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
     let turn_submitted_count = thread_events
         .iter()
         .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
@@ -8212,6 +8223,28 @@ async fn telegram_webhook_accepts_update_and_uses_sink() {
     let captured = envelopes.lock().await;
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].content.text_projection(), "hello webhook");
+    let envelope = captured[0].clone();
+    drop(captured);
+
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    let thread_id = receipt.thread_id.unwrap();
+    wait_for_assistant_text(&bridge, &thread_id, "local:hello webhook").await;
+    let store = SqliteSessionStore::open(session_store_path).await.unwrap();
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = store
+        .read_events(&control_stream_id(&coordinates), None)
+        .await
+        .unwrap();
+    let thread_events = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
+    assert_eq!(admission.payload["route_id"], "telegram.bot:main");
 }
 
 #[tokio::test]

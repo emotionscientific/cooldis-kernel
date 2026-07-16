@@ -1,6 +1,6 @@
 use cooldis::{
     AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, CooldisAppServer,
-    CooldisAppServerConfig,
+    CooldisAppServerConfig, EventKind, EventStore, EventStreamId, SqliteSessionStore,
 };
 use serde_json::Value;
 use std::net::{SocketAddr, TcpListener};
@@ -75,9 +75,55 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         resumed_stdout.contains("second debug rpc turn"),
         "resumed turn output did not include prompt: {resumed_stdout:?}"
     );
+    let store = SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+        .await
+        .unwrap();
+    let control_events = store
+        .read_events(&EventStreamId::new(format!("control:{thread_id}")), None)
+        .await
+        .unwrap();
+    let thread_events = store
+        .read_events(&EventStreamId::new(format!("thread:{thread_id}")), None)
+        .await
+        .unwrap();
+    assert_admission_precedes_execution(&control_events, &thread_events, "surface:debug-rpc");
 
     server.stop().await;
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn assert_admission_precedes_execution(
+    control_events: &[cooldis::EventRecord],
+    thread_events: &[cooldis::EventRecord],
+    route_id: &str,
+) {
+    let admission = control_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::AdmissionDecided && event.payload["route_id"] == route_id
+        })
+        .expect("control stream missing expected admission.decided");
+    let executed = thread_events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event.payload["runtime_kind"] != "thread_started"
+        })
+        .expect("thread stream missing executed turn session entry");
+    assert!(
+        (
+            admission.created_at_ms,
+            admission.stream_id.to_string(),
+            admission.sequence.get(),
+            admission.id.to_string(),
+        ) < (
+            executed.created_at_ms,
+            executed.stream_id.to_string(),
+            executed.sequence.get(),
+            executed.id.to_string(),
+        ),
+        "admission.decided must precede executed turn session entry"
+    );
 }
 
 struct DebugRpcServer {

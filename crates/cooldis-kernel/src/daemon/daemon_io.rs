@@ -3369,7 +3369,7 @@ impl CooldisDaemonIoBridge {
                 .insert(target.address.scope_key(), child_key.to_string());
             let reserved = match self
                 .supervisor
-                .reserve_turn_to_with_admission(
+                .reserve_admitted_turn_to(
                     &child_coordinates,
                     child_key.to_string(),
                     self.runtime_input(input),
@@ -3384,7 +3384,7 @@ impl CooldisDaemonIoBridge {
                     return Err(cooldis_bridge_error(err));
                 }
             };
-            reserved.submit().await;
+            crate::kernel::admission::submit_reserved(reserved).await;
         }
 
         let mut receipt_target = target.clone();
@@ -4320,7 +4320,7 @@ impl CooldisDaemonIoBridge {
         .await?;
         self.lock_active_turns()
             .insert(target.address.scope_key(), turn_id.to_string());
-        reserved.submit().await;
+        crate::kernel::admission::submit_reserved(reserved).await;
         let evidence = self
             .wait_for_turn_execution_evidence(coordinates, turn_id, submission_mode)
             .await?;
@@ -4478,7 +4478,7 @@ impl CooldisDaemonIoBridge {
                 }
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(&input),
@@ -4557,7 +4557,7 @@ impl CooldisDaemonIoBridge {
                 }
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(&input),
@@ -4638,7 +4638,7 @@ impl CooldisDaemonIoBridge {
                 let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
@@ -4661,7 +4661,7 @@ impl CooldisDaemonIoBridge {
                     .await?;
                     self.lock_active_turns()
                         .insert(target.address.scope_key(), turn_id.clone());
-                    reserved.submit().await;
+                    crate::kernel::admission::submit_reserved(reserved).await;
                     let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
                     return Ok((receipt, None));
@@ -4723,7 +4723,7 @@ impl CooldisDaemonIoBridge {
                 let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
@@ -4746,7 +4746,7 @@ impl CooldisDaemonIoBridge {
                     .await?;
                     self.lock_active_turns()
                         .insert(target.address.scope_key(), turn_id.clone());
-                    reserved.submit().await;
+                    crate::kernel::admission::submit_reserved(reserved).await;
                     let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
                     return Ok((receipt, None));
@@ -4814,7 +4814,7 @@ impl CooldisDaemonIoBridge {
                     if let (Some(turn_id), Some(input)) = (replacement_turn_id, replacement) {
                         Some(
                             self.supervisor
-                                .reserve_turn_to_with_admission(
+                                .reserve_admitted_turn_to(
                                     &coordinates,
                                     turn_id.clone(),
                                     self.runtime_input(input),
@@ -4846,7 +4846,7 @@ impl CooldisDaemonIoBridge {
                         .await?;
                         self.lock_active_turns()
                             .insert(target.address.scope_key(), turn_id.clone());
-                        reserved.submit().await;
+                        crate::kernel::admission::submit_reserved(reserved).await;
                     }
                     let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                     receipt.thread_id = Some(coordinates.thread_id.to_string());

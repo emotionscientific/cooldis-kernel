@@ -2364,6 +2364,16 @@ async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
     .await;
     assert_eq!(received.coordinates.thread_id, child_id);
     assert_output(&mut child_output_events, "turn-cross:from root").await;
+    let control_events = child.read_control_events().await.unwrap();
+    let thread_events = child.read_thread_events(None).await.unwrap();
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
+    assert_eq!(
+        admission.payload["route_id"],
+        "surface:kernel-thread-submit"
+    );
 
     let wait = control
         .wait_thread(root.context(), child_id, Some(1_000))
