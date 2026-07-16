@@ -1,13 +1,14 @@
 use super::*;
 use crate::{
-    CHANNEL_EMIT_CAPABILITY, CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE,
-    COOLDIS_PROCESS_PACKAGE, KERNEL_RUNTIME_KIND, KernelNotifyOperationProvider,
-    KernelOperationDispatcher, KernelOperationRegistration, KernelProcessOperationProvider,
-    NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND, OperationRegistration,
-    PROCESS_EXEC_OPERATION, RuntimeHost, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
-    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, ThreadContext,
-    ThreadCoordinates, ThreadTopology, TurnInput, VirtualBashRuntimeFactory, WasmRuntimeArtifact,
-    cooldis_notify_kernel_package, cooldis_process_kernel_package, cooldis_threads_kernel_package,
+    AgentManifestGrantExpiry, CHANNEL_EMIT_CAPABILITY, CHANNEL_EMIT_OPERATION,
+    COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE, KERNEL_RUNTIME_KIND,
+    KernelNotifyOperationProvider, KernelOperationDispatcher, KernelOperationRegistration,
+    KernelProcessOperationProvider, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
+    OperationRegistration, PROCESS_EXEC_OPERATION, RuntimeHost, THREAD_CANCEL_OPERATION,
+    THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION,
+    THREAD_WAIT_OPERATION, ThreadContext, ThreadCoordinates, ThreadTopology, TurnInput,
+    VirtualBashRuntimeFactory, WasmRuntimeArtifact, cooldis_notify_kernel_package,
+    cooldis_process_kernel_package, cooldis_threads_kernel_package,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -234,6 +235,66 @@ async fn router_invokes_capability_protected_operation_when_granted() {
             content,
             ..
         } if tool_result_text(&content) == "echo:cooldis"
+    ));
+}
+
+#[tokio::test]
+async fn router_checks_grant_expiry_live_at_each_tool_invocation() {
+    let router = router_with_operation(
+        "secret-echo",
+        "echo",
+        "bytes",
+        vec!["secret:EXAMPLE_API_KEY"],
+    )
+    .await
+    .with_capability_grant("secret:EXAMPLE_API_KEY")
+    .with_capability_grant("fs.read:/workspace")
+    .with_capability_grant_expiries([
+        AgentManifestGrantExpiry {
+            capability: "secret:EXAMPLE_API_KEY".to_string(),
+            expires_at: "1970-01-01T00:00:01Z".to_string(),
+        },
+        AgentManifestGrantExpiry {
+            capability: "fs.read:/workspace".to_string(),
+            expires_at: "1970-01-01T00:00:02Z".to_string(),
+        },
+    ]);
+
+    let at_expiry = router
+        .invoke_tool_call_at(
+            "call_before",
+            "secret_echo_search",
+            json!({"input": "before"}),
+            1_000,
+        )
+        .await;
+    let after_expiry = router
+        .invoke_tool_call_at(
+            "call_after",
+            "secret_echo_search",
+            json!({"input": "after"}),
+            1_001,
+        )
+        .await;
+
+    assert!(matches!(
+        at_expiry,
+        CanonicalMessage::ToolResult {
+            is_error: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        after_expiry,
+        CanonicalMessage::ToolResult {
+            is_error: true,
+            content,
+            ..
+        } if {
+            let text = tool_result_text(&content);
+            text.contains("missing capability grants: secret:EXAMPLE_API_KEY")
+                && text.contains("1970-01-01T00:00:01Z")
+        }
     ));
 }
 
@@ -566,6 +627,7 @@ async fn router_with_kernel_process_operation(cwd: PathBuf) -> AgentToolRouter {
             tool_name: PROCESS_EXEC_OPERATION.to_string(),
             registered_name: COOLDIS_PROCESS_PACKAGE.to_string(),
             operation_name: PROCESS_EXEC_OPERATION.to_string(),
+            grant_expiries: Vec::new(),
         }])
 }
 
@@ -589,11 +651,13 @@ async fn router_with_kernel_notify_operation() -> AgentToolRouter {
                 tool_name: NOTIFY_PREVIEW_OPERATION.to_string(),
                 registered_name: COOLDIS_NOTIFY_PACKAGE.to_string(),
                 operation_name: NOTIFY_PREVIEW_OPERATION.to_string(),
+                grant_expiries: Vec::new(),
             },
             OperationToolAlias {
                 tool_name: CHANNEL_EMIT_OPERATION.to_string(),
                 registered_name: COOLDIS_NOTIFY_PACKAGE.to_string(),
                 operation_name: CHANNEL_EMIT_OPERATION.to_string(),
+                grant_expiries: Vec::new(),
             },
         ])
 }
@@ -631,6 +695,7 @@ async fn router_with_kernel_thread_operations(
                 tool_name: operation.to_string(),
                 registered_name: crate::COOLDIS_THREADS_PACKAGE.to_string(),
                 operation_name: operation.to_string(),
+                grant_expiries: Vec::new(),
             }),
         )
 }

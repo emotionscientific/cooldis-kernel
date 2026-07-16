@@ -158,6 +158,26 @@ First-party kernel tools are still operation artifacts. For example,
 `threads.spawn` grant. The manifest binds published operation records by
 artifact hash rather than copying tool implementations into itself.
 
+Every `grants` array on `bash_tool`, `direct_tool`,
+`protocol_tool_import`, and coupling rows accepts either the existing bare
+capability string or an expiring object:
+
+```toml
+grants = [
+  "fs.read:/workspace",
+  { capability = "net:https://example.com", expires_at = "2026-07-16T20:00:00Z" },
+]
+```
+
+`expires_at` is an absolute RFC3339 UTC instant; duration shorthand is not
+accepted. A bare string has no expiry and retains the legacy serialized and
+content-addressed manifest shape. If any grant on a tool row has already
+expired at bind, the whole tool row is omitted from the presented surface and
+the bind receipt records the lapsed grant and exclusion. Authority remains
+live after bind: form snapshots remain stable for a running turn, but the next
+invocation after a grant expires fails closed and names the capability and
+expiry. A later bind with a fresh grant is the only way to restore that power.
+
 ### Resources
 
 Static or external artifacts made available to the agent, context builder, or
@@ -357,7 +377,11 @@ child-thread creation rules
 ```
 
 The model cannot grant itself new powers. Publish and start must validate that
-declared tools, resources, couplings, and effects are allowed.
+declared tools, resources, couplings, and effects are allowed. Coupling grants
+use the same bare-string or expiring-object form as tool grants. An expired
+coupling row is excluded at bind; a coupling grant that lapses later fails
+before the next source read, executor invocation, or sink write, with the lapse
+recorded on the control stream.
 
 ### Admission
 

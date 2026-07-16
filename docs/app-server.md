@@ -606,12 +606,15 @@ thread with no matching events returns an empty `data` array and null cursors.
 ### `mandate/start`
 
 Params:
-`{ "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder." }`.
+`{ "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder.", "expiresAt": "2026-07-04T20:00:00Z" }`.
 Only `threadId` and `schedule` are required. The schedule union is externally
 tagged: `{ "cron": { "expr": "0 9 * * *", "tz": "America/Los_Angeles" } }`,
 `{ "interval": { "every_ms": 60000 } }`, or
 `{ "at": { "when": "2026-07-04T18:00:00Z" } }`. `catchUp` defaults to
-`"skip_missed"` and may also be `"coalesce_missed"`.
+`"skip_missed"` and may also be `"coalesce_missed"`. `expiresAt` is an
+optional absolute RFC3339 UTC instant. An already expired mandate is rejected;
+after a live mandate passes that instant, its next continuation request is
+rejected and the lapse is witnessed on the control stream.
 
 Result:
 `{ "mandateEventId": "...", "streamId": "control:<threadId>", "sequence": 1 }`.

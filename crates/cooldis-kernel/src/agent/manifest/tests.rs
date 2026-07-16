@@ -77,6 +77,149 @@ ref = "{resource_ref}"
     )
 }
 
+#[test]
+fn legacy_string_grants_keep_the_resolved_manifest_hash_and_wire_shape() {
+    let source = manifest_source_with_tool(
+        "legacy-grants",
+        "1.0.0",
+        &format!("op://tailcat@sha256:{}", hash()),
+        &["fs.read:/workspace"],
+        false,
+    );
+
+    let plan = AgentPublishPlan::from_source(&source).unwrap();
+
+    assert_eq!(
+        plan.resolved_manifest["tools"][0]["grants"],
+        serde_json::json!(["fs.read:/workspace"])
+    );
+    assert_eq!(
+        plan.manifest_hash,
+        "sha256:15b5cbea672ebc3ea41bfae24532f608dd762533e2e9f37b28ff72f08aee5c16"
+    );
+}
+
+fn manifest_source_with_all_grant_positions(name: &str, grant: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "{name}"
+version = "1.0.0"
+description = "Pins every manifest grant position."
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "bash_tool"
+id = "tailcat"
+command = "tailcat"
+operation_ref = "op://tailcat@sha256:{hash}"
+grants = [{grant}]
+
+[[tools]]
+type = "direct_tool"
+id = "lookup"
+tool_name = "lookup"
+operation_ref = "op://lookup@sha256:{hash}"
+grants = [{grant}]
+
+[[tools]]
+type = "protocol_tool_import"
+id = "docs"
+protocol = "mcp"
+server_ref = "mcp://docs"
+grants = [{grant}]
+
+[[couplings]]
+id = "audit"
+function_ref = "op://audit/run@sha256:{hash}"
+grants = [{grant}]
+
+[couplings.trigger]
+kind = "turn.completed"
+
+[[couplings.source.selectors]]
+stream = "thread"
+kind = "turn.completed"
+
+[couplings.sink]
+stream = "control"
+kind = ["observation"]
+"#,
+        hash = hash(),
+    )
+}
+
+#[test]
+fn legacy_string_grants_pin_all_four_positions_in_one_manifest_hash() {
+    let source =
+        manifest_source_with_all_grant_positions("legacy-all-grants", "\"stream.read:thread\"");
+
+    let plan = AgentPublishPlan::from_source(&source).unwrap();
+
+    let grants = plan.resolved_manifest["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["grants"].clone())
+        .chain(std::iter::once(
+            plan.resolved_manifest["couplings"][0]["grants"].clone(),
+        ))
+        .collect::<Vec<_>>();
+    assert_eq!(grants, vec![serde_json::json!(["stream.read:thread"]); 4]);
+    assert_eq!(
+        plan.manifest_hash,
+        "sha256:68c68f12a4a5897127a9d3b6b59067625080273b0f801c2c91c6f925568c57b6"
+    );
+}
+
+#[test]
+fn object_grant_manifest_hash_is_stable_across_toml_round_trip() {
+    #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+    struct GrantEnvelope {
+        grants: Vec<crate::agent::manifest_schema::AgentManifestGrant>,
+    }
+
+    let source = manifest_source_with_all_grant_positions(
+        "object-all-grants",
+        r#"{ capability = "stream.read:thread", expires_at = "2026-07-16T20:00:00Z" }"#,
+    );
+    let first = AgentPublishPlan::from_source(&source).unwrap();
+    let value: toml::Value = toml::from_str(&source).unwrap();
+    AgentManifestSchema::from_toml_value(&value).unwrap();
+    let encoded = toml::to_string(&value).unwrap();
+    let second = AgentPublishPlan::from_source(&encoded).unwrap();
+
+    let grant_wire = GrantEnvelope {
+        grants: vec![crate::agent::manifest_schema::AgentManifestGrant::Expiring(
+            AgentManifestGrantExpiry {
+                capability: "stream.read:thread".to_string(),
+                expires_at: "2026-07-16T20:00:00Z".to_string(),
+            },
+        )],
+    };
+    let first_encoding = toml::to_string(&grant_wire).unwrap();
+    let decoded: GrantEnvelope = toml::from_str(&first_encoding).unwrap();
+    let second_encoding = toml::to_string(&decoded).unwrap();
+
+    assert_eq!(second.resolved_manifest, first.resolved_manifest);
+    assert_eq!(second.manifest_hash, first.manifest_hash);
+    assert_eq!(decoded, grant_wire);
+    assert_eq!(second_encoding, first_encoding);
+    assert_eq!(
+        second.resolved_manifest["couplings"][0]["grants"][0],
+        serde_json::json!({
+            "capability": "stream.read:thread",
+            "expires_at": "2026-07-16T20:00:00Z",
+        })
+    );
+}
+
 fn folder_first_manifest_source(name: &str, context: &str) -> String {
     format!(
         r#"

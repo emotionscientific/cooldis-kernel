@@ -346,6 +346,7 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 skill_discovery: None,
                 static_context_segments: Vec::new(),
                 granted: vec!["threads.read".to_string()],
+                grant_bindings: Vec::new(),
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
@@ -5699,6 +5700,7 @@ async fn kernel_thread_router() -> AgentToolRouter {
             tool_name: THREAD_SPAWN_OPERATION.to_string(),
             registered_name: crate::COOLDIS_THREADS_PACKAGE.to_string(),
             operation_name: THREAD_SPAWN_OPERATION.to_string(),
+            grant_expiries: Vec::new(),
         }])
 }
 
@@ -5732,10 +5734,12 @@ async fn append_tool_controller_bind_receipt(
             artifact_hash: "test".to_string(),
             operation_name: Some("tool_gate".to_string()),
             grants: Vec::new(),
+            grant_expiries: Vec::new(),
             budget: AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }],
         granted: Vec::new(),
+        grant_bindings: Vec::new(),
         effective_runtime: AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: None,
@@ -5779,6 +5783,7 @@ async fn append_manifest_runtime_grace(
         tool_universes: Vec::new(),
         couplings: Vec::new(),
         granted: Vec::new(),
+        grant_bindings: Vec::new(),
         effective_runtime: AgentManifestRuntimeDefaults {
             cancellation_grace_ms: Some(cancellation_grace_ms),
             ..AgentManifestRuntimeDefaults::default()

@@ -611,6 +611,7 @@ async fn protocol_tool_import_direct_pins_must_not_duplicate_tool_rows() {
         None,
         &BTreeSet::from(["mcp://arcade".to_string()]),
         Some(&discoverer),
+        0,
     )
     .await;
     let err = match result {
@@ -781,6 +782,7 @@ async fn manifest_coupling_binds_controller_receipt() {
             artifact_hash: operation.active_artifact_hash,
             operation_name: Some("pre_tool_gate".to_string()),
             grants: vec!["thread.pause".to_string()],
+            grant_expiries: Vec::new(),
             budget: AgentManifestCouplingBudget {
                 max_ms: Some(250),
                 max_discharge_events: Some(4),
@@ -2104,6 +2106,7 @@ ref = "skill://registry-package"
         Some(&initial.skill_packages),
         Some(&forged_discovery),
         true,
+        crate::kernel::history::now_ms(),
     )
     .await
     .unwrap_err()
@@ -2456,10 +2459,117 @@ async fn operation_bind_requires_declared_grants() {
             name: "search".to_string(),
             artifact_hash: record.active_artifact_hash,
             grants: vec!["net:https://example.com".to_string()],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn bind_receipt_carries_future_expiry_and_excludes_expired_tool_rows() {
+    let root = temp_dir("manifest-bind-grant-expiry");
+    let operation_root = root.join("operations");
+    let registry = LocalOperationRegistry::new(&operation_root);
+    fs::create_dir_all(&operation_root).unwrap();
+    let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
+    let artifact = operation_root.join("search.wasm");
+    fs::write(&artifact, wasm).unwrap();
+    let operation = registry
+        .publish_artifact(crate::PublishOperationRequest {
+            name: "search".to_string(),
+            artifact_path: artifact.clone(),
+            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
+            interface: None,
+            capability_grants: BTreeSet::from(["net:https://example.com".to_string()]),
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    let manifest = format!(
+        r#"{}
+
+[[tools]]
+type = "direct_tool"
+id = "search"
+tool_name = "search"
+operation_ref = "op://search/search@sha256:{}"
+grants = [
+  {{ capability = "net:https://example.com", expires_at = "2026-07-16T20:00:00Z" }},
+  {{ capability = "fs.read:/workspace", expires_at = "2026-07-16T21:00:00Z" }},
+]
+"#,
+        minimal_manifest("grant-expiry"),
+        operation.active_artifact_hash
+    );
+    let manifest_path = root.join("grant-expiry.cooldis.agent.toml");
+    fs::write(&manifest_path, manifest).unwrap();
+    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_root)
+        .unwrap();
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo");
+
+    let future = bind_published_agent_record_at(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        1_784_231_999_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(future.bind_receipt.tool_ids, vec!["search"]);
+    assert_eq!(future.bind_receipt.operation_bindings.len(), 1);
+    assert_eq!(future.bind_receipt.grant_bindings.len(), 2);
+    assert_eq!(
+        future.bind_receipt.grant_bindings[0].expires_at.as_deref(),
+        Some("2026-07-16T20:00:00Z")
+    );
+    assert!(!future.bind_receipt.grant_bindings[0].lapsed_at_bind);
+    assert!(!future.bind_receipt.grant_bindings[0].surface_excluded);
+
+    let expired = bind_published_agent_record_at(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        1_784_232_001_000,
+    )
+    .await
+    .unwrap();
+    assert!(expired.bind_receipt.tool_ids.is_empty());
+    assert!(expired.bind_receipt.operation_bindings.is_empty());
+    assert!(expired.operation_names.is_empty());
+    assert_eq!(
+        expired
+            .bind_receipt
+            .grant_bindings
+            .iter()
+            .filter(|binding| binding.lapsed_at_bind)
+            .count(),
+        1
+    );
+    assert!(
+        expired
+            .bind_receipt
+            .grant_bindings
+            .iter()
+            .all(|binding| binding.surface_excluded)
+    );
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2503,6 +2613,7 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
             grants: vec!["net:https://profile.example".to_string()],
+            grant_expiries: Vec::new(),
             operations: vec!["profile".to_string()],
             direct_tools: Vec::new(),
         }]
@@ -2634,6 +2745,7 @@ async fn operation_bindings_merge_grants_for_shared_artifact() {
                 "fs.read:/workspace".to_string(),
                 "net:https://example.com".to_string(),
             ],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -2694,6 +2806,7 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
                 "net:https://profile.example".to_string(),
                 "net:https://summary.example".to_string(),
             ],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -2769,6 +2882,7 @@ fn operation_binding_accepts_legacy_metadata_without_grants_or_operations() {
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
             grants: Vec::new(),
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]

@@ -164,10 +164,94 @@ pub(super) fn select_replay_coupling(
             "bound coupling id {coupling_id:?} was not found in replay coupling set"
         )));
     }
-    Ok(BoundCouplingSet::new(
+    let grant_expiries = coupling_set
+        .grant_expiries
+        .get(coupling_id)
+        .cloned()
+        .map(|expiries| BTreeMap::from([(coupling_id.to_string(), expiries)]))
+        .unwrap_or_default();
+    Ok(BoundCouplingSet::new_with_grant_expiries(
         coupling_set.snapshot_id.clone(),
         couplings,
+        grant_expiries,
     ))
+}
+
+#[cfg(test)]
+mod expiry_selection_tests {
+    use super::*;
+    use crate::{
+        AgentManifestCouplingQuota, BoundCouplingFunction, BoundCouplingSelector,
+        BoundCouplingSink, CouplingRole, EventKind,
+    };
+
+    #[test]
+    fn selecting_one_replay_coupling_preserves_its_grant_expiries() {
+        let selected = replay_coupling("selected");
+        let other = replay_coupling("other");
+        let set = BoundCouplingSet::new_with_grant_expiries(
+            "snapshot-a",
+            vec![selected, other],
+            BTreeMap::from([
+                (
+                    "selected".to_string(),
+                    vec![crate::AgentManifestGrantExpiry {
+                        capability: "stream.read:thread".to_string(),
+                        expires_at: "2050-01-01T00:00:00Z".to_string(),
+                    }],
+                ),
+                (
+                    "other".to_string(),
+                    vec![crate::AgentManifestGrantExpiry {
+                        capability: "stream.write:control".to_string(),
+                        expires_at: "2060-01-01T00:00:00Z".to_string(),
+                    }],
+                ),
+            ]),
+        );
+
+        let selected = select_replay_coupling(&set, "selected").unwrap();
+
+        assert_eq!(selected.couplings.len(), 1);
+        assert_eq!(selected.couplings[0].id, "selected");
+        assert_eq!(
+            selected.grant_expiries.keys().cloned().collect::<Vec<_>>(),
+            vec!["selected"]
+        );
+    }
+
+    fn replay_coupling(id: &str) -> BoundCoupling {
+        BoundCoupling {
+            id: id.to_string(),
+            role: CouplingRole::Controller,
+            trigger_kind: EventKind::TurnCompleted,
+            trigger_match: BTreeMap::new(),
+            trigger_quota: AgentManifestCouplingQuota::default(),
+            source_selectors: vec![BoundCouplingSelector {
+                stream: "thread".to_string(),
+                kinds: vec![EventKind::TurnCompleted],
+                scope: None,
+                since: None,
+            }],
+            sink: BoundCouplingSink {
+                stream: "control".to_string(),
+                kinds: vec![EventKind::PlacementDecision],
+            },
+            function_ref: format!("op://{id}/run@sha256:{}", "a".repeat(64)),
+            function: BoundCouplingFunction {
+                name: id.to_string(),
+                artifact_hash: "a".repeat(64),
+                operation_name: Some("run".to_string()),
+            },
+            grants: vec![
+                "stream.read:thread".to_string(),
+                "stream.write:control".to_string(),
+            ],
+            budget: Default::default(),
+            config: serde_json::json!({}),
+            config_hash: "sha256:test".to_string(),
+        }
+    }
 }
 
 pub(super) async fn resolve_replay_artifact(

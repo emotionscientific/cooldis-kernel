@@ -2628,6 +2628,7 @@ async fn start_clock_thread_with_mandate(
             catch_up: Some(catch_up),
             input_template: Some("wake".to_string()),
             snapshot_id: None,
+            expires_at: None,
         },
         Utc::now(),
     )
@@ -7208,6 +7209,7 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
         tool_universes: Vec::new(),
         couplings: Vec::new(),
         granted: Vec::new(),
+        grant_bindings: Vec::new(),
         effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: Some(crate::AgentManifestPlacementBinding::default()),

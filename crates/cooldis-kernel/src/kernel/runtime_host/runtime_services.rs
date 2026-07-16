@@ -378,11 +378,25 @@ impl RuntimeServices {
         if executable_couplings.is_empty() {
             return Ok(());
         }
+        let grant_expiries = executable_couplings
+            .iter()
+            .filter_map(|coupling| {
+                coupling_set
+                    .grant_expiries
+                    .get(&coupling.id)
+                    .cloned()
+                    .map(|expiries| (coupling.id.clone(), expiries))
+            })
+            .collect();
         let executor = CouplingExecutorRegistry::new(self.operation_registry_root.clone());
         let scheduler = CouplingScheduler::new(self.runtime_store.as_ref(), &executor);
         scheduler
             .run_batch(
-                &BoundCouplingSet::new(coupling_set.snapshot_id.clone(), executable_couplings),
+                &BoundCouplingSet::new_with_grant_expiries(
+                    coupling_set.snapshot_id.clone(),
+                    executable_couplings,
+                    grant_expiries,
+                ),
                 appended,
             )
             .await?;

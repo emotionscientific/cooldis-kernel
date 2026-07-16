@@ -1229,19 +1229,37 @@ pub(crate) fn fold_thread_handle_bindings(
 }
 
 fn parent_allows_supervisor_spawn(metadata: &BTreeMap<String, String>) -> CooldisResult<bool> {
+    parent_allows_supervisor_spawn_at(metadata, crate::kernel::history::now_ms())
+}
+
+fn parent_allows_supervisor_spawn_at(
+    metadata: &BTreeMap<String, String>,
+    now_ms: i64,
+) -> CooldisResult<bool> {
     let Some(raw) = metadata.get(THREAD_BOUND_COUPLING_SET_METADATA) else {
         return Ok(false);
     };
     let coupling_set = serde_json::from_str::<BoundCouplingSet>(raw).map_err(|err| {
         CooldisError::RuntimeFactory(format!("thread bound coupling set is invalid: {err}"))
     })?;
-    Ok(coupling_set.couplings.iter().any(|coupling| {
+    let Some(coupling) = coupling_set.couplings.iter().find(|coupling| {
         coupling.id == STD_SUPERVISOR_SPAWN_TEMPLATE_ID
             && coupling
                 .grants
                 .iter()
                 .any(|grant| grant == THREADS_SPAWN_CAPABILITY)
-    }))
+    }) else {
+        return Ok(false);
+    };
+    crate::agent::manifest_bind::ensure_grant_expiries_live(
+        coupling_set
+            .grant_expiries
+            .get(&coupling.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        now_ms,
+    )?;
+    Ok(true)
 }
 
 fn spawn_request_already_projected(
@@ -1367,6 +1385,36 @@ mod tests {
         host.shutdown_all().await.unwrap();
     }
 
+    #[test]
+    fn supervisor_spawn_projector_checks_cached_coupling_authority_live() {
+        let coupling = std_supervisor_spawn_coupling(json!({
+            "initial_submission": "echo projected child",
+        }));
+        let metadata = BTreeMap::from([(
+            THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
+            serde_json::to_string(&BoundCouplingSet::new_with_grant_expiries(
+                "snapshot-a",
+                vec![coupling],
+                BTreeMap::from([(
+                    STD_SUPERVISOR_SPAWN_TEMPLATE_ID.to_string(),
+                    vec![crate::AgentManifestGrantExpiry {
+                        capability: THREADS_SPAWN_CAPABILITY.to_string(),
+                        expires_at: "1970-01-01T00:00:01Z".to_string(),
+                    }],
+                )]),
+            ))
+            .unwrap(),
+        )]);
+
+        assert!(parent_allows_supervisor_spawn_at(&metadata, 1_000).unwrap());
+        let err = parent_allows_supervisor_spawn_at(&metadata, 1_001).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing capability grants: threads.spawn")
+        );
+        assert!(err.to_string().contains("1970-01-01T00:00:01Z"));
+    }
+
     struct ForgedRemoteWorkspaceResolver;
 
     #[async_trait::async_trait]
@@ -1397,6 +1445,7 @@ mod tests {
                     tool_universes: Vec::new(),
                     couplings: Vec::new(),
                     granted: Vec::new(),
+                    grant_bindings: Vec::new(),
                     effective_runtime: AgentManifestRuntimeDefaults::default(),
                     overridden_keys: Vec::new(),
                     placement: Some(crate::AgentManifestPlacementBinding {

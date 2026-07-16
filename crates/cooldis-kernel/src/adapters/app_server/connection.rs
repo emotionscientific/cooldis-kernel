@@ -320,6 +320,8 @@ pub(super) struct MandateStartParams {
     pub(super) catch_up: Option<MandateCatchUpPolicy>,
     #[serde(default)]
     pub(super) input_template: Option<String>,
+    #[serde(default)]
+    pub(super) expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2088,6 +2090,7 @@ impl CooldisAppServer {
                     .metadata
                     .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
                     .cloned(),
+                expires_at: params.expires_at,
             },
             chrono::Utc::now(),
         )
