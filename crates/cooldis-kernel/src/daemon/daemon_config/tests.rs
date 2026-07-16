@@ -767,7 +767,7 @@ fn validates_telegram_route_shape() {
         telegram: Some(CooldisTelegramRouteConfig {
             listen: Some("127.0.0.1:9000".to_string()),
             path: "telegram".to_string(),
-            secret_token: None,
+            secret_token: Some("secret".to_string()),
             secret_token_env: None,
             bot_token: None,
             bot_token_env: None,
@@ -778,6 +778,42 @@ fn validates_telegram_route_shape() {
 
     let errors = config.validation_errors();
     assert!(errors.iter().any(|error| error.contains("path")));
+}
+
+#[test]
+fn enabled_telegram_route_requires_webhook_secret() {
+    let mut config = CooldisDaemonConfig::default();
+    config.io.routes.push(CooldisIoRouteConfig {
+        id: "telegram-main".to_string(),
+        kind: "telegram.bot".to_string(),
+        enabled: true,
+        policy: None,
+        content_policies: None,
+        threading: None,
+        agent_ref: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: CooldisEgressRetryConfig::default(),
+        telegram: Some(CooldisTelegramRouteConfig {
+            listen: Some("127.0.0.1:9000".to_string()),
+            path: "/telegram".to_string(),
+            secret_token: None,
+            secret_token_env: None,
+            bot_token: None,
+            bot_token_env: None,
+            api_base: None,
+        }),
+        metadata: BTreeMap::new(),
+    });
+
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("io.routes.telegram-main.telegram"));
+    assert!(err.contains("secret_token or secret_token_env is required"));
+
+    config.io.routes[0].enabled = false;
+    assert!(config.validate().is_ok());
 }
 
 #[test]
