@@ -176,6 +176,9 @@ fn recovery_bind_receipt(effect_class: EffectClass) -> AgentManifestBindReceipt 
     AgentManifestBindReceipt {
         ref_uri: "agent://test/recovery".to_string(),
         manifest_hash: "snapshot-recovery".to_string(),
+        model_profile_origin: None,
+        placement_origin: None,
+        workspace_origin: None,
         model_profile_id: "default".to_string(),
         provider_id: "test".to_string(),
         model_id: "model".to_string(),
