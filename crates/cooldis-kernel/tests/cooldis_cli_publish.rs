@@ -278,6 +278,8 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(commands.contains("cooldis skill publish"));
     assert!(commands.contains("cooldis skill import"));
     assert!(commands.contains("cooldis auth set"));
+    assert!(commands.contains("cooldis agent versions <name> [--json]"));
+    assert!(commands.contains("cooldis agent diff <name> --from"));
     assert_no_command(&commands, &["dev"]);
     assert_no_command(&commands, &["operator"]);
 
@@ -287,6 +289,11 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
 
     let help_chat = run_cooldis(["help", "chat"]);
     assert!(help_chat.contains("cooldis chat"));
+
+    let versions_help = run_cooldis(["help", "agent", "versions"]);
+    assert!(versions_help.contains("cooldis agent versions <name> [--json]"));
+    let diff_help = run_cooldis(["help", "agent", "diff"]);
+    assert!(diff_help.contains("--from <version>[:authored|:resolved]"));
 
     let help_auth = run_cooldis(["help", "auth"]);
     assert!(help_auth.contains("cooldis auth"));
@@ -1681,6 +1688,203 @@ operation_ref = "op://tailcat@sha256:{TEST_OPERATION_HASH}"
         registry_root.to_str().unwrap(),
     ]);
     assert!(show_by_ref.contains("\"version\": \"0.1.0\""));
+}
+
+#[test]
+fn cooldis_cli_lists_and_diffs_immutable_agent_version_snapshots() {
+    let workspace = temp_dir("agent-version-snapshots");
+    let project = workspace.join("auditor");
+    fs::create_dir_all(project.join("prompts")).unwrap();
+    let manifest_path = project.join("cooldis.agent.toml");
+    let source = |version: &str, description: &str| {
+        format!(
+            r#"[agent]
+name = "auditor"
+version = "{version}"
+description = "{description}"
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+"#,
+        )
+    };
+    fs::write(project.join("prompts/system.md"), "Audit every release.\n").unwrap();
+    fs::write(&manifest_path, source("1.0.0", "First snapshot.")).unwrap();
+    let registry_root = workspace.join("agents");
+    let operation_registry_root = workspace.join("operations");
+
+    run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    fs::write(&manifest_path, source("2.0.0", "Second snapshot.")).unwrap();
+    run_cooldis([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+
+    for (version, published_at_ms) in [("1.0.0", 0_u64), ("2.0.0", 1_000_u64)] {
+        let path = LocalAgentRegistry::new(&registry_root)
+            .version_record_path("auditor", version)
+            .unwrap();
+        let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["published_at_ms"] = Value::from(published_at_ms);
+        fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    }
+
+    let versions = run_cooldis([
+        "agent",
+        "versions",
+        "auditor",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    assert!(versions.contains("PUBLISHED AT"));
+    assert!(versions.contains("VERSION"));
+    assert!(versions.contains("MANIFEST HASH"));
+    assert!(versions.contains("1970-01-01T00:00:00.000Z"));
+    assert!(versions.contains("1970-01-01T00:00:01.000Z"));
+    assert!(versions.find("1.0.0").unwrap() < versions.find("2.0.0").unwrap());
+    assert!(!versions.contains("[no-authored-source]"));
+
+    let versions_json = run_cooldis([
+        "agent",
+        "versions",
+        "auditor",
+        "--json",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let versions: Vec<Value> = serde_json::from_str(&versions_json).unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0]["version"], "1.0.0");
+    assert_eq!(versions[1]["version"], "2.0.0");
+    assert!(
+        versions[0]["source_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(
+        versions[0]["manifest_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(versions[0]["authored_source_present"], true);
+
+    let diff = run_cooldis([
+        "agent",
+        "diff",
+        "auditor",
+        "--from",
+        "1.0.0",
+        "--to",
+        "2.0.0",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    assert!(diff.contains("manifest auditor 1.0.0:resolved -> 2.0.0:resolved"));
+    assert!(diff.contains("~ /identity/description: \"First snapshot.\" -> \"Second snapshot.\""));
+
+    let diff_json = run_cooldis([
+        "agent",
+        "diff",
+        "auditor",
+        "--from",
+        "1.0.0",
+        "--to",
+        "2.0.0",
+        "--json",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let changes: Vec<Value> = serde_json::from_str(&diff_json).unwrap();
+    assert!(changes.iter().any(|change| {
+        change["path"] == "/identity/description" && change["kind"] == "changed"
+    }));
+
+    let cross_form = run_cooldis([
+        "agent",
+        "diff",
+        "auditor",
+        "--from",
+        "1.0.0:authored",
+        "--to",
+        "1.0.0:resolved",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    assert!(cross_form.contains("manifest auditor 1.0.0:authored -> 1.0.0:resolved"));
+    assert!(cross_form.contains("~ /context:"));
+    assert!(cross_form.contains("+ /resources/0:"));
+
+    let legacy_path = LocalAgentRegistry::new(&registry_root)
+        .version_record_path("auditor", "1.0.0")
+        .unwrap();
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("authored_source");
+    fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    let failed = run_cooldis_failed([
+        "agent",
+        "diff",
+        "auditor",
+        "--from",
+        "1.0.0:authored",
+        "--to",
+        "2.0.0:resolved",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let error = stderr(&failed);
+    assert!(error.contains("auditor@1.0.0"));
+    assert!(error.contains("legacy record has no authored_source"));
+
+    let missing_value = run_cooldis_failed([
+        "agent",
+        "diff",
+        "auditor",
+        "--from",
+        "--to",
+        "2.0.0",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    assert!(stderr(&missing_value).contains("--from requires a value"));
+
+    let invalid_timestamp_path = LocalAgentRegistry::new(&registry_root)
+        .version_record_path("auditor", "2.0.0")
+        .unwrap();
+    let mut invalid_timestamp: Value =
+        serde_json::from_slice(&fs::read(&invalid_timestamp_path).unwrap()).unwrap();
+    invalid_timestamp["published_at_ms"] = Value::from(u64::MAX);
+    fs::write(
+        &invalid_timestamp_path,
+        serde_json::to_vec_pretty(&invalid_timestamp).unwrap(),
+    )
+    .unwrap();
+    let invalid_timestamp = run_cooldis_failed([
+        "agent",
+        "versions",
+        "auditor",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let error = stderr(&invalid_timestamp);
+    assert!(error.contains("auditor@2.0.0"));
+    assert!(error.contains("invalid published_at_ms"));
 }
 
 #[test]

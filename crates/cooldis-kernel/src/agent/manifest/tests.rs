@@ -933,3 +933,213 @@ fn legacy_records_without_resolved_refs_still_load() {
     let loaded = registry.load_record("release-verifier").unwrap();
     assert!(loaded.resolved_refs.is_empty());
 }
+
+#[test]
+fn published_records_round_trip_authored_source_and_legacy_absence() {
+    let registry = LocalAgentRegistry::new(temp_root("authored-source"));
+    let operation_root = seed_tailcat_operation_root("authored-source-operations");
+    let source = manifest_source("release-verifier", "1.0.0", false);
+    let record = registry
+        .publish_plan_with_operation_registry(
+            AgentPublishPlan::from_source(&source).unwrap(),
+            &operation_root,
+        )
+        .unwrap();
+
+    assert_eq!(record.authored_source.as_deref(), Some(source.as_str()));
+    assert_eq!(
+        registry
+            .load_record("release-verifier")
+            .unwrap()
+            .authored_source
+            .as_deref(),
+        Some(source.as_str())
+    );
+    assert_eq!(
+        registry
+            .load_version_record("release-verifier", "1.0.0")
+            .unwrap()
+            .authored_source
+            .as_deref(),
+        Some(source.as_str())
+    );
+
+    for path in [
+        registry.record_path("release-verifier").unwrap(),
+        registry
+            .version_record_path("release-verifier", "1.0.0")
+            .unwrap(),
+    ] {
+        let mut json: JsonValue = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("authored_source");
+        fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    }
+
+    let legacy_head = registry.load_record("release-verifier").unwrap();
+    let legacy_version = registry
+        .load_version_record("release-verifier", "1.0.0")
+        .unwrap();
+    assert!(legacy_head.authored_source.is_none());
+    assert!(legacy_version.authored_source.is_none());
+    assert!(
+        serde_json::to_value(&legacy_head)
+            .unwrap()
+            .get("authored_source")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(&legacy_version)
+            .unwrap()
+            .get("authored_source")
+            .is_none()
+    );
+}
+
+#[test]
+fn immutable_version_record_keeps_first_authored_snapshot() {
+    let registry = LocalAgentRegistry::new(temp_root("authored-source-immutable"));
+    let operation_root = seed_tailcat_operation_root("authored-source-immutable-operations");
+    let original = manifest_source("release-verifier", "1.0.0", false);
+    registry
+        .publish_plan_with_operation_registry(
+            AgentPublishPlan::from_source(&original).unwrap(),
+            &operation_root,
+        )
+        .unwrap();
+
+    let reformatted = format!("# republished with a comment\n{original}");
+    registry
+        .publish_plan_with_operation_registry(
+            AgentPublishPlan::from_source(&reformatted).unwrap(),
+            &operation_root,
+        )
+        .unwrap();
+
+    let version = registry
+        .load_version_record("release-verifier", "1.0.0")
+        .unwrap();
+    assert_eq!(version.authored_source.as_deref(), Some(original.as_str()));
+
+    let changed = original.replace("Checks a release branch.", "Checks every release branch.");
+    let error = registry
+        .publish_plan_with_operation_registry(
+            AgentPublishPlan::from_source(&changed).unwrap(),
+            &operation_root,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("refusing to replace"));
+    assert_eq!(
+        registry
+            .load_version_record("release-verifier", "1.0.0")
+            .unwrap()
+            .authored_source
+            .as_deref(),
+        Some(original.as_str())
+    );
+}
+
+#[test]
+fn version_records_are_listed_by_publication_time_not_declared_version() {
+    let registry = LocalAgentRegistry::new(temp_root("version-history"));
+    for (version, published_at_ms) in [("9.0.0", 300), ("1.0.0", 100), ("2.0.0", 200)] {
+        let record =
+            AgentPublishPlan::from_source(&manifest_source("release-verifier", version, false))
+                .unwrap()
+                .into_record(published_at_ms);
+        registry.write_version_record_atomically(&record).unwrap();
+    }
+
+    let versions = registry.list_version_records("release-verifier").unwrap();
+    assert_eq!(
+        versions
+            .iter()
+            .map(|record| record.version.as_str())
+            .collect::<Vec<_>>(),
+        vec!["1.0.0", "2.0.0", "9.0.0"]
+    );
+    assert_eq!(
+        versions
+            .iter()
+            .map(|record| record.published_at_ms)
+            .collect::<Vec<_>>(),
+        vec![100, 200, 300]
+    );
+    assert!(versions.iter().all(|record| record.authored_source_present));
+    let listed = serde_json::to_value(&versions).unwrap();
+    assert!(listed[0].get("authored_source").is_none());
+    assert!(listed[0].get("resolved_manifest").is_none());
+}
+
+#[test]
+fn canonical_json_diff_is_structural_path_ordered_and_escapes_json_pointers() {
+    let before = serde_json::json!({
+        "array": [{"pin": "op://tailcat@sha256:old"}, "removed"],
+        "nested": {"changed": 1, "removed": true},
+        "ref": "agent://worker@latest",
+        "a/b": {"~pin": "old"},
+    });
+    let after = serde_json::json!({
+        "array": [{"pin": "op://tailcat@sha256:new"}],
+        "nested": {"added": null, "changed": 2},
+        "ref": "agent://worker@2.0.0",
+        "a/b": {"~pin": "new"},
+    });
+
+    let changes = diff_canonical_json(&before, &after);
+
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.path.as_str(), change.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            ("/array/0/pin", AgentManifestDiffKind::Changed),
+            ("/array/1", AgentManifestDiffKind::Removed),
+            ("/a~1b/~0pin", AgentManifestDiffKind::Changed),
+            ("/nested/added", AgentManifestDiffKind::Added),
+            ("/nested/changed", AgentManifestDiffKind::Changed),
+            ("/nested/removed", AgentManifestDiffKind::Removed),
+            ("/ref", AgentManifestDiffKind::Changed),
+        ]
+    );
+    assert_eq!(
+        changes[0].before,
+        Some(serde_json::json!("op://tailcat@sha256:old"))
+    );
+    assert_eq!(
+        changes[0].after,
+        Some(serde_json::json!("op://tailcat@sha256:new"))
+    );
+    assert_eq!(changes[1].before, Some(serde_json::json!("removed")));
+    assert_eq!(changes[1].after, None);
+    assert_eq!(changes[3].before, None);
+    assert_eq!(changes[3].after, Some(JsonValue::Null));
+    assert!(changes.iter().all(|change| match change.kind {
+        AgentManifestDiffKind::Added => change.before.is_none() && change.after.is_some(),
+        AgentManifestDiffKind::Removed => change.before.is_some() && change.after.is_none(),
+        AgentManifestDiffKind::Changed => change.before.is_some() && change.after.is_some(),
+    }));
+    let encoded = serde_json::to_value(&changes).unwrap();
+    assert!(encoded[0].get("before").is_some());
+    assert!(encoded[0].get("after").is_some());
+    assert!(encoded[1].get("before").is_some());
+    assert!(encoded[1].get("after").is_none());
+    assert!(encoded[3].get("before").is_none());
+    assert!(encoded[3].get("after").is_some_and(JsonValue::is_null));
+}
+
+#[test]
+fn canonical_json_diff_sorts_array_index_paths_lexicographically() {
+    let before = serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let after = serde_json::json!([0, 1, 20, 3, 4, 5, 6, 7, 8, 9, 100]);
+
+    let changes = diff_canonical_json(&before, &after);
+
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/10", "/2"]
+    );
+}
