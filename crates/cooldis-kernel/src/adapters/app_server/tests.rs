@@ -2652,6 +2652,10 @@ allow = ["default_cwd"]
         Some(record.ref_uri.as_str())
     );
     assert_eq!(bind.payload["model_profile_id"].as_str(), Some("small"));
+    assert_eq!(
+        bind.payload["model_profile_origin"].as_str(),
+        Some("selected-at-start")
+    );
     assert_eq!(bind.payload["model_id"].as_str(), Some("fixture-small"));
 
     let large_start = app

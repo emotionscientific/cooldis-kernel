@@ -65,6 +65,7 @@ mod chat;
 mod console;
 mod coupling;
 mod daemon;
+mod debug_bind;
 mod debug_rpc;
 mod import;
 mod rpc;
@@ -78,6 +79,7 @@ use blob::*;
 use console::*;
 use coupling::*;
 use daemon::*;
+use debug_bind::*;
 use debug_rpc::*;
 use import::*;
 use rpc::*;
@@ -266,6 +268,9 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         }
         [command] if command == "rpc" => print_rpc_help(),
         [command] if command == "debug" => print_debug_help(),
+        [command, subcommand] if command == "debug" && subcommand == "bind" => {
+            print_debug_bind_help()
+        }
         [command, subcommand] if command == "debug" && subcommand == "rpc" => {
             print_debug_rpc_help()
         }
@@ -364,6 +369,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis tool source show <name> [--json] [--state-home .cooldis/state]",
     "cooldis tool source remove <name> [--state-home .cooldis/state]",
     "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]",
+    "cooldis debug bind <thread-id> [--json] [--url <ws-url> | --config <cooldis.toml> | --journal <db>]",
     "cooldis debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]",
     "cooldis debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]",
     "cooldis debug rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]",

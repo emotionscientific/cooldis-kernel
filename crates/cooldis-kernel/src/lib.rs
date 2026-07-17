@@ -327,11 +327,11 @@ pub use agent::manifest::{
     default_operations_registry_root, diff_canonical_json,
 };
 pub use agent::manifest_bind::{
-    AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBoundThread,
-    AgentManifestCompileReceipt, AgentManifestCouplingBinding, AgentManifestDirectToolBinding,
-    AgentManifestDiscoveredSkill, AgentManifestGrantBindingReceipt,
-    AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestPlacementBinding, AgentManifestProviderSurface,
+    AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBindingOrigin,
+    AgentManifestBoundThread, AgentManifestCompileReceipt, AgentManifestCouplingBinding,
+    AgentManifestDirectToolBinding, AgentManifestDiscoveredSkill, AgentManifestGrantBindingReceipt,
+    AgentManifestModelProfileOrigin, AgentManifestModelProfileSelection,
+    AgentManifestOperationBinding, AgentManifestPlacementBinding, AgentManifestProviderSurface,
     AgentManifestResolvedWorkspaceMount, AgentManifestSkillDiscovery,
     AgentManifestSkillPackageBinding, AgentManifestStaticContextSegment,
     AgentManifestWorkspaceBinding, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,

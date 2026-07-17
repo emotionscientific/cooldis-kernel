@@ -35,7 +35,8 @@ allowed to exercise.
 - Opt into conventional workspace skill discovery and retain the exact bind
   witness across resume/fork while later workspace reads remain live.
 - Run the agent through a governed runtime instead of a one-off app server.
-- Inspect events, tool calls, receipts, and artifacts.
+- Inspect events, tool calls, receipts, artifacts, and the effective bind
+  envelope recorded for a thread.
 - Resume work from durable records.
 - Start idempotent process handles whose terminal outcomes re-enter the owning
   thread through durable ingress.

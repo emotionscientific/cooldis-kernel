@@ -397,17 +397,17 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     now_ms: i64,
 ) -> CooldisResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
-    let placement = resolve_manifest_placement(
+    let placement = resolve_manifest_placement_with_origin(
         default_placement,
         placement_override,
         remote_event_store_served,
     )?;
-    let workspace = resolve_manifest_workspace(
+    let workspace = resolve_manifest_workspace_with_origin(
         manifest.workspace.as_ref(),
         default_workspace,
         workspace_override,
     )?;
-    if placement.target != PlacementTarget::Local && workspace.is_some() {
+    if placement.binding.target != PlacementTarget::Local && workspace.is_some() {
         return Err(CooldisError::RuntimeFactory(
             "workspace bindings currently require local placement; remote and sandbox workspace transfer belongs to the sandbox executor boundary"
                 .to_string(),
@@ -461,7 +461,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     };
     let (skill_discovery, discovery_context_segment) = bind_workspace_skill_discovery(
         &manifest,
-        workspace.as_ref(),
+        workspace.as_ref().map(|workspace| &workspace.mount),
         skill_discovery_witness,
         rehydrating_from_witness,
         &bound_skills.skill_names,
@@ -501,6 +501,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         ref_uri: record.ref_uri.clone(),
         manifest_hash: record.manifest_hash.clone(),
         model_profile_id: profile.id.clone(),
+        model_profile_origin: Some(selected.origin),
         provider_id,
         model_id,
         tool_ids: bound_tools.tool_ids,
@@ -522,8 +523,10 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
             .collect(),
         effective_runtime,
         overridden_keys,
-        placement: Some(placement),
-        workspace,
+        placement: Some(placement.binding),
+        placement_origin: Some(placement.origin),
+        workspace_origin: workspace.as_ref().map(|workspace| workspace.origin),
+        workspace: workspace.map(|workspace| workspace.mount),
     };
     Ok(AgentManifestBoundThread {
         manifest,
@@ -2281,6 +2284,7 @@ struct SelectedManifestModelProfile<'a> {
     profile: &'a AgentManifestModelProfile,
     provider_id: String,
     model_id: String,
+    origin: AgentManifestModelProfileOrigin,
 }
 
 fn select_manifest_model_profile<'a>(
@@ -2314,6 +2318,11 @@ fn select_manifest_model_profile<'a>(
                 profile,
                 provider_id,
                 model_id,
+                origin: if selection.is_empty() {
+                    AgentManifestModelProfileOrigin::ManifestDefault
+                } else {
+                    AgentManifestModelProfileOrigin::SelectedAtStart
+                },
             });
             if selection.is_empty() {
                 break;
@@ -2834,6 +2843,8 @@ pub struct AgentManifestBindReceipt {
     pub manifest_hash: String,
     /// The selected declared profile for this bind.
     pub model_profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile_origin: Option<AgentManifestModelProfileOrigin>,
     pub provider_id: String,
     pub model_id: String,
     pub tool_ids: Vec<String>,
@@ -2874,10 +2885,29 @@ pub struct AgentManifestBindReceipt {
     /// witnessed before the field existed keep decoding and folding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<AgentManifestPlacementBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_origin: Option<AgentManifestBindingOrigin>,
     /// Effective host workspace mount fixed for this bind. Optional so bind
     /// receipts written before workspace binding existed keep decoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<AgentManifestResolvedWorkspaceMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_origin: Option<AgentManifestBindingOrigin>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentManifestModelProfileOrigin {
+    ManifestDefault,
+    SelectedAtStart,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentManifestBindingOrigin {
+    DaemonDefault,
+    BindOverride,
+    Manifest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2938,12 +2968,36 @@ pub fn resolve_manifest_placement(
     placement_override: Option<&AgentManifestPlacementBinding>,
     remote_event_store_served: bool,
 ) -> CooldisResult<AgentManifestPlacementBinding> {
-    let resolved = placement_override
-        .or(default_placement)
-        .cloned()
-        .unwrap_or_default();
+    Ok(resolve_manifest_placement_with_origin(
+        default_placement,
+        placement_override,
+        remote_event_store_served,
+    )?
+    .binding)
+}
+
+struct ResolvedManifestPlacement {
+    binding: AgentManifestPlacementBinding,
+    origin: AgentManifestBindingOrigin,
+}
+
+fn resolve_manifest_placement_with_origin(
+    default_placement: Option<&AgentManifestPlacementBinding>,
+    placement_override: Option<&AgentManifestPlacementBinding>,
+    remote_event_store_served: bool,
+) -> CooldisResult<ResolvedManifestPlacement> {
+    let (resolved, origin) = match placement_override {
+        Some(placement) => (placement.clone(), AgentManifestBindingOrigin::BindOverride),
+        None => (
+            default_placement.cloned().unwrap_or_default(),
+            AgentManifestBindingOrigin::DaemonDefault,
+        ),
+    };
     if resolved.target == PlacementTarget::Remote && remote_event_store_served {
-        return Ok(resolved);
+        return Ok(ResolvedManifestPlacement {
+            binding: resolved,
+            origin,
+        });
     }
     if resolved.target != PlacementTarget::Local {
         let target = match resolved.target {
@@ -2955,7 +3009,10 @@ pub fn resolve_manifest_placement(
             "placement target {target} requires the remote EventStore backend capability, which is not available"
         )));
     }
-    Ok(resolved)
+    Ok(ResolvedManifestPlacement {
+        binding: resolved,
+        origin,
+    })
 }
 
 /// Machine-local workspace authority supplied by daemon config or an
@@ -2999,7 +3056,26 @@ pub fn resolve_manifest_workspace(
     default_workspace: Option<&AgentManifestWorkspaceBinding>,
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
 ) -> CooldisResult<Option<AgentManifestResolvedWorkspaceMount>> {
-    let binding = workspace_override.or(default_workspace);
+    Ok(
+        resolve_manifest_workspace_with_origin(requirement, default_workspace, workspace_override)?
+            .map(|workspace| workspace.mount),
+    )
+}
+
+struct ResolvedManifestWorkspace {
+    mount: AgentManifestResolvedWorkspaceMount,
+    origin: AgentManifestBindingOrigin,
+}
+
+fn resolve_manifest_workspace_with_origin(
+    requirement: Option<&AgentManifestWorkspaceRequirement>,
+    default_workspace: Option<&AgentManifestWorkspaceBinding>,
+    workspace_override: Option<&AgentManifestWorkspaceBinding>,
+) -> CooldisResult<Option<ResolvedManifestWorkspace>> {
+    let (binding, origin) = match workspace_override {
+        Some(binding) => (Some(binding), AgentManifestBindingOrigin::BindOverride),
+        None => (default_workspace, AgentManifestBindingOrigin::DaemonDefault),
+    };
     let (requirement, binding) = match (requirement, binding) {
         (None, None) => return Ok(None),
         (Some(_), None) => {
@@ -3036,10 +3112,13 @@ pub fn resolve_manifest_workspace(
             host_path.display()
         )));
     }
-    Ok(Some(AgentManifestResolvedWorkspaceMount {
-        guest_path: PathBuf::from(&requirement.guest_path),
-        host_path,
-        mode: binding.mode,
+    Ok(Some(ResolvedManifestWorkspace {
+        mount: AgentManifestResolvedWorkspaceMount {
+            guest_path: PathBuf::from(&requirement.guest_path),
+            host_path,
+            mode: binding.mode,
+        },
+        origin,
     }))
 }
 

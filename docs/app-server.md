@@ -80,6 +80,22 @@ cargo run --bin cooldis -- debug rpc turn --thread <thread-id> --json "resume he
 cargo run --bin cooldis -- debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 ```
 
+`cooldis debug bind` answers why a thread has its effective configuration by
+projecting its recorded `manifest.compile.completed` and
+`manifest.bind.completed` receipts. It uses the same WebSocket endpoint
+selection as `debug rpc`, and it can inspect the same thread offline from the
+SQLite journal without a daemon:
+
+```sh
+cargo run --bin cooldis -- debug bind <thread-id>
+cargo run --bin cooldis -- debug bind <thread-id> --json --url ws://127.0.0.1:49200/rpc
+cargo run --bin cooldis -- debug bind <thread-id> --journal .cooldis/state/session_history.sqlite3
+```
+
+The command never resolves the manifest again or consults current daemon
+defaults to fill old receipt gaps. Legacy origins that were not recorded print
+as `[unrecorded]`.
+
 ## Provider Config
 
 The chat command can point its private app-server runtime at a live

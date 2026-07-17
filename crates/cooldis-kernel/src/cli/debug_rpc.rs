@@ -16,6 +16,7 @@ pub(super) async fn run_debug(mut args: Vec<OsString>) -> CooldisResult<()> {
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
+        "bind" => run_debug_bind(args).await,
         "rpc" => run_debug_rpc(args).await,
         other => Err(usage_error(format!(
             "unknown debug subcommand {other:?}; use `cooldis debug --help`"
@@ -52,8 +53,8 @@ pub(super) async fn run_debug_rpc(mut args: Vec<OsString>) -> CooldisResult<()> 
 /// `--url` and `--config` together is a usage error.
 #[derive(Debug)]
 pub(super) struct DebugRpcEndpointArgs {
-    url: Option<String>,
-    config: Option<PathBuf>,
+    pub(super) url: Option<String>,
+    pub(super) config: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -511,6 +512,7 @@ pub(super) fn print_debug_help() {
         "cooldis debug\n\
 \n\
 Usage:\n\
+  cooldis debug bind <thread-id> [--json] [--url <ws-url> | --config <cooldis.toml> | --journal <db>]\n\
   cooldis debug rpc (call|turn|tail) ...   debug client for a running daemon (see `cooldis debug rpc --help`)\n\
 \n\
 Maintainer and protocol inspection tools. These commands are not the public\n\

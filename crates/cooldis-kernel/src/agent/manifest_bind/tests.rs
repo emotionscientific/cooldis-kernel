@@ -178,6 +178,25 @@ fn workspace_binding_resolution_is_declared_fail_closed_and_override_first() {
         fs::canonicalize(&override_host).unwrap()
     );
     assert_eq!(resolved.mode, AgentManifestWorkspaceMode::ReadWrite);
+    let default_origin =
+        resolve_manifest_workspace_with_origin(Some(&requirement), Some(&default_binding), None)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        default_origin.origin,
+        AgentManifestBindingOrigin::DaemonDefault
+    );
+    let override_origin = resolve_manifest_workspace_with_origin(
+        Some(&requirement),
+        Some(&default_binding),
+        Some(&override_binding),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        override_origin.origin,
+        AgentManifestBindingOrigin::BindOverride
+    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -381,6 +400,9 @@ pinned = true
         bound.bind_receipt.static_context_segments[0].content_sha256,
         blob.content_sha256
     );
+    let receipt = serde_json::to_value(&bound.bind_receipt).unwrap();
+    assert_eq!(receipt["model_profile_origin"], "manifest-default");
+    assert_eq!(receipt["placement_origin"], "daemon-default");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -624,6 +646,182 @@ async fn protocol_tool_import_direct_pins_must_not_duplicate_tool_rows() {
             .contains("duplicate direct tool_name surface")
     );
     assert!(err.to_string().contains("cooldis_mcp_echo"));
+}
+
+#[tokio::test]
+async fn bind_receipt_keeps_each_pinned_universe_import_correspondence() {
+    let root = temp_dir("manifest-bind-multiple-pinned-universes");
+    let first_tool = witnessed_tool("first.echo", "string");
+    let second_tool = witnessed_tool("second.echo", "string");
+    let first_pin = format!(
+        "mcptool://arcade/{}@{}",
+        first_tool.tool_name, first_tool.schema_hash
+    );
+    let second_pin = format!(
+        "mcptool://arcade/{}@{}",
+        second_tool.tool_name, second_tool.schema_hash
+    );
+    let discovery =
+        ToolUniverseDiscovery::witness("mcp://arcade", vec![first_tool, second_tool], 1).unwrap();
+    let discoverer = StaticToolUniverseDiscoverer { discovery };
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"
+[agent]
+name = "multiple-pinned-universes"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "protocol_tool_import"
+id = "first-import"
+protocol = "mcp"
+server_ref = "mcp://arcade"
+expose = ["direct_tool"]
+pin = "{first_pin}"
+
+[[tools]]
+type = "protocol_tool_import"
+id = "second-import"
+protocol = "mcp"
+server_ref = "mcp://arcade"
+expose = ["direct_tool"]
+pin = "{second_pin}"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        None,
+        &BTreeSet::from(["mcp://arcade".to_string()]),
+        Some(&discoverer),
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bound.bind_receipt.tool_ids,
+        vec!["first-import".to_string(), "second-import".to_string()]
+    );
+    assert_eq!(bound.bind_receipt.tool_universes.len(), 2);
+    assert_eq!(
+        bound.bind_receipt.tool_universes[0].import_id,
+        "first-import"
+    );
+    assert_eq!(bound.bind_receipt.tool_universes[0].pinned, vec![first_pin]);
+    assert_eq!(
+        bound.bind_receipt.tool_universes[1].import_id,
+        "second-import"
+    );
+    assert_eq!(
+        bound.bind_receipt.tool_universes[1].pinned,
+        vec![second_pin]
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn bind_receipt_does_not_record_operation_rows_by_manifest_tool_id() {
+    let root = temp_dir("manifest-bind-operation-tool-correspondence");
+    let operation_root = root.join("operations");
+    let operation = publish_multi_operation_record(
+        &operation_root,
+        "operation-record",
+        &[("operation-name", Vec::new())],
+    )
+    .await;
+    let manifest_path = root.join("operation-tool.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "operation-tool-correspondence"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "bash_tool"
+id = "manifest-tool-id"
+command = "run-operation"
+operation_ref = "op://operation-record/operation-name@sha256:{}"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation.active_artifact_hash
+        ),
+    )
+    .unwrap();
+    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_root)
+        .unwrap();
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bound.bind_receipt.tool_ids,
+        vec!["manifest-tool-id".to_string()]
+    );
+    assert_eq!(bound.bind_receipt.operation_bindings.len(), 1);
+    assert_eq!(
+        bound.bind_receipt.operation_bindings[0].name,
+        "operation-record"
+    );
+    assert_eq!(
+        bound.bind_receipt.operation_bindings[0].operations,
+        vec!["operation-name".to_string()]
+    );
+    assert!(
+        bound.bind_receipt.operation_bindings[0]
+            .direct_tools
+            .is_empty()
+    );
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -1808,6 +2006,10 @@ discover = true
     .await
     .unwrap();
 
+    assert_eq!(
+        bound.bind_receipt.workspace_origin,
+        Some(AgentManifestBindingOrigin::BindOverride)
+    );
     let discovery = bound
         .bind_receipt
         .skill_discovery
@@ -3267,10 +3469,17 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
     );
     let legacy_receipt: AgentManifestBindReceipt = serde_json::from_str(&legacy_wire).unwrap();
     assert_eq!(legacy_receipt.placement, None);
+    assert_eq!(legacy_receipt.model_profile_origin, None);
+    assert_eq!(legacy_receipt.placement_origin, None);
     assert_eq!(legacy_receipt.workspace, None);
+    assert_eq!(legacy_receipt.workspace_origin, None);
     assert_eq!(legacy_receipt.skill_discovery, None);
     assert_eq!(legacy_receipt.ref_uri, "cooldis://agents/karl");
     assert_eq!(legacy_receipt.tool_ids, vec!["threads/spawn"]);
+    let legacy_value = serde_json::to_value(&legacy_receipt).unwrap();
+    assert!(legacy_value.get("model_profile_origin").is_none());
+    assert!(legacy_value.get("placement_origin").is_none());
+    assert!(legacy_value.get("workspace_origin").is_none());
     assert!(
         serde_json::to_value(&legacy_receipt)
             .unwrap()
@@ -3359,6 +3568,18 @@ fn placement_resolution_defaults_local_and_rpc_override_wins() {
     assert_eq!(
         resolve_manifest_placement(Some(&default), Some(&rpc_override), false).unwrap(),
         rpc_override
+    );
+    assert_eq!(
+        resolve_manifest_placement_with_origin(None, None, false)
+            .unwrap()
+            .origin,
+        AgentManifestBindingOrigin::DaemonDefault
+    );
+    assert_eq!(
+        resolve_manifest_placement_with_origin(Some(&default), Some(&rpc_override), false)
+            .unwrap()
+            .origin,
+        AgentManifestBindingOrigin::BindOverride
     );
 }
 

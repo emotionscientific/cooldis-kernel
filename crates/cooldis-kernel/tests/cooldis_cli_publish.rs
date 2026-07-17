@@ -274,6 +274,7 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     assert!(commands.contains("cooldis console"));
     assert!(commands.contains("cooldis chat [PROMPT]"));
     assert!(commands.contains("cooldis debug rpc call"));
+    assert!(commands.contains("cooldis debug bind"));
     assert!(commands.contains("cooldis tool manual"));
     assert!(commands.contains("cooldis skill publish"));
     assert!(commands.contains("cooldis skill import"));
@@ -319,6 +320,9 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     let help_debug_rpc = run_cooldis(["help", "debug", "rpc"]);
     assert!(help_debug_rpc.contains("cooldis debug rpc"));
 
+    let help_debug_bind = run_cooldis(["help", "debug", "bind"]);
+    assert!(help_debug_bind.contains("cooldis debug bind"));
+
     let rpc = run_cooldis(["rpc", "--help"]);
     assert!(rpc.contains("cooldis rpc"));
     assert!(rpc.contains("--listen"));
@@ -334,6 +338,9 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
 
     let debug_rpc = run_cooldis(["debug", "rpc", "--help"]);
     assert!(debug_rpc.contains("Protocol-level debug client"));
+
+    let debug_bind = run_cooldis(["debug", "bind", "--help"]);
+    assert!(debug_bind.contains("recorded manifest compile and bind"));
 
     let old_tool_plan = run_cooldis_failed(["tool", "plan", "--help"]);
     assert!(stderr(&old_tool_plan).contains("unknown tool subcommand"));

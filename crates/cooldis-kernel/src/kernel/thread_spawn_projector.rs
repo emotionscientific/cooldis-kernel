@@ -1435,6 +1435,7 @@ mod tests {
                     ref_uri: agent_ref.to_string(),
                     manifest_hash: "sha256:forged-remote-workspace".to_string(),
                     model_profile_id: "default".to_string(),
+                    model_profile_origin: None,
                     provider_id: "test".to_string(),
                     model_id: "model".to_string(),
                     tool_ids: Vec::new(),
@@ -1453,11 +1454,13 @@ mod tests {
                         executor_ref: Some("executor://cluster/default".to_string()),
                         config: BTreeMap::new(),
                     }),
+                    placement_origin: None,
                     workspace: Some(AgentManifestResolvedWorkspaceMount {
                         guest_path: PathBuf::from("/work"),
                         host_path: PathBuf::from("/tmp/forged-remote-workspace"),
                         mode: AgentManifestWorkspaceMode::ReadWrite,
                     }),
+                    workspace_origin: None,
                 })
                 .unwrap(),
             })
