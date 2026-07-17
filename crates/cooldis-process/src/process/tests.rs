@@ -302,8 +302,13 @@ async fn host_process_termination_kills_term_ignoring_process_group_members() {
 
     let child_pid = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Ok(pid) = std::fs::read_to_string(&pid_file) {
-                break pid.trim().parse::<libc::pid_t>().unwrap();
+            // The shell creates the pid file before the echo's content lands;
+            // keep polling until the content actually parses.
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok())
+            {
+                break pid;
             }
             tokio::task::yield_now().await;
         }
