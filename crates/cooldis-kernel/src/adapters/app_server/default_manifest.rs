@@ -282,6 +282,7 @@ fn default_manifest_tools(
                         "op://{COOLDIS_THREADS_PACKAGE}/{operation_name}@sha256:{}",
                         record.active_artifact_hash
                     ),
+                    effect_class: Default::default(),
                     grants,
                 }));
             }
@@ -333,6 +334,7 @@ fn default_manifest_tools(
                     "op://{}/{}@sha256:{}",
                     record.name, operation.operation_name, record.active_artifact_hash
                 ),
+                effect_class: Default::default(),
                 grants: grants.clone(),
             }));
         }

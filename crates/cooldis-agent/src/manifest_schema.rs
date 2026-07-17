@@ -109,6 +109,7 @@ impl AgentManifestSchema {
         }
 
         reject_reserved_resource_kinds(value)?;
+        validate_raw_effect_classes(value)?;
         validate_raw_grant_shapes(value)?;
 
         let identity = required_section(value, "agent")?;
@@ -552,6 +553,21 @@ pub enum AgentManifestTool {
     ProtocolImport(AgentManifestProtocolToolImport),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EffectClass {
+    Pure,
+    Idempotent,
+    #[default]
+    AtMostOnce,
+}
+
+impl EffectClass {
+    pub fn is_at_most_once(&self) -> bool {
+        *self == Self::AtMostOnce
+    }
+}
+
 /// A command exposed inside virtual bash, backed by a published operation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -560,6 +576,8 @@ pub struct AgentManifestBashTool {
     pub command: String,
     /// `op://...` operation artifact reference.
     pub operation_ref: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
     /// Effect grants ride on the binding that uses them (audit section 10);
     /// there is no manifest-global grant pool.
     #[serde(default)]
@@ -574,6 +592,8 @@ pub struct AgentManifestDirectTool {
     pub tool_name: String,
     /// `op://...` operation artifact reference.
     pub operation_ref: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
     #[serde(default)]
     pub grants: Vec<AgentManifestGrant>,
 }
@@ -592,6 +612,8 @@ pub struct AgentManifestProtocolToolImport {
     /// names placement; content-addressing belongs to per-tool contract pins
     /// (`mcptool://...@sha256:<hash>`), not the source record.
     pub server_ref: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
     /// Which surfaces imported tools may be exposed on. Empty means the
     /// search surface only (the default for live universes).
     #[serde(default)]
@@ -1200,6 +1222,37 @@ fn reject_reserved_resource_kinds(value: &toml::Value) -> CooldisResult<()> {
             return Err(CooldisError::RuntimeFactory(format!(
                 "resource kind {kind:?} is reserved for a deferred V1 resource scope"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_raw_effect_classes(value: &toml::Value) -> CooldisResult<()> {
+    let Some(tools) = value.get("tools").and_then(toml::Value::as_array) else {
+        return Ok(());
+    };
+    for (tool_index, tool) in tools.iter().enumerate() {
+        let tool_id = tool
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("<row {tool_index}>"));
+        let Some(effect_class) = tool.get("effect_class") else {
+            continue;
+        };
+        match effect_class.as_str() {
+            Some("pure" | "idempotent" | "at-most-once") => {}
+            Some(effect_class) => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "tool {tool_id:?} effect_class {effect_class:?} is unknown; expected pure, idempotent, or at-most-once"
+                )));
+            }
+            None => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "tool {tool_id:?} effect_class must be a string, got {}",
+                    toml_value_kind(effect_class)
+                )));
+            }
         }
     }
     Ok(())

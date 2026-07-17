@@ -358,7 +358,8 @@ pub use agent::manifest_schema::{
     AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey,
     AgentManifestRuntimeOverridePolicy, AgentManifestSchema, AgentManifestSkills,
     AgentManifestTool, AgentManifestToolProtocol, AgentManifestToolSurface,
-    AgentManifestWorkspaceMode, AgentManifestWorkspaceRequirement, default_context_pipeline,
+    AgentManifestWorkspaceMode, AgentManifestWorkspaceRequirement, EffectClass,
+    default_context_pipeline,
 };
 pub use agent::tool_interceptor::{
     AllowAllToolPermissionGate, ToolExecutionInterceptor, ToolExecutionOutcome,

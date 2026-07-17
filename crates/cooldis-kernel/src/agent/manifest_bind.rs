@@ -18,7 +18,7 @@ use crate::agent::manifest_schema::{
     AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
     AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey, AgentManifestSchema,
     AgentManifestTool, AgentManifestToolSurface, AgentManifestWorkspaceMode,
-    AgentManifestWorkspaceRequirement, KERNEL_ASSEMBLER_STATIC,
+    AgentManifestWorkspaceRequirement, EffectClass, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::agent::tool_universe::{
     PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
@@ -746,6 +746,7 @@ struct OperationBindingAccumulator {
     grant_expiries: BTreeSet<AgentManifestGrantExpiry>,
     operations: BTreeSet<String>,
     direct_tools: BTreeSet<AgentManifestDirectToolBinding>,
+    effect_class: Option<EffectClass>,
     whole_record: bool,
 }
 
@@ -757,7 +758,13 @@ impl OperationBindingAccumulator {
         operation: Option<String>,
         direct_tool: Option<AgentManifestDirectToolBinding>,
     ) {
-        self.merge_with_expiries(grants, BTreeSet::new(), operation, direct_tool);
+        self.merge_with_expiries(
+            grants,
+            BTreeSet::new(),
+            operation,
+            direct_tool,
+            EffectClass::AtMostOnce,
+        );
     }
 
     fn merge_with_expiries(
@@ -766,12 +773,18 @@ impl OperationBindingAccumulator {
         grant_expiries: BTreeSet<AgentManifestGrantExpiry>,
         operation: Option<String>,
         direct_tool: Option<AgentManifestDirectToolBinding>,
+        effect_class: EffectClass,
     ) {
         self.grants.extend(grants);
         self.grant_expiries.extend(grant_expiries);
         if let Some(direct_tool) = direct_tool {
             self.direct_tools.insert(direct_tool);
         }
+        self.effect_class = Some(
+            self.effect_class
+                .map(|bound| bound.max(effect_class))
+                .unwrap_or(effect_class),
+        );
         match operation {
             Some(operation) if !self.whole_record => {
                 self.operations.insert(operation);
@@ -2162,6 +2175,7 @@ async fn bind_tools(
                     &tool.operation_ref,
                     &grants,
                     &grant_expiries,
+                    tool.effect_class,
                     None,
                     operation_registry_root,
                     &mut granted,
@@ -2193,6 +2207,7 @@ async fn bind_tools(
                     &tool.operation_ref,
                     &grants,
                     &grant_expiries,
+                    tool.effect_class,
                     Some(&tool.tool_name),
                     operation_registry_root,
                     &mut granted,
@@ -2392,6 +2407,7 @@ fn operation_bindings_from_map(
             AgentManifestOperationBinding {
                 name,
                 artifact_hash,
+                effect_class: binding.effect_class.unwrap_or_default(),
                 grants: binding.grants.into_iter().collect(),
                 grant_expiries: binding.grant_expiries.into_iter().collect(),
                 operations,
@@ -2468,6 +2484,7 @@ async fn bind_protocol_tool_import(
     let binding = ToolUniverseBinding {
         import_id: tool.id.clone(),
         server_ref: tool.server_ref.clone(),
+        effect_class: tool.effect_class,
         include_tools,
         pin,
         grant_expiries: grant_expiries(&tool.grants),
@@ -2492,6 +2509,7 @@ async fn bind_operation_ref(
         operation_ref,
         grants,
         &[],
+        EffectClass::AtMostOnce,
         direct_tool_name,
         operation_registry_root,
         granted,
@@ -2505,6 +2523,7 @@ async fn bind_operation_ref_with_expiries(
     operation_ref: &str,
     grants: &[String],
     grant_expiries: &[AgentManifestGrantExpiry],
+    effect_class: EffectClass,
     direct_tool_name: Option<&str>,
     operation_registry_root: Option<&Path>,
     granted: &mut BTreeSet<String>,
@@ -2527,6 +2546,7 @@ async fn bind_operation_ref_with_expiries(
             Ok::<AgentManifestDirectToolBinding, CooldisError>(AgentManifestDirectToolBinding {
                 tool_name: tool_name.to_string(),
                 operation,
+                effect_class,
                 grant_expiries: grant_expiries.to_vec(),
             })
         })
@@ -2540,6 +2560,7 @@ async fn bind_operation_ref_with_expiries(
             grant_expiries.iter().cloned().collect(),
             verification.operation,
             direct_tool_binding,
+            effect_class,
         );
     Ok(())
 }
@@ -3166,6 +3187,8 @@ impl AgentManifestCouplingBinding {
 pub struct AgentManifestOperationBinding {
     pub name: String,
     pub artifact_hash: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3183,6 +3206,8 @@ pub struct AgentManifestOperationBinding {
 pub struct AgentManifestDirectToolBinding {
     pub tool_name: String,
     pub operation: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grant_expiries: Vec<AgentManifestGrantExpiry>,
 }

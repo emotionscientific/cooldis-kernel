@@ -98,6 +98,35 @@ fn witnessed_contracts_are_schema_hash_addressed() {
 }
 
 #[test]
+fn argument_fingerprint_is_stable_across_object_key_order() {
+    let first = serde_json::from_str::<Value>(
+        r#"{"outer":{"b":2.50,"a":"\u96ea"},"z":-0.0,"text":"caf\u00e9"}"#,
+    )
+    .unwrap();
+    let second =
+        serde_json::from_str::<Value>(r#"{"text":"café","z":-0.0,"outer":{"a":"雪","b":2.5}}"#)
+            .unwrap();
+
+    let first = args_fingerprint("search", &first).unwrap();
+    let second = args_fingerprint("search", &second).unwrap();
+
+    assert_eq!(first, second);
+    assert!(first.starts_with("sha256:"));
+    assert_ne!(
+        first,
+        args_fingerprint(
+            "different-search",
+            &serde_json::json!({
+                "outer": {"a": "雪", "b": 2.5},
+                "z": -0.0,
+                "text": "café"
+            })
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn discovery_filter_restamps_the_hash() {
     let tools = vec![
         WitnessedToolContract::witness(&ToolDefinition::new(
@@ -799,6 +828,7 @@ fn mounted_universe(
         binding: ToolUniverseBinding {
             import_id: server_ref.trim_start_matches("mcp://").to_string(),
             server_ref: server_ref.to_string(),
+            effect_class: EffectClass::AtMostOnce,
             include_tools: None,
             pin,
             grant_expiries: Vec::new(),

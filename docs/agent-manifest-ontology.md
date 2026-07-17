@@ -158,6 +158,23 @@ First-party kernel tools are still operation artifacts. For example,
 `threads.spawn` grant. The manifest binds published operation records by
 artifact hash rather than copying tool implementations into itself.
 
+Every `bash_tool`, `direct_tool`, and `protocol_tool_import` row may declare an
+effect class:
+
+```toml
+effect_class = "idempotent" # pure | idempotent | at-most-once
+```
+
+The field defaults to `at-most-once`. `pure` and `idempotent` authorize a
+re-execution after an interrupted invocation; `at-most-once` instead produces
+a witnessed conservative failure. A recorded outcome is reused for every
+class only when its argument fingerprint and bound manifest snapshot match.
+Fingerprints are SHA-256 hashes of the canonical JSON tool name and arguments.
+Journal events written before fingerprints existed retain their legacy request
+event and call-id reuse behavior. Pinned protocol imports copy their declared
+class into the bind receipt; dynamic tool-universe calls remain
+`at-most-once`.
+
 Every `grants` array on `bash_tool`, `direct_tool`,
 `protocol_tool_import`, and coupling rows accepts either the existing bare
 capability string or an expiring object:

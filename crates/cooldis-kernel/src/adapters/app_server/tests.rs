@@ -10,16 +10,16 @@ use super::threads::{
 use super::*;
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventKind, EventOrigin, KERNEL_RUNTIME_KIND,
-    LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
-    MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
-    PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
-    PROCESS_WRITE_OPERATION, ProviderError, PublishSkillPackageRequest, PublishedOperationSource,
-    SCHEDULE_MANAGE_CAPABILITY, SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION,
-    THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION,
-    THREAD_WAIT_OPERATION, THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY,
-    THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL, TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig,
-    ThinkingEffort,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EffectClass, EventKind, EventOrigin,
+    KERNEL_RUNTIME_KIND, LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION,
+    MANDATE_REVOKE_OPERATION, MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION,
+    OPERATION_METADATA_RUNTIME_KIND, PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION,
+    PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, ProviderError,
+    PublishSkillPackageRequest, PublishedOperationSource, SCHEDULE_MANAGE_CAPABILITY,
+    SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
+    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
+    THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL,
+    TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig, ThinkingEffort,
 };
 
 #[test]
@@ -7091,6 +7091,7 @@ type = "bash_tool"
 id = "profile"
 command = "profile"
 operation_ref = "op://analytics/profile@sha256:{}"
+effect_class = "idempotent"
 
 [runtime]
 default_cwd = "."
@@ -7154,6 +7155,22 @@ streaming = false
         bind.payload["operation_bindings"][0]["operations"],
         json!(["profile"])
     );
+    let request = crate::ToolCallRequestedPayload {
+        subject: crate::ToolCallSubject {
+            turn_id: "turn-effect-class".to_string(),
+            call_id: "call-effect-class".to_string(),
+        },
+        snapshot_id: bind.payload["manifest_hash"].as_str().unwrap().to_string(),
+        tool_name: crate::BASH_TOOL.to_string(),
+        arguments: json!({"command":"profile customer-1"}),
+        args_fingerprint: None,
+        holds: Vec::new(),
+    };
+    assert_eq!(
+        crate::adapters::provider_runtime::effect_class_for_request(&events, &request).unwrap(),
+        EffectClass::Idempotent,
+        "the runtime lookup must read the class from the real top-level bind receipt shape"
+    );
 
     app.dispatch_request(
         &connection,
@@ -7197,6 +7214,7 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
             name: "analytics".to_string(),
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
+            effect_class: EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
             grant_expiries: Vec::new(),
             operations: Vec::new(),
