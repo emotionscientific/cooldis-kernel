@@ -320,17 +320,18 @@ pub use agent::hooks::{
     UserPromptSubmitHookOutcome, UserPromptSubmitHookRequest,
 };
 pub use agent::manifest::{
-    AgentAliasRecord, AgentAliasResolutionReceipt, AgentManifestRefVerification,
-    AgentManifestRefVerificationStatus, AgentPublishPlan, AgentRecordRef, AgentToolRef,
-    LocalAgentRegistry, PublishedAgentRecord, agent_ref_uri, default_blob_registry_root,
-    default_blob_registry_root_for_agent_registry_root, default_operations_registry_root,
+    AgentAliasRecord, AgentAliasResolutionReceipt, AgentManifestDiffChange, AgentManifestDiffKind,
+    AgentManifestRefVerification, AgentManifestRefVerificationStatus, AgentPublishPlan,
+    AgentRecordRef, AgentToolRef, AgentVersionSummary, LocalAgentRegistry, PublishedAgentRecord,
+    agent_ref_uri, default_blob_registry_root, default_blob_registry_root_for_agent_registry_root,
+    default_operations_registry_root, diff_canonical_json,
 };
 pub use agent::manifest_bind::{
-    AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBoundThread,
-    AgentManifestCompileReceipt, AgentManifestCouplingBinding, AgentManifestDirectToolBinding,
-    AgentManifestDiscoveredSkill, AgentManifestGrantBindingReceipt,
-    AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestPlacementBinding, AgentManifestProviderSurface,
+    AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBindingOrigin,
+    AgentManifestBoundThread, AgentManifestCompileReceipt, AgentManifestCouplingBinding,
+    AgentManifestDirectToolBinding, AgentManifestDiscoveredSkill, AgentManifestGrantBindingReceipt,
+    AgentManifestModelProfileOrigin, AgentManifestModelProfileSelection,
+    AgentManifestOperationBinding, AgentManifestPlacementBinding, AgentManifestProviderSurface,
     AgentManifestResolvedWorkspaceMount, AgentManifestSkillDiscovery,
     AgentManifestSkillPackageBinding, AgentManifestStaticContextSegment,
     AgentManifestWorkspaceBinding, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,

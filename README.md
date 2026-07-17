@@ -105,7 +105,8 @@ stateful product harnesses are future direction. See
 - [Docs index](docs/README.md): documentation map.
 - [Overview](docs/index.md): product category and current status.
 - [Getting started](docs/getting-started.md): local run and inspection path.
-- [CLI](docs/cli.md): canonical commands and help model.
+- [CLI](docs/cli.md): canonical commands, help model, and receipt-backed bind
+  inspection.
 - [Runtime primitives](docs/developers/runtime-primitives.md): kernel-owned
   surfaces and boundaries.
 - [ABI](docs/abi.md): operation boundary and host/guest contract.

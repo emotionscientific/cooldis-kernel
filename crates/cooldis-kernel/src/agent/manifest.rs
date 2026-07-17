@@ -12,6 +12,7 @@ use cooldis_agent::{validate_namespace, validate_version};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -236,6 +237,45 @@ impl LocalAgentRegistry {
             .collect()
     }
 
+    pub fn list_version_records(&self, name: &str) -> CooldisResult<Vec<AgentVersionSummary>> {
+        let name = validate_record_name(name)?;
+        let versions_dir = self.root.join("versions").join(&name);
+        if !versions_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&versions_dir).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to read agent versions directory {}: {err}",
+                versions_dir.display()
+            ))
+        })? {
+            let entry = entry.map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read agent version entry in {}: {err}",
+                    versions_dir.display()
+                ))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(version) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let record = self.load_version_record(&name, version)?;
+            records.push(AgentVersionSummary {
+                version: record.version,
+                source_hash: record.source_hash,
+                manifest_hash: record.manifest_hash,
+                published_at_ms: record.published_at_ms,
+                authored_source_present: record.authored_source.is_some(),
+            });
+        }
+        records.sort_by_key(|record| record.published_at_ms);
+        Ok(records)
+    }
+
     /// Resolve a mutable alias (`latest`, `stable`, ...) to its immutable
     /// version record, producing a resolution receipt. Aliases live under
     /// `aliases/<name>/<alias>.json`; `latest` is maintained automatically on
@@ -409,6 +449,7 @@ pub struct AgentPublishPlan {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    pub authored_source: String,
     pub source_hash: String,
     pub manifest_hash: String,
     pub model_profile_count: usize,
@@ -535,6 +576,7 @@ impl AgentPublishPlan {
             namespace,
             version,
             description: manifest.identity.description.clone(),
+            authored_source: source.to_string(),
             source_hash,
             manifest_hash,
             model_profile_count: manifest.model_profiles.len(),
@@ -645,6 +687,7 @@ impl AgentPublishPlan {
             namespace: self.namespace,
             version: self.version,
             description: self.description,
+            authored_source: Some(self.authored_source),
             source_hash: self.source_hash,
             manifest_hash: self.manifest_hash,
             model_profile_count: self.model_profile_count,
@@ -659,6 +702,8 @@ impl AgentPublishPlan {
     }
 }
 
+/// A manifest version snapshot pairs `authored_source` and `resolved_manifest`
+/// with their `source_hash` and `manifest_hash`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PublishedAgentRecord {
     pub schema_version: u32,
@@ -669,6 +714,8 @@ pub struct PublishedAgentRecord {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored_source: Option<String>,
     pub source_hash: String,
     pub manifest_hash: String,
     pub model_profile_count: usize,
@@ -682,6 +729,114 @@ pub struct PublishedAgentRecord {
     pub ref_uri: String,
     pub resolved_manifest: JsonValue,
     pub published_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentVersionSummary {
+    pub version: String,
+    pub source_hash: String,
+    pub manifest_hash: String,
+    pub published_at_ms: u64,
+    pub authored_source_present: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentManifestDiffKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentManifestDiffChange {
+    pub path: String,
+    pub kind: AgentManifestDiffKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<JsonValue>,
+}
+
+pub fn diff_canonical_json(before: &JsonValue, after: &JsonValue) -> Vec<AgentManifestDiffChange> {
+    let mut changes = Vec::new();
+    diff_canonical_json_at_path(before, after, "", &mut changes);
+    changes.sort_by(|left, right| left.path.cmp(&right.path));
+    changes
+}
+
+fn diff_canonical_json_at_path(
+    before: &JsonValue,
+    after: &JsonValue,
+    path: &str,
+    changes: &mut Vec<AgentManifestDiffChange>,
+) {
+    if before == after {
+        return;
+    }
+    match (before, after) {
+        (JsonValue::Object(before), JsonValue::Object(after)) => {
+            let keys = before
+                .keys()
+                .chain(after.keys())
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            for key in keys {
+                let child_path = json_pointer_child(path, key);
+                match (before.get(key), after.get(key)) {
+                    (Some(before), Some(after)) => {
+                        diff_canonical_json_at_path(before, after, &child_path, changes)
+                    }
+                    (Some(before), None) => changes.push(AgentManifestDiffChange {
+                        path: child_path,
+                        kind: AgentManifestDiffKind::Removed,
+                        before: Some(before.clone()),
+                        after: None,
+                    }),
+                    (None, Some(after)) => changes.push(AgentManifestDiffChange {
+                        path: child_path,
+                        kind: AgentManifestDiffKind::Added,
+                        before: None,
+                        after: Some(after.clone()),
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        (JsonValue::Array(before), JsonValue::Array(after)) => {
+            for index in 0..before.len().max(after.len()) {
+                let child_path = json_pointer_child(path, &index.to_string());
+                match (before.get(index), after.get(index)) {
+                    (Some(before), Some(after)) => {
+                        diff_canonical_json_at_path(before, after, &child_path, changes)
+                    }
+                    (Some(before), None) => changes.push(AgentManifestDiffChange {
+                        path: child_path,
+                        kind: AgentManifestDiffKind::Removed,
+                        before: Some(before.clone()),
+                        after: None,
+                    }),
+                    (None, Some(after)) => changes.push(AgentManifestDiffChange {
+                        path: child_path,
+                        kind: AgentManifestDiffKind::Added,
+                        before: None,
+                        after: Some(after.clone()),
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => changes.push(AgentManifestDiffChange {
+            path: path.to_string(),
+            kind: AgentManifestDiffKind::Changed,
+            before: Some(before.clone()),
+            after: Some(after.clone()),
+        }),
+    }
+}
+
+fn json_pointer_child(path: &str, segment: &str) -> String {
+    format!("{path}/{}", segment.replace('~', "~0").replace('/', "~1"))
 }
 
 impl PublishedAgentRecord {
@@ -1203,6 +1358,13 @@ fn canonical_json_from_schema(value: &AgentManifestSchema) -> CooldisResult<Json
         CooldisError::RuntimeFactory(format!("failed to canonicalize agent manifest: {err}"))
     })?;
     Ok(sort_json(json))
+}
+
+pub(crate) fn canonical_json_from_authored_source(source: &str) -> CooldisResult<JsonValue> {
+    let value: toml::Value = toml::from_str(source)
+        .map_err(|err| CooldisError::RuntimeFactory(format!("invalid agent manifest: {err}")))?;
+    let manifest = AgentManifestSchema::from_toml_value(&value)?;
+    canonical_json_from_schema(&manifest)
 }
 
 fn sort_json(value: JsonValue) -> JsonValue {

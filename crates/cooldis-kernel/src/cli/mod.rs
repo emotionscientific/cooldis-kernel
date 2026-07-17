@@ -65,6 +65,7 @@ mod chat;
 mod console;
 mod coupling;
 mod daemon;
+mod debug_bind;
 mod debug_rpc;
 mod import;
 mod rpc;
@@ -78,6 +79,7 @@ use blob::*;
 use console::*;
 use coupling::*;
 use daemon::*;
+use debug_bind::*;
 use debug_rpc::*;
 use import::*;
 use rpc::*;
@@ -183,6 +185,12 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         [command, subcommand] if command == "agent" && subcommand == "list" => {
             print_agent_list_help()
         }
+        [command, subcommand] if command == "agent" && subcommand == "versions" => {
+            print_agent_versions_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "diff" => {
+            print_agent_diff_help()
+        }
         [command, subcommand] if command == "agent" && subcommand == "show" => {
             print_agent_show_help()
         }
@@ -260,6 +268,9 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         }
         [command] if command == "rpc" => print_rpc_help(),
         [command] if command == "debug" => print_debug_help(),
+        [command, subcommand] if command == "debug" && subcommand == "bind" => {
+            print_debug_bind_help()
+        }
         [command, subcommand] if command == "debug" && subcommand == "rpc" => {
             print_debug_rpc_help()
         }
@@ -334,6 +345,8 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
     "cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
     "cooldis agent list [--registry-root .cooldis/agents]",
+    "cooldis agent versions <name> [--json] [--registry-root .cooldis/agents]",
+    "cooldis agent diff <name> --from <version>[:authored|:resolved] --to <version>[:authored|:resolved] [--json] [--registry-root .cooldis/agents]",
     "cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]",
     "cooldis agent run <agent-ref> --input <text> [--registry-root .cooldis/agents]",
     "cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]",
@@ -356,6 +369,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis tool source show <name> [--json] [--state-home .cooldis/state]",
     "cooldis tool source remove <name> [--state-home .cooldis/state]",
     "cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]",
+    "cooldis debug bind <thread-id> [--json] [--url <ws-url> | --config <cooldis.toml> | --journal <db>]",
     "cooldis debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <cooldis.toml>]",
     "cooldis debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <cooldis.toml>]",
     "cooldis debug rpc tail --thread <id> [--url <ws-url> | --config <cooldis.toml>]",

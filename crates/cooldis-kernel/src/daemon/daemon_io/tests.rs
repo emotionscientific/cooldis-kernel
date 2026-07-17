@@ -7199,6 +7199,7 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
         ref_uri: "agent://workspace@0.1.0".to_string(),
         manifest_hash: "sha256:workspace".to_string(),
         model_profile_id: "default".to_string(),
+        model_profile_origin: None,
         provider_id: APP_SERVER_LOCAL_PROVIDER.to_string(),
         model_id: APP_SERVER_LOCAL_MODEL.to_string(),
         tool_ids: Vec::new(),
@@ -7213,7 +7214,9 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
         effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: Some(crate::AgentManifestPlacementBinding::default()),
+        placement_origin: None,
         workspace: Some(resolved_workspace),
+        workspace_origin: None,
     })
     .unwrap();
     parent

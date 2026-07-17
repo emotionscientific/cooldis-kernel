@@ -58,6 +58,36 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         "completed text did not include prompt: {completed_text:?}"
     );
 
+    let live_bind = run_cooldis([
+        "debug",
+        "bind",
+        thread_id.as_str(),
+        "--json",
+        "--url",
+        url.as_str(),
+    ])
+    .await;
+    assert_success(&live_bind);
+    let live_explanation: Value = serde_json::from_slice(&live_bind.stdout).unwrap();
+    assert_eq!(live_explanation["thread_id"], thread_id);
+    assert_eq!(live_explanation["model"]["origin"], "manifest-default");
+
+    let missing_thread_id = Uuid::now_v7().to_string();
+    let missing_bind = run_cooldis([
+        "debug",
+        "bind",
+        missing_thread_id.as_str(),
+        "--url",
+        url.as_str(),
+    ])
+    .await;
+    assert!(!missing_bind.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_bind.stderr).contains("thread not found"),
+        "missing-thread error was not preserved: {}",
+        String::from_utf8_lossy(&missing_bind.stderr)
+    );
+
     let resumed = run_cooldis([
         "debug",
         "rpc",
@@ -87,8 +117,22 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         .await
         .unwrap();
     assert_admission_precedes_execution(&control_events, &thread_events, "surface:debug-rpc");
+    drop(store);
 
     server.stop().await;
+    let journal = root.join("state/session_history.sqlite3");
+    let offline_bind = run_cooldis([
+        "debug",
+        "bind",
+        thread_id.as_str(),
+        "--json",
+        "--journal",
+        journal.to_str().unwrap(),
+    ])
+    .await;
+    assert_success(&offline_bind);
+    let offline_explanation: Value = serde_json::from_slice(&offline_bind.stdout).unwrap();
+    assert_eq!(offline_explanation, live_explanation);
     let _ = std::fs::remove_dir_all(root);
 }
 

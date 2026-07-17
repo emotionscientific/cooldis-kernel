@@ -36,6 +36,8 @@ inputs, durable effects, or output semantics.
 | `cooldis agent plan` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent plan --help` | partial | Document JSON/text output shape and validation exit statuses. |
 | `cooldis agent publish` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent publish --help` | partial | Document registry writes, idempotency, and failure statuses in man form. |
 | `cooldis agent list` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent list --help` | partial | Document listing output and registry-root behavior in man form. |
+| `cooldis agent versions` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent versions --help` | partial | Lists immutable snapshots in publication order with text and JSON projections; generated manual output remains follow-up work. |
+| `cooldis agent diff` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent diff --help` | partial | Diffs authored and resolved snapshots structurally with text and JSON projections; generated manual output remains follow-up work. |
 | `cooldis agent show` | [Cooldis Agent CLI](agent-cli.md) | `cooldis agent show --help` | partial | Document JSON record schema pointer in man form. |
 | `cooldis agent run` | [Cooldis Agent CLI](agent-cli.md), [V1 Release Candidate Gate](v1-release-candidate.md) | `cooldis agent run --help` | partial | Runs one manifest-backed local app-server turn and prints manifest receipt event ids; generated manual output remains follow-up work. |
 | `cooldis blob publish` | [Cooldis Agent CLI](agent-cli.md) | `cooldis blob publish --help` | partial | Publishes immutable blob resources for folder-first prompts and explicit static context inputs; generated manual output remains follow-up work. |
@@ -54,6 +56,7 @@ inputs, durable effects, or output semantics.
 | `cooldis rpc` | [RPC Control Plane](app-server.md) | `cooldis rpc --help` | partial | Add generated endpoint/method manual and wire examples. |
 | `cooldis chat` | [Chat Console](chat.md), [RPC Control Plane](app-server.md), [Provider Adapter Surface](provider-adapters.md) | `cooldis chat --help` | partial | Bundled local terminal console over app-server RPC; richer generated manual remains follow-up work. |
 | `cooldis debug rpc` | [RPC Control Plane](app-server.md) | `cooldis debug rpc --help` | partial | Protocol debug client for running daemon WebSocket endpoints; formal man page remains follow-up work. |
+| `cooldis debug bind` | [RPC Control Plane](app-server.md), [CLI](cli.md) | `cooldis debug bind --help` | partial | Receipt-only effective bind explanation over live `thread/events/list` or an offline SQLite journal; formal man page remains follow-up work. |
 | `cooldis daemon run` | [Cooldis Daemon](daemon.md), [Cooldis IO](io.md) | `cooldis daemon --help` | partial | Add generated daemon run/config/service man pages. |
 | `cooldis daemon config validate` | [Cooldis Daemon](daemon.md) | `cooldis daemon --help` | partial | Document config schema and validation errors in man form. |
 | `cooldis daemon service print` | [Cooldis Daemon](daemon.md) | `cooldis daemon --help` | partial | Document generated launchd/systemd output and side-effect boundary. |
