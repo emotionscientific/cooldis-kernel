@@ -28,8 +28,9 @@ use crate::agent::agent_tool_router::{
 };
 use crate::agent::contracts::sha256_hex;
 use crate::{
-    AgentManifestGrantExpiry, CanonicalMessage, CooldisError, CooldisResult, EventKind,
-    EventStreamId, NewEventRecord, RuntimeStore, ToolDefinition, ToolInvocationCancellation,
+    AgentManifestGrantExpiry, CanonicalMessage, CooldisError, CooldisResult, EffectClass,
+    EventKind, EventStreamId, NewEventRecord, RuntimeStore, ToolDefinition,
+    ToolInvocationCancellation,
 };
 use async_trait::async_trait;
 pub use cooldis_agent::PinnedToolRef;
@@ -40,7 +41,7 @@ use cooldis_runtime_contracts::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Model-facing surface names for the reserved meta-operations. These are
@@ -98,6 +99,19 @@ impl WitnessedToolContract {
 pub fn schema_hash_of(schema: &Value) -> CooldisResult<String> {
     let bytes = serde_json::to_vec(schema).map_err(|err| {
         CooldisError::RuntimeFactory(format!("failed to encode tool schema for hashing: {err}"))
+    })?;
+    Ok(sha256_hex(&bytes))
+}
+
+pub(crate) fn args_fingerprint(tool_name: &str, arguments: &Value) -> CooldisResult<String> {
+    let invocation = BTreeMap::from([
+        ("arguments", arguments.clone()),
+        ("tool_name", Value::String(tool_name.to_string())),
+    ]);
+    let bytes = serde_json::to_vec(&invocation).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to encode tool invocation arguments for hashing: {err}"
+        ))
     })?;
     Ok(sha256_hex(&bytes))
 }
@@ -166,6 +180,8 @@ pub struct ToolUniverseBinding {
     /// Manifest tool id of the `protocol_tool_import`.
     pub import_id: String,
     pub server_ref: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
     /// Manifest-level filter, already applied to `discovery`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_tools: Option<BTreeSet<String>>,
@@ -223,6 +239,8 @@ pub struct ToolUniverseBindReceipt {
 pub struct ToolUniverseToolReceipt {
     pub tool_name: String,
     pub schema_hash: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
 }
 
 impl ToolUniverseBindReceipt {
@@ -238,6 +256,12 @@ impl ToolUniverseBindReceipt {
                 .map(|tool| ToolUniverseToolReceipt {
                     tool_name: tool.tool_name.clone(),
                     schema_hash: tool.schema_hash.clone(),
+                    effect_class: binding
+                        .pin
+                        .as_ref()
+                        .filter(|pin| pin.tool_name == tool.tool_name)
+                        .map(|_| binding.effect_class)
+                        .unwrap_or_default(),
                 })
                 .collect(),
             pinned: binding
@@ -278,6 +302,7 @@ impl ToolUniverseDiscoveryReceipt {
                 .map(|tool| ToolUniverseToolReceipt {
                     tool_name: tool.tool_name.clone(),
                     schema_hash: tool.schema_hash.clone(),
+                    effect_class: EffectClass::AtMostOnce,
                 })
                 .collect(),
         }

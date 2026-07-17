@@ -2179,6 +2179,7 @@ impl CapsuleBindingRuntimeFactory {
             let AgentManifestOperationBinding {
                 name,
                 artifact_hash,
+                effect_class: _,
                 grants,
                 grant_expiries,
                 operations,

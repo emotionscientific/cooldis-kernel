@@ -3,10 +3,11 @@ use crate::agent::manifest_schema::{
     AgentManifestCouplingSource, AgentManifestCouplingTrigger, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::{
-    AgentManifestCompactionDefaults, AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol,
-    LocalBlobRegistry, LocalSkillRegistry, PublishSkillPackageRequest,
-    STD_SUPERVISOR_SPAWN_TEMPLATE_ID, SkillImportPlan, THREADS_SPAWN_CAPABILITY, ToolDefinition,
-    ToolUniverseDiscovery, WitnessedToolContract,
+    AgentManifestBashTool, AgentManifestCompactionDefaults, AgentManifestDirectTool,
+    AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol, LocalBlobRegistry,
+    LocalSkillRegistry, PublishSkillPackageRequest, STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+    SkillImportPlan, THREADS_SPAWN_CAPABILITY, ToolDefinition, ToolUniverseDiscovery,
+    WitnessedToolContract,
 };
 use async_trait::async_trait;
 use std::fs;
@@ -514,6 +515,73 @@ async fn protocol_tool_import_binds_filtered_discovery() {
         binding.include_tools,
         Some(BTreeSet::from(["cooldis_mcp_echo".to_string()]))
     );
+}
+
+#[tokio::test]
+async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() {
+    let root = temp_dir("manifest-bind-effect-classes");
+    let bash_record =
+        publish_multi_operation_record(&root, "bash-ops", &[("inspect", vec![])]).await;
+    let direct_record =
+        publish_multi_operation_record(&root, "direct-ops", &[("lookup", vec![])]).await;
+    let witnessed = witnessed_tool("remote.lookup", "string");
+    let pin = format!("mcptool://arcade/remote.lookup@{}", witnessed.schema_hash);
+    let discovery = ToolUniverseDiscovery::witness("mcp://arcade", vec![witnessed], 1).unwrap();
+    let discoverer = StaticToolUniverseDiscoverer { discovery };
+    let tools = vec![
+        AgentManifestTool::Bash(AgentManifestBashTool {
+            id: "inspect".to_string(),
+            command: "inspect".to_string(),
+            operation_ref: format!(
+                "op://bash-ops/inspect@sha256:{}",
+                bash_record.active_artifact_hash
+            ),
+            effect_class: EffectClass::Pure,
+            grants: Vec::new(),
+        }),
+        AgentManifestTool::Direct(AgentManifestDirectTool {
+            id: "lookup".to_string(),
+            tool_name: "lookup".to_string(),
+            operation_ref: format!(
+                "op://direct-ops/lookup@sha256:{}",
+                direct_record.active_artifact_hash
+            ),
+            effect_class: EffectClass::Idempotent,
+            grants: Vec::new(),
+        }),
+        AgentManifestTool::ProtocolImport(AgentManifestProtocolToolImport {
+            effect_class: EffectClass::Pure,
+            ..protocol_import("mcp://arcade", None, Some(pin))
+        }),
+    ];
+
+    let bound = bind_tools(
+        &tools,
+        Some(&root),
+        &BTreeSet::from(["mcp://arcade".to_string()]),
+        Some(&discoverer),
+        0,
+    )
+    .await
+    .unwrap();
+
+    let bash = bound
+        .operation_bindings
+        .iter()
+        .find(|binding| binding.name == "bash-ops")
+        .unwrap();
+    assert_eq!(bash.effect_class, EffectClass::Pure);
+    let direct = bound
+        .operation_bindings
+        .iter()
+        .find(|binding| binding.name == "direct-ops")
+        .unwrap();
+    assert_eq!(direct.effect_class, EffectClass::Idempotent);
+    assert_eq!(direct.direct_tools[0].effect_class, EffectClass::Idempotent);
+    let universe = ToolUniverseBindReceipt::from_binding(&bound.tool_universes[0]);
+    assert_eq!(universe.tools[0].effect_class, EffectClass::Pure);
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -2660,6 +2728,7 @@ async fn operation_bind_requires_declared_grants() {
         vec![AgentManifestOperationBinding {
             name: "search".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
             grant_expiries: Vec::new(),
             operations: Vec::new(),
@@ -2814,6 +2883,7 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
         vec![AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec!["net:https://profile.example".to_string()],
             grant_expiries: Vec::new(),
             operations: vec!["profile".to_string()],
@@ -2943,6 +3013,7 @@ async fn operation_bindings_merge_grants_for_shared_artifact() {
         vec![AgentManifestOperationBinding {
             name: "search".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec![
                 "fs.read:/workspace".to_string(),
                 "net:https://example.com".to_string(),
@@ -3004,6 +3075,7 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
         vec![AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec![
                 "net:https://profile.example".to_string(),
                 "net:https://summary.example".to_string(),
@@ -3083,6 +3155,7 @@ fn operation_binding_accepts_legacy_metadata_without_grants_or_operations() {
             name: "search".to_string(),
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
+            effect_class: EffectClass::AtMostOnce,
             grants: Vec::new(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
@@ -3251,6 +3324,7 @@ fn protocol_import(
         id: "mcp_echo".to_string(),
         protocol: AgentManifestToolProtocol::Mcp,
         server_ref: server_ref.to_string(),
+        effect_class: EffectClass::AtMostOnce,
         expose,
         pin,
         include_tools,

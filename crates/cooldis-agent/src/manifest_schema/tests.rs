@@ -156,6 +156,57 @@ fn full_fixture_manifest_parses_and_validates() {
     assert!(manifest.workspace.is_none());
     assert!(manifest.couplings.is_empty());
     assert_eq!(manifest.effective_context_pipeline().sources.len(), 3);
+    assert!(manifest.tools.iter().all(|tool| match tool {
+        AgentManifestTool::Bash(tool) => tool.effect_class == EffectClass::AtMostOnce,
+        AgentManifestTool::Direct(tool) => tool.effect_class == EffectClass::AtMostOnce,
+        AgentManifestTool::ProtocolImport(tool) => {
+            tool.effect_class == EffectClass::AtMostOnce
+        }
+    }));
+    assert!(
+        !toml::to_string(&manifest).unwrap().contains("effect_class"),
+        "legacy manifests must not acquire defaulted effect_class fields when re-encoded"
+    );
+}
+
+#[test]
+fn tool_rows_accept_effect_classes_and_reject_unknown_values_by_row() {
+    let source = valid_manifest()
+        .replace(
+            "command = \"tailcat\"",
+            "command = \"tailcat\"\neffect_class = \"pure\"",
+        )
+        .replace(
+            "tool_name = \"risk_lookup\"",
+            "tool_name = \"risk_lookup\"\neffect_class = \"idempotent\"",
+        )
+        .replace(
+            "server_ref = \"mcp://docs\"",
+            "server_ref = \"mcp://docs\"\neffect_class = \"at-most-once\"",
+        );
+    let manifest = parse(&source).unwrap();
+    assert!(matches!(
+        &manifest.tools[0],
+        AgentManifestTool::Bash(tool) if tool.effect_class == EffectClass::Pure
+    ));
+    assert!(matches!(
+        &manifest.tools[1],
+        AgentManifestTool::Direct(tool) if tool.effect_class == EffectClass::Idempotent
+    ));
+    assert!(matches!(
+        &manifest.tools[2],
+        AgentManifestTool::ProtocolImport(tool) if tool.effect_class == EffectClass::AtMostOnce
+    ));
+
+    let err = parse(&valid_manifest().replace(
+        "tool_name = \"risk_lookup\"",
+        "tool_name = \"risk_lookup\"\neffect_class = \"retryable\"",
+    ))
+    .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("tool \"risk_lookup\""), "{text}");
+    assert!(text.contains("effect_class"), "{text}");
+    assert!(text.contains("retryable"), "{text}");
 }
 
 #[test]

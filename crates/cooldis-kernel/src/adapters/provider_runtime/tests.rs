@@ -3,16 +3,17 @@ use crate::EventKind;
 use crate::test_support::{FaultingProviderClient, FaultingRuntimeStore};
 use crate::{
     AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindReceipt,
-    AgentManifestCouplingBinding, AgentManifestCouplingBudget, AgentManifestRuntimeDefaults,
-    AgentToolRouter, CanonicalStopReason, CanonicalUsage, CommandHookHandler, CouplingRole,
-    EventProvenance, EventRecord, EventSequence, EventStore, EventStreamId, HistoryResult,
-    HookEventName, HookHandler, HookHandlerOutput, HookHandlerSpec, HookRequest, HookRunStatus,
+    AgentManifestCouplingBinding, AgentManifestCouplingBudget, AgentManifestDirectToolBinding,
+    AgentManifestOperationBinding, AgentManifestRuntimeDefaults, AgentToolRouter,
+    CanonicalStopReason, CanonicalUsage, CommandHookHandler, CouplingRole, EventProvenance,
+    EventRecord, EventSequence, EventStore, EventStreamId, HistoryResult, HookEventName,
+    HookHandler, HookHandlerOutput, HookHandlerSpec, HookRequest, HookRunStatus,
     InMemorySessionStore, KernelOperationRegistration, KernelThreadSpawnAgentBinding,
     KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationRecord,
     ObservationStore, OperationRegistration, OperationRegistry, OperationToolAlias,
     ProviderCapabilityRecord, ProviderContextPolicy, RuntimeEvent, RuntimeExecutionPolicy,
-    RuntimeHost, SessionContext, SessionEntry, SessionEntryId, SessionEntryKind, SessionStore,
-    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadBaseRef, ThreadCoordinates,
+    RuntimeHost, RuntimeStore, SessionContext, SessionEntry, SessionEntryId, SessionEntryKind,
+    SessionStore, SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadBaseRef, ThreadCoordinates,
     ThreadJoinedPayload, ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology,
     ToolCallDecisionOutcomePayload, ToolCallDecisionPayload, ToolCallSubject,
     ToolCallSuspendedPayload, ToolInvocationCancellation, TurnContextSnapshot, WasmRuntimeArtifact,
@@ -115,6 +116,814 @@ impl NonObservingThreadToolProvider {
 struct ImmediateThreadToolProvider;
 
 struct IsolatedFailureToolProvider;
+
+#[derive(Default)]
+struct RecoveryCountingToolProvider {
+    invocations: AtomicU64,
+}
+
+#[async_trait]
+impl AgentKernelToolProvider for RecoveryCountingToolProvider {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            "recovery_tool",
+            "Recovery contract test tool.",
+            serde_json::json!({"type":"object"}),
+        )]
+    }
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(CanonicalMessage::tool_result(
+            call.call_id,
+            call.tool_name,
+            format!("executed:{}", call.arguments["input"].as_str().unwrap()),
+            false,
+        )))
+    }
+}
+
+#[test]
+fn recovery_action_truth_table_honors_effect_class_and_fingerprint() {
+    for effect_class in [
+        EffectClass::Pure,
+        EffectClass::Idempotent,
+        EffectClass::AtMostOnce,
+    ] {
+        for outcome_exists in [false, true] {
+            for fingerprint_matches in [false, true] {
+                let expected = if outcome_exists && fingerprint_matches {
+                    ToolRecoveryAction::Reuse
+                } else if effect_class == EffectClass::AtMostOnce {
+                    ToolRecoveryAction::ConservativeFailure
+                } else {
+                    ToolRecoveryAction::Reexecute
+                };
+                assert_eq!(
+                    tool_recovery_action(effect_class, outcome_exists, fingerprint_matches),
+                    expected,
+                    "{effect_class:?} outcome_exists={outcome_exists} fingerprint_matches={fingerprint_matches}"
+                );
+            }
+        }
+    }
+}
+
+fn recovery_bind_receipt(effect_class: EffectClass) -> AgentManifestBindReceipt {
+    AgentManifestBindReceipt {
+        ref_uri: "agent://test/recovery".to_string(),
+        manifest_hash: "snapshot-recovery".to_string(),
+        model_profile_origin: None,
+        placement_origin: None,
+        workspace_origin: None,
+        model_profile_id: "default".to_string(),
+        provider_id: "test".to_string(),
+        model_id: "model".to_string(),
+        tool_ids: vec!["recovery".to_string()],
+        operation_bindings: vec![AgentManifestOperationBinding {
+            name: "recovery".to_string(),
+            artifact_hash: "test".to_string(),
+            effect_class,
+            grants: Vec::new(),
+            grant_expiries: Vec::new(),
+            operations: vec!["recovery_tool".to_string()],
+            direct_tools: vec![AgentManifestDirectToolBinding {
+                tool_name: "recovery_tool".to_string(),
+                operation: "recovery_tool".to_string(),
+                effect_class,
+                grant_expiries: Vec::new(),
+            }],
+        }],
+        skill_packages: Vec::new(),
+        skill_discovery: None,
+        static_context_segments: Vec::new(),
+        tool_universes: Vec::new(),
+        couplings: Vec::new(),
+        granted: Vec::new(),
+        grant_bindings: Vec::new(),
+        effective_runtime: AgentManifestRuntimeDefaults::default(),
+        overridden_keys: Vec::new(),
+        placement: None,
+        workspace: None,
+    }
+}
+
+async fn append_recovery_bind_receipt(
+    store: &dyn RuntimeStore,
+    coordinates: &ThreadCoordinates,
+    effect_class: EffectClass,
+) {
+    store
+        .append_events(
+            &EventStreamId::for_thread(coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ManifestBindCompleted,
+                serde_json::to_value(recovery_bind_receipt(effect_class)).unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+}
+
+#[test]
+fn bash_effect_class_requires_one_exactly_attributable_operation() {
+    let mut receipt = recovery_bind_receipt(EffectClass::Idempotent);
+    receipt.operation_bindings[0].operations = vec!["safe".to_string()];
+    receipt.operation_bindings[0].direct_tools.clear();
+
+    assert_eq!(
+        effect_class_from_bind_receipt(
+            &receipt,
+            crate::BASH_TOOL,
+            &serde_json::json!({"command": "safe argument"}),
+        ),
+        EffectClass::Idempotent
+    );
+    for command in [
+        "FOO=1 safe",
+        "safe; destructive",
+        "safe ; destructive",
+        "safe && destructive",
+        "safe || destructive",
+        "safe | destructive",
+        "safe\ndestructive",
+        "safe > /tmp/output",
+        "safe $(destructive)",
+        "safe `destructive`",
+        "\"safe\" argument",
+    ] {
+        assert_eq!(
+            effect_class_from_bind_receipt(
+                &receipt,
+                crate::BASH_TOOL,
+                &serde_json::json!({"command": command}),
+            ),
+            EffectClass::AtMostOnce,
+            "compound or shell-evaluated command {command:?} must fail closed"
+        );
+    }
+}
+
+async fn append_recovery_request(
+    store: &dyn RuntimeStore,
+    coordinates: &ThreadCoordinates,
+    arguments: Value,
+) -> EventRecord {
+    let fingerprint = args_fingerprint("recovery_tool", &arguments).unwrap();
+    store
+        .append_events(
+            &EventStreamId::for_thread(coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ToolCallRequested,
+                serde_json::to_value(ToolCallRequestedPayload {
+                    subject: ToolCallSubject {
+                        turn_id: "turn-recovery".to_string(),
+                        call_id: "call-recovery".to_string(),
+                    },
+                    snapshot_id: "snapshot-recovery".to_string(),
+                    tool_name: "recovery_tool".to_string(),
+                    arguments,
+                    args_fingerprint: Some(fingerprint),
+                    holds: Vec::new(),
+                })
+                .unwrap(),
+            )],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
+async fn recovery_after_store_reopen(
+    effect_class: EffectClass,
+    prior_arguments: Value,
+    recorded_result: Option<&str>,
+    current_arguments: Value,
+) -> (u64, CanonicalMessage) {
+    let path = temp_db_path("cooldis-tool-recovery");
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "recovery");
+    {
+        let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
+        append_recovery_bind_receipt(store.as_ref(), &coordinates, effect_class).await;
+        let request = append_recovery_request(store.as_ref(), &coordinates, prior_arguments).await;
+        if let Some(recorded_result) = recorded_result {
+            let services = RuntimeServices::new(store, RuntimeExecutionPolicy::default());
+            services
+                .append_agent_loop_session_entry(
+                    &coordinates,
+                    None,
+                    SessionEntryKind::Message {
+                        message: CanonicalMessage::tool_result(
+                            "call-recovery",
+                            "recovery_tool",
+                            recorded_result,
+                            false,
+                        ),
+                    },
+                    vec![request.id],
+                )
+                .await
+                .unwrap();
+            let request_payload =
+                serde_json::from_value::<ToolCallRequestedPayload>(request.payload).unwrap();
+            append_tool_completion_event(
+                &services,
+                &coordinates,
+                "turn-recovery".to_string(),
+                "call-recovery".to_string(),
+                "snapshot-recovery".to_string(),
+                "recovery_tool".to_string(),
+                request_payload.args_fingerprint,
+                true,
+                Some(1),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
+    let services = RuntimeServices::new(store, RuntimeExecutionPolicy::default());
+    let current_request = append_recovery_request(
+        services.runtime_store().as_ref(),
+        &coordinates,
+        current_arguments.clone(),
+    )
+    .await;
+    let current_payload =
+        serde_json::from_value::<ToolCallRequestedPayload>(current_request.payload).unwrap();
+    let mut calls = vec![WitnessedToolCall {
+        tool_call: ProviderToolCall {
+            id: "call-recovery".to_string(),
+            name: "recovery_tool".to_string(),
+            arguments: current_arguments,
+        },
+        snapshot_id: "snapshot-recovery".to_string(),
+        args_fingerprint: current_payload.args_fingerprint.clone(),
+        request_event_id: current_request.id,
+        holds: Vec::new(),
+        recovery_action: ToolRecoveryAction::Reexecute,
+        recovery_source_event_id: None,
+        recovery_fingerprint_mismatch: false,
+    }];
+    apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
+        .await
+        .unwrap();
+
+    let provider = Arc::new(RecoveryCountingToolProvider::default());
+    let kernel_provider: Arc<dyn AgentKernelToolProvider> = provider.clone();
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(kernel_provider),
+    );
+    let interceptor = ToolExecutionInterceptor::new(router);
+    let turn_context = TurnContext::new(
+        ThreadContext::root(coordinates),
+        "turn-recovery",
+        &TurnInput::text(""),
+        CancellationToken::new(),
+    );
+    let (events, _) = broadcast::channel(8);
+    let prepared = prepare_tool_call(
+        &interceptor,
+        &services,
+        &turn_context,
+        &events,
+        calls.pop().unwrap(),
+        Arc::new(AtomicU64::new(0)),
+        ToolInvocationCancellation::never(),
+    )
+    .await
+    .unwrap();
+    let PreparedToolCallOutcome::Completed { ref outcome, .. } = prepared else {
+        panic!("recovery should produce a completed outcome");
+    };
+    let result = outcome.result.clone();
+    append_detached_tool_call_outcome(
+        &services,
+        &turn_context,
+        turn_context.coordinates().thread_id,
+        &events,
+        Ok(prepared),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matching_tool_call_completed_exists(
+            &services,
+            turn_context.coordinates(),
+            "turn-recovery",
+            "call-recovery",
+            "snapshot-recovery",
+            current_payload.args_fingerprint.as_deref(),
+        )
+        .await
+        .unwrap(),
+        "recovery completion must echo the current fingerprint"
+    );
+    assert!(
+        existing_tool_result_message(
+            &services,
+            turn_context.coordinates(),
+            current_request.id,
+            "call-recovery",
+            "snapshot-recovery",
+            current_payload.args_fingerprint.as_deref(),
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "recovery outcome must be witnessed from the current request"
+    );
+    let invocations = provider.invocations.load(Ordering::SeqCst);
+    drop(services);
+    let _ = std::fs::remove_file(path);
+    (invocations, result)
+}
+
+#[tokio::test]
+async fn crash_cut_idempotent_dangling_request_reexecutes_after_store_reopen() {
+    let (invocations, result) = recovery_after_store_reopen(
+        EffectClass::Idempotent,
+        serde_json::json!({"input":"same"}),
+        None,
+        serde_json::json!({"input":"same"}),
+    )
+    .await;
+    assert_eq!(invocations, 1);
+    assert_eq!(text_from_message(&result), "executed:same");
+}
+
+#[tokio::test]
+async fn crash_cut_at_most_once_dangling_request_records_conservative_failure() {
+    let (invocations, result) = recovery_after_store_reopen(
+        EffectClass::AtMostOnce,
+        serde_json::json!({"input":"same"}),
+        None,
+        serde_json::json!({"input":"same"}),
+    )
+    .await;
+    assert_eq!(invocations, 0);
+    assert!(matches!(
+        result,
+        CanonicalMessage::ToolResult { is_error: true, .. }
+    ));
+    let text = text_from_message(&result);
+    assert!(text.contains("interrupted"), "{text}");
+    assert!(text.contains("effect class at-most-once"), "{text}");
+}
+
+#[tokio::test]
+async fn completed_matching_fingerprint_reuses_and_mismatch_never_reuses() {
+    let (matching_invocations, matching_result) = recovery_after_store_reopen(
+        EffectClass::Idempotent,
+        serde_json::json!({"input":"same"}),
+        Some("recorded:same"),
+        serde_json::json!({"input":"same"}),
+    )
+    .await;
+    assert_eq!(matching_invocations, 0);
+    assert_eq!(text_from_message(&matching_result), "recorded:same");
+
+    let (mismatch_invocations, mismatch_result) = recovery_after_store_reopen(
+        EffectClass::Idempotent,
+        serde_json::json!({"input":"old"}),
+        Some("recorded:old"),
+        serde_json::json!({"input":"new"}),
+    )
+    .await;
+    assert_eq!(mismatch_invocations, 1);
+    assert_eq!(text_from_message(&mismatch_result), "executed:new");
+
+    let (at_most_once_invocations, at_most_once_result) = recovery_after_store_reopen(
+        EffectClass::AtMostOnce,
+        serde_json::json!({"input":"old"}),
+        Some("recorded:old"),
+        serde_json::json!({"input":"new"}),
+    )
+    .await;
+    assert_eq!(at_most_once_invocations, 0);
+    let text = text_from_message(&at_most_once_result);
+    assert!(text.contains("fingerprint mismatch"), "{text}");
+    assert!(text.contains("effect class at-most-once"), "{text}");
+}
+
+#[tokio::test]
+async fn completion_without_canonical_result_degrades_by_effect_class() {
+    for (label, effect_class, expected) in [
+        (
+            "idempotent",
+            EffectClass::Idempotent,
+            ToolRecoveryAction::Reexecute,
+        ),
+        (
+            "at-most-once",
+            EffectClass::AtMostOnce,
+            ToolRecoveryAction::ConservativeFailure,
+        ),
+    ] {
+        let store = Arc::new(InMemorySessionStore::new());
+        let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+        let coordinates =
+            ThreadCoordinates::new("tenant_a", "user_1", format!("completion-only-{label}"));
+        append_recovery_bind_receipt(store.as_ref(), &coordinates, effect_class).await;
+        let arguments = serde_json::json!({"input":"same"});
+        let prior = append_recovery_request(store.as_ref(), &coordinates, arguments.clone()).await;
+        let prior_payload =
+            serde_json::from_value::<ToolCallRequestedPayload>(prior.payload).unwrap();
+        append_tool_completion_event(
+            &services,
+            &coordinates,
+            "turn-recovery".to_string(),
+            "call-recovery".to_string(),
+            "snapshot-recovery".to_string(),
+            "recovery_tool".to_string(),
+            prior_payload.args_fingerprint,
+            true,
+            Some(1),
+            Some(0),
+            None,
+        )
+        .await
+        .unwrap();
+        let current =
+            append_recovery_request(store.as_ref(), &coordinates, arguments.clone()).await;
+        let current_payload =
+            serde_json::from_value::<ToolCallRequestedPayload>(current.payload).unwrap();
+        let mut calls = vec![WitnessedToolCall {
+            tool_call: ProviderToolCall {
+                id: "call-recovery".to_string(),
+                name: "recovery_tool".to_string(),
+                arguments,
+            },
+            snapshot_id: "snapshot-recovery".to_string(),
+            args_fingerprint: current_payload.args_fingerprint,
+            request_event_id: current.id,
+            holds: Vec::new(),
+            recovery_action: ToolRecoveryAction::Reexecute,
+            recovery_source_event_id: None,
+            recovery_fingerprint_mismatch: false,
+        }];
+
+        apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
+            .await
+            .unwrap();
+
+        assert_eq!(calls[0].recovery_action, expected, "{label}");
+        assert_eq!(calls[0].recovery_source_event_id, None, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "legacy-tool-recovery");
+    append_recovery_bind_receipt(store.as_ref(), &coordinates, EffectClass::Idempotent).await;
+    let prior = store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ToolCallRequested,
+                serde_json::json!({
+                    "subject": {"turn_id":"turn-recovery", "call_id":"call-recovery"},
+                    "snapshot_id": "snapshot-recovery",
+                    "tool_name": "recovery_tool",
+                    "arguments": {"input":"same"}
+                }),
+            )],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    services
+        .append_agent_loop_session_entry(
+            &coordinates,
+            None,
+            SessionEntryKind::Message {
+                message: CanonicalMessage::tool_result(
+                    "call-recovery",
+                    "recovery_tool",
+                    "legacy result",
+                    false,
+                ),
+            },
+            vec![prior.id],
+        )
+        .await
+        .unwrap();
+    store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ToolCallCompleted,
+                serde_json::json!({
+                    "subject": {"turn_id":"turn-recovery", "call_id":"call-recovery"},
+                    "snapshot_id": "snapshot-recovery",
+                    "tool_name": "recovery_tool",
+                    "success": true
+                }),
+            )],
+        )
+        .await
+        .unwrap();
+    let current = append_recovery_request(
+        store.as_ref(),
+        &coordinates,
+        serde_json::json!({"input":"same"}),
+    )
+    .await;
+    let current_payload =
+        serde_json::from_value::<ToolCallRequestedPayload>(current.payload).unwrap();
+    let mut calls = vec![WitnessedToolCall {
+        tool_call: ProviderToolCall {
+            id: "call-recovery".to_string(),
+            name: "recovery_tool".to_string(),
+            arguments: serde_json::json!({"input":"same"}),
+        },
+        snapshot_id: "snapshot-recovery".to_string(),
+        args_fingerprint: current_payload.args_fingerprint,
+        request_event_id: current.id,
+        holds: Vec::new(),
+        recovery_action: ToolRecoveryAction::Reexecute,
+        recovery_source_event_id: None,
+        recovery_fingerprint_mismatch: false,
+    }];
+
+    apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
+        .await
+        .unwrap();
+
+    assert_eq!(calls[0].recovery_action, ToolRecoveryAction::Reuse);
+    assert_eq!(calls[0].recovery_source_event_id, Some(prior.id));
+    assert!(!calls[0].recovery_fingerprint_mismatch);
+}
+
+#[tokio::test]
+async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "rewritten-bash-recovery");
+    let mut receipt = recovery_bind_receipt(EffectClass::Idempotent);
+    receipt.operation_bindings[0].operations = vec!["safe".to_string()];
+    receipt.operation_bindings[0].direct_tools.clear();
+    store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ManifestBindCompleted,
+                serde_json::to_value(receipt).unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+    let arguments = serde_json::json!({"command":"safe input"});
+    let request = |arguments: Value| {
+        let fingerprint = args_fingerprint(crate::BASH_TOOL, &arguments).unwrap();
+        NewEventRecord::witnessed(
+            coordinates.clone(),
+            EventKind::ToolCallRequested,
+            serde_json::to_value(ToolCallRequestedPayload {
+                subject: ToolCallSubject {
+                    turn_id: "turn-recovery".to_string(),
+                    call_id: "call-recovery".to_string(),
+                },
+                snapshot_id: "snapshot-recovery".to_string(),
+                tool_name: crate::BASH_TOOL.to_string(),
+                arguments,
+                args_fingerprint: Some(fingerprint),
+                holds: Vec::new(),
+            })
+            .unwrap(),
+        )
+    };
+    let prior = store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![request(arguments.clone())],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .append_events(
+            &crate::control_stream_id(&coordinates),
+            vec![NewEventRecord::discharged(
+                coordinates.clone(),
+                EventKind::ToolCallDecision,
+                serde_json::to_value(ToolCallDecisionPayload {
+                    subject: ToolCallSubject {
+                        turn_id: "turn-recovery".to_string(),
+                        call_id: "call-recovery".to_string(),
+                    },
+                    snapshot_id: "snapshot-recovery".to_string(),
+                    outcome: ToolCallDecisionOutcomePayload::Rewrite {
+                        arguments: serde_json::json!({"command":"destructive input"}),
+                    },
+                    admissible: None,
+                })
+                .unwrap(),
+                EventProvenance {
+                    source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                    source_event_ids: vec![prior.id],
+                    discharged_by: Some("test:rewrite".to_string()),
+                    function: Some("rewrite/v1".to_string()),
+                    ..EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    let current = store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![request(arguments.clone())],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let current_payload =
+        serde_json::from_value::<ToolCallRequestedPayload>(current.payload).unwrap();
+    let mut calls = vec![WitnessedToolCall {
+        tool_call: ProviderToolCall {
+            id: "call-recovery".to_string(),
+            name: crate::BASH_TOOL.to_string(),
+            arguments,
+        },
+        snapshot_id: "snapshot-recovery".to_string(),
+        args_fingerprint: current_payload.args_fingerprint,
+        request_event_id: current.id,
+        holds: Vec::new(),
+        recovery_action: ToolRecoveryAction::Reexecute,
+        recovery_source_event_id: None,
+        recovery_fingerprint_mismatch: false,
+    }];
+
+    apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        calls[0].recovery_action,
+        ToolRecoveryAction::ConservativeFailure
+    );
+}
+
+#[tokio::test]
+async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "witnessed-turn-rerun");
+    append_recovery_bind_receipt(store.as_ref(), &coordinates, EffectClass::Idempotent).await;
+    let input = TurnInput::text("recover the witnessed batch");
+    let user_entry = services
+        .append_user_turn_input(&coordinates, "turn-recovery", &input)
+        .await
+        .unwrap();
+    let submitted =
+        append_turn_submitted_event(&services, &coordinates, "turn-recovery", &user_entry)
+            .await
+            .unwrap();
+    let arguments = serde_json::json!({"input":"same"});
+    let assistant = CanonicalMessage::assistant(
+        "openai",
+        ProviderApi::OpenAIResponses,
+        "gpt-test",
+        vec![CanonicalContent::tool_call(
+            "call-recovery",
+            "recovery_tool",
+            arguments.clone(),
+        )],
+        CanonicalStopReason::ToolUse,
+    );
+    let assistant_entry = services
+        .append_agent_loop_session_entry(
+            &coordinates,
+            None,
+            SessionEntryKind::Message { message: assistant },
+            vec![submitted.id],
+        )
+        .await
+        .unwrap();
+    let turn_context = TurnContext::new(
+        ThreadContext::root(coordinates.clone()),
+        "turn-recovery",
+        &input,
+        CancellationToken::new(),
+    );
+    append_tool_call_requested_events(
+        &services,
+        &turn_context,
+        &[(
+            ProviderToolCall {
+                id: "call-recovery".to_string(),
+                name: "recovery_tool".to_string(),
+                arguments: arguments.clone(),
+            },
+            "snapshot-recovery".to_string(),
+        )],
+        assistant_entry.entry_id,
+    )
+    .await
+    .unwrap();
+    drop(services);
+
+    let provider = Arc::new(RecoveryCountingToolProvider::default());
+    let kernel_provider: Arc<dyn AgentKernelToolProvider> = provider.clone();
+    let router = Arc::new(
+        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+            .with_kernel_tool_provider(kernel_provider),
+    );
+    let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+        "recovered final reply",
+    )]));
+    let host = RuntimeHost::with_session_store(
+        Arc::new(
+            CanonicalProviderRuntimeFactory::new(
+                CanonicalProviderRuntimeConfig::new(
+                    ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
+                client.clone(),
+            )
+            .with_tool_router(router),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .load_thread_with_topology_and_metadata(
+            coordinates.clone(),
+            ThreadTopology::root(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        coordinates.thread_id,
+        "turn-recovery",
+        "recover the witnessed batch",
+    )
+    .await
+    .unwrap();
+    assert_output(&mut events, "recovered final reply").await;
+
+    assert_eq!(provider.invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        client.requests().len(),
+        1,
+        "the model is called only after replay"
+    );
+    let requests = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.kind == EventKind::ToolCallRequested
+                && event.payload["subject"]["call_id"] == "call-recovery"
+        })
+        .map(|event| serde_json::from_value::<ToolCallRequestedPayload>(event.payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].arguments, requests[1].arguments);
+    assert_eq!(requests[0].args_fingerprint, requests[1].args_fingerprint);
+    assert!(
+        thread
+            .session_context()
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| {
+                matches!(
+                    message,
+                    CanonicalMessage::ToolResult {
+                        tool_call_id,
+                        is_error: false,
+                        ..
+                    } if tool_call_id == "call-recovery"
+                )
+            })
+    );
+    host.shutdown_all().await.unwrap();
+}
 
 #[derive(Default)]
 struct AppendPause {
@@ -2459,6 +3268,7 @@ async fn persisted_round_accounting_rejects_a_request_without_an_assistant_sourc
                 snapshot_id: "unbound".to_string(),
                 tool_name: "thread_status".to_string(),
                 arguments: serde_json::json!({"task_name": "worker-a"}),
+                args_fingerprint: None,
                 holds: Vec::new(),
             })
             .unwrap(),
@@ -2561,6 +3371,7 @@ async fn persisted_round_accounting_rejects_a_cross_turn_assistant_source() {
                     snapshot_id: "unbound".to_string(),
                     tool_name: "thread_status".to_string(),
                     arguments: serde_json::json!({"task_name": "worker-a"}),
+                    args_fingerprint: None,
                     holds: Vec::new(),
                 })
                 .unwrap(),
@@ -3957,6 +4768,7 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                         snapshot_id: "snapshot-1".to_string(),
                         tool_name: "thread_status".to_string(),
                         arguments: serde_json::json!({}),
+                        args_fingerprint: None,
                         holds: Vec::new(),
                     })
                     .unwrap(),
@@ -4021,6 +4833,7 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                         call_id: "call-1".to_string(),
                         tool_name: "thread_status".to_string(),
                         snapshot_id: "snapshot-1".to_string(),
+                        args_fingerprint: None,
                         source_event_id: request.id,
                         finish_order: 0,
                         cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
@@ -4091,6 +4904,206 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
 }
 
 #[tokio::test]
+async fn result_append_commits_before_its_completion_event() {
+    let inner = Arc::new(InMemorySessionStore::new());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "result-before-completion");
+    let request = append_recovery_request(
+        inner.as_ref(),
+        &coordinates,
+        serde_json::json!({"input":"same"}),
+    )
+    .await;
+    let payload =
+        serde_json::from_value::<ToolCallRequestedPayload>(request.payload.clone()).unwrap();
+    let faulting = Arc::new(FaultingRuntimeStore::new(inner.clone()).fail_nth(
+        "append_events_fenced",
+        1,
+        "completion append failed before commit",
+    ));
+    let services = RuntimeServices::new(faulting, RuntimeExecutionPolicy::default());
+    let (events, _) = broadcast::channel(8);
+
+    let err = append_tool_result_message(
+        &services,
+        &coordinates,
+        coordinates.thread_id,
+        &events,
+        "call-recovery".to_string(),
+        "recovery_tool".to_string(),
+        "turn-recovery".to_string(),
+        "snapshot-recovery".to_string(),
+        payload.args_fingerprint,
+        CanonicalMessage::tool_result("call-recovery", "recovery_tool", "persisted first", false),
+        Some(1),
+        Some(0),
+        None,
+        request.id,
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("completion append failed"),
+        "{err}"
+    );
+
+    let records = inner
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    assert!(
+        records
+            .iter()
+            .all(|event| event.kind != EventKind::ToolCallCompleted)
+    );
+    assert!(
+        inner
+            .build_context(&coordinates)
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| matches!(
+                message,
+                CanonicalMessage::ToolResult { tool_call_id, .. }
+                    if tool_call_id == "call-recovery"
+            ))
+    );
+}
+
+#[tokio::test]
+async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
+    let store = Arc::new(InMemorySessionStore::new());
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "legacy-completion-collision");
+    let legacy_request = store
+        .append_events(
+            &EventStreamId::for_thread(&coordinates),
+            vec![NewEventRecord::witnessed(
+                coordinates.clone(),
+                EventKind::ToolCallRequested,
+                serde_json::to_value(ToolCallRequestedPayload {
+                    subject: ToolCallSubject {
+                        turn_id: "turn-recovery".to_string(),
+                        call_id: "call-recovery".to_string(),
+                    },
+                    snapshot_id: "snapshot-recovery".to_string(),
+                    tool_name: "recovery_tool".to_string(),
+                    arguments: serde_json::json!({"input":"legacy"}),
+                    args_fingerprint: None,
+                    holds: Vec::new(),
+                })
+                .unwrap(),
+            )],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    append_tool_completion_event(
+        &services,
+        &coordinates,
+        "turn-recovery".to_string(),
+        "call-recovery".to_string(),
+        "snapshot-recovery".to_string(),
+        "recovery_tool".to_string(),
+        None,
+        true,
+        Some(1),
+        Some(0),
+        None,
+    )
+    .await
+    .unwrap();
+    let current = append_recovery_request(
+        store.as_ref(),
+        &coordinates,
+        serde_json::json!({"input":"current"}),
+    )
+    .await;
+    let current_payload =
+        serde_json::from_value::<ToolCallRequestedPayload>(current.payload.clone()).unwrap();
+    let current_fingerprint = current_payload.args_fingerprint.clone().unwrap();
+    let (events, _) = broadcast::channel(8);
+
+    assert!(
+        !matching_tool_call_completed_exists(
+            &services,
+            &coordinates,
+            "turn-recovery",
+            "call-recovery",
+            "snapshot-recovery",
+            Some(&current_fingerprint),
+        )
+        .await
+        .unwrap(),
+        "a legacy completion must not terminate a new fingerprinted generation"
+    );
+
+    append_tool_result_message(
+        &services,
+        &coordinates,
+        coordinates.thread_id,
+        &events,
+        "call-recovery".to_string(),
+        "recovery_tool".to_string(),
+        "turn-recovery".to_string(),
+        "snapshot-recovery".to_string(),
+        current_payload.args_fingerprint,
+        CanonicalMessage::tool_result("call-recovery", "recovery_tool", "current result", false),
+        Some(1),
+        Some(1),
+        None,
+        current.id,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let completions = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 2);
+    assert!(
+        completions
+            .iter()
+            .any(|completion| completion.args_fingerprint.as_deref() == Some(&current_fingerprint))
+    );
+    assert!(
+        matching_tool_call_completed_exists(
+            &services,
+            &coordinates,
+            "turn-recovery",
+            "call-recovery",
+            "snapshot-recovery",
+            Some(&current_fingerprint),
+        )
+        .await
+        .unwrap(),
+        "the exact completion must terminate the current generation"
+    );
+    assert!(
+        existing_tool_result_message(
+            &services,
+            &coordinates,
+            current.id,
+            "call-recovery",
+            "snapshot-recovery",
+            Some(&current_fingerprint),
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    let _ = legacy_request;
+}
+
+#[tokio::test]
 async fn completion_append_is_subject_idempotent_under_concurrency() {
     let store = Arc::new(InMemorySessionStore::new());
     let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
@@ -4103,6 +5116,7 @@ async fn completion_append_is_subject_idempotent_under_concurrency() {
             "call-1".to_string(),
             "snapshot-1".to_string(),
             "thread_status".to_string(),
+            Some(format!("sha256:{}", "a".repeat(64))),
             false,
             Some(0),
             Some(0),
@@ -4142,7 +5156,8 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .unwrap()
         .pop()
         .unwrap();
-    let request = |call_id: &str| {
+    let request = |call_id: &str, arguments: Value| {
+        let fingerprint = args_fingerprint("thread_status", &arguments).unwrap();
         NewEventRecord::discharged(
             child_coordinates.clone(),
             EventKind::ToolCallRequested,
@@ -4153,7 +5168,8 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
                 },
                 snapshot_id: "snapshot-cancelled".to_string(),
                 tool_name: "thread_status".to_string(),
-                arguments: serde_json::json!({"task_name": "worker"}),
+                arguments,
+                args_fingerprint: Some(fingerprint),
                 holds: Vec::new(),
             })
             .unwrap(),
@@ -4170,9 +5186,12 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .append_events(
             &EventStreamId::for_thread(&child_coordinates),
             vec![
-                request("call-dangling"),
-                request("call-dangling"),
-                request("call-already-completed"),
+                request("call-dangling", serde_json::json!({"task_name": "old"})),
+                request("call-dangling", serde_json::json!({"task_name": "new"})),
+                request(
+                    "call-already-completed",
+                    serde_json::json!({"task_name": "completed"}),
+                ),
             ],
         )
         .await
@@ -4241,6 +5260,11 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
                     snapshot_id: "snapshot-cancelled".to_string(),
                     tool_name: "thread_status".to_string(),
                     success: true,
+                    args_fingerprint: serde_json::from_value::<ToolCallRequestedPayload>(
+                        requests[2].payload.clone(),
+                    )
+                    .unwrap()
+                    .args_fingerprint,
                     duration_ms: Some(7),
                     finish_order: Some(4),
                     cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
@@ -4317,10 +5341,10 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .iter()
         .find(|payload| payload.subject.call_id == "call-dangling")
         .unwrap();
-    assert!(
-        recovered.success,
-        "recovery must preserve the persisted natural tool outcome"
-    );
+    assert!(!recovered.success);
+    let latest_request =
+        serde_json::from_value::<ToolCallRequestedPayload>(requests[1].payload.clone()).unwrap();
+    assert_eq!(recovered.args_fingerprint, latest_request.args_fingerprint);
     assert_eq!(
         recovered.cancellation,
         Some(ToolCallCancellation::CancelledExceededGrace)
@@ -4339,8 +5363,8 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
                     if tool_call_id == "call-dangling"
             ))
             .count(),
-        1,
-        "recovery must reuse a canonical result persisted before its completion fact"
+        2,
+        "the stale result remains, while recovery settles the latest unfinished generation"
     );
     let _ = child;
     host.shutdown_all().await.unwrap();
@@ -4405,6 +5429,12 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     assert_eq!(request.payload["tool_name"].as_str(), Some("echo_search"));
     assert_eq!(request.payload["tool"].as_str(), Some("echo_search"));
     assert_eq!(
+        request.payload["args_fingerprint"],
+        serde_json::json!(
+            args_fingerprint("echo_search", &serde_json::json!({"input": "cooldis"})).unwrap()
+        )
+    );
+    assert_eq!(
         request.payload["subject"]["turn_id"].as_str(),
         Some("turn-1")
     );
@@ -4428,6 +5458,10 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     assert_eq!(completed.origin, crate::EventOrigin::Witnessed);
     assert_eq!(completed.payload["tool_name"].as_str(), Some("echo_search"));
     assert_eq!(completed.payload["success"].as_bool(), Some(true));
+    assert_eq!(
+        completed.payload["args_fingerprint"],
+        request.payload["args_fingerprint"]
+    );
     assert!(records.iter().any(|event| {
         event.kind == EventKind::TurnCompleted
             && event.origin == crate::EventOrigin::Discharged
@@ -4674,6 +5708,23 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
         .find(|event| event.kind == EventKind::ToolCallCompleted)
         .expect("resumed call completion");
     assert_eq!(completion.payload["finish_order"], 0);
+    let request_payload =
+        serde_json::from_value::<ToolCallRequestedPayload>(request.payload.clone()).unwrap();
+    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+    assert!(
+        existing_tool_result_message(
+            &services,
+            &thread.context().coordinates,
+            request.id,
+            "call_1|fc_1",
+            &request_payload.snapshot_id,
+            request_payload.args_fingerprint.as_deref(),
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "a resumed result remains reusable through its original request witness"
+    );
     assert!(
         records
             .iter()

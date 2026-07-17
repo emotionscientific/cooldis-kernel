@@ -1830,6 +1830,7 @@ mod tests {
                 snapshot_id: "snapshot".to_string(),
                 tool_name: "bash".to_string(),
                 success: false,
+                args_fingerprint: None,
                 duration_ms: Some(12),
                 finish_order: Some(0),
                 cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
