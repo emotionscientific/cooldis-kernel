@@ -183,6 +183,12 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         [command, subcommand] if command == "agent" && subcommand == "list" => {
             print_agent_list_help()
         }
+        [command, subcommand] if command == "agent" && subcommand == "versions" => {
+            print_agent_versions_help()
+        }
+        [command, subcommand] if command == "agent" && subcommand == "diff" => {
+            print_agent_diff_help()
+        }
         [command, subcommand] if command == "agent" && subcommand == "show" => {
             print_agent_show_help()
         }
@@ -334,6 +340,8 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
     "cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]",
     "cooldis agent list [--registry-root .cooldis/agents]",
+    "cooldis agent versions <name> [--json] [--registry-root .cooldis/agents]",
+    "cooldis agent diff <name> --from <version>[:authored|:resolved] --to <version>[:authored|:resolved] [--json] [--registry-root .cooldis/agents]",
     "cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]",
     "cooldis agent run <agent-ref> --input <text> [--registry-root .cooldis/agents]",
     "cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]",

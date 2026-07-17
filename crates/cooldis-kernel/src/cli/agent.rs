@@ -1,6 +1,7 @@
 //! The `agent` subcommand family.
 
 use super::*;
+use chrono::{SecondsFormat, TimeZone, Utc};
 
 pub(super) async fn run_agent(mut args: Vec<OsString>) -> CooldisResult<()> {
     if args.is_empty()
@@ -17,6 +18,8 @@ pub(super) async fn run_agent(mut args: Vec<OsString>) -> CooldisResult<()> {
         "plan" => agent_plan(args).await,
         "publish" => agent_publish(args).await,
         "list" => agent_list(args).await,
+        "versions" => agent_versions(args).await,
+        "diff" => agent_diff(args).await,
         "show" => agent_show(args).await,
         "run" => agent_run(args).await,
         other => Err(usage_error(format!("unknown agent subcommand {other:?}"))),
@@ -498,6 +501,143 @@ pub(super) async fn agent_list(args: Vec<OsString>) -> CooldisResult<()> {
     Ok(())
 }
 
+pub(super) async fn agent_versions(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_agent_versions_args(args)?;
+    if options.help {
+        print_agent_versions_help();
+        return Ok(());
+    }
+    let name = options
+        .name
+        .ok_or_else(|| usage_error("agent versions requires <name>"))?;
+    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+    let records = registry.list_version_records(&name)?;
+    if options.json {
+        let rows = records
+            .iter()
+            .map(|record| {
+                json!({
+                    "version": record.version,
+                    "source_hash": record.source_hash,
+                    "manifest_hash": record.manifest_hash,
+                    "published_at_ms": record.published_at_ms,
+                    "authored_source_present": record.authored_source_present,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_writer_pretty(std::io::stdout(), &rows)
+            .map_err(|err| usage_error(format!("failed to encode agent versions JSON: {err}")))?;
+        println!();
+        return Ok(());
+    }
+    println!("{:<24}  {:<16}  MANIFEST HASH", "PUBLISHED AT", "VERSION");
+    for record in records {
+        let published_at = i64::try_from(record.published_at_ms)
+            .ok()
+            .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(format!(
+                    "agent record {}@{} has invalid published_at_ms {}",
+                    name, record.version, record.published_at_ms
+                ))
+            })?
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        let authored = if !record.authored_source_present {
+            "  [no-authored-source]"
+        } else {
+            ""
+        };
+        println!(
+            "{published_at:<24}  {:<16}  {}{authored}",
+            record.version, record.manifest_hash
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn agent_diff(args: Vec<OsString>) -> CooldisResult<()> {
+    let options = parse_agent_diff_args(args)?;
+    if options.help {
+        print_agent_diff_help();
+        return Ok(());
+    }
+    let name = options
+        .name
+        .ok_or_else(|| usage_error("agent diff requires <name>"))?;
+    let from = options
+        .from
+        .ok_or_else(|| usage_error("agent diff requires --from <version>[:authored|:resolved]"))?;
+    let to = options
+        .to
+        .ok_or_else(|| usage_error("agent diff requires --to <version>[:authored|:resolved]"))?;
+    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+    let from_record = registry.load_version_record(&name, &from.version)?;
+    let to_record = registry.load_version_record(&name, &to.version)?;
+    let before = manifest_diff_snapshot(&from_record, from.form)?;
+    let after = manifest_diff_snapshot(&to_record, to.form)?;
+    let changes = crate::diff_canonical_json(&before, &after);
+    if options.json {
+        serde_json::to_writer_pretty(std::io::stdout(), &changes)
+            .map_err(|err| usage_error(format!("failed to encode agent diff JSON: {err}")))?;
+        println!();
+        return Ok(());
+    }
+    println!(
+        "manifest {name} {}:{} -> {}:{}",
+        from.version,
+        from.form.as_str(),
+        to.version,
+        to.form.as_str()
+    );
+    for change in changes {
+        match change.kind {
+            crate::AgentManifestDiffKind::Changed => println!(
+                "~ {}: {} -> {}",
+                change.path,
+                render_manifest_diff_value(change.before.as_ref().expect("changed before value")),
+                render_manifest_diff_value(change.after.as_ref().expect("changed after value"))
+            ),
+            crate::AgentManifestDiffKind::Added => println!(
+                "+ {}: {}",
+                change.path,
+                render_manifest_diff_value(change.after.as_ref().expect("added after value"))
+            ),
+            crate::AgentManifestDiffKind::Removed => println!(
+                "- {}: {}",
+                change.path,
+                render_manifest_diff_value(change.before.as_ref().expect("removed before value"))
+            ),
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn manifest_diff_snapshot(
+    record: &PublishedAgentRecord,
+    form: AgentManifestForm,
+) -> CooldisResult<Value> {
+    match form {
+        AgentManifestForm::Resolved => Ok(record.resolved_manifest.clone()),
+        AgentManifestForm::Authored => {
+            let source = record.authored_source.as_deref().ok_or_else(|| {
+                CooldisError::RuntimeFactory(format!(
+                    "agent record {}@{}: legacy record has no authored_source; authored-form diff is unavailable",
+                    record.name, record.version
+                ))
+            })?;
+            crate::agent::manifest::canonical_json_from_authored_source(source)
+        }
+    }
+}
+
+pub(super) fn render_manifest_diff_value(value: &Value) -> String {
+    let rendered = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    if rendered.chars().count() <= 120 {
+        return rendered;
+    }
+    rendered.chars().take(117).collect::<String>() + "..."
+}
+
 pub(super) async fn agent_show(args: Vec<OsString>) -> CooldisResult<()> {
     let options = parse_agent_show_args(args)?;
     if options.help {
@@ -599,6 +739,45 @@ pub(super) struct AgentManifestArgs {
 #[derive(Debug)]
 pub(super) struct AgentRegistryArgs {
     registry_root: Option<PathBuf>,
+    help: bool,
+}
+
+#[derive(Debug)]
+pub(super) struct AgentVersionsArgs {
+    name: Option<String>,
+    registry_root: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgentManifestForm {
+    Authored,
+    Resolved,
+}
+
+impl AgentManifestForm {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Authored => "authored",
+            Self::Resolved => "resolved",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct AgentDiffEndpoint {
+    version: String,
+    form: AgentManifestForm,
+}
+
+#[derive(Debug)]
+pub(super) struct AgentDiffArgs {
+    name: Option<String>,
+    from: Option<AgentDiffEndpoint>,
+    to: Option<AgentDiffEndpoint>,
+    registry_root: Option<PathBuf>,
+    json: bool,
     help: bool,
 }
 
@@ -716,6 +895,120 @@ pub(super) fn parse_agent_registry_args(
         registry_root,
         help,
     })
+}
+
+pub(super) fn parse_agent_versions_args(args: Vec<OsString>) -> CooldisResult<AgentVersionsArgs> {
+    let mut name = None;
+    let mut registry_root = None;
+    let mut json = false;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--json" => json = true,
+            "--registry-root" => {
+                registry_root = Some(PathBuf::from(required_agent_history_value(
+                    &mut iter,
+                    "--registry-root",
+                )?))
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown agent versions argument {other:?}"
+                )));
+            }
+            _ => {
+                if name.is_some() {
+                    return Err(usage_error("agent versions accepts exactly one <name>"));
+                }
+                name = Some(arg.to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(AgentVersionsArgs {
+        name,
+        registry_root,
+        json,
+        help,
+    })
+}
+
+pub(super) fn parse_agent_diff_args(args: Vec<OsString>) -> CooldisResult<AgentDiffArgs> {
+    let mut name = None;
+    let mut from = None;
+    let mut to = None;
+    let mut registry_root = None;
+    let mut json = false;
+    let mut help = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--help" | "-h" => help = true,
+            "--json" => json = true,
+            "--from" => {
+                from = Some(parse_agent_diff_endpoint(
+                    &required_agent_history_value(&mut iter, "--from")?.to_string_lossy(),
+                )?)
+            }
+            "--to" => {
+                to = Some(parse_agent_diff_endpoint(
+                    &required_agent_history_value(&mut iter, "--to")?.to_string_lossy(),
+                )?)
+            }
+            "--registry-root" => {
+                registry_root = Some(PathBuf::from(required_agent_history_value(
+                    &mut iter,
+                    "--registry-root",
+                )?))
+            }
+            other if other.starts_with('-') => {
+                return Err(usage_error(format!(
+                    "unknown agent diff argument {other:?}"
+                )));
+            }
+            _ => {
+                if name.is_some() {
+                    return Err(usage_error("agent diff accepts exactly one <name>"));
+                }
+                name = Some(arg.to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(AgentDiffArgs {
+        name,
+        from,
+        to,
+        registry_root,
+        json,
+        help,
+    })
+}
+
+pub(super) fn parse_agent_diff_endpoint(value: &str) -> CooldisResult<AgentDiffEndpoint> {
+    let (version, form) = match value.rsplit_once(':') {
+        Some((version, "authored")) => (version, AgentManifestForm::Authored),
+        Some((version, "resolved")) => (version, AgentManifestForm::Resolved),
+        _ => (value, AgentManifestForm::Resolved),
+    };
+    cooldis_agent::validate_version(version)?;
+    Ok(AgentDiffEndpoint {
+        version: version.to_string(),
+        form,
+    })
+}
+
+fn required_agent_history_value(
+    iter: &mut impl Iterator<Item = OsString>,
+    flag: &'static str,
+) -> CooldisResult<OsString> {
+    let value = iter
+        .next()
+        .ok_or_else(|| usage_error(format!("{flag} requires a value")))?;
+    if value.to_string_lossy().starts_with('-') {
+        return Err(usage_error(format!("{flag} requires a value")));
+    }
+    Ok(value)
 }
 
 pub(super) fn parse_agent_show_args(args: Vec<OsString>) -> CooldisResult<AgentShowArgs> {
@@ -1038,6 +1331,8 @@ Usage:\n\
   cooldis agent plan <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
   cooldis agent publish <manifest> [--registry-root .cooldis/agents] [--operations-registry-root .cooldis/operations]\n\
   cooldis agent list [--registry-root .cooldis/agents]\n\
+  cooldis agent versions <name> [--json] [--registry-root .cooldis/agents]\n\
+  cooldis agent diff <name> --from <version>[:authored|:resolved] --to <version>[:authored|:resolved] [--json] [--registry-root .cooldis/agents]\n\
   cooldis agent show <agent-ref-or-name> [--registry-root .cooldis/agents]\n\
   cooldis agent run <agent-ref> --input <text> [--registry-root .cooldis/agents]\n\
 \n\
@@ -1100,6 +1395,28 @@ Lists published agent records in the local registry.\n"
     );
 }
 
+pub(super) fn print_agent_versions_help() {
+    println!(
+        "cooldis agent versions\n\
+\n\
+Usage:\n\
+  cooldis agent versions <name> [--json] [--registry-root .cooldis/agents]\n\
+\n\
+Lists immutable agent versions in publication order.\n"
+    );
+}
+
+pub(super) fn print_agent_diff_help() {
+    println!(
+        "cooldis agent diff\n\
+\n\
+Usage:\n\
+  cooldis agent diff <name> --from <version>[:authored|:resolved] --to <version>[:authored|:resolved] [--json] [--registry-root .cooldis/agents]\n\
+\n\
+Prints a structural diff between immutable authored or resolved manifest snapshots.\n"
+    );
+}
+
 pub(super) fn print_agent_show_help() {
     println!(
         "cooldis agent show\n\
@@ -1121,4 +1438,79 @@ Usage:\n\
 Starts a manifest-backed app-server thread, runs one turn, prints the assistant\n\
 output, then prints the manifest compile and bind receipt event ids.\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_diff_endpoint_preserves_colons_inside_versions() {
+        let endpoint = parse_agent_diff_endpoint("release:2026:07").unwrap();
+        assert_eq!(endpoint.version, "release:2026:07");
+        assert_eq!(endpoint.form, AgentManifestForm::Resolved);
+
+        let endpoint = parse_agent_diff_endpoint("release:2026:07:authored").unwrap();
+        assert_eq!(endpoint.version, "release:2026:07");
+        assert_eq!(endpoint.form, AgentManifestForm::Authored);
+    }
+
+    #[test]
+    fn agent_history_parsers_reject_missing_flag_values_and_duplicate_names() {
+        let error = parse_agent_diff_args(
+            ["auditor", "--from", "--to", "2.0.0"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--from requires a value"));
+
+        let error = parse_agent_versions_args(
+            ["auditor", "--registry-root", "--json"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--registry-root requires a value")
+        );
+
+        let error = parse_agent_diff_args(
+            ["auditor", "second", "--from", "1", "--to", "2"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("agent diff accepts exactly one <name>")
+        );
+    }
+
+    #[test]
+    fn manifest_diff_values_are_compact_json_truncated_to_120_characters() {
+        let value = Value::String("x".repeat(200));
+        let rendered = render_manifest_diff_value(&value);
+
+        assert_eq!(rendered.chars().count(), 120);
+        assert!(rendered.ends_with("..."));
+        assert!(rendered.starts_with('"'));
+    }
+
+    #[test]
+    fn manifest_diff_value_truncation_counts_multibyte_characters_at_the_boundary() {
+        let exactly_120 = render_manifest_diff_value(&Value::String("é".repeat(118)));
+        assert_eq!(exactly_120.chars().count(), 120);
+        assert!(!exactly_120.ends_with("..."));
+
+        let over_boundary = render_manifest_diff_value(&Value::String("é".repeat(119)));
+        assert_eq!(over_boundary.chars().count(), 120);
+        assert!(over_boundary.ends_with("..."));
+    }
 }

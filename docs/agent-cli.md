@@ -20,6 +20,8 @@ cooldis blob publish release-verifier/prompts/system.md --name identity
 cooldis skill publish release-verifier/skills
 cooldis skill import ~/.agents/skills/release-checker --dry-run
 cooldis agent list
+cooldis agent versions release-verifier
+cooldis agent diff release-verifier --from 0.1.0:authored --to 0.1.0:resolved
 cooldis agent show agent://release-verifier@0.1.0
 cooldis agent run agent://release-verifier@latest --input "check the branch"
 ```
@@ -71,7 +73,10 @@ an operations registry, it still succeeds and reports those refs as
 version records live in `versions/<name>/<version>.json`. Republish of the same
 name and version is allowed only when the manifest hash is identical. When a
 folder-first prompt is lowered, the publish receipt pins the blob hash through
-the resolved blob resource and the `identity` context source.
+the resolved blob resource and the `identity` context source. Each new record
+retains the authored TOML verbatim beside the canonical resolved manifest; the
+source and manifest hashes identify those two forms. Legacy records remain
+readable but do not gain an authored form retroactively.
 
 `publish` is a registry oracle for `op://` refs. Every operation tool row must
 name a local operation record, pin a published version hash, select either the
@@ -136,8 +141,20 @@ workspace-relative `path` (default `.agents/skills`); this does not publish or
 mount the files. See [Agent Manifest Ontology — Skills](agent-manifest-ontology.md#skills)
 for the two-lane model, no-mount rule, and durable witness semantics.
 
-`list` and `show` inspect published records from the local registry. They are the
-minimum discovery surface required once publication exists.
+`list` and `show` inspect published records from the local registry. `versions
+<name>` lists immutable versions by `published_at_ms`, not by the author-declared
+version string. Its text output includes an RFC3339 publication time, declared
+version, manifest hash, and `[no-authored-source]` for legacy records; `--json`
+also exposes the source hash and authored-source availability.
+
+`diff <name> --from <version>[:authored|:resolved] --to
+<version>[:authored|:resolved]` compares two immutable snapshots structurally.
+The form defaults to `resolved`; `authored` parses the retained TOML through the
+manifest schema before comparison. Comparing authored and resolved forms of one
+version shows fields filled during resolution, including folder-first prompt
+lowering. Changes are JSON-pointer path ordered and reported as added, removed,
+or changed. `--json` emits the raw change list. Authored comparison fails
+explicitly when a legacy record has no retained source.
 
 `run` starts a manifest-backed app-server thread from a published `agent://...`
 ref, sends one input turn, prints the assistant output, then prints the manifest

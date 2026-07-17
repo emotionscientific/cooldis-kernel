@@ -1504,6 +1504,8 @@ async fn agent_query_methods_project_local_registry_records() {
     assert_eq!(local_agent["toolIds"].as_array().unwrap().len(), 0);
     assert_eq!(local_agent["aliases"][0]["alias"].as_str(), Some("latest"));
     assert_eq!(local_agent["aliases"][0]["version"].as_str(), Some("0.1.0"));
+    assert!(local_agent.get("authored_source").is_none());
+    assert!(local_agent.get("resolved_manifest").is_none());
 
     let read = app
         .dispatch_request(
@@ -1716,11 +1718,12 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
         Some("Publisher v2")
     );
     assert_eq!(publish["latestAlias"]["version"].as_str(), Some("0.1.1"));
-    assert!(
-        LocalAgentRegistry::new(&agent_registry_root)
-            .version_record_path("publisher", "0.1.1")
-            .unwrap()
-            .exists()
+    let published_record = LocalAgentRegistry::new(&agent_registry_root)
+        .load_version_record("publisher", "0.1.1")
+        .unwrap();
+    assert_eq!(
+        published_record.authored_source.as_deref(),
+        publish["source"].as_str()
     );
 
     let stale = app
@@ -2857,6 +2860,12 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
     let registry = LocalAgentRegistry::new(&agent_registry_root);
     let first = registry.load_ref("agent://cooldis/default@latest").unwrap();
     assert_eq!(first.version, "1.0.0");
+    assert!(
+        first
+            .authored_source
+            .as_deref()
+            .is_some_and(|source| source.contains("name = \"default\""))
+    );
     assert_eq!(default_agent_version_count(&agent_registry_root), 1);
 
     let _ = CooldisAppServer::new_local(config.clone()).await.unwrap();
