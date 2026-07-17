@@ -1495,6 +1495,7 @@ mod tests {
                 ref_uri: "agent://test/bash".to_string(),
                 manifest_hash: self.snapshot_id.clone(),
                 model_profile_id: "default".to_string(),
+                model_profile_origin: None,
                 provider_id: "test".to_string(),
                 model_id: "model".to_string(),
                 tool_ids: Vec::new(),
@@ -1509,7 +1510,9 @@ mod tests {
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
+                placement_origin: None,
                 workspace: None,
+                workspace_origin: None,
             };
             self.store
                 .append_events(

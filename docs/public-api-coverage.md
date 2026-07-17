@@ -54,6 +54,7 @@ inputs, durable effects, or output semantics.
 | `cooldis rpc` | [RPC Control Plane](app-server.md) | `cooldis rpc --help` | partial | Add generated endpoint/method manual and wire examples. |
 | `cooldis chat` | [Chat Console](chat.md), [RPC Control Plane](app-server.md), [Provider Adapter Surface](provider-adapters.md) | `cooldis chat --help` | partial | Bundled local terminal console over app-server RPC; richer generated manual remains follow-up work. |
 | `cooldis debug rpc` | [RPC Control Plane](app-server.md) | `cooldis debug rpc --help` | partial | Protocol debug client for running daemon WebSocket endpoints; formal man page remains follow-up work. |
+| `cooldis debug bind` | [RPC Control Plane](app-server.md), [CLI](cli.md) | `cooldis debug bind --help` | partial | Receipt-only effective bind explanation over live `thread/events/list` or an offline SQLite journal; formal man page remains follow-up work. |
 | `cooldis daemon run` | [Cooldis Daemon](daemon.md), [Cooldis IO](io.md) | `cooldis daemon --help` | partial | Add generated daemon run/config/service man pages. |
 | `cooldis daemon config validate` | [Cooldis Daemon](daemon.md) | `cooldis daemon --help` | partial | Document config schema and validation errors in man form. |
 | `cooldis daemon service print` | [Cooldis Daemon](daemon.md) | `cooldis daemon --help` | partial | Document generated launchd/systemd output and side-effect boundary. |

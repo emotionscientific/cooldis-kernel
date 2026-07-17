@@ -55,6 +55,7 @@ Both redact stored values in status and list output.
 
 ```sh
 cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]
+cooldis debug bind <thread-id> [--json] [--url <ws-url> | --config <path> | --journal <db>]
 cooldis debug rpc call <method> [PARAMS_JSON]
 cooldis debug rpc turn (--thread <id> | --new) <text>
 cooldis debug rpc tail --thread <id>
@@ -62,8 +63,13 @@ cooldis daemon run|config|service
 ```
 
 `cooldis rpc` is the app-server control plane for scripts, local hosts, MCP,
-ACP, and other clients. `cooldis debug rpc` is protocol tooling for maintainers
-and smoke tests; it is not the default user console.
+ACP, and other clients. `cooldis debug bind` explains the effective model,
+placement, workspace, runtime, tool, coupling, grant, skill, and context
+envelope strictly from recorded compile and bind receipts. It reads a running
+daemon through `thread/events/list`, or a stopped daemon's SQLite journal with
+`--journal`; `--json` emits the full receipt projection. `cooldis debug rpc` is
+protocol tooling for maintainers and smoke tests; it is not the default user
+console.
 
 ## Release Contract
 

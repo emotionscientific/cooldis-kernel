@@ -326,11 +326,11 @@ pub use agent::manifest::{
     default_blob_registry_root_for_agent_registry_root, default_operations_registry_root,
 };
 pub use agent::manifest_bind::{
-    AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBoundThread,
-    AgentManifestCompileReceipt, AgentManifestCouplingBinding, AgentManifestDirectToolBinding,
-    AgentManifestDiscoveredSkill, AgentManifestGrantBindingReceipt,
-    AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestPlacementBinding, AgentManifestProviderSurface,
+    AgentManifestBindOverrides, AgentManifestBindReceipt, AgentManifestBindingOrigin,
+    AgentManifestBoundThread, AgentManifestCompileReceipt, AgentManifestCouplingBinding,
+    AgentManifestDirectToolBinding, AgentManifestDiscoveredSkill, AgentManifestGrantBindingReceipt,
+    AgentManifestModelProfileOrigin, AgentManifestModelProfileSelection,
+    AgentManifestOperationBinding, AgentManifestPlacementBinding, AgentManifestProviderSurface,
     AgentManifestResolvedWorkspaceMount, AgentManifestSkillDiscovery,
     AgentManifestSkillPackageBinding, AgentManifestStaticContextSegment,
     AgentManifestWorkspaceBinding, BoundCoupling, BoundCouplingFunction, BoundCouplingSelector,

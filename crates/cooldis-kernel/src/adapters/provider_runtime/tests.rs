@@ -336,6 +336,7 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 ref_uri: CHILD_AGENT_REF.to_string(),
                 manifest_hash: CHILD_MANIFEST_HASH.to_string(),
                 model_profile_id: "default".to_string(),
+                model_profile_origin: None,
                 provider_id: "test".to_string(),
                 model_id: "model".to_string(),
                 tool_ids: Vec::new(),
@@ -350,7 +351,9 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
+                placement_origin: None,
                 workspace: None,
+                workspace_origin: None,
             })
             .unwrap(),
         })
@@ -5713,6 +5716,7 @@ async fn append_tool_controller_bind_receipt(
         ref_uri: "agent://test/controller".to_string(),
         manifest_hash: "snapshot-controller".to_string(),
         model_profile_id: "default".to_string(),
+        model_profile_origin: None,
         provider_id: "test".to_string(),
         model_id: "model".to_string(),
         tool_ids: Vec::new(),
@@ -5743,7 +5747,9 @@ async fn append_tool_controller_bind_receipt(
         effective_runtime: AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: None,
+        placement_origin: None,
         workspace: None,
+        workspace_origin: None,
     };
     store
         .append_events(
@@ -5773,6 +5779,7 @@ async fn append_manifest_runtime_grace(
         ref_uri: "agent://test/interruption".to_string(),
         manifest_hash: "snapshot-interruption".to_string(),
         model_profile_id: "default".to_string(),
+        model_profile_origin: None,
         provider_id: "test".to_string(),
         model_id: "model".to_string(),
         tool_ids: Vec::new(),
@@ -5790,7 +5797,9 @@ async fn append_manifest_runtime_grace(
         },
         overridden_keys: vec!["cancellation_grace_ms".to_string()],
         placement: None,
+        placement_origin: None,
         workspace: None,
+        workspace_origin: None,
     };
     store
         .append_events(
