@@ -52,12 +52,71 @@ if ((${#bad_runtime_paths[@]} > 0)); then
   exit 1
 fi
 
-if [[ "$MODE" == "staged" && "${COOLDIS_ALLOW_PRODUCT_TERMS:-0}" != "1" ]]; then
-  product_hits="$(
+product_term_hits() {
+  local base_rev="${1:-}"
+
+  if [[ -n "$base_rev" ]]; then
+    git diff --cached "$base_rev" --unified=0 -- crates/cooldis-kernel/src crates/cooldis-guest-sdk 2>/dev/null \
+      | grep -E '^\+[^+].*([^[:alnum:]_]|^)(billing|dashboard|dashboards|invite|invites|telegram|railway)([^[:alnum:]_]|$)' \
+      || true
+  else
     git diff --cached --unified=0 -- crates/cooldis-kernel/src crates/cooldis-guest-sdk 2>/dev/null \
       | grep -E '^\+[^+].*([^[:alnum:]_]|^)(billing|dashboard|dashboards|invite|invites|telegram|railway)([^[:alnum:]_]|$)' \
       || true
-  )"
+  fi
+}
+
+if [[ "$MODE" == "staged" && "${COOLDIS_ALLOW_PRODUCT_TERMS:-0}" != "1" ]]; then
+  product_hits="$(product_term_hits)"
+
+  # During a merge, only lines added relative to HEAD and every MERGE_HEAD
+  # parent are new; lines carried verbatim by any parent are already landed.
+  merge_head_path="$(git rev-parse --git-path MERGE_HEAD)"
+  if [[ -f "$merge_head_path" && -n "$product_hits" ]]; then
+    product_hit_lines=()
+    while IFS= read -r hit; do
+      [[ -n "$hit" ]] && product_hit_lines+=("$hit")
+    done <<<"$product_hits"
+
+    while IFS= read -r merge_parent || [[ -n "$merge_parent" ]]; do
+      merge_parent="${merge_parent#"${merge_parent%%[![:space:]]*}"}"
+      merge_parent="${merge_parent%"${merge_parent##*[![:space:]]}"}"
+      [[ -z "$merge_parent" ]] && continue
+      ((${#product_hit_lines[@]} == 0)) && break
+      if ! git rev-parse --verify --quiet "${merge_parent}^{commit}" >/dev/null; then
+        die "invalid merge parent in MERGE_HEAD"
+      fi
+      parent_hits="$(product_term_hits "$merge_parent")"
+      common_product_hit_lines=()
+
+      for hit in "${product_hit_lines[@]}"; do
+        normalized_hit="${hit#+}"
+        parent_has_hit=0
+        while IFS= read -r parent_hit; do
+          if [[ -n "$parent_hit" && "${parent_hit#+}" == "$normalized_hit" ]]; then
+            parent_has_hit=1
+            break
+          fi
+        done <<<"$parent_hits"
+
+        if ((parent_has_hit)); then
+          common_product_hit_lines+=("$hit")
+        fi
+      done
+
+      if ((${#common_product_hit_lines[@]} > 0)); then
+        product_hit_lines=("${common_product_hit_lines[@]}")
+      else
+        product_hit_lines=()
+      fi
+    done <"$merge_head_path"
+
+    if ((${#product_hit_lines[@]} > 0)); then
+      product_hits="$(printf '%s\n' "${product_hit_lines[@]}")"
+    else
+      product_hits=""
+    fi
+  fi
 
   if [[ -n "$product_hits" ]]; then
     printf 'Staged runtime code appears to add product-shaped terms.\n' >&2
