@@ -39,7 +39,8 @@ use crate::{
 use async_trait::async_trait;
 use cooldis_io_core::{
     AdmissionDecision, ConversationKind, IngressContent, IngressEnvelope, IoConversation,
-    IoDedupeKey, IoError, IoSource, IoTurnInput, ResolvedIoTarget, ThreadAddress,
+    IoDedupeKey, IoDelivery, IoError, IoPrincipal, IoSource, IoTurnInput, ResolvedIoTarget,
+    ThreadAddress,
 };
 use cooldis_sqlite::{TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -233,7 +234,7 @@ impl ProcessRemoteThreadExecutorInner {
 
         self.queue
             .enqueue(queue_entry(
-                thread_id,
+                &request.child.coordinates,
                 request.turn_id.clone(),
                 request.dispatch_id.clone(),
                 &request.input,
@@ -354,7 +355,7 @@ impl RemoteThreadExecutor for ProcessRemoteThreadExecutor {
         self.inner
             .queue
             .enqueue(queue_entry(
-                request.target_thread_id,
+                &state.child.coordinates,
                 request.turn_id,
                 request.dispatch_id,
                 &request.input,
@@ -579,11 +580,12 @@ async fn settle_remote_spawn_failure(
 }
 
 fn queue_entry(
-    target_thread_id: ThreadId,
+    target: &ThreadCoordinates,
     turn_id: String,
     dispatch_id: cooldis_runtime_contracts::DispatchId,
     input: &TurnInput,
 ) -> CooldisResult<RemoteIngressQueueEntryV1> {
+    let target_thread_id = target.thread_id;
     let source = IoSource::new("cooldis.remote", "ingress");
     let mut envelope = IngressEnvelope::new(
         source.clone(),
@@ -591,7 +593,13 @@ fn queue_entry(
         IngressContent::text(input.text_projection()),
         0,
     )
-    .with_dedupe_key(IoDedupeKey::for_source(&source, dispatch_id.as_str()));
+    .with_dedupe_key(IoDedupeKey::for_source(&source, dispatch_id.as_str()))
+    .with_delivery(IoDelivery::new(dispatch_id.to_string()))
+    .with_principal(IoPrincipal::new(
+        target.tenant_id.clone(),
+        target.user_id.clone(),
+        format!("remote:{dispatch_id}"),
+    ));
     envelope.id = format!("remote-ingress-{}", sha256_hex(dispatch_id.as_str()));
     envelope
         .metadata

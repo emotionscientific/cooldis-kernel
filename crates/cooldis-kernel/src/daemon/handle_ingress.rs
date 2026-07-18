@@ -31,7 +31,7 @@ use crate::{
 };
 use cooldis_io_core::{
     ConversationKind, IngressContent, IngressEnvelope, IngressSink, IoConversation, IoDedupeKey,
-    IoSource,
+    IoDelivery, IoPrincipal, IoSource,
 };
 use cooldis_runtime_contracts::{
     HANDLE_OUTCOME_CONTENT_KIND, HandleId, HandleTerminalEnvelope, HandleTerminalOutcome,
@@ -258,6 +258,12 @@ impl ThreadTerminalSettlement {
         .with_dedupe_key(IoDedupeKey::new(
             HANDLE_OUTCOME_CONTENT_KIND,
             self.dispatch_id.to_string(),
+        ))
+        .with_delivery(IoDelivery::new(self.dispatch_id.to_string()))
+        .with_principal(IoPrincipal::new(
+            self.consumer.tenant_id.clone(),
+            self.consumer.user_id.clone(),
+            format!("handle:{}", self.dispatch_id),
         ))
         .with_metadata("cooldis_route_id", HANDLE_OUTCOME_CONTENT_KIND)
         .with_metadata("cooldis_route_policy", "queue_per_conversation"))

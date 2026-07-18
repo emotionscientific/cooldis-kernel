@@ -10769,7 +10769,8 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
 #[tokio::test]
 async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
     use cooldis_io_core::{
-        ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoSource,
+        ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoDelivery,
+        IoPrincipal, IoSource,
     };
     use cooldis_runtime_contracts::{
         DispatchId, HANDLE_DISPATCH_CONTENT_KIND, HANDLE_OUTCOME_CONTENT_KIND, HandleId,
@@ -10888,7 +10889,16 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
         },
         1,
     )
-    .with_dedupe_key(IoDedupeKey::new(HANDLE_OUTCOME_CONTENT_KIND, dispatch_id))
+    .with_dedupe_key(IoDedupeKey::new(
+        HANDLE_OUTCOME_CONTENT_KIND,
+        dispatch_id.clone(),
+    ))
+    .with_delivery(IoDelivery::new(dispatch_id.clone()))
+    .with_principal(IoPrincipal::new(
+        app.tenant_id(),
+        app.user_id(),
+        format!("handle:{dispatch_id}"),
+    ))
     .with_metadata("cooldis_route_id", HANDLE_OUTCOME_CONTENT_KIND)
     .with_metadata("cooldis_route_policy", "queue_per_conversation");
     duplicate.id = events

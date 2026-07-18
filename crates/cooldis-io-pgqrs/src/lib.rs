@@ -137,6 +137,7 @@ fn pgqrs_store_config(dsn: &str) -> pgqrs::Config {
 #[async_trait]
 impl IngressSink for PgqrsIngressQueue {
     async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        envelope.require_witnessed()?;
         let claimed = self.try_claim_dedupe_key(&envelope)?;
         if !claimed {
             return Ok(IngressAck::rejected(&envelope, "duplicate dedupe key"));
@@ -159,9 +160,9 @@ impl PgqrsIngressQueue {
         let Some(path) = &self.sqlite_dedupe_path else {
             return Ok(true);
         };
-        let Some(dedupe_key) = &envelope.dedupe_key else {
-            return Ok(true);
-        };
+        let dedupe_key = envelope.effective_dedupe_key().ok_or_else(|| {
+            IoError::InvalidEnvelope("effective dedupe key is required".to_string())
+        })?;
         let connection = rusqlite::Connection::open(path)
             .map_err(|err| IoError::Queue(format!("open sqlite dedupe store: {err}")))?;
         connection
@@ -392,7 +393,8 @@ fn queue_error(err: PgqrsError) -> IoError {
 mod tests {
     use super::*;
     use cooldis_io_core::{
-        ConversationKind, IngressContent, IoActor, IoConversation, IoDedupeKey, IoSource,
+        ConversationKind, IngressContent, IoActor, IoConversation, IoDedupeKey, IoDelivery,
+        IoPrincipal, IoSource,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -416,6 +418,39 @@ mod tests {
         )
         .with_actor(IoActor::new("telegram:user:42"))
         .with_dedupe_key(IoDedupeKey::for_source(&source, format!("update:{text}")))
+        .with_delivery(IoDelivery::new(format!("update:{text}")))
+        .with_principal(IoPrincipal::new("tenant", "user", "route:main"))
+    }
+
+    #[tokio::test]
+    async fn sqlite_queue_rejects_unwitnessed_submit_before_mutation() {
+        let path = test_db_path("unwitnessed");
+        let queue =
+            PgqrsIngressQueue::connect(PgqrsQueueConfig::local_sqlite(&path, "cooldis-ingress"))
+                .await
+                .unwrap();
+        let source = IoSource::new("telegram.bot", "main");
+        let unwitnessed = IngressEnvelope::new(
+            source.clone(),
+            IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+            IngressContent::text("missing delivery"),
+            1_777_000_000_000,
+        )
+        .with_dedupe_key(IoDedupeKey::for_source(&source, "update:missing"));
+
+        let err = queue.submit(unwitnessed).await.unwrap_err();
+        assert!(matches!(
+            err,
+            IoError::InvalidEnvelope(message) if message == "delivery is required"
+        ));
+        assert!(
+            queue
+                .lease_default("worker-1", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -433,6 +468,14 @@ mod tests {
         assert_eq!(leased.len(), 1);
         assert_eq!(leased[0].envelope.content.text_projection(), "hello");
         assert_eq!(leased[0].attempt, 1);
+        assert_eq!(
+            leased[0].envelope.delivery,
+            Some(IoDelivery::new("update:hello"))
+        );
+        assert_eq!(
+            leased[0].envelope.principal,
+            Some(IoPrincipal::new("tenant", "user", "route:main"))
+        );
 
         queue.complete_ingress(&leased[0].message_id).await.unwrap();
         assert!(
@@ -488,7 +531,8 @@ mod tests {
             },
             1_777_000_000_000,
         )
-        .with_dedupe_key(IoDedupeKey::for_source(&source, "mandate:0"));
+        .with_dedupe_key(IoDedupeKey::for_source(&source, "mandate:0"))
+        .with_delivery(IoDelivery::new("mandate:0"));
         let duplicate = IngressEnvelope::new(
             source.clone(),
             IoConversation::new("thread:one", ConversationKind::System),
@@ -498,7 +542,8 @@ mod tests {
             },
             1_777_000_000_001,
         )
-        .with_dedupe_key(IoDedupeKey::for_source(&source, "mandate:0"));
+        .with_dedupe_key(IoDedupeKey::for_source(&source, "mandate:0"))
+        .with_delivery(IoDelivery::new("mandate:0"));
 
         assert!(queue.submit(first).await.unwrap().accepted);
         let duplicate_ack = queue.submit(duplicate).await.unwrap();

@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use cooldis_io_core::{
     ConversationKind, DeliveryReceipt, EgressAdapter, EgressEnvelope, EgressKind, IngressAck,
     IngressContent, IngressEnvelope, IngressSink, IoActor, IoAttachment, IoConversation,
-    IoDedupeKey, IoError, IoProtocolAdapter, IoProtocolCapabilities, IoResult, IoSource, IoTarget,
+    IoDedupeKey, IoDelivery, IoError, IoProtocolAdapter, IoProtocolCapabilities, IoResult,
+    IoSource, IoTarget,
 };
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeStruct,
@@ -190,6 +191,7 @@ impl TelegramNormalizer {
             &source,
             format!("update:{update_id}"),
         ))
+        .with_delivery(IoDelivery::new(format!("update:{update_id}")))
         .with_metadata("telegram_update_id", update_id.to_string())
         .with_metadata("telegram_update_kind", update_kind)
         .with_metadata("telegram_message_id", message.message_id.to_string())
@@ -224,6 +226,7 @@ impl TelegramNormalizer {
             &source,
             format!("update:{update_id}"),
         ))
+        .with_delivery(IoDelivery::new(format!("update:{update_id}")))
         .with_metadata("telegram_update_id", update_id.to_string())
         .with_metadata("telegram_update_kind", "message_reaction")
         .with_metadata("telegram_message_id", reaction.message_id.to_string())
@@ -1163,6 +1166,22 @@ mod tests {
             envelope.dedupe_key.as_ref().map(IoDedupeKey::stable_key),
             Some("telegram.bot:main:update:999".to_string())
         );
+        assert_eq!(
+            envelope
+                .effective_dedupe_key()
+                .as_ref()
+                .map(IoDedupeKey::stable_key),
+            Some("telegram.bot:main:update:999".to_string()),
+            "the adapter-envelope migration must preserve the literal pre-contract key"
+        );
+        assert_eq!(
+            envelope
+                .delivery
+                .as_ref()
+                .map(|delivery| delivery.delivery_id.as_str()),
+            Some("update:999")
+        );
+        assert_eq!(envelope.principal, None);
         assert_eq!(envelope.content.text_projection(), "hello telegram");
         assert_eq!(
             envelope

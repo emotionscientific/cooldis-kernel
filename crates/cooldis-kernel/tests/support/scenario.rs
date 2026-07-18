@@ -36,7 +36,8 @@ use super::{Inv6ClaimsSettle, fork_invariants_v1, invariant_set_v1};
 use async_trait::async_trait;
 use cooldis_io_core::{
     ConversationKind, IngressAck, IngressContent, IngressEnvelope, IngressQueueStore, IngressSink,
-    IoConversation, IoDedupeKey, IoResult, IoSource, LeasedIngressEnvelope, ThreadAddress,
+    IoConversation, IoDedupeKey, IoDelivery, IoPrincipal, IoResult, IoSource,
+    LeasedIngressEnvelope, ThreadAddress,
 };
 use cooldis_io_pgqrs::sqlite_dsn;
 use futures_util::FutureExt;
@@ -991,15 +992,19 @@ impl ScenarioHarness {
     fn envelope(&mut self, root_index: usize, policy: &str, text: &str) -> IngressEnvelope {
         self.envelope_index += 1;
         let source = Self::source();
+        let delivery_id = format!("{}:{}", self.plan.seed, self.envelope_index);
         let mut envelope = IngressEnvelope::new(
             source.clone(),
             Self::conversation(root_index),
             IngressContent::text(text),
             self.tick.load(std::sync::atomic::Ordering::SeqCst) * 1_000,
         )
-        .with_dedupe_key(IoDedupeKey::for_source(
-            &source,
-            format!("{}:{}", self.plan.seed, self.envelope_index),
+        .with_dedupe_key(IoDedupeKey::for_source(&source, delivery_id.clone()))
+        .with_delivery(IoDelivery::new(delivery_id))
+        .with_principal(IoPrincipal::new(
+            self.server.tenant_id(),
+            self.server.user_id(),
+            "route:scenario",
         ))
         .with_metadata("cooldis_route_id", "scenario")
         .with_metadata("cooldis_route_policy", policy);
@@ -2847,7 +2852,13 @@ mod tests {
             IngressContent::text("accepted stale completion"),
             0,
         )
-        .with_dedupe_key(IoDedupeKey::for_source(&source, "stale-completion"));
+        .with_dedupe_key(IoDedupeKey::for_source(&source, "stale-completion"))
+        .with_delivery(IoDelivery::new("stale-completion"))
+        .with_principal(IoPrincipal::new(
+            "scenario-tenant",
+            "scenario-user",
+            "route:scenario",
+        ));
         queue.submit(envelope).await.unwrap();
         let leased = queue.lease_ingress("worker-a", 1, 1).await.unwrap();
         assert_eq!(leased.len(), 1);

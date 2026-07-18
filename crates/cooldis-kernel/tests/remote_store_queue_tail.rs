@@ -19,7 +19,8 @@ use cooldis::{
     NewEventRecord, SqliteSessionStore, ThreadCoordinates,
 };
 use cooldis_io_core::{
-    ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoSource,
+    ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoDelivery,
+    IoPrincipal, IoSource,
 };
 use cooldis_runtime_contracts::{DispatchId, ThreadId};
 use cooldis_sqlite::{TransactionBehavior, params};
@@ -53,6 +54,12 @@ fn entry(thread_id: ThreadId, dispatch: &str, text: &str) -> RemoteIngressQueueE
         .with_dedupe_key(IoDedupeKey::new(
             "cooldis.remote.dispatch",
             dispatch_id.to_string(),
+        ))
+        .with_delivery(IoDelivery::new(dispatch_id.to_string()))
+        .with_principal(IoPrincipal::new(
+            "remote-tenant",
+            "remote-user",
+            format!("remote:{dispatch_id}"),
         )),
         enqueued_at_ms: 0,
     }
