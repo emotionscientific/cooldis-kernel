@@ -3,6 +3,7 @@ use crate::{
     CouplingRole, EventKind, EventOrigin, EventRecord, EventRecordId, EventStore, EventStreamId,
     ThreadCoordinates,
 };
+use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
@@ -19,6 +20,8 @@ pub struct ToolCallRequestedPayload {
     pub snapshot_id: String,
     pub tool_name: String,
     pub arguments: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args_fingerprint: Option<String>,
     /// Kernel-derived resource holds for this invocation. Empty when decoding
     /// events written before hold scheduling existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -59,6 +62,8 @@ pub struct ToolCallCompletedPayload {
     pub tool_name: String,
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// Zero-based completion order observed by the batch executor. Event and
     /// history append order remains model call order.
@@ -68,6 +73,19 @@ pub struct ToolCallCompletedPayload {
     /// call ran to completion without an interrupt reaching it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation: Option<ToolCallCancellation>,
+}
+
+/// Recovery honors the effect class; a recorded outcome is reused only under
+/// a matching fingerprint within the same snapshot. A missing recorded
+/// fingerprint retains legacy request-event and call-id reuse.
+pub(crate) fn tool_invocation_fingerprint_matches(
+    recorded_snapshot_id: &str,
+    recorded_fingerprint: Option<&str>,
+    current_snapshot_id: &str,
+    current_fingerprint: Option<&str>,
+) -> bool {
+    recorded_snapshot_id == current_snapshot_id
+        && recorded_fingerprint.is_none_or(|recorded| Some(recorded) == current_fingerprint)
 }
 
 /// Witnessed cancellation outcome for a tool call reached by an interrupt.
@@ -472,6 +490,7 @@ pub async fn list_pending_tool_call_suspensions<S: EventStore + ?Sized>(
             })?;
         terminal_subjects.insert((payload.subject, payload.snapshot_id));
     }
+    let mut completions = Vec::new();
     for event in thread_events
         .iter()
         .filter(|event| event.kind == EventKind::ToolCallCompleted)
@@ -480,7 +499,7 @@ pub async fn list_pending_tool_call_suspensions<S: EventStore + ?Sized>(
             .map_err(|err| {
                 CooldisError::History(format!("tool.call.completed payload is invalid: {err}"))
             })?;
-        terminal_subjects.insert((payload.subject, payload.snapshot_id));
+        completions.push(payload);
     }
 
     let mut pending = Vec::new();
@@ -492,14 +511,48 @@ pub async fn list_pending_tool_call_suspensions<S: EventStore + ?Sized>(
             .map_err(|err| {
                 CooldisError::History(format!("tool.call.suspended payload is invalid: {err}"))
             })?;
-        if terminal_subjects.contains(&(payload.subject.clone(), payload.snapshot_id.clone())) {
+        let request_event_id = event.provenance.source_event_ids.first().copied();
+        let request = request_event_id
+            .and_then(|request_event_id| {
+                thread_events.iter().find(|event| {
+                    event.id == request_event_id && event.kind == EventKind::ToolCallRequested
+                })
+            })
+            .map(|request_event| {
+                serde_json::from_value::<ToolCallRequestedPayload>(request_event.payload.clone())
+                    .map_err(|err| {
+                        CooldisError::History(format!(
+                            "tool.call.requested payload is invalid: {err}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        let completed = if let Some(request) = request {
+            completions.iter().any(|completion| {
+                completion.subject == request.subject
+                    && completion.snapshot_id == request.snapshot_id
+                    && completion.args_fingerprint == request.args_fingerprint
+            })
+        } else {
+            // Legacy/manual suspension facts may not identify their request in
+            // provenance. Preserve the former subject+snapshot terminal check
+            // only for that unresolved case; fingerprinted requests use the
+            // generation-aware path above.
+            completions.iter().any(|completion| {
+                completion.subject == payload.subject
+                    && completion.snapshot_id == payload.snapshot_id
+            })
+        };
+        if completed
+            || terminal_subjects.contains(&(payload.subject.clone(), payload.snapshot_id.clone()))
+        {
             continue;
         }
         pending.push(PendingToolCallSuspension {
             suspended_event_id: event.id,
             subject: payload.subject,
             snapshot_id: payload.snapshot_id,
-            request_event_id: event.provenance.source_event_ids.first().copied(),
+            request_event_id,
             approval_id: payload.approval_id,
             reason: payload.reason,
         });
@@ -580,9 +633,18 @@ pub async fn decide_turn_continuation<S: EventStore + ?Sized>(
     if let Some(expires_at_ms) = mandate.expires_at_ms
         && request.now_ms > expires_at_ms
     {
+        let expires_at = Utc
+            .timestamp_millis_opt(expires_at_ms)
+            .single()
+            .map(|instant| instant.to_rfc3339_opts(SecondsFormat::Millis, true));
         return Ok(TurnContinuationDecision::Reject {
             consumed_request_id: Some(consumed_request_id),
-            reason: "continuation mandate expired".to_string(),
+            reason: match expires_at {
+                Some(expires_at) => {
+                    format!("continuation mandate expired at {expires_at_ms} ({expires_at})")
+                }
+                None => format!("continuation mandate expired at {expires_at_ms}"),
+            },
             fail_closed: false,
         });
     }
@@ -861,6 +923,25 @@ mod tests {
         }))
         .unwrap();
         assert!(legacy_request.holds.is_empty());
+        assert_eq!(legacy_request.args_fingerprint, None);
+        assert!(tool_invocation_fingerprint_matches(
+            "snapshot-a",
+            None,
+            "snapshot-a",
+            Some("sha256:new"),
+        ));
+        assert!(!tool_invocation_fingerprint_matches(
+            "snapshot-a",
+            Some("sha256:old"),
+            "snapshot-a",
+            Some("sha256:new"),
+        ));
+        assert!(!tool_invocation_fingerprint_matches(
+            "snapshot-a",
+            None,
+            "snapshot-b",
+            None,
+        ));
 
         #[derive(Deserialize)]
         struct LegacyToolCallRequestedPayload {
@@ -875,6 +956,7 @@ mod tests {
             snapshot_id: legacy_request.snapshot_id.clone(),
             tool_name: legacy_request.tool_name.clone(),
             arguments: legacy_request.arguments.clone(),
+            args_fingerprint: Some(format!("sha256:{}", "a".repeat(64))),
             holds: vec![json!({
                 "key": {"kind": "kernel_thread", "task_name": "worker-a"},
                 "access": "exclusive"
@@ -901,8 +983,10 @@ mod tests {
         .unwrap();
         assert_eq!(legacy_completion.finish_order, None);
         assert_eq!(legacy_completion.cancellation, None);
+        assert_eq!(legacy_completion.args_fingerprint, None);
 
         let cancelled = serde_json::to_value(ToolCallCompletedPayload {
+            args_fingerprint: Some(format!("sha256:{}", "a".repeat(64))),
             cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
             ..legacy_completion.clone()
         })
@@ -921,6 +1005,9 @@ mod tests {
 
         let completed_normally = serde_json::to_value(legacy_completion).unwrap();
         assert!(completed_normally.get("cancellation").is_none());
+        assert!(completed_normally.get("args_fingerprint").is_none());
+        let requested_normally = serde_json::to_value(legacy_request).unwrap();
+        assert!(requested_normally.get("args_fingerprint").is_none());
     }
 
     #[tokio::test]
@@ -1179,6 +1266,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_request_after_mandate_expiry_rejects_and_names_the_lapse() {
+        let fixture = ToolDecisionFixture::new().await;
+        fixture.append_turn_continue("try again").await;
+        fixture
+            .append_mandate_started(MandateStartedPayload {
+                subject: MandateSubject {
+                    thread_id: None,
+                    loop_id: Some("loop-1".to_string()),
+                },
+                mandate_id: "mandate-1".to_string(),
+                snapshot_id: fixture.snapshot_id.clone(),
+                thread_id: Some(fixture.coordinates.thread_id.to_string()),
+                max_continuations: None,
+                expires_at_ms: Some(999),
+                schedule: None,
+                max_occurrences: None,
+                catch_up: None,
+                input_template: None,
+            })
+            .await;
+
+        let decision = decide_turn_continuation(&fixture.store, fixture.continuation_request())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            decision,
+            TurnContinuationDecision::Reject {
+                consumed_request_id: Some(_),
+                reason,
+                fail_closed: false,
+            } if reason == "continuation mandate expired at 999 (1970-01-01T00:00:00.999Z)"
+        ));
+    }
+
+    #[tokio::test]
     async fn revoked_mandate_rejects_continuation() {
         let fixture = ToolDecisionFixture::new().await;
         fixture.append_turn_continue("try again").await;
@@ -1313,6 +1436,51 @@ mod tests {
         assert!(pending.is_empty());
     }
 
+    #[tokio::test]
+    async fn legacy_suspension_without_request_provenance_closes_on_subject_completion() {
+        let fixture = ToolDecisionFixture::new().await;
+        fixture
+            .append_control_witnessed(
+                EventKind::ToolCallSuspended,
+                serde_json::to_value(ToolCallSuspendedPayload {
+                    subject: fixture.subject.clone(),
+                    snapshot_id: fixture.snapshot_id.clone(),
+                    approval_id: Some("approval-legacy".to_string()),
+                    reason: Some("legacy suspension".to_string()),
+                })
+                .unwrap(),
+            )
+            .await;
+        fixture
+            .store
+            .append_events(
+                &EventStreamId::for_thread(&fixture.coordinates),
+                vec![NewEventRecord::witnessed(
+                    fixture.coordinates.clone(),
+                    EventKind::ToolCallCompleted,
+                    serde_json::to_value(ToolCallCompletedPayload {
+                        subject: fixture.subject.clone(),
+                        snapshot_id: fixture.snapshot_id.clone(),
+                        tool_name: "bash".to_string(),
+                        success: true,
+                        args_fingerprint: None,
+                        duration_ms: Some(1),
+                        finish_order: None,
+                        cancellation: None,
+                    })
+                    .unwrap(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let pending = list_pending_tool_call_suspensions(&fixture.store, &fixture.coordinates)
+            .await
+            .unwrap();
+
+        assert!(pending.is_empty());
+    }
+
     struct ToolDecisionFixture {
         store: InMemorySessionStore,
         coordinates: ThreadCoordinates,
@@ -1342,6 +1510,7 @@ mod tests {
                             snapshot_id: snapshot_id.clone(),
                             tool_name: "bash".to_string(),
                             arguments: json!({"cmd": "rm -rf /"}),
+                            args_fingerprint: None,
                             holds: Vec::new(),
                         })
                         .unwrap(),
@@ -1449,6 +1618,7 @@ mod tests {
                 ref_uri: "agent://test/bash".to_string(),
                 manifest_hash: self.snapshot_id.clone(),
                 model_profile_id: "default".to_string(),
+                model_profile_origin: None,
                 provider_id: "test".to_string(),
                 model_id: "model".to_string(),
                 tool_ids: Vec::new(),
@@ -1459,10 +1629,13 @@ mod tests {
                 tool_universes: Vec::new(),
                 couplings,
                 granted: Vec::new(),
+                grant_bindings: Vec::new(),
                 effective_runtime: AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
+                placement_origin: None,
                 workspace: None,
+                workspace_origin: None,
             };
             self.store
                 .append_events(
@@ -1537,6 +1710,7 @@ mod tests {
             artifact_hash: "abc".to_string(),
             operation_name: Some("bash_gate".to_string()),
             grants: Vec::new(),
+            grant_expiries: Vec::new(),
             budget: AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }

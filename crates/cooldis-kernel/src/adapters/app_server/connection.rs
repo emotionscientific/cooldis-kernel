@@ -320,6 +320,8 @@ pub(super) struct MandateStartParams {
     pub(super) catch_up: Option<MandateCatchUpPolicy>,
     #[serde(default)]
     pub(super) input_template: Option<String>,
+    #[serde(default)]
+    pub(super) expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2088,6 +2090,7 @@ impl CooldisAppServer {
                     .metadata
                     .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
                     .cloned(),
+                expires_at: params.expires_at,
             },
             chrono::Utc::now(),
         )
@@ -3266,6 +3269,7 @@ impl CooldisAppServer {
         handle: &RuntimeThreadHandle,
         method: &str,
         input: &[Value],
+        surface: &str,
     ) -> Result<crate::EventRecord, JsonRpcErrorError> {
         let coordinates = handle.context().coordinates.clone();
         let envelope_digest = crate::agent::manifest_bind::canonical_json_hash(&json!({
@@ -3274,10 +3278,7 @@ impl CooldisAppServer {
         }))
         .map_err(internal_error)?;
         let payload = crate::IoIngressReceivedPayload {
-            route_id: Some(format!(
-                "surface:{}",
-                crate::kernel::admission::APP_SERVER_RPC_SURFACE
-            )),
+            route_id: Some(format!("surface:{surface}")),
             dedupe_key: None,
             external_conversation_id: None,
             external_actor_id: None,
@@ -3447,11 +3448,12 @@ impl CooldisAppServer {
         } else {
             input
         };
+        let surface = connection.admission_surface().await;
         let ingress_event = self
-            .record_rpc_ingress_received(&handle, "turn/start", &params.input)
+            .record_rpc_ingress_received(&handle, "turn/start", &params.input, surface)
             .await?;
         let admission = crate::kernel::admission::AdmissionGateContext::surface_default(
-            crate::kernel::admission::APP_SERVER_RPC_SURFACE,
+            surface,
             vec![ingress_event.id],
         )
         .map_err(internal_error)?;
@@ -3477,7 +3479,7 @@ impl CooldisAppServer {
 
         self.inner
             .supervisor
-            .submit_turn_to_with_admission(
+            .submit_admitted_turn_to(
                 &coordinates,
                 turn_id.clone(),
                 input,
@@ -4184,6 +4186,11 @@ impl ConnectionState {
 
     pub(super) async fn initialize_seen(&self) -> bool {
         self.handshake.lock().await.initialize_seen
+    }
+
+    pub(super) async fn admission_surface(&self) -> &'static str {
+        let handshake = self.handshake.lock().await;
+        crate::kernel::admission::app_server_surface(handshake.client_name.as_deref())
     }
 
     pub(super) async fn mark_initialized(&self) {

@@ -1,8 +1,6 @@
 use crate::CompactionTrigger;
 use crate::agent::manifest_bind::BoundCouplingSet;
-use crate::kernel::admission::{
-    AdmissionGateContext, HOST_SUBMIT_SURFACE, append_admission_decided,
-};
+use crate::kernel::admission::{AdmissionGateContext, HOST_SUBMIT_SURFACE};
 use crate::kernel::control_decision::{TurnContinuationDecision, TurnContinuationDecisionRequest};
 use crate::kernel::history::{
     EventKind, EventStreamId, InMemorySessionStore, RuntimeStore, SessionContext, SessionEntryKind,
@@ -362,7 +360,7 @@ impl Drop for PublishedThreadStartGuard {
 
 impl ReservedTurnSubmission {
     /// Publishes a submission after all fallible admission work has completed.
-    pub(crate) async fn submit(self) -> bool {
+    pub(super) async fn submit_unchecked(self) -> bool {
         let Self {
             host,
             thread,
@@ -923,7 +921,8 @@ impl RuntimeHost {
                     *accepted_event_id,
                 )
                 .await?;
-                self.submit_turn_with_admission(
+                crate::kernel::admission::submit_turn(
+                    self,
                     thread_id,
                     next_turn_id.clone(),
                     TurnInput::text(request_payload.next_turn_input),
@@ -976,7 +975,8 @@ impl RuntimeHost {
                     accepted.id,
                 )
                 .await?;
-                self.submit_turn_with_admission(
+                crate::kernel::admission::submit_turn(
+                    self,
                     thread_id,
                     next_turn_id.clone(),
                     TurnInput::text(next_turn_input),
@@ -1023,26 +1023,18 @@ impl RuntimeHost {
         mode: TurnSubmissionMode,
     ) -> CooldisResult<()> {
         let admission = AdmissionGateContext::surface_default(HOST_SUBMIT_SURFACE, Vec::new())?;
-        self.submit_turn_with_admission(thread_id, turn_id, input, mode, Some(admission))
-            .await
+        crate::kernel::admission::submit_turn(
+            self,
+            thread_id,
+            turn_id,
+            input,
+            mode,
+            Some(admission),
+        )
+        .await
     }
 
-    pub(crate) async fn submit_turn_with_admission(
-        &self,
-        thread_id: ThreadId,
-        turn_id: impl Into<String>,
-        input: TurnInput,
-        mode: TurnSubmissionMode,
-        admission: Option<AdmissionGateContext>,
-    ) -> CooldisResult<()> {
-        self.reserve_turn_submission_with_admission(thread_id, turn_id, input, mode, admission)
-            .await?
-            .submit()
-            .await;
-        Ok(())
-    }
-
-    pub(crate) async fn reserve_turn_submission_with_admission(
+    pub(super) async fn reserve_turn_submission_at_choke_point(
         &self,
         thread_id: ThreadId,
         turn_id: impl Into<String>,
@@ -1115,7 +1107,7 @@ impl RuntimeHost {
             .await
             .map_err(|_| CooldisError::ThreadClosed(thread_id))?;
         if let Some(admission) = admission {
-            append_admission_decided(&thread, admission).await?;
+            crate::kernel::admission::append_admission_decided(&thread, admission).await?;
         }
         let turn_watchdog = if self.inner.execution_policy.turn_timeout_ms.is_some() {
             Some(thread.thread.services.register_turn_watchdog(&mut input))

@@ -70,6 +70,11 @@ struct CaptureSink {
     envelopes: Arc<TokioMutex<Vec<IngressEnvelope>>>,
 }
 
+struct BlockingSink {
+    entered: Notify,
+    release: Notify,
+}
+
 struct FailFirstCaptureSink {
     attempts: AtomicUsize,
     envelopes: TokioMutex<Vec<IngressEnvelope>>,
@@ -81,6 +86,15 @@ impl IngressSink for CaptureSink {
         let ack = IngressAck::accepted(&envelope);
         self.envelopes.lock().await.push(envelope);
         Ok(ack)
+    }
+}
+
+#[async_trait]
+impl IngressSink for BlockingSink {
+    async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(IngressAck::accepted(&envelope))
     }
 }
 
@@ -608,6 +622,9 @@ async fn remote_queue_redelivery_enters_child_ingress_once() {
         .read_events(&control_stream_id(&child_coordinates), None)
         .await
         .unwrap();
+    let admission =
+        crate::kernel::admission::assert_admission_precedes_turn_records(&control, &events);
+    assert_eq!(admission.payload["route_id"], "cooldis.remote:ingress");
     assert_eq!(
         control
             .iter()
@@ -2611,6 +2628,7 @@ async fn start_clock_thread_with_mandate(
             catch_up: Some(catch_up),
             input_template: Some("wake".to_string()),
             snapshot_id: None,
+            expires_at: None,
         },
         Utc::now(),
     )
@@ -6433,6 +6451,10 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         Some("queue")
     );
     assert_eq!(
+        control_events[admission_pos].payload["route_id"].as_str(),
+        Some("main")
+    );
+    assert_eq!(
         control_events[admission_pos].payload["policy_hash"],
         policy_bound.payload["content_hash"]
     );
@@ -6449,6 +6471,10 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         .read_events(&thread_stream, None)
         .await
         .unwrap();
+    crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
     let turn_submitted_count = thread_events
         .iter()
         .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
@@ -7173,6 +7199,7 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
         ref_uri: "agent://workspace@0.1.0".to_string(),
         manifest_hash: "sha256:workspace".to_string(),
         model_profile_id: "default".to_string(),
+        model_profile_origin: None,
         provider_id: APP_SERVER_LOCAL_PROVIDER.to_string(),
         model_id: APP_SERVER_LOCAL_MODEL.to_string(),
         tool_ids: Vec::new(),
@@ -7183,10 +7210,13 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
         tool_universes: Vec::new(),
         couplings: Vec::new(),
         granted: Vec::new(),
+        grant_bindings: Vec::new(),
         effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: Some(crate::AgentManifestPlacementBinding::default()),
+        placement_origin: None,
         workspace: Some(resolved_workspace),
+        workspace_origin: None,
     })
     .unwrap();
     parent
@@ -8183,7 +8213,7 @@ async fn telegram_webhook_accepts_update_and_uses_sink() {
             route_id: "main".to_string(),
             listen: "127.0.0.1:0".to_string(),
             path: "/telegram".to_string(),
-            secret_token: Some("secret".to_string()),
+            secret_token: "secret".to_string(),
         },
         sink,
     )
@@ -8212,6 +8242,152 @@ async fn telegram_webhook_accepts_update_and_uses_sink() {
     let captured = envelopes.lock().await;
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].content.text_projection(), "hello webhook");
+    let envelope = captured[0].clone();
+    drop(captured);
+
+    let (bridge, _rx, session_store_path) = test_bridge().await;
+    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    let thread_id = receipt.thread_id.unwrap();
+    wait_for_assistant_text(&bridge, &thread_id, "local:hello webhook").await;
+    let store = SqliteSessionStore::open(session_store_path).await.unwrap();
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control_events = store
+        .read_events(&control_stream_id(&coordinates), None)
+        .await
+        .unwrap();
+    let thread_events = store
+        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
+    assert_eq!(admission.payload["route_id"], "telegram.bot:main");
+}
+
+#[tokio::test]
+async fn telegram_webhook_auth_is_uniform_and_precedes_routing_and_payload_parsing() {
+    let envelopes = Arc::new(TokioMutex::new(Vec::new()));
+    let sink = Arc::new(CaptureSink {
+        envelopes: envelopes.clone(),
+    });
+    let server = TelegramWebhookServer::bind(
+        TelegramWebhookServerConfig {
+            route_id: "main".to_string(),
+            listen: "127.0.0.1:0".to_string(),
+            path: "/telegram".to_string(),
+            secret_token: "secret".to_string(),
+        },
+        sink,
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    tokio::spawn(server.serve());
+
+    let missing = post_raw_json(addr, "/telegram", None, "{").await;
+    let wrong = post_raw_json(addr, "/telegram", Some("wrong"), "{}").await;
+    let hidden_route = post_raw_json(addr, "/not-telegram", None, "{}").await;
+    let oversized_head = send_raw_request(
+        addr,
+        format!(
+            "POST /telegram HTTP/1.1\r\nHost: {addr}\r\nX-Telegram-Bot-Api-Secret-Token: secret\r\nX-Padding: {}\r\nContent-Length: 2\r\n\r\n{{}}",
+            "a".repeat(MAX_HTTP_HEADER_BYTES)
+        ),
+    )
+    .await;
+
+    assert!(missing.starts_with("HTTP/1.1 401 Unauthorized"));
+    assert_eq!(wrong, missing);
+    assert_eq!(hidden_route, missing);
+    assert_eq!(oversized_head, missing);
+    assert!(envelopes.lock().await.is_empty());
+
+    let accepted = post_json(
+        addr,
+        "/telegram",
+        Some("secret"),
+        json!({
+            "update_id": 1001,
+            "message": {
+                "message_id": 557,
+                "chat": { "id": 789, "type": "private" },
+                "date": 1777000000,
+                "text": "authenticated webhook"
+            }
+        }),
+    )
+    .await;
+
+    assert!(accepted.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(envelopes.lock().await.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn telegram_webhook_times_out_a_stalled_request_head() {
+    let (mut reader, mut writer) = tokio::io::duplex(1024);
+    writer
+        .write_all(b"POST /telegram HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(60), read_http_request_head(&mut reader))
+        .await
+        .expect("request-head deadline did not fire within the hang-detector bound");
+    let Err(err) = result else {
+        panic!("partial request head unexpectedly parsed");
+    };
+    assert!(err.to_string().contains("request head timed out"));
+    drop(writer);
+}
+
+#[tokio::test]
+async fn telegram_webhook_serve_cancellation_aborts_accepted_requests() {
+    let sink = Arc::new(BlockingSink {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let server = TelegramWebhookServer::bind(
+        TelegramWebhookServerConfig {
+            route_id: "main".to_string(),
+            listen: "127.0.0.1:0".to_string(),
+            path: "/telegram".to_string(),
+            secret_token: "secret".to_string(),
+        },
+        sink.clone(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let server_task = tokio::spawn(server.serve());
+    let entered = sink.entered.notified();
+    let response_task = tokio::spawn(post_json(
+        addr,
+        "/telegram",
+        Some("secret"),
+        json!({
+            "update_id": 1002,
+            "message": {
+                "message_id": 558,
+                "chat": { "id": 790, "type": "private" },
+                "date": 1777000000,
+                "text": "cancel this request"
+            }
+        }),
+    ));
+
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .expect("request did not reach the sink");
+    server_task.abort();
+    server_task.await.unwrap_err();
+    sink.release.notify_one();
+
+    let response = tokio::time::timeout(Duration::from_secs(5), response_task)
+        .await
+        .expect("accepted connection did not close after server cancellation")
+        .unwrap();
+    assert!(response.is_empty());
 }
 
 #[tokio::test]
@@ -8229,7 +8405,7 @@ async fn telegram_webhook_queue_mode_writes_to_sqlite() {
             route_id: "main".to_string(),
             listen: "127.0.0.1:0".to_string(),
             path: "/telegram".to_string(),
-            secret_token: None,
+            secret_token: "secret".to_string(),
         },
         queue.clone(),
     )
@@ -8241,7 +8417,7 @@ async fn telegram_webhook_queue_mode_writes_to_sqlite() {
     let response = post_json(
         addr,
         "/telegram",
-        None,
+        Some("secret"),
         json!({
             "update_id": 1000,
             "message": {
@@ -8286,5 +8462,33 @@ async fn post_json(
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+async fn post_raw_json(addr: SocketAddr, path: &str, secret: Option<&str>, body: &str) -> String {
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if let Some(secret) = secret {
+        request.push_str(&format!("X-Telegram-Bot-Api-Secret-Token: {secret}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+
+    send_raw_request(addr, request).await
+}
+
+async fn send_raw_request(addr: SocketAddr, request: String) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    if let Err(err) = stream.read_to_string(&mut response).await {
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(
+            !response.is_empty(),
+            "connection reset before HTTP response"
+        );
+    }
     response
 }

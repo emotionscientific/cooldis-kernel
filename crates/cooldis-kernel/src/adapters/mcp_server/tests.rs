@@ -5,9 +5,10 @@ use crate::adapters::app_server::{
 use crate::{
     APP_SERVER_OPENAI_COMPATIBLE_MODEL, APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentLoopConfig,
     AppServerListenAddr, CanonicalContent, CanonicalStopReason, CanonicalUsage,
-    CapsuleBindingsConfig, CooldisAppServer, CooldisAppServerConfig, LocalOperationRegistry,
-    ProviderApi, ProviderClient, ProviderRequest, ProviderResponse, ProviderResult,
-    PublishOperationRequest, PublishedOperationSource, SecretSourceKind, SqliteSecretStore,
+    CapsuleBindingsConfig, CooldisAppServer, CooldisAppServerConfig, EventStore, EventStreamId,
+    LocalOperationRegistry, ProviderApi, ProviderClient, ProviderRequest, ProviderResponse,
+    ProviderResult, PublishOperationRequest, PublishedOperationSource, SecretSourceKind,
+    SqliteSecretStore, SqliteSessionStore,
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -74,6 +75,7 @@ async fn mcp_server_runs_prompt_and_command_through_daemon() {
     let listen = AppServerListenAddr::Unix(socket.clone());
     let config = isolated_app_config(listen.clone(), &root);
     let app = CooldisAppServer::new_local(config).await.unwrap();
+    let session_store_path = app.session_store_path().to_path_buf();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
@@ -109,6 +111,15 @@ async fn mcp_server_runs_prompt_and_command_through_daemon() {
         prompt["result"]["structuredContent"]["assistantText"],
         "local:hello mcp"
     );
+    let prompt_thread_id = prompt["result"]["structuredContent"]["threadId"]
+        .as_str()
+        .unwrap();
+    assert_admission_surface(
+        &session_store_path,
+        prompt_thread_id,
+        crate::kernel::admission::MCP_ADAPTER_SURFACE,
+    )
+    .await;
 
     send(
             &mut write,
@@ -629,6 +640,23 @@ fn isolated_app_config(listen: AppServerListenAddr, root: &Path) -> CooldisAppSe
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     config
+}
+
+async fn assert_admission_surface(store_path: &Path, thread_id: &str, surface: &str) {
+    let store = SqliteSessionStore::open(store_path).await.unwrap();
+    let control_events = store
+        .read_events(&EventStreamId::new(format!("control:{thread_id}")), None)
+        .await
+        .unwrap();
+    let thread_events = store
+        .read_events(&EventStreamId::new(format!("thread:{thread_id}")), None)
+        .await
+        .unwrap();
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
+    assert_eq!(admission.payload["route_id"], format!("surface:{surface}"));
 }
 
 #[derive(Default)]

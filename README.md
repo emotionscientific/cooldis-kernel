@@ -105,7 +105,8 @@ stateful product harnesses are future direction. See
 - [Docs index](docs/README.md): documentation map.
 - [Overview](docs/index.md): product category and current status.
 - [Getting started](docs/getting-started.md): local run and inspection path.
-- [CLI](docs/cli.md): canonical commands and help model.
+- [CLI](docs/cli.md): canonical commands, help model, and receipt-backed bind
+  inspection.
 - [Runtime primitives](docs/developers/runtime-primitives.md): kernel-owned
   surfaces and boundaries.
 - [ABI](docs/abi.md): operation boundary and host/guest contract.
@@ -122,6 +123,8 @@ stateful product harnesses are future direction. See
   boundary.
 - [Provider adapters](docs/provider-adapters.md): agent loop boundary.
 - [Daemon and RPC](docs/app-server.md): app-server control plane.
+- [Threat model](docs/threat-model.md): stable threat IDs, current status, and
+  deterministic mitigation guards.
 - [Testing guidelines](docs/testing-guidelines.md): runtime test expectations.
 - [Release guide](RELEASE.md): tags, targets, package smoke tests, and
   installer artifacts.

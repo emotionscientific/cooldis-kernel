@@ -258,6 +258,20 @@ shrinks and its counts must track reality. Do not add entries for new
 violations. See [Kernel Invariants](kernel-invariants.md) for the public
 terminology orientation.
 
+## Threat-Model Lint
+
+`crates/cooldis-kernel/tests/threat_model_lint.rs` parses
+`docs/threat-model.md` as a strict registry. It enforces unique IDs, contiguous
+per-area numbering, the status and severity vocabularies, required entry fields,
+and affected-surface paths that resolve inside the repository. The companion
+`crates/cooldis-kernel/tests/threat_model_ids.txt` is append-only and must match
+the document order.
+
+Do not delete or renumber an entry. Append new IDs to both files. When a threat
+is resolved, change its status in place to `MITIGATED` and name the test or lint
+that proves the mitigation. `ACCEPTED` requires the architect-approved rationale
+in the mitigation field.
+
 ## Review Checklist
 
 Before calling runtime work done:

@@ -80,6 +80,22 @@ cargo run --bin cooldis -- debug rpc turn --thread <thread-id> --json "resume he
 cargo run --bin cooldis -- debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 ```
 
+`cooldis debug bind` answers why a thread has its effective configuration by
+projecting its recorded `manifest.compile.completed` and
+`manifest.bind.completed` receipts. It uses the same WebSocket endpoint
+selection as `debug rpc`, and it can inspect the same thread offline from the
+SQLite journal without a daemon:
+
+```sh
+cargo run --bin cooldis -- debug bind <thread-id>
+cargo run --bin cooldis -- debug bind <thread-id> --json --url ws://127.0.0.1:49200/rpc
+cargo run --bin cooldis -- debug bind <thread-id> --journal .cooldis/state/session_history.sqlite3
+```
+
+The command never resolves the manifest again or consults current daemon
+defaults to fill old receipt gaps. Legacy origins that were not recorded print
+as `[unrecorded]`.
+
 ## Provider Config
 
 The chat command can point its private app-server runtime at a live
@@ -606,12 +622,15 @@ thread with no matching events returns an empty `data` array and null cursors.
 ### `mandate/start`
 
 Params:
-`{ "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder." }`.
+`{ "threadId": "...", "schedule": { "interval": { "every_ms": 60000 } }, "maxOccurrences": 3, "catchUp": "skip_missed", "inputTemplate": "Continue with the reminder.", "expiresAt": "2026-07-04T20:00:00Z" }`.
 Only `threadId` and `schedule` are required. The schedule union is externally
 tagged: `{ "cron": { "expr": "0 9 * * *", "tz": "America/Los_Angeles" } }`,
 `{ "interval": { "every_ms": 60000 } }`, or
 `{ "at": { "when": "2026-07-04T18:00:00Z" } }`. `catchUp` defaults to
-`"skip_missed"` and may also be `"coalesce_missed"`.
+`"skip_missed"` and may also be `"coalesce_missed"`. `expiresAt` is an
+optional absolute RFC3339 UTC instant. An already expired mandate is rejected;
+after a live mandate passes that instant, its next continuation request is
+rejected and the lapse is witnessed on the control stream.
 
 Result:
 `{ "mandateEventId": "...", "streamId": "control:<threadId>", "sequence": 1 }`.

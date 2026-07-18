@@ -3,10 +3,11 @@ use crate::agent::manifest_schema::{
     AgentManifestCouplingSource, AgentManifestCouplingTrigger, KERNEL_ASSEMBLER_STATIC,
 };
 use crate::{
-    AgentManifestCompactionDefaults, AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol,
-    LocalBlobRegistry, LocalSkillRegistry, PublishSkillPackageRequest,
-    STD_SUPERVISOR_SPAWN_TEMPLATE_ID, SkillImportPlan, THREADS_SPAWN_CAPABILITY, ToolDefinition,
-    ToolUniverseDiscovery, WitnessedToolContract,
+    AgentManifestBashTool, AgentManifestCompactionDefaults, AgentManifestDirectTool,
+    AgentManifestRuntimeOverridePolicy, AgentManifestToolProtocol, LocalBlobRegistry,
+    LocalSkillRegistry, PublishSkillPackageRequest, STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+    SkillImportPlan, THREADS_SPAWN_CAPABILITY, ToolDefinition, ToolUniverseDiscovery,
+    WitnessedToolContract,
 };
 use async_trait::async_trait;
 use std::fs;
@@ -178,6 +179,25 @@ fn workspace_binding_resolution_is_declared_fail_closed_and_override_first() {
         fs::canonicalize(&override_host).unwrap()
     );
     assert_eq!(resolved.mode, AgentManifestWorkspaceMode::ReadWrite);
+    let default_origin =
+        resolve_manifest_workspace_with_origin(Some(&requirement), Some(&default_binding), None)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        default_origin.origin,
+        AgentManifestBindingOrigin::DaemonDefault
+    );
+    let override_origin = resolve_manifest_workspace_with_origin(
+        Some(&requirement),
+        Some(&default_binding),
+        Some(&override_binding),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        override_origin.origin,
+        AgentManifestBindingOrigin::BindOverride
+    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -381,6 +401,9 @@ pinned = true
         bound.bind_receipt.static_context_segments[0].content_sha256,
         blob.content_sha256
     );
+    let receipt = serde_json::to_value(&bound.bind_receipt).unwrap();
+    assert_eq!(receipt["model_profile_origin"], "manifest-default");
+    assert_eq!(receipt["placement_origin"], "daemon-default");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -492,6 +515,73 @@ async fn protocol_tool_import_binds_filtered_discovery() {
         binding.include_tools,
         Some(BTreeSet::from(["cooldis_mcp_echo".to_string()]))
     );
+}
+
+#[tokio::test]
+async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() {
+    let root = temp_dir("manifest-bind-effect-classes");
+    let bash_record =
+        publish_multi_operation_record(&root, "bash-ops", &[("inspect", vec![])]).await;
+    let direct_record =
+        publish_multi_operation_record(&root, "direct-ops", &[("lookup", vec![])]).await;
+    let witnessed = witnessed_tool("remote.lookup", "string");
+    let pin = format!("mcptool://arcade/remote.lookup@{}", witnessed.schema_hash);
+    let discovery = ToolUniverseDiscovery::witness("mcp://arcade", vec![witnessed], 1).unwrap();
+    let discoverer = StaticToolUniverseDiscoverer { discovery };
+    let tools = vec![
+        AgentManifestTool::Bash(AgentManifestBashTool {
+            id: "inspect".to_string(),
+            command: "inspect".to_string(),
+            operation_ref: format!(
+                "op://bash-ops/inspect@sha256:{}",
+                bash_record.active_artifact_hash
+            ),
+            effect_class: EffectClass::Pure,
+            grants: Vec::new(),
+        }),
+        AgentManifestTool::Direct(AgentManifestDirectTool {
+            id: "lookup".to_string(),
+            tool_name: "lookup".to_string(),
+            operation_ref: format!(
+                "op://direct-ops/lookup@sha256:{}",
+                direct_record.active_artifact_hash
+            ),
+            effect_class: EffectClass::Idempotent,
+            grants: Vec::new(),
+        }),
+        AgentManifestTool::ProtocolImport(AgentManifestProtocolToolImport {
+            effect_class: EffectClass::Pure,
+            ..protocol_import("mcp://arcade", None, Some(pin))
+        }),
+    ];
+
+    let bound = bind_tools(
+        &tools,
+        Some(&root),
+        &BTreeSet::from(["mcp://arcade".to_string()]),
+        Some(&discoverer),
+        0,
+    )
+    .await
+    .unwrap();
+
+    let bash = bound
+        .operation_bindings
+        .iter()
+        .find(|binding| binding.name == "bash-ops")
+        .unwrap();
+    assert_eq!(bash.effect_class, EffectClass::Pure);
+    let direct = bound
+        .operation_bindings
+        .iter()
+        .find(|binding| binding.name == "direct-ops")
+        .unwrap();
+    assert_eq!(direct.effect_class, EffectClass::Idempotent);
+    assert_eq!(direct.direct_tools[0].effect_class, EffectClass::Idempotent);
+    let universe = ToolUniverseBindReceipt::from_binding(&bound.tool_universes[0]);
+    assert_eq!(universe.tools[0].effect_class, EffectClass::Pure);
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -611,6 +701,7 @@ async fn protocol_tool_import_direct_pins_must_not_duplicate_tool_rows() {
         None,
         &BTreeSet::from(["mcp://arcade".to_string()]),
         Some(&discoverer),
+        0,
     )
     .await;
     let err = match result {
@@ -623,6 +714,182 @@ async fn protocol_tool_import_direct_pins_must_not_duplicate_tool_rows() {
             .contains("duplicate direct tool_name surface")
     );
     assert!(err.to_string().contains("cooldis_mcp_echo"));
+}
+
+#[tokio::test]
+async fn bind_receipt_keeps_each_pinned_universe_import_correspondence() {
+    let root = temp_dir("manifest-bind-multiple-pinned-universes");
+    let first_tool = witnessed_tool("first.echo", "string");
+    let second_tool = witnessed_tool("second.echo", "string");
+    let first_pin = format!(
+        "mcptool://arcade/{}@{}",
+        first_tool.tool_name, first_tool.schema_hash
+    );
+    let second_pin = format!(
+        "mcptool://arcade/{}@{}",
+        second_tool.tool_name, second_tool.schema_hash
+    );
+    let discovery =
+        ToolUniverseDiscovery::witness("mcp://arcade", vec![first_tool, second_tool], 1).unwrap();
+    let discoverer = StaticToolUniverseDiscoverer { discovery };
+    let record = publish_agent_manifest(
+        &root,
+        &format!(
+            r#"
+[agent]
+name = "multiple-pinned-universes"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "protocol_tool_import"
+id = "first-import"
+protocol = "mcp"
+server_ref = "mcp://arcade"
+expose = ["direct_tool"]
+pin = "{first_pin}"
+
+[[tools]]
+type = "protocol_tool_import"
+id = "second-import"
+protocol = "mcp"
+server_ref = "mcp://arcade"
+expose = ["direct_tool"]
+pin = "{second_pin}"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#
+        ),
+    );
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        None,
+        None,
+        None,
+        &BTreeSet::from(["mcp://arcade".to_string()]),
+        Some(&discoverer),
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bound.bind_receipt.tool_ids,
+        vec!["first-import".to_string(), "second-import".to_string()]
+    );
+    assert_eq!(bound.bind_receipt.tool_universes.len(), 2);
+    assert_eq!(
+        bound.bind_receipt.tool_universes[0].import_id,
+        "first-import"
+    );
+    assert_eq!(bound.bind_receipt.tool_universes[0].pinned, vec![first_pin]);
+    assert_eq!(
+        bound.bind_receipt.tool_universes[1].import_id,
+        "second-import"
+    );
+    assert_eq!(
+        bound.bind_receipt.tool_universes[1].pinned,
+        vec![second_pin]
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn bind_receipt_does_not_record_operation_rows_by_manifest_tool_id() {
+    let root = temp_dir("manifest-bind-operation-tool-correspondence");
+    let operation_root = root.join("operations");
+    let operation = publish_multi_operation_record(
+        &operation_root,
+        "operation-record",
+        &[("operation-name", Vec::new())],
+    )
+    .await;
+    let manifest_path = root.join("operation-tool.cooldis.agent.toml");
+    fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "operation-tool-correspondence"
+version = "0.1.0"
+kind = "cooldis.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "bash_tool"
+id = "manifest-tool-id"
+command = "run-operation"
+operation_ref = "op://operation-record/operation-name@sha256:{}"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation.active_artifact_hash
+        ),
+    )
+    .unwrap();
+    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_root)
+        .unwrap();
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo")
+        .with_supports_streaming(false);
+
+    let bound = bind_published_agent_record(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bound.bind_receipt.tool_ids,
+        vec!["manifest-tool-id".to_string()]
+    );
+    assert_eq!(bound.bind_receipt.operation_bindings.len(), 1);
+    assert_eq!(
+        bound.bind_receipt.operation_bindings[0].name,
+        "operation-record"
+    );
+    assert_eq!(
+        bound.bind_receipt.operation_bindings[0].operations,
+        vec!["operation-name".to_string()]
+    );
+    assert!(
+        bound.bind_receipt.operation_bindings[0]
+            .direct_tools
+            .is_empty()
+    );
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -781,6 +1048,7 @@ async fn manifest_coupling_binds_controller_receipt() {
             artifact_hash: operation.active_artifact_hash,
             operation_name: Some("pre_tool_gate".to_string()),
             grants: vec!["thread.pause".to_string()],
+            grant_expiries: Vec::new(),
             budget: AgentManifestCouplingBudget {
                 max_ms: Some(250),
                 max_discharge_events: Some(4),
@@ -1806,6 +2074,10 @@ discover = true
     .await
     .unwrap();
 
+    assert_eq!(
+        bound.bind_receipt.workspace_origin,
+        Some(AgentManifestBindingOrigin::BindOverride)
+    );
     let discovery = bound
         .bind_receipt
         .skill_discovery
@@ -2104,6 +2376,7 @@ ref = "skill://registry-package"
         Some(&initial.skill_packages),
         Some(&forged_discovery),
         true,
+        crate::kernel::history::now_ms(),
     )
     .await
     .unwrap_err()
@@ -2455,11 +2728,119 @@ async fn operation_bind_requires_declared_grants() {
         vec![AgentManifestOperationBinding {
             name: "search".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn bind_receipt_carries_future_expiry_and_excludes_expired_tool_rows() {
+    let root = temp_dir("manifest-bind-grant-expiry");
+    let operation_root = root.join("operations");
+    let registry = LocalOperationRegistry::new(&operation_root);
+    fs::create_dir_all(&operation_root).unwrap();
+    let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
+    let artifact = operation_root.join("search.wasm");
+    fs::write(&artifact, wasm).unwrap();
+    let operation = registry
+        .publish_artifact(crate::PublishOperationRequest {
+            name: "search".to_string(),
+            artifact_path: artifact.clone(),
+            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
+            interface: None,
+            capability_grants: BTreeSet::from(["net:https://example.com".to_string()]),
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    let manifest = format!(
+        r#"{}
+
+[[tools]]
+type = "direct_tool"
+id = "search"
+tool_name = "search"
+operation_ref = "op://search/search@sha256:{}"
+grants = [
+  {{ capability = "net:https://example.com", expires_at = "2026-07-16T20:00:00Z" }},
+  {{ capability = "fs.read:/workspace", expires_at = "2026-07-16T21:00:00Z" }},
+]
+"#,
+        minimal_manifest("grant-expiry"),
+        operation.active_artifact_hash
+    );
+    let manifest_path = root.join("grant-expiry.cooldis.agent.toml");
+    fs::write(&manifest_path, manifest).unwrap();
+    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_root)
+        .unwrap();
+    let surface = AgentManifestProviderSurface::single("local_offline", "echo");
+
+    let future = bind_published_agent_record_at(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        1_784_231_999_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(future.bind_receipt.tool_ids, vec!["search"]);
+    assert_eq!(future.bind_receipt.operation_bindings.len(), 1);
+    assert_eq!(future.bind_receipt.grant_bindings.len(), 2);
+    assert_eq!(
+        future.bind_receipt.grant_bindings[0].expires_at.as_deref(),
+        Some("2026-07-16T20:00:00Z")
+    );
+    assert!(!future.bind_receipt.grant_bindings[0].lapsed_at_bind);
+    assert!(!future.bind_receipt.grant_bindings[0].surface_excluded);
+
+    let expired = bind_published_agent_record_at(
+        &record,
+        None,
+        &surface,
+        Some(&operation_root),
+        None,
+        None,
+        &BTreeSet::new(),
+        None,
+        &AgentManifestModelProfileSelection::default(),
+        &AgentManifestBindOverrides::default(),
+        1_784_232_001_000,
+    )
+    .await
+    .unwrap();
+    assert!(expired.bind_receipt.tool_ids.is_empty());
+    assert!(expired.bind_receipt.operation_bindings.is_empty());
+    assert!(expired.operation_names.is_empty());
+    assert_eq!(
+        expired
+            .bind_receipt
+            .grant_bindings
+            .iter()
+            .filter(|binding| binding.lapsed_at_bind)
+            .count(),
+        1
+    );
+    assert!(
+        expired
+            .bind_receipt
+            .grant_bindings
+            .iter()
+            .all(|binding| binding.surface_excluded)
+    );
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2502,7 +2883,9 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
         vec![AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec!["net:https://profile.example".to_string()],
+            grant_expiries: Vec::new(),
             operations: vec!["profile".to_string()],
             direct_tools: Vec::new(),
         }]
@@ -2630,10 +3013,12 @@ async fn operation_bindings_merge_grants_for_shared_artifact() {
         vec![AgentManifestOperationBinding {
             name: "search".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec![
                 "fs.read:/workspace".to_string(),
                 "net:https://example.com".to_string(),
             ],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -2690,10 +3075,12 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
         vec![AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
+            effect_class: EffectClass::AtMostOnce,
             grants: vec![
                 "net:https://profile.example".to_string(),
                 "net:https://summary.example".to_string(),
             ],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -2768,7 +3155,9 @@ fn operation_binding_accepts_legacy_metadata_without_grants_or_operations() {
             name: "search".to_string(),
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
+            effect_class: EffectClass::AtMostOnce,
             grants: Vec::new(),
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -2935,6 +3324,7 @@ fn protocol_import(
         id: "mcp_echo".to_string(),
         protocol: AgentManifestToolProtocol::Mcp,
         server_ref: server_ref.to_string(),
+        effect_class: EffectClass::AtMostOnce,
         expose,
         pin,
         include_tools,
@@ -3153,10 +3543,17 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
     );
     let legacy_receipt: AgentManifestBindReceipt = serde_json::from_str(&legacy_wire).unwrap();
     assert_eq!(legacy_receipt.placement, None);
+    assert_eq!(legacy_receipt.model_profile_origin, None);
+    assert_eq!(legacy_receipt.placement_origin, None);
     assert_eq!(legacy_receipt.workspace, None);
+    assert_eq!(legacy_receipt.workspace_origin, None);
     assert_eq!(legacy_receipt.skill_discovery, None);
     assert_eq!(legacy_receipt.ref_uri, "cooldis://agents/karl");
     assert_eq!(legacy_receipt.tool_ids, vec!["threads/spawn"]);
+    let legacy_value = serde_json::to_value(&legacy_receipt).unwrap();
+    assert!(legacy_value.get("model_profile_origin").is_none());
+    assert!(legacy_value.get("placement_origin").is_none());
+    assert!(legacy_value.get("workspace_origin").is_none());
     assert!(
         serde_json::to_value(&legacy_receipt)
             .unwrap()
@@ -3245,6 +3642,18 @@ fn placement_resolution_defaults_local_and_rpc_override_wins() {
     assert_eq!(
         resolve_manifest_placement(Some(&default), Some(&rpc_override), false).unwrap(),
         rpc_override
+    );
+    assert_eq!(
+        resolve_manifest_placement_with_origin(None, None, false)
+            .unwrap()
+            .origin,
+        AgentManifestBindingOrigin::DaemonDefault
+    );
+    assert_eq!(
+        resolve_manifest_placement_with_origin(Some(&default), Some(&rpc_override), false)
+            .unwrap()
+            .origin,
+        AgentManifestBindingOrigin::BindOverride
     );
 }
 

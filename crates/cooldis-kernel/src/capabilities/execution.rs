@@ -4,11 +4,11 @@ use crate::kernel::history::{
 };
 use crate::kernel::process_handle_dispatch::{ProcessHandleDispatcher, command_digest};
 use crate::{
-    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider, AgentRuntime,
-    AgentRuntimeFactory, CooldisError, CooldisResult, OperationRegistry, RuntimeEventKind,
-    RuntimeServices, RuntimeTerminalState, SessionEntryKind, ThreadCommand, ThreadContext,
-    ThreadEvent, ThreadSignal, ThreadStatus, ToolDefinition, ToolInvocationCancellation,
-    TurnContextSnapshot, TurnSubmissionMode, emit_runtime_event,
+    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider, AgentManifestGrantExpiry,
+    AgentRuntime, AgentRuntimeFactory, CooldisError, CooldisResult, OperationRegistry,
+    RuntimeEventKind, RuntimeServices, RuntimeTerminalState, SessionEntryKind, ThreadCommand,
+    ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus, ToolDefinition,
+    ToolInvocationCancellation, TurnContextSnapshot, TurnSubmissionMode, emit_runtime_event,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -96,6 +96,7 @@ pub struct VirtualBashRuntimeConfig {
     /// must re-present one filesystem tree.
     pub workspace_vfs: Option<Arc<CooldisVfs>>,
     pub capability_grants: BTreeSet<String>,
+    pub capability_grant_expiries: Vec<AgentManifestGrantExpiry>,
     pub execution_policy: BashExecutionPolicy,
     pub external_executor: Option<Arc<dyn ExternalCommandExecutor>>,
 }
@@ -122,6 +123,7 @@ impl std::fmt::Debug for VirtualBashRuntimeConfig {
                 &self.workspace_vfs.as_ref().map(|_| "<CooldisVfs>"),
             )
             .field("capability_grants", &self.capability_grants)
+            .field("capability_grant_expiries", &self.capability_grant_expiries)
             .field("execution_policy", &self.execution_policy)
             .field(
                 "external_executor",
@@ -147,6 +149,7 @@ impl Default for VirtualBashRuntimeConfig {
             operation_registry: None,
             workspace_vfs: None,
             capability_grants: BTreeSet::new(),
+            capability_grant_expiries: Vec::new(),
             execution_policy: BashExecutionPolicy::virtual_only(),
             external_executor: None,
         }
@@ -227,6 +230,14 @@ impl VirtualBashRuntimeConfig {
 
     pub fn with_capability_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
         self.capability_grants.extend(grants);
+        self
+    }
+
+    pub fn with_capability_grant_expiries(
+        mut self,
+        expiries: impl IntoIterator<Item = AgentManifestGrantExpiry>,
+    ) -> Self {
+        self.capability_grant_expiries.extend(expiries);
         self
     }
 
@@ -436,11 +447,38 @@ impl AgentKernelToolProvider for BashToolProvider {
         self.invoke_tool_call_inner(call, None).await
     }
 
+    async fn invoke_tool_call_at(
+        &self,
+        call: AgentKernelToolCall,
+        now_ms: i64,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
+        crate::agent::manifest_bind::ensure_grant_expiries_live(
+            &self.config.capability_grant_expiries,
+            now_ms,
+        )?;
+        self.invoke_tool_call_inner(call, None).await
+    }
+
     async fn invoke_tool_call_cancellable(
         &self,
         call: AgentKernelToolCall,
         cancellation: ToolInvocationCancellation,
     ) -> CooldisResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call_inner(call, Some(cancellation))
+            .await
+            .map(AgentKernelToolOutcome::Completed)
+    }
+
+    async fn invoke_tool_call_cancellable_at(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+        now_ms: i64,
+    ) -> CooldisResult<AgentKernelToolOutcome> {
+        crate::agent::manifest_bind::ensure_grant_expiries_live(
+            &self.config.capability_grant_expiries,
+            now_ms,
+        )?;
         self.invoke_tool_call_inner(call, Some(cancellation))
             .await
             .map(AgentKernelToolOutcome::Completed)

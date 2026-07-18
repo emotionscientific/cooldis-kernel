@@ -23,11 +23,14 @@
 //! discovery and call is witnessed on the thread's event stream
 //! (`tool.universe.discovery.completed`, `tool.universe.call.completed`).
 
-use crate::agent::agent_tool_router::{AgentKernelToolCall, AgentKernelToolProvider};
+use crate::agent::agent_tool_router::{
+    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider,
+};
 use crate::agent::contracts::sha256_hex;
 use crate::{
-    CanonicalMessage, CooldisError, CooldisResult, EventKind, EventStreamId, NewEventRecord,
-    RuntimeStore, ToolDefinition,
+    AgentManifestGrantExpiry, CanonicalMessage, CooldisError, CooldisResult, EffectClass,
+    EventKind, EventStreamId, NewEventRecord, RuntimeStore, ToolDefinition,
+    ToolInvocationCancellation,
 };
 use async_trait::async_trait;
 pub use cooldis_agent::PinnedToolRef;
@@ -38,7 +41,7 @@ use cooldis_runtime_contracts::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Model-facing surface names for the reserved meta-operations. These are
@@ -96,6 +99,19 @@ impl WitnessedToolContract {
 pub fn schema_hash_of(schema: &Value) -> CooldisResult<String> {
     let bytes = serde_json::to_vec(schema).map_err(|err| {
         CooldisError::RuntimeFactory(format!("failed to encode tool schema for hashing: {err}"))
+    })?;
+    Ok(sha256_hex(&bytes))
+}
+
+pub(crate) fn args_fingerprint(tool_name: &str, arguments: &Value) -> CooldisResult<String> {
+    let invocation = BTreeMap::from([
+        ("arguments", arguments.clone()),
+        ("tool_name", Value::String(tool_name.to_string())),
+    ]);
+    let bytes = serde_json::to_vec(&invocation).map_err(|err| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to encode tool invocation arguments for hashing: {err}"
+        ))
     })?;
     Ok(sha256_hex(&bytes))
 }
@@ -164,11 +180,15 @@ pub struct ToolUniverseBinding {
     /// Manifest tool id of the `protocol_tool_import`.
     pub import_id: String,
     pub server_ref: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
     /// Manifest-level filter, already applied to `discovery`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_tools: Option<BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<PinnedToolRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
     pub discovery: ToolUniverseDiscovery,
 }
 
@@ -210,6 +230,8 @@ pub struct ToolUniverseBindReceipt {
     /// Pin references resolved to rows, empty when the import is
     /// search-surface only.
     pub pinned: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -217,6 +239,8 @@ pub struct ToolUniverseBindReceipt {
 pub struct ToolUniverseToolReceipt {
     pub tool_name: String,
     pub schema_hash: String,
+    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
+    pub effect_class: EffectClass,
 }
 
 impl ToolUniverseBindReceipt {
@@ -232,6 +256,12 @@ impl ToolUniverseBindReceipt {
                 .map(|tool| ToolUniverseToolReceipt {
                     tool_name: tool.tool_name.clone(),
                     schema_hash: tool.schema_hash.clone(),
+                    effect_class: binding
+                        .pin
+                        .as_ref()
+                        .filter(|pin| pin.tool_name == tool.tool_name)
+                        .map(|_| binding.effect_class)
+                        .unwrap_or_default(),
                 })
                 .collect(),
             pinned: binding
@@ -244,6 +274,7 @@ impl ToolUniverseBindReceipt {
                     )
                 })
                 .collect(),
+            grant_expiries: binding.grant_expiries.clone(),
         }
     }
 }
@@ -271,6 +302,7 @@ impl ToolUniverseDiscoveryReceipt {
                 .map(|tool| ToolUniverseToolReceipt {
                     tool_name: tool.tool_name.clone(),
                     schema_hash: tool.schema_hash.clone(),
+                    effect_class: EffectClass::AtMostOnce,
                 })
                 .collect(),
         }
@@ -378,6 +410,17 @@ impl ToolUniverseSearchSurface {
 
     pub fn universes(&self) -> &[MountedToolUniverse] {
         &self.universes
+    }
+
+    fn ensure_mounted_grants_live(
+        &self,
+        mounted: &MountedToolUniverse,
+        now_ms: i64,
+    ) -> CooldisResult<()> {
+        crate::agent::manifest_bind::ensure_grant_expiries_live(
+            &mounted.binding.grant_expiries,
+            now_ms,
+        )
     }
 
     fn resolve_contract<'a>(
@@ -629,11 +672,13 @@ impl ToolUniverseSearchSurface {
     async fn invoke_pinned_direct_call(
         &self,
         call: AgentKernelToolCall,
+        now_ms: i64,
     ) -> CooldisResult<Option<CanonicalMessage>> {
         let resolved = match self.resolve_pinned_contract(&call.tool_name)? {
             Some(resolved) => resolved,
             None => return Ok(None),
         };
+        self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
         let pin = resolved.mounted.binding.pin.as_ref().ok_or_else(|| {
             CooldisError::RuntimeExecution(format!(
                 "pinned tool row {:?} is missing its pin",
@@ -785,11 +830,28 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
         &self,
         call: AgentKernelToolCall,
     ) -> CooldisResult<Option<CanonicalMessage>> {
+        self.invoke_tool_call_at(call, crate::kernel::history::now_ms())
+            .await
+    }
+
+    async fn invoke_tool_call_at(
+        &self,
+        call: AgentKernelToolCall,
+        now_ms: i64,
+    ) -> CooldisResult<Option<CanonicalMessage>> {
         match call.tool_name.as_str() {
             TOOL_SEARCH_TOOL => {
                 let query = optional_string_arg(&call.arguments, "query")?;
                 let universe = optional_string_arg(&call.arguments, "universe")?;
                 let query = query.map(|value| value.to_lowercase());
+                for mounted in self.universes.iter().filter(|mounted| {
+                    universe
+                        .as_deref()
+                        .map(|expected| mounted.binding.server_ref == expected)
+                        .unwrap_or(true)
+                }) {
+                    self.ensure_mounted_grants_live(mounted, now_ms)?;
+                }
                 let tools = self
                     .universes
                     .iter()
@@ -842,6 +904,7 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                 let tool_name = required_string_arg(&call.arguments, "tool")?;
                 let universe = optional_string_arg(&call.arguments, "universe")?;
                 let resolved = self.resolve_contract(&tool_name, universe.as_deref())?;
+                self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
                 let schema = serde_json::to_string_pretty(&resolved.contract.input_schema)
                     .map_err(|err| {
                         CooldisError::RuntimeExecution(format!(
@@ -871,12 +934,24 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                     )
                 })?;
                 let resolved = self.resolve_contract(&tool_name, universe.as_deref())?;
+                self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
                 self.invoke_universe_call(call, resolved, arguments)
                     .await
                     .map(Some)
             }
-            _ => self.invoke_pinned_direct_call(call).await,
+            _ => self.invoke_pinned_direct_call(call, now_ms).await,
         }
+    }
+
+    async fn invoke_tool_call_cancellable_at(
+        &self,
+        call: AgentKernelToolCall,
+        _cancellation: ToolInvocationCancellation,
+        now_ms: i64,
+    ) -> CooldisResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call_at(call, now_ms)
+            .await
+            .map(AgentKernelToolOutcome::Completed)
     }
 }
 

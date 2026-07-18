@@ -273,6 +273,12 @@ kind = "clock.tick"
 enabled = true
 ```
 
+Enabled Telegram routes must set either `secret_token` or
+`secret_token_env`; daemon config validation rejects a listener without one.
+The daemon authenticates `X-Telegram-Bot-Api-Secret-Token` before route or
+payload processing. `bot_token`/`bot_token_env` remains optional for
+ingress-only routes.
+
 Dynamic code plugins can come later as out-of-process adapters that speak the
 same envelope shape over JSON-RPC, websocket, or another small transport.
 

@@ -15,6 +15,7 @@ use crate::agent::manifest_bind::{BoundCouplingSet, coupling_set_content_hash};
 use crate::daemon::remote_store::placement::{
     RemoteThreadExecutor, RemoteThreadSpawnRequest, RemoteThreadSubmitRequest,
 };
+use crate::kernel::admission::{AdmissionGateContext, KERNEL_THREAD_SUBMIT_SURFACE};
 use crate::kernel::history::{
     EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId,
     NewEventRecord, SessionContext, ThreadSpawnedPayload,
@@ -823,17 +824,18 @@ impl RuntimeKernelControl {
             });
         }
         let target = self.scoped_thread(caller, target_thread_id).await?;
-        let submitted = host
-            .reserve_turn_submission_with_admission(
-                target_thread_id,
-                turn_id.clone(),
-                input,
-                TurnSubmissionMode::Queue,
-                None,
-            )
-            .await?
-            .submit()
-            .await;
+        let admission =
+            AdmissionGateContext::surface_default(KERNEL_THREAD_SUBMIT_SURFACE, Vec::new())?;
+        let reserved = crate::kernel::admission::reserve_turn(
+            &host,
+            target_thread_id,
+            turn_id.clone(),
+            input,
+            TurnSubmissionMode::Queue,
+            Some(admission),
+        )
+        .await?;
+        let submitted = crate::kernel::admission::submit_reserved(reserved).await;
         let metadata = BTreeMap::from([
             (
                 "operation".to_string(),

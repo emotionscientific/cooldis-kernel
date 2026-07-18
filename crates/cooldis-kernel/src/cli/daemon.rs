@@ -355,12 +355,18 @@ pub(super) async fn start_telegram_route(
             route.id
         ))
     })?;
+    let secret_token = telegram.secret_token_value()?.ok_or_else(|| {
+        usage_error(format!(
+            "telegram route {} requires telegram.secret_token or telegram.secret_token_env",
+            route.id
+        ))
+    })?;
     let server = TelegramWebhookServer::bind(
         TelegramWebhookServerConfig {
             route_id: route.id.clone(),
             listen,
             path: telegram.path.clone(),
-            secret_token: telegram.secret_token_value()?,
+            secret_token,
         },
         sink,
     )

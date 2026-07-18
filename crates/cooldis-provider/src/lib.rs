@@ -6,7 +6,7 @@ use cooldis_history::{
     CacheControl, CanonicalContent, CanonicalMessage, CanonicalStopReason, CanonicalUsage,
     ProviderApi, ThinkingMetadata, ThinkingProvider,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

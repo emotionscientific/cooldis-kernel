@@ -158,6 +158,43 @@ First-party kernel tools are still operation artifacts. For example,
 `threads.spawn` grant. The manifest binds published operation records by
 artifact hash rather than copying tool implementations into itself.
 
+Every `bash_tool`, `direct_tool`, and `protocol_tool_import` row may declare an
+effect class:
+
+```toml
+effect_class = "idempotent" # pure | idempotent | at-most-once
+```
+
+The field defaults to `at-most-once`. `pure` and `idempotent` authorize a
+re-execution after an interrupted invocation; `at-most-once` instead produces
+a witnessed conservative failure. A recorded outcome is reused for every
+class only when its argument fingerprint and bound manifest snapshot match.
+Fingerprints are SHA-256 hashes of the canonical JSON tool name and arguments.
+Journal events written before fingerprints existed retain their legacy request
+event and call-id reuse behavior. Pinned protocol imports copy their declared
+class into the bind receipt; dynamic tool-universe calls remain
+`at-most-once`.
+
+Every `grants` array on `bash_tool`, `direct_tool`,
+`protocol_tool_import`, and coupling rows accepts either the existing bare
+capability string or an expiring object:
+
+```toml
+grants = [
+  "fs.read:/workspace",
+  { capability = "net:https://example.com", expires_at = "2026-07-16T20:00:00Z" },
+]
+```
+
+`expires_at` is an absolute RFC3339 UTC instant; duration shorthand is not
+accepted. A bare string has no expiry and retains the legacy serialized and
+content-addressed manifest shape. If any grant on a tool row has already
+expired at bind, the whole tool row is omitted from the presented surface and
+the bind receipt records the lapsed grant and exclusion. Authority remains
+live after bind: form snapshots remain stable for a running turn, but the next
+invocation after a grant expires fails closed and names the capability and
+expiry. A later bind with a fresh grant is the only way to restore that power.
+
 ### Resources
 
 Static or external artifacts made available to the agent, context builder, or
@@ -357,7 +394,11 @@ child-thread creation rules
 ```
 
 The model cannot grant itself new powers. Publish and start must validate that
-declared tools, resources, couplings, and effects are allowed.
+declared tools, resources, couplings, and effects are allowed. Coupling grants
+use the same bare-string or expiring-object form as tool grants. An expired
+coupling row is excluded at bind; a coupling grant that lapses later fails
+before the next source read, executor invocation, or sink write, with the lapse
+recorded on the control stream.
 
 ### Admission
 
@@ -369,17 +410,23 @@ runtime command is enqueued. Daemon ingress records its route policy context
 `io.ingress.received` event ids) and then schedules through the already-admitted
 runtime path so it cannot double emit.
 
-Non-daemon turn-starting surfaces use the `surface:<name>` route convention. The
-app-server RPC path records `surface:app-server-rpc`; direct
-`RuntimeHost::submit*` records `surface:host-submit`. Their policy hash is the
-canonical hash of the declared trivial surface policy, not an empty string. The
-current journal schema has queue/steer/interrupt/fork/observe/reject/coalesce
-decision values, so the trivial admitted surface policy lowers to
-`decision = "queue"` with `admissible = ["queue"]`. App-server RPC first
-witnesses the input as `io.ingress.received` and names that event in
-`source_ingress_event_ids`; direct host submit has no ingress event, so its
-source list is intentionally empty. CLI chat submits through the operator RPC
-path and inherits the app-server surface admission record.
+Non-daemon turn-starting surfaces use the `surface:<name>` route convention.
+The app-server RPC path records the surface of the initialized client:
+`surface:mcp-adapter`, `surface:acp-adapter`, and `surface:debug-rpc` for the
+bundled adapters, `surface:app-server-rpc` for any other client. The surface
+label is attribution and provenance only; admission authority is the same
+declared surface policy for all of them. Direct `RuntimeHost::submit*` records
+`surface:host-submit`; kernel thread-to-thread submission records
+`surface:kernel-thread-submit`. Their policy hash is the canonical hash of the
+declared trivial surface policy, not an empty string. The current journal
+schema has queue/steer/interrupt/fork/observe/reject/coalesce decision values,
+so the trivial admitted surface policy lowers to `decision = "queue"` with
+`admissible = ["queue"]`. App-server RPC first witnesses the input as
+`io.ingress.received` and names that event in `source_ingress_event_ids`;
+direct host submit has no ingress event, so its source list is intentionally
+empty. CLI chat submits through the operator RPC path and inherits the
+app-server surface admission record. The registry of turn-entry surfaces and
+the coverage ratchet over them live in `kernel/admission.rs`.
 
 In-loop continuations use the same admission law through the continuation gate:
 `turn.continuation.accepted` or `turn.continuation.rejected` records the

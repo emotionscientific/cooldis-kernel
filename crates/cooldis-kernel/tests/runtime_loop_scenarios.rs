@@ -1290,6 +1290,7 @@ async fn kernel_thread_router() -> AgentToolRouter {
             tool_name: THREAD_SPAWN_OPERATION.to_string(),
             registered_name: cooldis::COOLDIS_THREADS_PACKAGE.to_string(),
             operation_name: THREAD_SPAWN_OPERATION.to_string(),
+            grant_expiries: Vec::new(),
         }])
 }
 

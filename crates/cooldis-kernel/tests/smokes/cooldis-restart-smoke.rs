@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const ROUTE_ID: &str = "restart-smoke";
 const WEBHOOK_PATH: &str = "/ingress";
+const WEBHOOK_SECRET: &str = "restart-smoke-secret";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -484,6 +485,7 @@ threading = "per_conversation"
 listen = "{webhook_addr}"
 path = "{WEBHOOK_PATH}"
 bot_token = "restart-smoke-token"
+secret_token = "{WEBHOOK_SECRET}"
 api_base = "http://{telegram_api_addr}"
 "#,
         toml_path(&std::env::current_dir()?),
@@ -563,7 +565,7 @@ async fn post_update(
         .await
         .map_err(|err| err.to_string())?;
     let request = format!(
-        "POST {WEBHOOK_PATH} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {WEBHOOK_PATH} HTTP/1.1\r\nHost: {addr}\r\nX-Telegram-Bot-Api-Secret-Token: {WEBHOOK_SECRET}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream

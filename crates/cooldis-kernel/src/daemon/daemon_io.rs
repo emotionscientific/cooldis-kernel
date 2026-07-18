@@ -40,21 +40,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, Value as JsonValue, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use subtle::ConstantTimeEq;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 const DEFAULT_QUEUE_BATCH: usize = 16;
 const DEFAULT_WORKER_POLL_MS: u64 = 250;
 const DEFAULT_EGRESS_PROJECTOR_POLL_MS: u64 = 250;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TELEGRAM_WEBHOOK_REQUESTS: usize = 128;
+const TELEGRAM_WEBHOOK_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+const TELEGRAM_WEBHOOK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_RESPONSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_TYPING_SIMULATION_DELAY: Duration = Duration::from_secs(8);
 const IO_EGRESS_PROJECTOR_DISCHARGED_BY: &str = "projector:io-egress";
 const IO_EGRESS_PROJECTOR_FUNCTION: &str = "delivery/v1";
@@ -3369,7 +3375,7 @@ impl CooldisDaemonIoBridge {
                 .insert(target.address.scope_key(), child_key.to_string());
             let reserved = match self
                 .supervisor
-                .reserve_turn_to_with_admission(
+                .reserve_admitted_turn_to(
                     &child_coordinates,
                     child_key.to_string(),
                     self.runtime_input(input),
@@ -3384,7 +3390,7 @@ impl CooldisDaemonIoBridge {
                     return Err(cooldis_bridge_error(err));
                 }
             };
-            reserved.submit().await;
+            crate::kernel::admission::submit_reserved(reserved).await;
         }
 
         let mut receipt_target = target.clone();
@@ -4320,7 +4326,7 @@ impl CooldisDaemonIoBridge {
         .await?;
         self.lock_active_turns()
             .insert(target.address.scope_key(), turn_id.to_string());
-        reserved.submit().await;
+        crate::kernel::admission::submit_reserved(reserved).await;
         let evidence = self
             .wait_for_turn_execution_evidence(coordinates, turn_id, submission_mode)
             .await?;
@@ -4478,7 +4484,7 @@ impl CooldisDaemonIoBridge {
                 }
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(&input),
@@ -4557,7 +4563,7 @@ impl CooldisDaemonIoBridge {
                 }
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(&input),
@@ -4638,7 +4644,7 @@ impl CooldisDaemonIoBridge {
                 let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
@@ -4661,7 +4667,7 @@ impl CooldisDaemonIoBridge {
                     .await?;
                     self.lock_active_turns()
                         .insert(target.address.scope_key(), turn_id.clone());
-                    reserved.submit().await;
+                    crate::kernel::admission::submit_reserved(reserved).await;
                     let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
                     return Ok((receipt, None));
@@ -4723,7 +4729,7 @@ impl CooldisDaemonIoBridge {
                 let (coordinates, handle) = self.ensure_thread(target, envelope).await?;
                 let reserved = self
                     .supervisor
-                    .reserve_turn_to_with_admission(
+                    .reserve_admitted_turn_to(
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
@@ -4746,7 +4752,7 @@ impl CooldisDaemonIoBridge {
                     .await?;
                     self.lock_active_turns()
                         .insert(target.address.scope_key(), turn_id.clone());
-                    reserved.submit().await;
+                    crate::kernel::admission::submit_reserved(reserved).await;
                     let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
                     return Ok((receipt, None));
@@ -4814,7 +4820,7 @@ impl CooldisDaemonIoBridge {
                     if let (Some(turn_id), Some(input)) = (replacement_turn_id, replacement) {
                         Some(
                             self.supervisor
-                                .reserve_turn_to_with_admission(
+                                .reserve_admitted_turn_to(
                                     &coordinates,
                                     turn_id.clone(),
                                     self.runtime_input(input),
@@ -4846,7 +4852,7 @@ impl CooldisDaemonIoBridge {
                         .await?;
                         self.lock_active_turns()
                             .insert(target.address.scope_key(), turn_id.clone());
-                        reserved.submit().await;
+                        crate::kernel::admission::submit_reserved(reserved).await;
                     }
                     let mut receipt = KernelIoReceipt::new(envelope, target.clone(), decision);
                     receipt.thread_id = Some(coordinates.thread_id.to_string());
@@ -5314,11 +5320,13 @@ pub struct TelegramWebhookServerConfig {
     pub route_id: String,
     pub listen: String,
     pub path: String,
-    pub secret_token: Option<String>,
+    pub secret_token: String,
 }
 
 pub struct TelegramWebhookServer {
-    config: TelegramWebhookServerConfig,
+    route_id: String,
+    path: String,
+    secret_token_hash: [u8; 32],
     listener: TcpListener,
     sink: Arc<dyn IngressSink>,
 }
@@ -5328,6 +5336,12 @@ impl TelegramWebhookServer {
         config: TelegramWebhookServerConfig,
         sink: Arc<dyn IngressSink>,
     ) -> CooldisResult<Self> {
+        if config.secret_token.trim().is_empty() {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "Telegram webhook route {} requires a non-empty secret_token",
+                config.route_id
+            )));
+        }
         let listener = TcpListener::bind(&config.listen).await.map_err(|err| {
             CooldisError::RuntimeFactory(format!(
                 "failed to bind Telegram webhook route {} on {}: {err}",
@@ -5335,7 +5349,9 @@ impl TelegramWebhookServer {
             ))
         })?;
         Ok(Self {
-            config,
+            route_id: config.route_id,
+            path: config.path,
+            secret_token_hash: Sha256::digest(config.secret_token.as_bytes()).into(),
             listener,
             sink,
         })
@@ -5348,34 +5364,110 @@ impl TelegramWebhookServer {
     }
 
     pub async fn serve(self) -> CooldisResult<()> {
-        let adapter = Arc::new(TelegramWebhookAdapter::new(self.config.route_id.clone()));
+        let adapter = Arc::new(TelegramWebhookAdapter::new(self.route_id));
+        let mut requests = JoinSet::new();
         loop {
-            let (stream, _) = self.listener.accept().await.map_err(|err| {
-                CooldisError::RuntimeFactory(format!(
-                    "failed to accept Telegram webhook connection: {err}"
-                ))
-            })?;
-            let config = self.config.clone();
-            let sink = self.sink.clone();
-            let adapter = adapter.clone();
-            tokio::spawn(async move {
-                if let Err(err) =
-                    handle_telegram_webhook_connection(stream, config, adapter, sink).await
-                {
-                    eprintln!("cooldis Telegram webhook request failed: {err}");
+            tokio::select! {
+                accepted = self.listener.accept(), if requests.len() < MAX_TELEGRAM_WEBHOOK_REQUESTS => {
+                    let (stream, _) = accepted.map_err(|err| {
+                        CooldisError::RuntimeFactory(format!(
+                            "failed to accept Telegram webhook connection: {err}"
+                        ))
+                    })?;
+                    let path = self.path.clone();
+                    let secret_token_hash = self.secret_token_hash;
+                    let sink = self.sink.clone();
+                    let adapter = adapter.clone();
+                    requests.spawn(async move {
+                        telegram_webhook_request_with_timeout(handle_telegram_webhook_connection(
+                            stream,
+                            path,
+                            secret_token_hash,
+                            adapter,
+                            sink,
+                        ))
+                        .await
+                    });
                 }
-            });
+                completed = requests.join_next(), if !requests.is_empty() => {
+                    report_telegram_webhook_request_completion(completed);
+                }
+            }
         }
+    }
+}
+
+async fn telegram_webhook_request_with_timeout(
+    request: impl Future<Output = CooldisResult<()>>,
+) -> CooldisResult<()> {
+    tokio::time::timeout(TELEGRAM_WEBHOOK_REQUEST_TIMEOUT, request)
+        .await
+        .map_err(|_| {
+            CooldisError::RuntimeFactory("Telegram webhook request timed out".to_string())
+        })?
+}
+
+fn report_telegram_webhook_request_completion(
+    completed: Option<Result<CooldisResult<()>, tokio::task::JoinError>>,
+) {
+    match completed {
+        Some(Ok(Err(err))) => eprintln!("cooldis Telegram webhook request failed: {err}"),
+        Some(Err(err)) => eprintln!("cooldis Telegram webhook request task failed: {err}"),
+        Some(Ok(Ok(()))) | None => {}
     }
 }
 
 async fn handle_telegram_webhook_connection(
     mut stream: TcpStream,
-    config: TelegramWebhookServerConfig,
+    path: String,
+    secret_token_hash: [u8; 32],
     adapter: Arc<TelegramWebhookAdapter>,
     sink: Arc<dyn IngressSink>,
 ) -> CooldisResult<()> {
-    let request = match read_http_request(&mut stream).await {
+    let request_head = match read_http_request_head(&mut stream).await {
+        Ok(request) => request,
+        Err(_) => {
+            write_telegram_auth_failure(&mut stream).await?;
+            return Ok(());
+        }
+    };
+
+    let actual_token_hash = Sha256::digest(
+        request_head
+            .headers
+            .get("x-telegram-bot-api-secret-token")
+            .map_or(b"".as_slice(), |value| value.as_bytes()),
+    );
+    let token_present = subtle::Choice::from(u8::from(
+        request_head
+            .headers
+            .contains_key("x-telegram-bot-api-secret-token"),
+    ));
+    let token_matches = actual_token_hash.as_slice().ct_eq(&secret_token_hash);
+    if !bool::from(token_present & token_matches) {
+        write_telegram_auth_failure(&mut stream).await?;
+        return Ok(());
+    }
+
+    if request_head.method != "POST" {
+        write_json_response(
+            &mut stream,
+            405,
+            json!({ "ok": false, "error": "method_not_allowed" }),
+        )
+        .await?;
+        return Ok(());
+    }
+    if request_head.path != path {
+        write_json_response(
+            &mut stream,
+            404,
+            json!({ "ok": false, "error": "not_found" }),
+        )
+        .await?;
+        return Ok(());
+    }
+    let body = match read_http_request_body(&mut stream, request_head).await {
         Ok(request) => request,
         Err(err) => {
             write_json_response(
@@ -5388,41 +5480,7 @@ async fn handle_telegram_webhook_connection(
         }
     };
 
-    if request.method != "POST" {
-        write_json_response(
-            &mut stream,
-            405,
-            json!({ "ok": false, "error": "method_not_allowed" }),
-        )
-        .await?;
-        return Ok(());
-    }
-    if request.path != config.path {
-        write_json_response(
-            &mut stream,
-            404,
-            json!({ "ok": false, "error": "not_found" }),
-        )
-        .await?;
-        return Ok(());
-    }
-    if let Some(secret_token) = config.secret_token.as_deref() {
-        let actual = request
-            .headers
-            .get("x-telegram-bot-api-secret-token")
-            .map(String::as_str);
-        if actual != Some(secret_token) {
-            write_json_response(
-                &mut stream,
-                401,
-                json!({ "ok": false, "error": "unauthorized" }),
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-
-    let update: TelegramUpdate = serde_json::from_slice(&request.body).map_err(|err| {
+    let update: TelegramUpdate = serde_json::from_slice(&body).map_err(|err| {
         CooldisError::RuntimeFactory(format!("failed to decode Telegram update JSON: {err}"))
     })?;
     match adapter
@@ -5450,20 +5508,43 @@ async fn handle_telegram_webhook_connection(
     Ok(())
 }
 
-#[derive(Debug)]
-struct HttpRequest {
+struct HttpRequestHead {
     method: String,
     path: String,
     headers: HashMap<String, String>,
-    body: Vec<u8>,
+    buffered_body: Vec<u8>,
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> CooldisResult<HttpRequest> {
+async fn read_http_request_head<R>(stream: &mut R) -> CooldisResult<HttpRequestHead>
+where
+    R: AsyncRead + Unpin,
+{
+    tokio::time::timeout(
+        TELEGRAM_WEBHOOK_HEAD_TIMEOUT,
+        read_http_request_head_inner(stream),
+    )
+    .await
+    .map_err(|_| {
+        CooldisError::RuntimeFactory("Telegram webhook request head timed out".to_string())
+    })?
+}
+
+async fn read_http_request_head_inner<R>(stream: &mut R) -> CooldisResult<HttpRequestHead>
+where
+    R: AsyncRead + Unpin,
+{
     let mut buffer = Vec::new();
     let header_end;
     loop {
+        let remaining = MAX_HTTP_HEADER_BYTES.saturating_sub(buffer.len());
+        if remaining == 0 {
+            return Err(CooldisError::RuntimeFactory(
+                "HTTP headers are too large".to_string(),
+            ));
+        }
         let mut chunk = [0_u8; 1024];
-        let read = stream.read(&mut chunk).await.map_err(|err| {
+        let read_len = remaining.min(chunk.len());
+        let read = stream.read(&mut chunk[..read_len]).await.map_err(|err| {
             CooldisError::RuntimeFactory(format!("failed to read HTTP request: {err}"))
         })?;
         if read == 0 {
@@ -5475,11 +5556,6 @@ async fn read_http_request(stream: &mut TcpStream) -> CooldisResult<HttpRequest>
         if let Some(index) = find_header_end(&buffer) {
             header_end = index;
             break;
-        }
-        if buffer.len() > MAX_HTTP_HEADER_BYTES {
-            return Err(CooldisError::RuntimeFactory(
-                "HTTP headers are too large".to_string(),
-            ));
         }
     }
 
@@ -5511,7 +5587,20 @@ async fn read_http_request(stream: &mut TcpStream) -> CooldisResult<HttpRequest>
         headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
     }
 
-    let content_length = headers
+    Ok(HttpRequestHead {
+        method,
+        path,
+        headers,
+        buffered_body: buffer[header_end + 4..].to_vec(),
+    })
+}
+
+async fn read_http_request_body(
+    stream: &mut TcpStream,
+    request: HttpRequestHead,
+) -> CooldisResult<Vec<u8>> {
+    let content_length = request
+        .headers
         .get("content-length")
         .map(|value| {
             value.parse::<usize>().map_err(|err| {
@@ -5526,8 +5615,7 @@ async fn read_http_request(stream: &mut TcpStream) -> CooldisResult<HttpRequest>
         ));
     }
 
-    let body_start = header_end + 4;
-    let mut body = buffer[body_start..].to_vec();
+    let mut body = request.buffered_body;
     while body.len() < content_length {
         let mut chunk = vec![0_u8; content_length - body.len()];
         let read = stream.read(&mut chunk).await.map_err(|err| {
@@ -5542,12 +5630,11 @@ async fn read_http_request(stream: &mut TcpStream) -> CooldisResult<HttpRequest>
     }
     body.truncate(content_length);
 
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-        body,
-    })
+    Ok(body)
+}
+
+async fn write_telegram_auth_failure(stream: &mut TcpStream) -> CooldisResult<()> {
+    write_json_response(stream, 401, json!({ "ok": false, "error": "unauthorized" })).await
 }
 
 async fn write_json_response(
@@ -5576,6 +5663,19 @@ Connection: close\r\n\
     stream.write_all(response.as_bytes()).await.map_err(|err| {
         CooldisError::RuntimeFactory(format!("failed to write HTTP response: {err}"))
     })?;
+    stream.shutdown().await.map_err(|err| {
+        CooldisError::RuntimeFactory(format!("failed to close HTTP response: {err}"))
+    })?;
+    let mut discard = [0_u8; 1024];
+    let _ = tokio::time::timeout(HTTP_RESPONSE_DRAIN_TIMEOUT, async {
+        loop {
+            match stream.read(&mut discard).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
     Ok(())
 }
 

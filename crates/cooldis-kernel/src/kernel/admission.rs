@@ -3,11 +3,49 @@ use crate::kernel::history::{
     AdmissionDecidedPayload, AdmissionDecision, EventKind, EventProvenance, EventRecord,
     EventRecordId, EventStreamId, NewEventRecord,
 };
-use crate::{CooldisError, CooldisResult, RuntimeThreadHandle};
+use crate::kernel::runtime_host::ReservedTurnSubmission;
+use crate::{
+    CooldisError, CooldisResult, RuntimeHost, RuntimeThreadHandle, ThreadId, TurnInput,
+    TurnSubmissionMode,
+};
 use serde_json::{Value, json};
 
-pub(crate) const HOST_SUBMIT_SURFACE: &str = "host-submit";
-pub(crate) const APP_SERVER_RPC_SURFACE: &str = "app-server-rpc";
+macro_rules! turn_entry_surfaces {
+    ($($constant:ident => $name:literal),+ $(,)?) => {
+        $(pub(crate) const $constant: &str = $name;)+
+
+        /// The complete registry of turn-entry surfaces guarded by admission.
+        ///
+        /// Every continuation the kernel executes was admitted; there is no side
+        /// door around this boundary. Add a new surface to the declaration below,
+        /// then add its end-to-end fixture to the admission coverage manifest. The
+        /// coverage ratchet fails and names any registered surface without one.
+        pub(crate) const TURN_ENTRY_SURFACES: &[&str] = &[$($constant),+];
+    };
+}
+
+turn_entry_surfaces! {
+    HOST_SUBMIT_SURFACE => "host-submit",
+    APP_SERVER_RPC_SURFACE => "app-server-rpc",
+    MCP_ADAPTER_SURFACE => "mcp-adapter",
+    ACP_ADAPTER_SURFACE => "acp-adapter",
+    DEBUG_RPC_SURFACE => "debug-rpc",
+    TELEGRAM_WEBHOOK_SURFACE => "telegram-webhook-ingress",
+    PGQRS_QUEUE_SURFACE => "pgqrs-queue-ingress",
+    REMOTE_SYNC_INGRESS_SURFACE => "remote-sync-ingress",
+    KERNEL_THREAD_SUBMIT_SURFACE => "kernel-thread-submit",
+}
+
+pub(crate) fn app_server_surface(client_name: Option<&str>) -> &'static str {
+    let surface = match client_name {
+        Some("cooldis-mcp-server") => MCP_ADAPTER_SURFACE,
+        Some("cooldis-acp-agent") => ACP_ADAPTER_SURFACE,
+        Some("cooldis-debug-rpc") => DEBUG_RPC_SURFACE,
+        _ => APP_SERVER_RPC_SURFACE,
+    };
+    debug_assert!(TURN_ENTRY_SURFACES.contains(&surface));
+    surface
+}
 
 const SURFACE_ADMISSION_FUNCTION: &str = "surface_admission/v1";
 const ADMISSION_ROUTE_FUNCTION: &str = "admission_route/v1";
@@ -72,6 +110,35 @@ pub(crate) async fn append_admission_decided(
 ) -> CooldisResult<EventRecord> {
     let record = admission_decided_record(handle.context().coordinates.clone(), context)?;
     handle.append_control_event(record).await
+}
+
+pub(crate) async fn submit_turn(
+    host: &RuntimeHost,
+    thread_id: ThreadId,
+    turn_id: impl Into<String>,
+    input: TurnInput,
+    mode: TurnSubmissionMode,
+    admission: Option<AdmissionGateContext>,
+) -> CooldisResult<()> {
+    let reserved = reserve_turn(host, thread_id, turn_id, input, mode, admission).await?;
+    submit_reserved(reserved).await;
+    Ok(())
+}
+
+pub(crate) async fn reserve_turn(
+    host: &RuntimeHost,
+    thread_id: ThreadId,
+    turn_id: impl Into<String>,
+    input: TurnInput,
+    mode: TurnSubmissionMode,
+    admission: Option<AdmissionGateContext>,
+) -> CooldisResult<ReservedTurnSubmission> {
+    host.reserve_turn_submission_at_choke_point(thread_id, turn_id, input, mode, admission)
+        .await
+}
+
+pub(crate) async fn submit_reserved(reserved: ReservedTurnSubmission) -> bool {
+    reserved.submit_unchecked().await
 }
 
 pub(crate) fn admission_decided_record(
@@ -199,37 +266,386 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
 }
 
 #[cfg(test)]
-fn event_order_key(event: &EventRecord) -> (i64, String) {
-    (event.created_at_ms, event.id.to_string())
+fn event_order_key(event: &EventRecord) -> (i64, String, i64, String) {
+    (
+        event.created_at_ms,
+        event.stream_id.to_string(),
+        event.sequence.get(),
+        event.id.to_string(),
+    )
 }
 
 #[cfg(test)]
-fn value_order_key(event: &Value) -> (i64, String) {
+fn value_order_key(event: &Value) -> (i64, String, i64, String) {
     let at_ms = event
         .get("atMs")
         .and_then(Value::as_i64)
         .expect("event missing atMs");
+    let stream_id = event
+        .get("stream_id")
+        .and_then(Value::as_str)
+        .expect("event missing stream_id")
+        .to_string();
+    let sequence = event
+        .get("sequence")
+        .and_then(Value::as_i64)
+        .expect("event missing sequence");
     let event_id = event
         .get("eventId")
         .and_then(Value::as_str)
         .expect("event missing eventId")
         .to_string();
-    (at_ms, event_id)
+    (at_ms, stream_id, sequence, event_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use uuid::Uuid;
 
+    const COVERED_SURFACE_FIXTURES: &[(&str, &str)] = &[
+        (
+            HOST_SUBMIT_SURFACE,
+            "runtime_host_submit_records_surface_admission_before_turn_execution",
+        ),
+        (
+            APP_SERVER_RPC_SURFACE,
+            "app_server_turn_start_records_surface_admission_before_execution",
+        ),
+        (
+            MCP_ADAPTER_SURFACE,
+            "mcp_server_runs_prompt_and_command_through_daemon",
+        ),
+        (
+            ACP_ADAPTER_SURFACE,
+            "acp_agent_process_smoke_runs_binary_over_stdio",
+        ),
+        (
+            DEBUG_RPC_SURFACE,
+            "debug_rpc_cli_calls_and_streams_turns_over_websocket",
+        ),
+        (
+            TELEGRAM_WEBHOOK_SURFACE,
+            "telegram_webhook_accepts_update_and_uses_sink",
+        ),
+        (
+            PGQRS_QUEUE_SURFACE,
+            "queue_worker_processes_envelope_after_queue_and_bridge_restart",
+        ),
+        (
+            REMOTE_SYNC_INGRESS_SURFACE,
+            "remote_queue_redelivery_enters_child_ingress_once",
+        ),
+        (
+            KERNEL_THREAD_SUBMIT_SURFACE,
+            "cross_thread_prompt_and_result_events_do_not_rewrite_lineage",
+        ),
+    ];
+
     #[test]
-    fn admission_order_key_breaks_same_millisecond_ties_with_event_id() {
+    fn admission_order_key_matches_replay_merge_tie_breaks() {
         let first = EventRecordId::from_uuid(Uuid::now_v7());
         let second = EventRecordId::from_uuid(Uuid::now_v7());
 
+        // UUIDv7's canonical hyphenated representation preserves UUID byte
+        // order, and `Uuid::now_v7` is process-monotonic within a millisecond.
+        assert!(first.to_string() < second.to_string());
         assert!(
-            (1_772_650_000_000_i64, first.to_string())
-                < (1_772_650_000_000_i64, second.to_string())
+            (
+                1_772_650_000_000_i64,
+                "control:thread".to_string(),
+                1_i64,
+                first.to_string(),
+            ) < (
+                1_772_650_000_000_i64,
+                "thread:thread".to_string(),
+                1_i64,
+                second.to_string(),
+            )
         );
+    }
+
+    #[test]
+    fn raw_submit_guard_detects_non_call_symbol_references() {
+        let source = r#"
+let reserve = RuntimeHost::reserve_turn_submission_at_choke_point;
+pub(super) use ReservedTurnSubmission::submit_unchecked;
+reserved.submit_unchecked
+    ();
+"#;
+
+        assert_eq!(
+            identifier_occurrences(source, "reserve_turn_submission_at_choke_point")
+                .into_iter()
+                .map(|occurrence| occurrence.line)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            identifier_occurrences(source, "submit_unchecked")
+                .into_iter()
+                .map(|occurrence| occurrence.line)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
+
+    #[test]
+    fn admission_fixture_contract_rejects_ignored_or_assertionless_tests() {
+        let ignored = r#"
+#[tokio::test]
+#[ignore = "not in the required lane"]
+async fn fixture() {
+    assert_admission_surface().await;
+}
+"#;
+        let assertionless = r#"
+#[test]
+fn fixture() {
+    // assert_admission_precedes_turn_records();
+    assert!(true);
+}
+"#;
+        let covered = r#"
+#[tokio::test]
+async fn fixture() {
+    assert_admission_precedes_turn_records();
+}
+"#;
+
+        assert!(admission_fixture_contract(ignored, "fixture").is_err());
+        assert!(admission_fixture_contract(assertionless, "fixture").is_err());
+        assert!(admission_fixture_contract(covered, "fixture").is_ok());
+    }
+
+    #[test]
+    fn every_registered_surface_has_an_admission_fixture() {
+        let covered = COVERED_SURFACE_FIXTURES
+            .iter()
+            .map(|(surface, _)| *surface)
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = TURN_ENTRY_SURFACES
+            .iter()
+            .copied()
+            .filter(|surface| !covered.contains(surface))
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "registered turn-entry surface(s) missing admission coverage fixture: {}",
+            missing.join(", ")
+        );
+        assert_eq!(
+            covered.len(),
+            COVERED_SURFACE_FIXTURES.len(),
+            "admission coverage manifest contains duplicate surface entries"
+        );
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut test_sources = Vec::new();
+        collect_rust_sources(&manifest_dir, &mut |path| {
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            test_sources.push((path.to_path_buf(), source));
+        });
+        for (surface, fixture) in COVERED_SURFACE_FIXTURES {
+            let declarations = test_sources
+                .iter()
+                .filter(|(_, source)| source.contains(&format!("fn {fixture}")))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                declarations.len(),
+                1,
+                "registered turn-entry surface {surface} must name exactly one admission fixture {fixture}, found {}",
+                declarations.len()
+            );
+            let (path, source) = declarations[0];
+            admission_fixture_contract(source, fixture).unwrap_or_else(|reason| {
+                let relative = path.strip_prefix(&manifest_dir).unwrap_or(path);
+                panic!(
+                    "registered turn-entry surface {surface} has invalid admission fixture {fixture} in {}: {reason}",
+                    relative.display()
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn app_server_adapter_clients_resolve_to_registered_surfaces() {
+        assert_eq!(app_server_surface(None), APP_SERVER_RPC_SURFACE);
+        assert_eq!(
+            app_server_surface(Some("cooldis-mcp-server")),
+            MCP_ADAPTER_SURFACE
+        );
+        assert_eq!(
+            app_server_surface(Some("cooldis-acp-agent")),
+            ACP_ADAPTER_SURFACE
+        );
+        assert_eq!(
+            app_server_surface(Some("cooldis-debug-rpc")),
+            DEBUG_RPC_SURFACE
+        );
+    }
+
+    #[test]
+    fn raw_turn_submit_choke_point_has_no_callers_outside_admission() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let source_root = manifest_dir.join("src");
+        let admission_path = source_root.join("kernel/admission.rs");
+        let runtime_host_path = source_root.join("kernel/runtime_host.rs");
+        let raw_symbols = ["reserve_turn_submission_at_choke_point", "submit_unchecked"];
+        let mut definitions = std::collections::BTreeMap::new();
+        let mut offenders = Vec::new();
+        collect_rust_sources(&source_root, &mut |path| {
+            if path == admission_path {
+                return;
+            }
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            let compact = source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            if path.starts_with(source_root.join("kernel"))
+                && (compact.contains("#[path=") || compact.contains("include!("))
+            {
+                let relative = path.strip_prefix(&manifest_dir).unwrap_or(path);
+                offenders.push(format!(
+                    "{}: kernel module uses #[path] or include!, which can hide a raw choke-point reference from the source ratchet",
+                    relative.display()
+                ));
+            }
+            for symbol in raw_symbols {
+                for occurrence in identifier_occurrences(&source, symbol) {
+                    let line = source.lines().nth(occurrence.line - 1).unwrap_or_default();
+                    if path == runtime_host_path
+                        && previous_identifier(&source, occurrence.offset) == Some("fn")
+                    {
+                        *definitions.entry(symbol).or_insert(0_usize) += 1;
+                        continue;
+                    }
+                    let relative = path.strip_prefix(&manifest_dir).unwrap_or(path);
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        relative.display(),
+                        occurrence.line,
+                        line.trim()
+                    ));
+                }
+            }
+        });
+        for symbol in raw_symbols {
+            let count = definitions.get(symbol).copied().unwrap_or_default();
+            if count != 1 {
+                offenders.push(format!(
+                    "src/kernel/runtime_host.rs: expected exactly one private definition of {symbol}, found {count}"
+                ));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "turn-submit choke point referenced outside kernel/admission.rs:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct IdentifierOccurrence {
+        offset: usize,
+        line: usize,
+    }
+
+    fn identifier_occurrences(source: &str, identifier: &str) -> Vec<IdentifierOccurrence> {
+        source
+            .match_indices(identifier)
+            .filter_map(|(offset, _)| {
+                let before = source[..offset].chars().next_back();
+                let after = source[offset + identifier.len()..].chars().next();
+                let is_boundary = |character: Option<char>| {
+                    character
+                        .is_none_or(|character| character != '_' && !character.is_alphanumeric())
+                };
+                (is_boundary(before) && is_boundary(after)).then(|| IdentifierOccurrence {
+                    offset,
+                    line: source[..offset]
+                        .bytes()
+                        .filter(|byte| *byte == b'\n')
+                        .count()
+                        + 1,
+                })
+            })
+            .collect()
+    }
+
+    fn previous_identifier(source: &str, offset: usize) -> Option<&str> {
+        source[..offset]
+            .rsplit(|character: char| character != '_' && !character.is_alphanumeric())
+            .find(|token| !token.is_empty())
+    }
+
+    fn admission_fixture_contract(source: &str, fixture: &str) -> Result<(), String> {
+        let declaration = format!("fn {fixture}");
+        let declaration_offset = source
+            .find(&declaration)
+            .ok_or_else(|| "function declaration is missing".to_string())?;
+        if source[declaration_offset + declaration.len()..].contains(&declaration) {
+            return Err("function declaration is duplicated".to_string());
+        }
+        let declaration_line_start = source[..declaration_offset]
+            .rfind('\n')
+            .map_or(0, |offset| offset + 1);
+        let attribute_start = source[..declaration_line_start]
+            .rfind("\n\n")
+            .map_or(0, |offset| offset + 2);
+        let attributes = &source[attribute_start..declaration_line_start];
+        if !(attributes.contains("#[test]") || attributes.contains("#[tokio::test")) {
+            return Err("fixture is not declared as a test".to_string());
+        }
+        if attributes.contains("ignore") {
+            return Err(
+                "fixture is ignored and does not run in the required full suite".to_string(),
+            );
+        }
+        let body_start = source[declaration_offset..]
+            .find('{')
+            .map(|offset| declaration_offset + offset + 1)
+            .ok_or_else(|| "fixture body is missing".to_string())?;
+        let declaration_prefix = &source[declaration_line_start..declaration_offset];
+        let indent_len = declaration_prefix
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(declaration_prefix.len());
+        let indent = &declaration_prefix[..indent_len];
+        let body_end_marker = format!("\n{indent}}}");
+        let body_end = source[body_start..]
+            .find(&body_end_marker)
+            .map(|offset| body_start + offset)
+            .ok_or_else(|| "fixture body closing brace is missing".to_string())?;
+        let body = &source[body_start..body_end];
+        let calls_admission_assertion = body.lines().any(|line| {
+            line.split("//")
+                .next()
+                .unwrap_or_default()
+                .split(|character: char| character != '_' && !character.is_alphanumeric())
+                .any(|token| token.starts_with("assert_admission_"))
+        });
+        if !calls_admission_assertion {
+            return Err("fixture body no longer calls an admission assertion".to_string());
+        }
+        Ok(())
+    }
+
+    fn collect_rust_sources(root: &Path, visit: &mut impl FnMut(&Path)) {
+        let entries = std::fs::read_dir(root)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()));
+        for entry in entries {
+            let path = entry.expect("source directory entry").path();
+            if path.is_dir() {
+                collect_rust_sources(&path, visit);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                visit(&path);
+            }
+        }
     }
 }

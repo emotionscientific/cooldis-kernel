@@ -403,6 +403,7 @@ impl CooldisAppServer {
             witnessed_skill_packages.as_deref(),
             witnessed_skill_discovery.as_ref(),
             true,
+            crate::kernel::history::now_ms(),
         )
         .await?;
         if bound.bind_receipt.workspace != stored_workspace {
@@ -1887,6 +1888,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
 struct ThreadOperationCatalog {
     registry: Arc<crate::OperationRegistry>,
     tool_aliases: Vec<OperationToolAlias>,
+    capability_grant_expiries: Vec<crate::AgentManifestGrantExpiry>,
     /// The per-thread workspace VFS installed into catalog-loaded operations and
     /// virtual bash so filesystem surfaces do not drift into separate trees.
     workspace_vfs: Arc<crate::CooldisVfs>,
@@ -1910,19 +1912,22 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
             let ThreadOperationCatalog {
                 registry,
                 tool_aliases,
+                capability_grant_expiries,
                 workspace_vfs,
             } = catalog;
             let capability_grants = operation_registry_capability_grants(&registry).await;
             tool_router = Some(
                 AgentToolRouter::new(Arc::clone(&registry))
                     .with_tool_aliases(tool_aliases)
-                    .with_capability_grants(capability_grants.clone()),
+                    .with_capability_grants(capability_grants.clone())
+                    .with_capability_grant_expiries(capability_grant_expiries.clone()),
             );
             factory = factory.with_bash_tool(bash_config_with_skill_files(
                 VirtualBashRuntimeConfig::default()
                     .with_operation_registry(registry)
                     .with_workspace_vfs(workspace_vfs)
-                    .with_capability_grants(capability_grants),
+                    .with_capability_grants(capability_grants)
+                    .with_capability_grant_expiries(capability_grant_expiries),
                 &skill_files,
             ));
         } else if !skill_files.is_empty() {
@@ -2169,14 +2174,18 @@ impl CapsuleBindingRuntimeFactory {
         let registry = LocalOperationRegistry::new(&registry_root);
         let mut records = Vec::new();
         let mut tool_aliases = Vec::new();
+        let mut capability_grant_expiries = Vec::new();
         for binding in manifest_operation_bindings {
             let AgentManifestOperationBinding {
                 name,
                 artifact_hash,
+                effect_class: _,
                 grants,
+                grant_expiries,
                 operations,
                 direct_tools,
             } = binding;
+            capability_grant_expiries.extend(grant_expiries);
             tool_aliases.extend(
                 direct_tools
                     .into_iter()
@@ -2184,6 +2193,7 @@ impl CapsuleBindingRuntimeFactory {
                         tool_name: direct_tool.tool_name,
                         registered_name: name.clone(),
                         operation_name: direct_tool.operation,
+                        grant_expiries: direct_tool.grant_expiries,
                     }),
             );
             let mut record = registry
@@ -2227,6 +2237,7 @@ impl CapsuleBindingRuntimeFactory {
         Ok(Some(ThreadOperationCatalog {
             registry: catalog.operation_registry(),
             tool_aliases,
+            capability_grant_expiries,
             workspace_vfs: catalog.vfs(),
         }))
     }

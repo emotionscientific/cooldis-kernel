@@ -98,6 +98,35 @@ fn witnessed_contracts_are_schema_hash_addressed() {
 }
 
 #[test]
+fn argument_fingerprint_is_stable_across_object_key_order() {
+    let first = serde_json::from_str::<Value>(
+        r#"{"outer":{"b":2.50,"a":"\u96ea"},"z":-0.0,"text":"caf\u00e9"}"#,
+    )
+    .unwrap();
+    let second =
+        serde_json::from_str::<Value>(r#"{"text":"café","z":-0.0,"outer":{"a":"雪","b":2.5}}"#)
+            .unwrap();
+
+    let first = args_fingerprint("search", &first).unwrap();
+    let second = args_fingerprint("search", &second).unwrap();
+
+    assert_eq!(first, second);
+    assert!(first.starts_with("sha256:"));
+    assert_ne!(
+        first,
+        args_fingerprint(
+            "different-search",
+            &serde_json::json!({
+                "outer": {"a": "雪", "b": 2.5},
+                "z": -0.0,
+                "text": "café"
+            })
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn discovery_filter_restamps_the_hash() {
     let tools = vec![
         WitnessedToolContract::witness(&ToolDefinition::new(
@@ -337,6 +366,102 @@ async fn search_describe_and_call_resolve_the_witnessed_snapshot() {
         calls.lock().unwrap().as_slice(),
         [serde_json::json!({"message": "hello"})]
     );
+}
+
+#[tokio::test]
+async fn protocol_tool_import_grant_lapse_fails_before_the_live_caller() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut mounted = mounted_universe(
+        "mcp://arcade",
+        vec![contract(
+            "cooldis_mcp_echo",
+            serde_json::json!({"type": "object", "additionalProperties": true}),
+        )],
+        Arc::new(RecordingCaller {
+            calls: Arc::clone(&calls),
+            output: ToolUniverseCallOutput {
+                content: "should not run".to_string(),
+                is_error: false,
+            },
+        }),
+        None,
+    );
+    mounted.binding.grant_expiries = vec![crate::AgentManifestGrantExpiry {
+        capability: "net.localhost".to_string(),
+        expires_at: "1970-01-01T00:00:01Z".to_string(),
+    }];
+    let surface = ToolUniverseSearchSurface::new(vec![mounted]);
+
+    let err = surface
+        .invoke_tool_call_at(
+            AgentKernelToolCall {
+                call_id: "call_expired".to_string(),
+                tool_name: TOOL_CALL_TOOL.to_string(),
+                arguments: serde_json::json!({
+                    "tool": "cooldis_mcp_echo",
+                    "arguments": {"message": "hello"}
+                }),
+                turn_context: None,
+            },
+            1_001,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("missing capability grants: net.localhost")
+    );
+    assert!(err.to_string().contains("1970-01-01T00:00:01Z"));
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancellable_protocol_tool_call_honors_the_injected_expiry_time() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut mounted = mounted_universe(
+        "mcp://arcade",
+        vec![contract(
+            "cooldis_mcp_echo",
+            serde_json::json!({"type": "object", "additionalProperties": true}),
+        )],
+        Arc::new(RecordingCaller {
+            calls: Arc::clone(&calls),
+            output: ToolUniverseCallOutput {
+                content: "should not run".to_string(),
+                is_error: false,
+            },
+        }),
+        None,
+    );
+    mounted.binding.grant_expiries = vec![crate::AgentManifestGrantExpiry {
+        capability: "net.localhost".to_string(),
+        expires_at: "2050-01-01T00:00:00Z".to_string(),
+    }];
+    let surface = ToolUniverseSearchSurface::new(vec![mounted]);
+
+    let err = surface
+        .invoke_tool_call_cancellable_at(
+            AgentKernelToolCall {
+                call_id: "call_expired".to_string(),
+                tool_name: TOOL_CALL_TOOL.to_string(),
+                arguments: serde_json::json!({
+                    "tool": "cooldis_mcp_echo",
+                    "arguments": {"message": "hello"}
+                }),
+                turn_context: None,
+            },
+            crate::ToolInvocationCancellation::never(),
+            2_524_608_000_001,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("missing capability grants: net.localhost")
+    );
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -703,8 +828,10 @@ fn mounted_universe(
         binding: ToolUniverseBinding {
             import_id: server_ref.trim_start_matches("mcp://").to_string(),
             server_ref: server_ref.to_string(),
+            effect_class: EffectClass::AtMostOnce,
             include_tools: None,
             pin,
+            grant_expiries: Vec::new(),
             discovery: ToolUniverseDiscovery::witness(server_ref, tools, 1).unwrap(),
         },
         caller,

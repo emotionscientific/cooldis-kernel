@@ -51,6 +51,29 @@ where
         coupling_set: &BoundCouplingSet,
         appended: Vec<EventRecord>,
     ) -> CooldisResult<CouplingSchedulerCycleReceipt> {
+        self.run_batch_with_clock(coupling_set, appended, crate::kernel::history::now_ms)
+            .await
+    }
+
+    pub async fn run_batch_at(
+        &self,
+        coupling_set: &BoundCouplingSet,
+        appended: Vec<EventRecord>,
+        now_ms: i64,
+    ) -> CooldisResult<CouplingSchedulerCycleReceipt> {
+        self.run_batch_with_clock(coupling_set, appended, || now_ms)
+            .await
+    }
+
+    async fn run_batch_with_clock<F>(
+        &self,
+        coupling_set: &BoundCouplingSet,
+        appended: Vec<EventRecord>,
+        mut now_ms: F,
+    ) -> CooldisResult<CouplingSchedulerCycleReceipt>
+    where
+        F: FnMut() -> i64,
+    {
         let mut seen = BTreeSet::new();
         let mut queue = VecDeque::new();
         self.enqueue_matches(
@@ -78,16 +101,29 @@ where
                         Vec::new(),
                     )
                     .await?;
-                self.enqueue_matches(
-                    coupling_set,
-                    receipt.clone(),
-                    &mut seen,
-                    &mut queue,
-                    RootDepth::Inherited {
-                        root_event_id: queued.activation.root_event_id,
-                        depth: queued.activation.depth + 1,
-                    },
-                );
+                appended_events.extend(receipt);
+                runs.push(run);
+                continue;
+            }
+            if let Err(err) = crate::agent::manifest_bind::ensure_grant_expiries_live(
+                coupling_set
+                    .grant_expiries
+                    .get(&queued.coupling.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                now_ms(),
+            ) {
+                let (run, receipt) = self
+                    .append_lapsed_run(
+                        coupling_set,
+                        &queued,
+                        err.to_string(),
+                        CouplingSourceCut::default(),
+                        Vec::new(),
+                        &mut seen,
+                        &mut queue,
+                    )
+                    .await?;
                 appended_events.extend(receipt);
                 runs.push(run);
                 continue;
@@ -172,6 +208,30 @@ where
                 }
             };
 
+            if let Err(err) = crate::agent::manifest_bind::ensure_grant_expiries_live(
+                coupling_set
+                    .grant_expiries
+                    .get(&queued.coupling.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                now_ms(),
+            ) {
+                let (run, receipt) = self
+                    .append_lapsed_run(
+                        coupling_set,
+                        &queued,
+                        err.to_string(),
+                        source_cut,
+                        source_events,
+                        &mut seen,
+                        &mut queue,
+                    )
+                    .await?;
+                appended_events.extend(receipt);
+                runs.push(run);
+                continue;
+            }
+
             let request = CouplingInvocation {
                 activation: queued.activation.clone(),
                 coupling: queued.coupling.clone(),
@@ -234,6 +294,30 @@ where
                         depth: queued.activation.depth + 1,
                     },
                 );
+                appended_events.extend(receipt);
+                runs.push(run);
+                continue;
+            }
+
+            if let Err(err) = crate::agent::manifest_bind::ensure_grant_expiries_live(
+                coupling_set
+                    .grant_expiries
+                    .get(&queued.coupling.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                now_ms(),
+            ) {
+                let (run, receipt) = self
+                    .append_lapsed_run(
+                        coupling_set,
+                        &queued,
+                        err.to_string(),
+                        source_cut,
+                        source_events,
+                        &mut seen,
+                        &mut queue,
+                    )
+                    .await?;
                 appended_events.extend(receipt);
                 runs.push(run);
                 continue;
@@ -434,6 +518,39 @@ where
         }
         let count = per_thread_run_counts.get(&key).copied().unwrap_or_default();
         Ok((key, count))
+    }
+
+    async fn append_lapsed_run(
+        &self,
+        coupling_set: &BoundCouplingSet,
+        queued: &QueuedActivation,
+        reason: String,
+        source_cut: CouplingSourceCut,
+        source_events: Vec<EventRecord>,
+        seen: &mut BTreeSet<ActivationKey>,
+        queue: &mut VecDeque<QueuedActivation>,
+    ) -> CooldisResult<(CouplingRunReceipt, Vec<EventRecord>)> {
+        let (run, receipt) = self
+            .append_run_receipt(
+                queued,
+                CouplingRunStatus::Failed,
+                Some(reason),
+                source_cut,
+                source_events,
+                Vec::new(),
+            )
+            .await?;
+        self.enqueue_matches(
+            coupling_set,
+            receipt.clone(),
+            seen,
+            queue,
+            RootDepth::Inherited {
+                root_event_id: queued.activation.root_event_id,
+                depth: queued.activation.depth + 1,
+            },
+        );
+        Ok((run, receipt))
     }
 
     async fn append_sink_events(
@@ -836,7 +953,10 @@ mod tests {
     };
     use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[derive(Clone, Default)]
     struct RecordingExecutor {
@@ -909,6 +1029,195 @@ mod tests {
                 stream_id: thread_stream.to_string(),
                 max_sequence: 1,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn coupling_grant_lapse_fails_before_source_read_or_executor_invocation() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let appended = store
+            .append_events(
+                &EventStreamId::for_thread(&coordinates),
+                vec![NewEventRecord::witnessed(
+                    coordinates,
+                    EventKind::TurnCompleted,
+                    json!({"turn_id": "t1"}),
+                )],
+            )
+            .await
+            .unwrap();
+        let executor = RecordingExecutor::default();
+        let scheduler = CouplingScheduler::new(&store, &executor);
+        let coupling = test_coupling("expiring_gate", EventKind::TurnCompleted, "control");
+        let coupling_set = BoundCouplingSet::new_with_grant_expiries(
+            "snapshot-a",
+            vec![coupling],
+            BTreeMap::from([(
+                "expiring_gate".to_string(),
+                vec![crate::AgentManifestGrantExpiry {
+                    capability: "stream.read:thread".to_string(),
+                    expires_at: "1970-01-01T00:00:01Z".to_string(),
+                }],
+            )]),
+        );
+
+        let receipt = scheduler
+            .run_batch_at(&coupling_set, appended, 1_001)
+            .await
+            .unwrap();
+
+        assert!(executor.calls.lock().unwrap().is_empty());
+        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
+        let reason = receipt.runs[0].reason.as_deref().unwrap();
+        assert!(reason.contains("missing capability grants: stream.read:thread"));
+        assert!(reason.contains("1970-01-01T00:00:01Z"));
+        assert!(receipt.appended_events.iter().any(|event| {
+            event.kind == EventKind::CouplingRunFailed
+                && event.payload["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("1970-01-01T00:00:01Z"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn coupling_batch_rechecks_expiry_at_each_consumption_boundary() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let appended = store
+            .append_events(
+                &EventStreamId::for_thread(&coordinates),
+                vec![
+                    NewEventRecord::witnessed(
+                        coordinates.clone(),
+                        EventKind::TurnCompleted,
+                        json!({"turn_id": "t1"}),
+                    ),
+                    NewEventRecord::witnessed(
+                        coordinates.clone(),
+                        EventKind::TurnCompleted,
+                        json!({"turn_id": "t2"}),
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+        let executor = RecordingExecutor {
+            discharges: vec![CouplingDischarge {
+                event_id: None,
+                stream: "control".to_string(),
+                kind: EventKind::PlacementDecision,
+                payload: json!({"placement": "local"}),
+            }],
+            ..RecordingExecutor::default()
+        };
+        let scheduler = CouplingScheduler::new(&store, &executor);
+        let coupling_set = BoundCouplingSet::new_with_grant_expiries(
+            "snapshot-a",
+            vec![test_coupling(
+                "expiring_gate",
+                EventKind::TurnCompleted,
+                "control",
+            )],
+            BTreeMap::from([(
+                "expiring_gate".to_string(),
+                vec![crate::AgentManifestGrantExpiry {
+                    capability: "stream.write:control".to_string(),
+                    expires_at: "1970-01-01T00:00:01Z".to_string(),
+                }],
+            )]),
+        );
+        let reads = AtomicUsize::new(0);
+
+        let receipt = scheduler
+            .run_batch_with_clock(&coupling_set, appended, || {
+                if reads.fetch_add(1, Ordering::SeqCst) < 3 {
+                    1_000
+                } else {
+                    1_001
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(executor.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            receipt
+                .runs
+                .iter()
+                .map(|run| run.status)
+                .collect::<Vec<_>>(),
+            vec![CouplingRunStatus::Completed, CouplingRunStatus::Failed]
+        );
+        assert!(
+            receipt.runs[1]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("expired at 1970-01-01T00:00:01Z"))
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_failure_triggering_coupling_stops_at_the_depth_limit() {
+        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = InMemorySessionStore::default();
+        let appended = store
+            .append_events(
+                &EventStreamId::for_thread(&coordinates),
+                vec![NewEventRecord::witnessed(
+                    coordinates,
+                    EventKind::CouplingRunFailed,
+                    json!({"reason": "initial failure"}),
+                )],
+            )
+            .await
+            .unwrap();
+        let executor = RecordingExecutor::default();
+        let scheduler = CouplingScheduler::with_config(
+            &store,
+            &executor,
+            CouplingSchedulerConfig {
+                max_depth: 1,
+                ..CouplingSchedulerConfig::default()
+            },
+        );
+        let coupling_set = BoundCouplingSet::new_with_grant_expiries(
+            "snapshot-a",
+            vec![test_coupling(
+                "expired_failure_observer",
+                EventKind::CouplingRunFailed,
+                "control",
+            )],
+            BTreeMap::from([(
+                "expired_failure_observer".to_string(),
+                vec![crate::AgentManifestGrantExpiry {
+                    capability: "stream.read:control".to_string(),
+                    expires_at: "1970-01-01T00:00:01Z".to_string(),
+                }],
+            )]),
+        );
+
+        let receipt = scheduler
+            .run_batch_at(&coupling_set, appended, 1_001)
+            .await
+            .unwrap();
+
+        assert!(executor.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            receipt
+                .runs
+                .iter()
+                .map(|run| run.status)
+                .collect::<Vec<_>>(),
+            vec![
+                CouplingRunStatus::Failed,
+                CouplingRunStatus::Failed,
+                CouplingRunStatus::Skipped,
+            ]
+        );
+        assert_eq!(
+            receipt.runs[2].reason.as_deref(),
+            Some("depth_limit_exhausted")
         );
     }
 

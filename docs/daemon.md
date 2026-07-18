@@ -105,6 +105,18 @@ Common route keys:
 | `agent_ref` | Optional published manifest ref, for example `agent://karl-dev@latest`. The daemon requires an `agent://` ref and fails startup if the ref does not resolve in the effective `daemon.registries.agents` root. Publish missing refs with `cooldis agent publish`. |
 | `egress_retry` | Per-route delivery retry limits for projected assistant output. |
 
+Telegram route keys:
+
+| Key | Meaning |
+| --- | --- |
+| `listen` | Required webhook socket address. Use a reverse proxy for public TLS termination. |
+| `path` | Webhook request path. Defaults to `/telegram`. |
+| `secret_token` | Required when the route is enabled unless `secret_token_env` is set. Sent by Telegram in `X-Telegram-Bot-Api-Secret-Token`. |
+| `secret_token_env` | Environment variable containing the required webhook secret token. |
+| `bot_token` | Optional Bot API token for Telegram egress unless `bot_token_env` is set. |
+| `bot_token_env` | Environment variable containing the Bot API token. |
+| `api_base` | Optional Telegram-compatible Bot API base URL override. |
+
 `daemon.runtime.placement` is the default manifest-bind placement. It accepts
 `target = "local" | "remote" | "sandbox"`, optional `executor_ref`, and an
 optional executor-specific `config` table. An additive app-server bind override

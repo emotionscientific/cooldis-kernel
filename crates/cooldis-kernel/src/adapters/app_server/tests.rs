@@ -10,16 +10,16 @@ use super::threads::{
 use super::*;
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
-    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EventKind, EventOrigin, KERNEL_RUNTIME_KIND,
-    LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
-    MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
-    PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
-    PROCESS_WRITE_OPERATION, ProviderError, PublishSkillPackageRequest, PublishedOperationSource,
-    SCHEDULE_MANAGE_CAPABILITY, SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION,
-    THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION,
-    THREAD_WAIT_OPERATION, THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY,
-    THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL, TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig,
-    ThinkingEffort,
+    COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EffectClass, EventKind, EventOrigin,
+    KERNEL_RUNTIME_KIND, LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION,
+    MANDATE_REVOKE_OPERATION, MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION,
+    OPERATION_METADATA_RUNTIME_KIND, PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION,
+    PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION, ProviderError,
+    PublishSkillPackageRequest, PublishedOperationSource, SCHEDULE_MANAGE_CAPABILITY,
+    SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
+    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
+    THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL,
+    TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig, ThinkingEffort,
 };
 
 #[test]
@@ -1504,6 +1504,8 @@ async fn agent_query_methods_project_local_registry_records() {
     assert_eq!(local_agent["toolIds"].as_array().unwrap().len(), 0);
     assert_eq!(local_agent["aliases"][0]["alias"].as_str(), Some("latest"));
     assert_eq!(local_agent["aliases"][0]["version"].as_str(), Some("0.1.0"));
+    assert!(local_agent.get("authored_source").is_none());
+    assert!(local_agent.get("resolved_manifest").is_none());
 
     let read = app
         .dispatch_request(
@@ -1716,11 +1718,12 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
         Some("Publisher v2")
     );
     assert_eq!(publish["latestAlias"]["version"].as_str(), Some("0.1.1"));
-    assert!(
-        LocalAgentRegistry::new(&agent_registry_root)
-            .version_record_path("publisher", "0.1.1")
-            .unwrap()
-            .exists()
+    let published_record = LocalAgentRegistry::new(&agent_registry_root)
+        .load_version_record("publisher", "0.1.1")
+        .unwrap();
+    assert_eq!(
+        published_record.authored_source.as_deref(),
+        publish["source"].as_str()
     );
 
     let stale = app
@@ -2643,6 +2646,10 @@ allow = ["default_cwd"]
         Some(record.ref_uri.as_str())
     );
     assert_eq!(bind.payload["model_profile_id"].as_str(), Some("small"));
+    assert_eq!(
+        bind.payload["model_profile_origin"].as_str(),
+        Some("selected-at-start")
+    );
     assert_eq!(bind.payload["model_id"].as_str(), Some("fixture-small"));
 
     let large_start = app
@@ -2851,6 +2858,12 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
     let registry = LocalAgentRegistry::new(&agent_registry_root);
     let first = registry.load_ref("agent://cooldis/default@latest").unwrap();
     assert_eq!(first.version, "1.0.0");
+    assert!(
+        first
+            .authored_source
+            .as_deref()
+            .is_some_and(|source| source.contains("name = \"default\""))
+    );
     assert_eq!(default_agent_version_count(&agent_registry_root), 1);
 
     let _ = CooldisAppServer::new_local(config.clone()).await.unwrap();
@@ -7085,6 +7098,7 @@ type = "bash_tool"
 id = "profile"
 command = "profile"
 operation_ref = "op://analytics/profile@sha256:{}"
+effect_class = "idempotent"
 
 [runtime]
 default_cwd = "."
@@ -7148,6 +7162,22 @@ streaming = false
         bind.payload["operation_bindings"][0]["operations"],
         json!(["profile"])
     );
+    let request = crate::ToolCallRequestedPayload {
+        subject: crate::ToolCallSubject {
+            turn_id: "turn-effect-class".to_string(),
+            call_id: "call-effect-class".to_string(),
+        },
+        snapshot_id: bind.payload["manifest_hash"].as_str().unwrap().to_string(),
+        tool_name: crate::BASH_TOOL.to_string(),
+        arguments: json!({"command":"profile customer-1"}),
+        args_fingerprint: None,
+        holds: Vec::new(),
+    };
+    assert_eq!(
+        crate::adapters::agent_loop::effect_class_for_request(&events, &request).unwrap(),
+        EffectClass::Idempotent,
+        "the runtime lookup must read the class from the real top-level bind receipt shape"
+    );
 
     app.dispatch_request(
         &connection,
@@ -7191,7 +7221,9 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
             name: "analytics".to_string(),
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
+            effect_class: EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
+            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]

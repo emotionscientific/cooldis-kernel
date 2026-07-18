@@ -733,7 +733,8 @@ fn mandate_start_input_schema() -> Value {
                 "description": "Optional maximum number of occurrences."
             },
             "catch_up": catch_up_schema(),
-            "input_template": string_schema("Optional continuation turn input template. Rendered as a plain string; only {scheduled_for} is substituted.")
+            "input_template": string_schema("Optional continuation turn input template. Rendered as a plain string; only {scheduled_for} is substituted."),
+            "expires_at": string_schema("Optional RFC3339 UTC instant after which the mandate confers no continuation authority.")
         }),
         &["schedule"],
     )
