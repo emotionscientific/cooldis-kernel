@@ -78,9 +78,14 @@ if [[ "$MODE" == "staged" && "${COOLDIS_ALLOW_PRODUCT_TERMS:-0}" != "1" ]]; then
       [[ -n "$hit" ]] && product_hit_lines+=("$hit")
     done <<<"$product_hits"
 
-    while IFS= read -r merge_parent; do
+    while IFS= read -r merge_parent || [[ -n "$merge_parent" ]]; do
+      merge_parent="${merge_parent#"${merge_parent%%[![:space:]]*}"}"
+      merge_parent="${merge_parent%"${merge_parent##*[![:space:]]}"}"
       [[ -z "$merge_parent" ]] && continue
       ((${#product_hit_lines[@]} == 0)) && break
+      if ! git rev-parse --verify --quiet "${merge_parent}^{commit}" >/dev/null; then
+        die "invalid merge parent in MERGE_HEAD"
+      fi
       parent_hits="$(product_term_hits "$merge_parent")"
       common_product_hit_lines=()
 
