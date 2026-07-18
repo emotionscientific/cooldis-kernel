@@ -24,9 +24,9 @@ use crate::{
 use async_trait::async_trait;
 use cooldis_io_core::{
     AdmissionDecision, DeliveryReceipt, EgressAdapter, EgressEnvelope, EgressKind, IngressAck,
-    IngressContent, IngressEnvelope, IngressQueueStore, IngressSink, IngressState, IoError,
-    IoResult, IoTarget, IoTurnInput, KernelIoBridge, KernelIoReceipt, LeasedIngressEnvelope,
-    ProviderPolicy, ResolvedIoTarget, ThreadAddress,
+    IngressContent, IngressEnvelope, IngressQueueStore, IngressSink, IngressState, IoDelivery,
+    IoError, IoPrincipal, IoResult, IoTarget, IoTurnInput, KernelIoBridge, KernelIoReceipt,
+    LeasedIngressEnvelope, ProviderPolicy, ResolvedIoTarget, ThreadAddress,
 };
 use cooldis_io_telegram::{TelegramUpdate, TelegramWebhookAdapter};
 use cooldis_runtime_contracts::{
@@ -1063,6 +1063,10 @@ impl CooldisDaemonIoBridge {
         Arc::new(DirectRuntimeIngressSink::new(self.clone()))
     }
 
+    pub(crate) fn route_identity(&self) -> (&str, &str) {
+        (&self.tenant_id, &self.user_id)
+    }
+
     pub async fn register_egress_adapter(
         &self,
         protocol: impl Into<String>,
@@ -1658,6 +1662,11 @@ impl CooldisDaemonIoBridge {
             Some(target) => target,
             None => self.resolve_target(&envelope).await?,
         };
+        let attribution_error = envelope.require_attributed(&target).err().or_else(|| {
+            source_envelopes
+                .iter()
+                .find_map(|source_envelope| source_envelope.require_attributed(&target).err())
+        });
         if !ingress_message_ids.is_empty() {
             match self
                 .ingress_outcome(&target, source_envelopes, ingress_message_ids)
@@ -1694,9 +1703,12 @@ impl CooldisDaemonIoBridge {
                 .await?;
             ingress_event_ids.push(ingress_event.id);
         }
-        let decision = match decision_override {
-            Some(decision) => decision,
-            None => self.decide(&envelope, &target, &state).await?,
+        let decision = match attribution_error {
+            Some(err) => AdmissionDecision::reject(err.to_string()),
+            None => match decision_override {
+                Some(decision) => decision,
+                None => self.decide(&envelope, &target, &state).await?,
+            },
         };
         let ingress_source_stream = control_stream_id(&coordinates);
         let admission_event = self
@@ -1761,6 +1773,7 @@ impl CooldisDaemonIoBridge {
             )
             .with_thread_id(coordinates.thread_id.to_string()),
         );
+        envelope.require_attributed(&target)?;
         let decision = AdmissionDecision::ObserveOnly {
             reason: "clock tick admitted as timer.fired".to_string(),
         };
@@ -3701,7 +3714,10 @@ impl CooldisDaemonIoBridge {
         let route_id = route_id_for_ingress(envelope);
         let mut payload = serde_json::to_value(IoIngressReceivedPayload {
             route_id: Some(route_id.clone()),
-            dedupe_key: envelope.dedupe_key.as_ref().map(|key| key.stable_key()),
+            dedupe_key: envelope
+                .effective_dedupe_key()
+                .as_ref()
+                .map(|key| key.stable_key()),
             external_conversation_id: Some(envelope.conversation.external_conversation_id.clone()),
             external_actor_id: envelope
                 .actor
@@ -4995,10 +5011,17 @@ impl KernelIoBridge for CooldisDaemonIoBridge {
         target: &ResolvedIoTarget,
         decision: &AdmissionDecision,
     ) -> IoResult<KernelIoReceipt> {
-        let (receipt, _) = self
-            .apply_with_ingress_outcomes(envelope, target, decision, &[], None, &[], None, None)
-            .await?;
-        Ok(receipt)
+        let source_envelopes = [envelope.clone()];
+        self.submit_envelope_with_sources_at_target(
+            envelope.clone(),
+            &source_envelopes,
+            &[],
+            false,
+            None,
+            Some(target.clone()),
+            Some(decision.clone()),
+        )
+        .await
     }
 }
 
@@ -5016,6 +5039,7 @@ impl DirectRuntimeIngressSink {
 #[async_trait]
 impl IngressSink for DirectRuntimeIngressSink {
     async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        envelope.require_witnessed()?;
         let ack = IngressAck::accepted(&envelope);
         self.bridge.submit_envelope(envelope).await?;
         Ok(ack)
@@ -5030,6 +5054,7 @@ pub struct RouteIngressSink {
     threading: Option<String>,
     agent_ref: Option<String>,
     coalesce_bursts: Option<CooldisCoalesceBurstsConfig>,
+    principal: Option<IoPrincipal>,
 }
 
 impl RouteIngressSink {
@@ -5042,13 +5067,32 @@ impl RouteIngressSink {
             threading: route.threading.clone(),
             agent_ref: route.agent_ref.clone(),
             coalesce_bursts: route.coalesce_bursts,
+            principal: None,
         }
+    }
+
+    pub fn with_route_identity(
+        inner: Arc<dyn IngressSink>,
+        route: &CooldisIoRouteConfig,
+        tenant_id: impl Into<String>,
+        principal_id: impl Into<String>,
+    ) -> Self {
+        let mut sink = Self::new(inner, route);
+        sink.principal = Some(IoPrincipal::new(
+            tenant_id,
+            principal_id,
+            format!("route:{}", route.id),
+        ));
+        sink
     }
 }
 
 #[async_trait]
 impl IngressSink for RouteIngressSink {
     async fn submit(&self, mut envelope: IngressEnvelope) -> IoResult<IngressAck> {
+        if envelope.principal.is_none() {
+            envelope.principal = self.principal.clone();
+        }
         envelope
             .metadata
             .insert("cooldis_route_id".to_string(), self.route_id.clone());
@@ -5090,6 +5134,13 @@ impl IngressSink for RouteIngressSink {
                 "cooldis_coalesce_max_batch".to_string(),
                 coalesce.max_batch.to_string(),
             );
+        }
+        envelope.require_witnessed()?;
+        if envelope.principal.is_none() {
+            return Err(IoError::InvalidEnvelope(format!(
+                "principal is required: route {:?} has no identity binding",
+                self.route_id
+            )));
         }
         self.inner.submit(envelope).await
     }
@@ -5158,7 +5209,12 @@ impl CooldisDaemonQueueWorker {
         let mut held_until_ms: Option<u64> = None;
         let mut coalesce_groups: BTreeMap<CoalesceGroupKey, Vec<LeasedIngressEnvelope>> =
             BTreeMap::new();
-        for message in leased {
+        for mut message in leased {
+            self.prepare_leased_envelope(&mut message.envelope);
+            if message.envelope.require_witnessed().is_err() {
+                self.submit_leased_message(message).await?;
+                continue;
+            }
             match coalesce_policy_for_envelope(&message.envelope) {
                 Ok(Some(_)) => {
                     coalesce_groups
@@ -5189,6 +5245,25 @@ impl CooldisDaemonQueueWorker {
             count,
             held_until_ms,
         })
+    }
+
+    fn prepare_leased_envelope(&self, envelope: &mut IngressEnvelope) {
+        let legacy = envelope.delivery.is_none();
+        if legacy && let Some(dedupe_key) = envelope.dedupe_key.as_ref() {
+            envelope.delivery = Some(IoDelivery::new(dedupe_key.key.clone()));
+        }
+        if envelope.principal.is_none()
+            && let Some(route_id) = envelope
+                .metadata
+                .get("cooldis_route_id")
+                .filter(|route_id| !route_id.is_empty())
+        {
+            envelope.principal = Some(IoPrincipal::new(
+                self.bridge.tenant_id.clone(),
+                self.bridge.user_id.clone(),
+                format!("route:{route_id}"),
+            ));
+        }
     }
 
     async fn submit_leased_message(&self, message: LeasedIngressEnvelope) -> IoResult<()> {
@@ -6348,8 +6423,8 @@ fn ingress_ownership_keys(
 ) -> IoResult<Vec<IngressOwnershipKey>> {
     let mut keys = BTreeMap::<String, String>::new();
     for envelope in source_envelopes {
-        let Some(dedupe_key) = envelope.dedupe_key.as_ref() else {
-            // Queue envelopes without a protocol dedupe key retain the ADR
+        let Some(dedupe_key) = envelope.effective_dedupe_key() else {
+            // Queue envelopes without an effective dedupe key retain the ADR
             // 0003 envelope-id fold. There is no dedupe row to own or age.
             return Ok(Vec::new());
         };
@@ -6644,7 +6719,10 @@ fn ingress_received_control_record(
         .map_err(|err| IoError::Bridge(format!("ingress envelope codec failed: {err}")))?;
     let payload = IoIngressReceivedPayload {
         route_id: Some(route_id_for_envelope(envelope)),
-        dedupe_key: envelope.dedupe_key.as_ref().map(|key| key.stable_key()),
+        dedupe_key: envelope
+            .effective_dedupe_key()
+            .as_ref()
+            .map(|key| key.stable_key()),
         external_conversation_id: Some(envelope.conversation.external_conversation_id.clone()),
         external_actor_id: envelope
             .actor
@@ -6753,9 +6831,13 @@ fn is_clock_tick_envelope(envelope: &IngressEnvelope) -> bool {
 }
 
 fn clock_tick_coordinates(envelope: &IngressEnvelope) -> IoResult<ThreadCoordinates> {
+    let principal = envelope
+        .principal
+        .as_ref()
+        .ok_or_else(|| IoError::InvalidEnvelope("principal is required".to_string()))?;
     Ok(ThreadCoordinates {
-        tenant_id: required_metadata(envelope, "cooldis_tenant_id")?.to_string(),
-        user_id: required_metadata(envelope, "cooldis_user_id")?.to_string(),
+        tenant_id: principal.tenant_id.clone(),
+        user_id: principal.principal_id.clone(),
         session_id: required_metadata(envelope, "cooldis_session_id")?.to_string(),
         thread_id: ThreadId::parse_str(required_metadata(envelope, "cooldis_thread_id")?)
             .map_err(|err| IoError::Bridge(format!("invalid clock.tick thread id: {err}")))?,

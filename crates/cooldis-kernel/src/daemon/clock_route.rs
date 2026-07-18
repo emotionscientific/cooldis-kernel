@@ -6,7 +6,7 @@ use crate::{
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use cooldis_io_core::{
     ConversationKind, IngressContent, IngressEnvelope, IngressSink, IoConversation, IoDedupeKey,
-    IoSource,
+    IoDelivery, IoPrincipal, IoSource,
 };
 use croner::Cron;
 use std::cmp::{Ordering, Reverse};
@@ -145,10 +145,8 @@ impl ScheduledTick {
             catch_up: self.catch_up,
         };
         let source = IoSource::new(CLOCK_TICK_ROUTE_KIND, route_id);
-        let dedupe_key = IoDedupeKey::for_source(
-            &source,
-            format!("{}:{}", self.mandate_event_id, self.occurrence_index),
-        );
+        let delivery_id = format!("{}:{}", self.mandate_event_id, self.occurrence_index);
+        let dedupe_key = IoDedupeKey::for_source(&source, delivery_id.clone());
         Ok(IngressEnvelope::new(
             source,
             IoConversation::new(
@@ -162,9 +160,13 @@ impl ScheduledTick {
             now.timestamp_millis().max(0) as u64,
         )
         .with_dedupe_key(dedupe_key)
+        .with_delivery(IoDelivery::new(delivery_id))
+        .with_principal(IoPrincipal::new(
+            self.coordinates.tenant_id.clone(),
+            self.coordinates.user_id.clone(),
+            format!("mandate:{}", self.mandate_event_id),
+        ))
         .with_metadata("cooldis_route_id", route_id.to_string())
-        .with_metadata("cooldis_tenant_id", self.coordinates.tenant_id.clone())
-        .with_metadata("cooldis_user_id", self.coordinates.user_id.clone())
         .with_metadata("cooldis_session_id", self.coordinates.session_id.clone())
         .with_metadata("cooldis_thread_id", self.coordinates.thread_id.to_string())
         .with_metadata(
@@ -668,8 +670,9 @@ mod tests {
             .await
             .unwrap();
         let coordinates = coordinates();
+        let mandate_event_id = EventRecordId::from_uuid(uuid::Uuid::from_u128(1));
         let mandate = crate::NewEventRecord {
-            id: EventRecordId::new(),
+            id: mandate_event_id,
             coordinates: coordinates.clone(),
             created_at_ms: dt("2026-01-01T00:00:00Z").timestamp_millis(),
             kind: EventKind::MandateStarted,
@@ -710,6 +713,32 @@ mod tests {
         let captured = envelopes.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].source.protocol, CLOCK_TICK_ROUTE_KIND);
+        let delivery_id = "00000000-0000-0000-0000-000000000001:0";
+        assert_eq!(
+            captured[0]
+                .effective_dedupe_key()
+                .as_ref()
+                .map(IoDedupeKey::stable_key),
+            Some("clock.tick:clock-main:00000000-0000-0000-0000-000000000001:0".to_string()),
+            "the adapter-envelope migration must preserve the literal pre-contract key"
+        );
+        assert_eq!(
+            captured[0]
+                .delivery
+                .as_ref()
+                .map(|delivery| delivery.delivery_id.as_str()),
+            Some(delivery_id)
+        );
+        assert_eq!(
+            captured[0].principal,
+            Some(cooldis_io_core::IoPrincipal::new(
+                coordinates.tenant_id.clone(),
+                coordinates.user_id.clone(),
+                format!("mandate:{mandate_event_id}"),
+            ))
+        );
+        assert!(!captured[0].metadata.contains_key("cooldis_tenant_id"));
+        assert!(!captured[0].metadata.contains_key("cooldis_user_id"));
         assert_eq!(
             captured[0]
                 .metadata

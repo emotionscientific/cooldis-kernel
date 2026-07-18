@@ -50,12 +50,12 @@ use crate::{
 use chrono::{DateTime, TimeZone, Utc};
 use cooldis_io_core::{
     ConversationKind, DeliveryReceipt, IngressContent, IoActor, IoConversation, IoDedupeKey,
-    IoProtocolAdapter, IoProtocolCapabilities, IoSource, IoTarget,
+    IoDelivery, IoPrincipal, IoProtocolAdapter, IoProtocolCapabilities, IoSource, IoTarget,
 };
 use cooldis_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig, sqlite_dsn};
 use cooldis_runtime_contracts::{
-    DispatchId, HANDLE_OUTCOME_CONTENT_KIND, HandleTerminalEnvelope, HandleTerminalOutcome,
-    RuntimeUsage,
+    DispatchId, HANDLE_OUTCOME_CONTENT_KIND, HandleId, HandleTerminalEnvelope,
+    HandleTerminalOutcome, RuntimeUsage,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -335,12 +335,14 @@ impl IngressQueueStore for ScriptedIngressQueue {
 }
 
 fn test_envelope(text: &str) -> IngressEnvelope {
-    IngressEnvelope::new(
+    let mut envelope = IngressEnvelope::new(
         IoSource::new("telegram.bot", "main"),
         IoConversation::new("telegram:chat:123", ConversationKind::Direct),
         IngressContent::text(text),
         now_ms(),
-    )
+    );
+    envelope.delivery = Some(IoDelivery::new(envelope.id.clone()));
+    envelope
 }
 
 fn telegram_queue_envelope(text: &str) -> IngressEnvelope {
@@ -360,6 +362,7 @@ fn telegram_queue_envelope_with_update(text: &str, update_id: &str) -> IngressEn
         &source,
         format!("update:{update_id}"),
     ))
+    .with_delivery(IoDelivery::new(format!("update:{update_id}")))
     .with_metadata("cooldis_route_id", "main")
     .with_metadata("cooldis_route_policy", "queue_per_conversation")
     .with_metadata("telegram_message_id", "555")
@@ -381,7 +384,39 @@ fn event_envelope(kind: &str) -> IngressEnvelope {
     )
     .with_actor(IoActor::new("external:user:42"))
     .with_dedupe_key(IoDedupeKey::for_source(&source, format!("event:{kind}")))
+    .with_delivery(IoDelivery::new(format!("event:{kind}")))
     .with_metadata("external_message_id", "556")
+}
+
+fn with_bridge_principal(
+    bridge: &CooldisDaemonIoBridge,
+    envelope: IngressEnvelope,
+) -> IngressEnvelope {
+    envelope.with_principal(IoPrincipal::new(
+        bridge.tenant_id.clone(),
+        bridge.user_id.clone(),
+        "test:daemon-io",
+    ))
+}
+
+fn route_sink_for_bridge(
+    inner: Arc<dyn IngressSink>,
+    route: &CooldisIoRouteConfig,
+    bridge: &CooldisDaemonIoBridge,
+) -> RouteIngressSink {
+    RouteIngressSink::with_route_identity(
+        inner,
+        route,
+        bridge.tenant_id.clone(),
+        bridge.user_id.clone(),
+    )
+}
+
+fn capture_route_sink(
+    inner: Arc<dyn IngressSink>,
+    route: &CooldisIoRouteConfig,
+) -> RouteIngressSink {
+    RouteIngressSink::with_route_identity(inner, route, "test-tenant", "test-user")
 }
 
 fn coalesce_envelope(
@@ -574,7 +609,13 @@ async fn remote_queue_redelivery_enters_child_ingress_once() {
         IngressContent::text("deliver once"),
         now_ms(),
     )
-    .with_dedupe_key(IoDedupeKey::for_source(&source, "dispatch-redelivery"));
+    .with_dedupe_key(IoDedupeKey::for_source(&source, "dispatch-redelivery"))
+    .with_delivery(IoDelivery::new("dispatch-redelivery"))
+    .with_principal(IoPrincipal::new(
+        child_coordinates.tenant_id.clone(),
+        child_coordinates.user_id.clone(),
+        "remote:dispatch-redelivery",
+    ));
     envelope.id = "remote-ingress-redelivery".to_string();
     let mut target = ResolvedIoTarget::new(
         ThreadAddress::new(
@@ -1614,7 +1655,10 @@ async fn submit_and_wait_for_assistant_event(
     bridge: &CooldisDaemonIoBridge,
     text: &str,
 ) -> (String, String) {
-    let receipt = bridge.submit_envelope(test_envelope(text)).await.unwrap();
+    let receipt = bridge
+        .submit_envelope(with_bridge_principal(bridge, test_envelope(text)))
+        .await
+        .unwrap();
     let thread_id = receipt.thread_id.expect("receipt should include thread id");
     let expected = format!("local:{text}");
     wait_for_assistant_text(bridge, &thread_id, &expected).await;
@@ -2665,7 +2709,10 @@ async fn direct_sink_submits_ingress_to_runtime_and_emits_egress() {
 
     let ack = bridge
         .direct_sink()
-        .submit(test_envelope("hello direct"))
+        .submit(with_bridge_principal(
+            &bridge,
+            test_envelope("hello direct"),
+        ))
         .await
         .unwrap();
 
@@ -2708,7 +2755,7 @@ async fn route_agent_ref_binds_manifest_prompt_metadata_and_receipts() {
     let bridge = CooldisDaemonIoBridge::from_app_server(&server);
     let mut route = route_with_egress(Vec::new(), None);
     route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
-    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+    let sink = route_sink_for_bridge(bridge.direct_sink(), &route, &bridge);
 
     sink.submit(test_envelope("hello route")).await.unwrap();
 
@@ -2788,7 +2835,7 @@ async fn route_agent_identity_survives_true_runtime_restart() {
     .await;
     let first_bridge = CooldisDaemonIoBridge::from_app_server(&first_server);
     register_route_state(&first_bridge, &route, &db).await;
-    RouteIngressSink::new(first_bridge.direct_sink(), &route)
+    route_sink_for_bridge(first_bridge.direct_sink(), &route, &first_bridge)
         .submit(test_envelope("before restart"))
         .await
         .unwrap();
@@ -2813,7 +2860,7 @@ async fn route_agent_identity_survives_true_runtime_restart() {
         Err(CooldisError::ThreadNotFound(_))
     ));
 
-    RouteIngressSink::new(restarted.direct_sink(), &route)
+    route_sink_for_bridge(restarted.direct_sink(), &route, &restarted)
         .submit(test_envelope("after restart"))
         .await
         .unwrap();
@@ -2869,7 +2916,7 @@ async fn fork_child_identity_survives_true_runtime_restart() {
     .await;
     let first_bridge = CooldisDaemonIoBridge::from_app_server(&first_server);
     register_route_state(&first_bridge, &route, &db).await;
-    RouteIngressSink::new(first_bridge.direct_sink(), &route)
+    route_sink_for_bridge(first_bridge.direct_sink(), &route, &first_bridge)
         .submit(test_envelope("before fork restart"))
         .await
         .unwrap();
@@ -2896,7 +2943,7 @@ async fn fork_child_identity_survives_true_runtime_restart() {
     .await;
     let restarted = CooldisDaemonIoBridge::from_app_server(&restarted_server);
     register_route_state(&restarted, &route, &db).await;
-    RouteIngressSink::new(restarted.direct_sink(), &route)
+    route_sink_for_bridge(restarted.direct_sink(), &route, &restarted)
         .submit(test_envelope("after fork restart"))
         .await
         .unwrap();
@@ -2976,7 +3023,7 @@ async fn route_without_agent_ref_stays_unbound() {
     .await;
     let bridge = CooldisDaemonIoBridge::from_app_server(&server);
     let route = route_with_egress(Vec::new(), None);
-    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+    let sink = route_sink_for_bridge(bridge.direct_sink(), &route, &bridge);
 
     sink.submit(test_envelope("hello unbound")).await.unwrap();
 
@@ -3082,7 +3129,7 @@ async fn fork_on_new_dm_child_inherits_route_agent_binding() {
     let mut route = route_with_egress(Vec::new(), None);
     route.policy = Some("fork_on_new_dm".to_string());
     route.agent_ref = Some("agent://daemon-route-runner@latest".to_string());
-    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+    let sink = route_sink_for_bridge(bridge.direct_sink(), &route, &bridge);
 
     sink.submit(test_envelope("fork route")).await.unwrap();
 
@@ -3165,7 +3212,10 @@ async fn racing_fork_applies_create_one_child_behind_one_parent_claim() {
     let egress_db = fixture_root.join("io.sqlite");
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     bridge
-        .submit_envelope(test_envelope("seed the shared fork parent"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            test_envelope("seed the shared fork parent"),
+        ))
         .await
         .unwrap();
     let parent_coordinates = only_thread_coordinates(&bridge).await;
@@ -3177,8 +3227,11 @@ async fn racing_fork_applies_create_one_child_behind_one_parent_claim() {
         &egress_db,
     )
     .await;
-    let envelope = telegram_queue_envelope("fork once under contention")
-        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let envelope = with_bridge_principal(
+        &bridge,
+        telegram_queue_envelope("fork once under contention")
+            .with_metadata("cooldis_route_policy", "fork_on_new_dm"),
+    );
 
     let (first, second) = tokio::join!(
         bridge.submit_queued_envelope(envelope.clone(), 1),
@@ -3387,7 +3440,10 @@ async fn coalesced_fork_first_attempt_loser_runs_no_recovery_effects() {
     let egress_db = fixture_root.join("io.sqlite");
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     bridge
-        .submit_envelope(test_envelope("seed the coalesced fork parent"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            test_envelope("seed the coalesced fork parent"),
+        ))
         .await
         .unwrap();
     let parent_coordinates = only_thread_coordinates(&bridge).await;
@@ -3398,8 +3454,11 @@ async fn coalesced_fork_first_attempt_loser_runs_no_recovery_effects() {
         &egress_db,
     )
     .await;
-    let envelope = telegram_queue_envelope("coalesced fork contention")
-        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let envelope = with_bridge_principal(
+        &bridge,
+        telegram_queue_envelope("coalesced fork contention")
+            .with_metadata("cooldis_route_policy", "fork_on_new_dm"),
+    );
     bridge
         .pause_after_ingress_claim
         .store(true, Ordering::SeqCst);
@@ -3688,9 +3747,9 @@ async fn settled_legacy_fork_claim_does_not_poison_new_scope_envelopes() {
     let session_store_path = server.session_store_path().to_path_buf();
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     bridge
-        .submit_envelope(telegram_queue_envelope_with_update(
-            "seed legacy claim scope",
-            "6100",
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope_with_update("seed legacy claim scope", "6100"),
         ))
         .await
         .unwrap();
@@ -3744,9 +3803,9 @@ async fn unsettled_legacy_fork_claim_errors_only_its_own_envelope() {
     let session_store_path = server.session_store_path().to_path_buf();
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     bridge
-        .submit_envelope(telegram_queue_envelope_with_update(
-            "seed unsettled legacy scope",
-            "6200",
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope_with_update("seed unsettled legacy scope", "6200"),
         ))
         .await
         .unwrap();
@@ -4267,7 +4326,7 @@ async fn interrupt_cancel_wait_does_not_hold_active_turn_state_lock() {
     let fixture_root = test_root("interrupt-active-turn-lock");
     let (bridge, runtime) = bridge_with_unresponsive_runtime(&fixture_root).await;
     bridge
-        .submit_envelope(test_envelope("active turn"))
+        .submit_envelope(with_bridge_principal(&bridge, test_envelope("active turn")))
         .await
         .unwrap();
     runtime.running.notified().await;
@@ -4278,10 +4337,11 @@ async fn interrupt_cancel_wait_does_not_hold_active_turn_state_lock() {
     let interrupt_bridge = bridge.clone();
     let interrupt = tokio::spawn(async move {
         interrupt_bridge
-            .submit_envelope(
+            .submit_envelope(with_bridge_principal(
+                &interrupt_bridge,
                 test_envelope("replacement")
                     .with_metadata("cooldis_route_policy", "interrupt_on_new_dm"),
-            )
+            ))
             .await
     });
 
@@ -4357,7 +4417,10 @@ fn ingress_outcome_fold_rejects_conflicting_claims() {
 async fn lone_effect_free_claims_fail_closed_during_recovery() {
     let root = test_root("effect-free-claim-corruption");
     let (server, bridge, _rx) = test_bridge_at_root(&root).await;
-    let envelope = observe_only_envelope("seed effect-free recovery target");
+    let envelope = with_bridge_principal(
+        &bridge,
+        observe_only_envelope("seed effect-free recovery target"),
+    );
     bridge.submit_envelope(envelope.clone()).await.unwrap();
     let target = bridge.resolve_target(&envelope).await.unwrap();
     let coordinates = only_thread_coordinates(&bridge).await;
@@ -4415,7 +4478,10 @@ async fn non_fork_claim_owner_survives_fork_rebind_before_redelivery() {
     let session_store_path = server.session_store_path().to_path_buf();
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     bridge
-        .submit_envelope(test_envelope("seed the owning parent"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            test_envelope("seed the owning parent"),
+        ))
         .await
         .unwrap();
     let parent = only_thread_coordinates(&bridge).await;
@@ -4467,8 +4533,11 @@ async fn non_fork_claim_owner_survives_fork_rebind_before_redelivery() {
 
     let (_server, restarted, _rx) = restarted_bridge_at_root(&fixture_root).await;
     register_route_state(&restarted, &route_with_egress(Vec::new(), None), &egress_db).await;
-    let fork = telegram_queue_envelope_with_update("rebind to a child", "40102")
-        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let fork = with_bridge_principal(
+        &restarted,
+        telegram_queue_envelope_with_update("rebind to a child", "40102")
+            .with_metadata("cooldis_route_policy", "fork_on_new_dm"),
+    );
     restarted.submit_queued_envelope(fork, 1).await.unwrap();
     let child = only_thread_coordinates(&restarted).await;
     assert_ne!(child.thread_id, parent.thread_id);
@@ -4518,7 +4587,10 @@ async fn ownership_tombstone_is_superseded_after_rebind_before_any_claim() {
     let session_store_path = server.session_store_path().to_path_buf();
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
     bridge
-        .submit_envelope(test_envelope("seed the tombstone parent"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            test_envelope("seed the tombstone parent"),
+        ))
         .await
         .unwrap();
     let parent = only_thread_coordinates(&bridge).await;
@@ -4577,8 +4649,11 @@ async fn ownership_tombstone_is_superseded_after_rebind_before_any_claim() {
 
     let (_server, restarted, _rx) = restarted_bridge_at_root(&fixture_root).await;
     register_route_state(&restarted, &route_with_egress(Vec::new(), None), &egress_db).await;
-    let fork = telegram_queue_envelope_with_update("move past the tombstone", "40104")
-        .with_metadata("cooldis_route_policy", "fork_on_new_dm");
+    let fork = with_bridge_principal(
+        &restarted,
+        telegram_queue_envelope_with_update("move past the tombstone", "40104")
+            .with_metadata("cooldis_route_policy", "fork_on_new_dm"),
+    );
     restarted.submit_queued_envelope(fork, 1).await.unwrap();
     let child = only_thread_coordinates(&restarted).await;
     assert_ne!(child.thread_id, parent.thread_id);
@@ -5218,6 +5293,268 @@ async fn observe_settled_before_complete_redelivery_appends_nothing() {
     let _ = std::fs::remove_dir_all(fixture_root);
 }
 
+#[tokio::test]
+async fn direct_and_route_sinks_reject_unwitnessed_envelopes_synchronously() {
+    let (bridge, _rx, _) = test_bridge().await;
+
+    let direct = DirectRuntimeIngressSink::new(bridge.clone());
+    let err = direct
+        .submit(IngressEnvelope::new(
+            IoSource::new("external.test", "direct"),
+            IoConversation::new("conversation", ConversationKind::Direct),
+            IngressContent::text("missing delivery"),
+            now_ms(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        IoError::InvalidEnvelope(message) if message == "delivery is required"
+    ));
+
+    let route = route_with_egress(Vec::new(), None);
+    let routed = RouteIngressSink::with_route_identity(
+        Arc::new(CaptureSink {
+            envelopes: Arc::new(TokioMutex::new(Vec::new())),
+        }),
+        &route,
+        bridge.tenant_id.clone(),
+        bridge.user_id.clone(),
+    );
+    let err = routed
+        .submit(IngressEnvelope::new(
+            IoSource::new("external.test", "main"),
+            IoConversation::new("conversation", ConversationKind::Direct),
+            IngressContent::text("missing delivery"),
+            now_ms(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        IoError::InvalidEnvelope(message) if message == "delivery is required"
+    ));
+}
+
+#[tokio::test]
+async fn route_sink_without_identity_binding_fails_closed() {
+    let captured = Arc::new(TokioMutex::new(Vec::new()));
+    let route = route_with_egress(Vec::new(), None);
+    let sink = RouteIngressSink::new(
+        Arc::new(CaptureSink {
+            envelopes: captured.clone(),
+        }),
+        &route,
+    );
+
+    let err = sink
+        .submit(telegram_queue_envelope("unbound route"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        IoError::InvalidEnvelope(message)
+            if message == "principal is required: route \"main\" has no identity binding"
+    ));
+    assert!(captured.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn unattributed_queued_ingress_is_witnessed_rejected_and_completed() {
+    let fixture_root = test_root("queue-unattributed-reject");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let mut envelope = telegram_queue_envelope_with_update("unattributed", "4701");
+    envelope.metadata.remove("cooldis_route_id");
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-unattributed",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-unattributed", 30);
+
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control = control_events_for(&session_store_path, &coordinates).await;
+    let admission = control
+        .iter()
+        .find(|event| event.kind == EventKind::AdmissionDecided)
+        .unwrap();
+    assert_eq!(admission.payload["decision"], "reject");
+    let claim = control
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .unwrap();
+    assert_eq!(claim.payload["intent"]["outcome"], "reject");
+    assert!(claim.payload.to_string().contains("principal is required"));
+    assert!(control.iter().any(|event| {
+        event.kind == EventKind::IoIngressSettled
+            && event.payload["ingress_envelope_ids"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == &ingress_id))
+    }));
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn principal_tenant_mismatch_is_witnessed_rejected_and_completed() {
+    let fixture_root = test_root("queue-tenant-mismatch-reject");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let envelope = telegram_queue_envelope_with_update("mismatch", "4702").with_principal(
+        IoPrincipal::new("other-tenant", bridge.user_id.clone(), "route:main"),
+    );
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-mismatch",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let worker =
+        CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-mismatch", 30);
+
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control = control_events_for(&session_store_path, &coordinates).await;
+    let claim = control
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressClaimed)
+        .unwrap();
+    assert_eq!(claim.payload["intent"]["outcome"], "reject");
+    assert!(
+        claim
+            .payload
+            .to_string()
+            .contains("does not match resolved target tenant")
+    );
+    assert!(
+        control
+            .iter()
+            .any(|event| event.kind == EventKind::IoIngressSettled)
+    );
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn legacy_leased_delivery_derivation_is_stable_across_lost_ack_redelivery() {
+    let fixture_root = test_root("queue-legacy-delivery-redelivery");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let session_store_path = server.session_store_path().to_path_buf();
+    let mut envelope = with_bridge_principal(
+        &bridge,
+        telegram_queue_envelope_with_update("legacy", "4703"),
+    );
+    envelope.delivery = None;
+    let ingress_id = envelope.id.clone();
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-legacy",
+        envelope,
+        ["lost queue completion acknowledgement"],
+    ));
+    let worker = CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-legacy", 0);
+
+    let first = worker.drain_once().await.unwrap_err();
+    assert!(
+        first
+            .to_string()
+            .contains("lost queue completion acknowledgement")
+    );
+    assert_eq!(worker.drain_once().await.unwrap(), 1);
+    assert!(queue.completed().await);
+    assert_eq!(queue.retry_calls().await, 0);
+
+    let coordinates = only_thread_coordinates(&bridge).await;
+    let control = control_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        control
+            .iter()
+            .filter(|event| event.kind == EventKind::IoIngressReceived)
+            .count(),
+        1
+    );
+    assert!(matches!(
+        ingress_outcome_fold(&control, &[ingress_id]).unwrap(),
+        IngressOutcomeState::Settled { .. }
+    ));
+    let received = control
+        .iter()
+        .find(|event| event.kind == EventKind::IoIngressReceived)
+        .unwrap();
+    assert_eq!(
+        received.payload["dedupe_key"],
+        "telegram.bot:main:update:4703"
+    );
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn unresolved_handle_target_remains_retryable_and_is_not_witnessed_rejected() {
+    let fixture_root = test_root("queue-resolver-retry");
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let dispatch_id = DispatchId::new("missing-handle-binding");
+    let source = IoSource::new("cooldis.handle", "thread");
+    let envelope = IngressEnvelope::new(
+        source,
+        IoConversation::new("thread:missing", ConversationKind::System),
+        IngressContent::Event {
+            kind: HANDLE_OUTCOME_CONTENT_KIND.to_string(),
+            payload: serde_json::to_value(HandleTerminalEnvelope {
+                dispatch_id: dispatch_id.clone(),
+                handle: HandleId::thread(ThreadId::new()),
+                outcome: HandleTerminalOutcome::Completed,
+                outcome_reason: None,
+                result: None,
+                result_schema_id: None,
+                artifact_refs: Vec::new(),
+                usage: None,
+                retryable: false,
+            })
+            .unwrap(),
+        },
+        now_ms(),
+    )
+    .with_dedupe_key(IoDedupeKey::new(
+        HANDLE_OUTCOME_CONTENT_KIND,
+        dispatch_id.to_string(),
+    ))
+    .with_delivery(IoDelivery::new(dispatch_id.to_string()))
+    .with_principal(IoPrincipal::new(
+        bridge.tenant_id.clone(),
+        bridge.user_id.clone(),
+        format!("handle:{dispatch_id}"),
+    ));
+    let queue = Arc::new(ScriptedIngressQueue::new(
+        "message-resolver-retry",
+        envelope,
+        std::iter::empty::<&str>(),
+    ));
+    let worker = CooldisDaemonQueueWorker::new(queue.clone(), bridge, "worker-resolver-retry", 30);
+
+    let err = worker.drain_once().await.unwrap_err();
+    assert!(err.to_string().contains("has no durable spawn binding"));
+    assert_eq!(queue.retry_calls().await, 1);
+    assert!(!queue.completed().await);
+    let store = SqliteSessionStore::open(server.session_store_path())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .list_control_stream_coordinates()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
 #[tokio::test(start_paused = true)]
 async fn reject_settled_before_complete_redelivery_dedupes_and_completes() {
     let fixture_root = test_root("reject-apply-complete-crash-cut");
@@ -5347,7 +5684,10 @@ async fn queue_worker_processes_sqlite_backed_envelope() {
             .await
             .unwrap(),
     );
-    queue.submit(test_envelope("hello queue")).await.unwrap();
+    queue
+        .submit(with_bridge_principal(&bridge, test_envelope("hello queue")))
+        .await
+        .unwrap();
 
     let worker = CooldisDaemonQueueWorker::new(queue, bridge, "worker-test", 30);
     assert_eq!(worker.drain_once().await.unwrap(), 1);
@@ -5375,7 +5715,7 @@ async fn content_policy_observe_only_event_does_not_start_turn() {
         "external.event".to_string(),
         "observe_only".to_string(),
     )]));
-    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+    let sink = route_sink_for_bridge(bridge.direct_sink(), &route, &bridge);
 
     let ack = sink.submit(event_envelope("external.event")).await.unwrap();
 
@@ -5414,7 +5754,7 @@ async fn content_policy_queue_starts_turn_with_event_payload() {
         "external.event".to_string(),
         "queue_per_conversation".to_string(),
     )]));
-    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+    let sink = route_sink_for_bridge(bridge.direct_sink(), &route, &bridge);
 
     let ack = sink.submit(event_envelope("external.event")).await.unwrap();
 
@@ -5443,7 +5783,7 @@ async fn content_policy_no_match_uses_route_default_for_event() {
         "other.event".to_string(),
         "observe_only".to_string(),
     )]));
-    let sink = RouteIngressSink::new(capture, &route);
+    let sink = capture_route_sink(capture, &route);
 
     sink.submit(event_envelope("external.event")).await.unwrap();
 
@@ -5469,7 +5809,7 @@ async fn content_policy_ignores_spoofed_kind_on_plain_message() {
         "external.event".to_string(),
         "observe_only".to_string(),
     )]));
-    let sink = RouteIngressSink::new(capture, &route);
+    let sink = capture_route_sink(capture, &route);
 
     sink.submit(
         telegram_queue_envelope("ordinary text mentioning external.event")
@@ -5504,7 +5844,7 @@ async fn content_policy_observe_only_bypasses_route_coalesce_metadata() {
         window_ms: 60_000,
         max_batch: 8,
     });
-    let sink = RouteIngressSink::new(capture, &route);
+    let sink = capture_route_sink(capture, &route);
 
     sink.submit(event_envelope("external.event")).await.unwrap();
 
@@ -5545,7 +5885,7 @@ async fn content_policy_coalesce_stamps_metadata_for_matching_event() {
         window_ms: 60_000,
         max_batch: 8,
     });
-    let sink = RouteIngressSink::new(capture, &route);
+    let sink = capture_route_sink(capture, &route);
 
     sink.submit(event_envelope("external.event")).await.unwrap();
 
@@ -5589,7 +5929,7 @@ async fn content_policy_reject_rejects_matching_event() {
         "external.event".to_string(),
         "reject".to_string(),
     )]));
-    let sink = RouteIngressSink::new(bridge.direct_sink(), &route);
+    let sink = route_sink_for_bridge(bridge.direct_sink(), &route, &bridge);
 
     let err = sink
         .submit(event_envelope("external.event"))
@@ -5620,7 +5960,7 @@ async fn content_policy_observe_only_bypasses_route_coalesce_in_queued_lane() {
             .await
             .unwrap(),
     );
-    let sink = RouteIngressSink::new(queue.clone(), &route);
+    let sink = route_sink_for_bridge(queue.clone(), &route, &bridge);
 
     let ack = sink.submit(event_envelope("external.event")).await.unwrap();
 
@@ -6013,7 +6353,10 @@ async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
 async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     let (bridge, _rx, session_store_path) = test_bridge().await;
     let active = bridge
-        .submit_envelope(telegram_queue_envelope_with_update("active", "4000"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope_with_update("active", "4000"),
+        ))
         .await
         .unwrap();
     let thread_id = active.thread_id.as_deref().unwrap();
@@ -6131,7 +6474,10 @@ async fn active_steer_settles_on_persisted_input_evidence() {
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
 
     bridge
-        .submit_envelope(telegram_queue_envelope("active turn"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope("active turn"),
+        ))
         .await
         .unwrap();
     client.wait_for_requests(1).await;
@@ -6188,7 +6534,10 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
     register_route_state(&bridge, &route_with_egress(Vec::new(), None), &egress_db).await;
 
     bridge
-        .submit_envelope(telegram_queue_envelope("finished turn"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope("finished turn"),
+        ))
         .await
         .unwrap();
     let coordinates = only_thread_coordinates(&bridge).await;
@@ -6270,10 +6619,11 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
 async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
     let (bridge, _rx, session_store_path) = test_bridge().await;
     let receipt = bridge
-        .submit_envelope(
+        .submit_envelope(with_bridge_principal(
+            &bridge,
             telegram_queue_envelope_with_update("fork me", "5001")
                 .with_metadata("cooldis_route_policy", "fork_on_new_dm"),
-        )
+        ))
         .await
         .unwrap();
     assert!(receipt.thread_id.is_some());
@@ -6892,7 +7242,7 @@ async fn configured_route_rejects_ingress_until_durable_state_is_seeded() {
         .register_egress_route_config(&source.protocol, &source.instance_id, &route)
         .await
         .unwrap();
-    let envelope = test_envelope("during startup");
+    let envelope = with_bridge_principal(&bridge, test_envelope("during startup"));
     let target = bridge.resolve_target(&envelope).await.unwrap();
     let existing = start_thread_for_target(&bridge, &target).await;
     let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
@@ -6997,7 +7347,7 @@ async fn reserved_root_start_failure_retries_the_same_durable_binding() {
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
     let (bridge, failure_probe) = bridge_with_runtime_build_failure(&root).await;
-    let envelope = test_envelope("fresh thread");
+    let envelope = with_bridge_principal(&bridge, test_envelope("fresh thread"));
     let target = bridge.resolve_target(&envelope).await.unwrap();
     let stale_coordinates = ThreadCoordinates {
         tenant_id: target.address.tenant_id.clone(),
@@ -7063,7 +7413,7 @@ async fn seeded_binding_unloaded_before_ingress_is_reloaded() {
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
     let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
-    let envelope = test_envelope("fresh thread");
+    let envelope = with_bridge_principal(&bridge, test_envelope("fresh thread"));
     let target = bridge.resolve_target(&envelope).await.unwrap();
     let stale_coordinates = start_thread_for_target(&bridge, &target).await;
     let state = DaemonEgressState::connect(sqlite_dsn(&db)).unwrap();
@@ -7481,7 +7831,7 @@ async fn duplicate_ingress_bindings_seed_the_latest_thread() {
     let db = root.join("io.sqlite");
     let route = route_with_egress(Vec::new(), None);
     let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
-    let envelope = test_envelope("latest thread");
+    let envelope = with_bridge_principal(&bridge, test_envelope("latest thread"));
     let target = bridge.resolve_target(&envelope).await.unwrap();
     let older = start_thread_for_target(&bridge, &target).await;
     let latest = start_thread_for_target(&bridge, &target).await;
@@ -7691,7 +8041,10 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
     let (server, bridge, mut first_rx) = test_bridge_at_root(&root).await;
     register_route_state(&bridge, &route, &db).await;
     let receipt = bridge
-        .submit_envelope(telegram_queue_envelope("please send action"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope("please send action"),
+        ))
         .await
         .unwrap();
     let thread_id = receipt.thread_id.expect("receipt should include thread id");
@@ -7834,7 +8187,10 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
     let (_server, bridge, mut rx) = test_bridge_at_root(&root).await;
     register_route_state(&bridge, &route, &db).await;
     let receipt = bridge
-        .submit_envelope(telegram_queue_envelope("poison skip"))
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope("poison skip"),
+        ))
         .await
         .unwrap();
     let thread_id = receipt.thread_id.expect("receipt should include thread id");
@@ -8246,7 +8602,10 @@ async fn telegram_webhook_accepts_update_and_uses_sink() {
     drop(captured);
 
     let (bridge, _rx, session_store_path) = test_bridge().await;
-    let receipt = bridge.submit_envelope(envelope).await.unwrap();
+    let receipt = bridge
+        .submit_envelope(with_bridge_principal(&bridge, envelope))
+        .await
+        .unwrap();
     let thread_id = receipt.thread_id.unwrap();
     wait_for_assistant_text(&bridge, &thread_id, "local:hello webhook").await;
     let store = SqliteSessionStore::open(session_store_path).await.unwrap();

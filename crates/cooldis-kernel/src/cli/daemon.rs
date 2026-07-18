@@ -296,7 +296,13 @@ pub(super) async fn route_sink_for_ingress(
             queue
         }
     };
-    Ok(Arc::new(RouteIngressSink::new(inner, route)))
+    let (tenant_id, principal_id) = bridge.route_identity();
+    Ok(Arc::new(RouteIngressSink::with_route_identity(
+        inner,
+        route,
+        tenant_id,
+        principal_id,
+    )))
 }
 
 pub(super) async fn start_clock_route(

@@ -176,6 +176,65 @@ impl IoDedupeKey {
     }
 }
 
+/// The external system's own identity for one delivery of an ingress event
+/// (ADR 0007). The envelope's internal id names our receipt of the event;
+/// this names the event as the external system knows it, which is what
+/// redelivery dedupes on.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IoDelivery {
+    /// A Telegram update id, a webhook delivery id, a queue message id, or a
+    /// scheduler occurrence ("{mandate_event_id}:{occurrence_index}").
+    pub delivery_id: String,
+    /// Redelivery attempt ordinal when the external system reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl IoDelivery {
+    pub fn new(delivery_id: impl Into<String>) -> Self {
+        Self {
+            delivery_id: delivery_id.into(),
+            attempt: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_attempt(mut self, attempt: u32) -> Self {
+        self.attempt = Some(attempt);
+        self
+    }
+}
+
+/// The principal an ingress envelope acts for, stamped before admission
+/// (ADR 0007). Self-attributing sources (the clock route) stamp it at
+/// construction; protocol adapters leave it unset and the daemon stamps it
+/// during resolution from the route binding. `envelope.actor` remains
+/// external provenance and is never itself the principal.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IoPrincipal {
+    pub tenant_id: String,
+    pub principal_id: String,
+    /// How attribution happened: "mandate:{event_id}", "route:{route_id}",
+    /// or a caller-auth scheme once boundary authentication lands.
+    pub via: String,
+}
+
+impl IoPrincipal {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        principal_id: impl Into<String>,
+        via: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            principal_id: principal_id.into(),
+            via: via.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IngressContent {
@@ -266,6 +325,16 @@ pub struct IngressEnvelope {
     pub attachments: Vec<IoAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<IoDedupeKey>,
+    /// External delivery identity (ADR 0007). `Option` only for wire
+    /// compatibility with pre-contract queued envelopes; the submit boundary
+    /// enforces presence via [`IngressEnvelope::require_witnessed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<IoDelivery>,
+    /// Principal attribution (ADR 0007). `Option` because protocol adapters
+    /// cannot attribute; the admission boundary enforces presence via
+    /// [`IngressEnvelope::require_attributed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<IoPrincipal>,
     pub received_at_ms: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
@@ -286,6 +355,8 @@ impl IngressEnvelope {
             content,
             attachments: Vec::new(),
             dedupe_key: None,
+            delivery: None,
+            principal: None,
             received_at_ms,
             metadata: BTreeMap::new(),
         }
@@ -299,6 +370,70 @@ impl IngressEnvelope {
     pub fn with_dedupe_key(mut self, dedupe_key: IoDedupeKey) -> Self {
         self.dedupe_key = Some(dedupe_key);
         self
+    }
+
+    pub fn with_delivery(mut self, delivery: IoDelivery) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+
+    pub fn with_principal(mut self, principal: IoPrincipal) -> Self {
+        self.principal = Some(principal);
+        self
+    }
+
+    /// The dedupe identity redelivery is judged by (ADR 0007 D1): an
+    /// explicitly set `dedupe_key` wins; otherwise the key derives from
+    /// `delivery` as `IoDedupeKey::for_source(&source, &delivery.delivery_id)`.
+    /// `None` only when the envelope carries neither, which no boundary
+    /// accepts.
+    pub fn effective_dedupe_key(&self) -> Option<IoDedupeKey> {
+        self.dedupe_key.clone().or_else(|| {
+            self.delivery
+                .as_ref()
+                .map(|delivery| IoDedupeKey::for_source(&self.source, delivery.delivery_id.clone()))
+        })
+    }
+
+    /// Submit-boundary check (ADR 0007 D3): `delivery` present with a
+    /// non-empty `delivery_id`, and an effective dedupe key exists. Rejection
+    /// is `IoError::InvalidEnvelope` naming the missing attribute.
+    pub fn require_witnessed(&self) -> IoResult<()> {
+        let delivery = self
+            .delivery
+            .as_ref()
+            .ok_or_else(|| IoError::InvalidEnvelope("delivery is required".to_string()))?;
+        if delivery.delivery_id.is_empty() {
+            return Err(IoError::InvalidEnvelope(
+                "delivery.delivery_id cannot be empty".to_string(),
+            ));
+        }
+        if self.effective_dedupe_key().is_none() {
+            return Err(IoError::InvalidEnvelope(
+                "effective dedupe key is required".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Admission-boundary check (ADR 0007 D3): [`Self::require_witnessed`],
+    /// `principal` present, and `principal.tenant_id` equal to the resolved
+    /// target's `tenant_id` (cross-tenant injection guard). Called after
+    /// resolution and before the admission decision; this is the guarantee,
+    /// independent of any sink's early check.
+    pub fn require_attributed(&self, target: &ResolvedIoTarget) -> IoResult<()> {
+        self.require_witnessed()?;
+        let principal = self
+            .principal
+            .as_ref()
+            .ok_or_else(|| IoError::InvalidEnvelope("principal is required".to_string()))?;
+        if principal.tenant_id != target.address.tenant_id {
+            return Err(IoError::InvalidEnvelope(format!(
+                "principal tenant {:?} does not match resolved target tenant {:?}",
+                principal.tenant_id, target.address.tenant_id
+            )));
+        }
+        Ok(())
     }
 
     pub fn with_attachment(mut self, attachment: IoAttachment) -> Self {
@@ -534,7 +669,7 @@ impl IngressAck {
     pub fn accepted(envelope: &IngressEnvelope) -> Self {
         Self {
             envelope_id: envelope.id.clone(),
-            dedupe_key: envelope.dedupe_key.clone(),
+            dedupe_key: envelope.effective_dedupe_key(),
             accepted: true,
             reason: None,
         }
@@ -543,7 +678,7 @@ impl IngressAck {
     pub fn rejected(envelope: &IngressEnvelope, reason: impl Into<String>) -> Self {
         Self {
             envelope_id: envelope.id.clone(),
-            dedupe_key: envelope.dedupe_key.clone(),
+            dedupe_key: envelope.effective_dedupe_key(),
             accepted: false,
             reason: Some(reason.into()),
         }
@@ -870,6 +1005,10 @@ pub struct KernelIoReceipt {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Attribution of the admitted outcome (ADR 0007 D5), copied from the
+    /// validated envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<IoPrincipal>,
 }
 
 impl KernelIoReceipt {
@@ -895,6 +1034,7 @@ impl KernelIoReceipt {
             target,
             mode: decision.mode(),
             turn_id,
+            principal: envelope.principal.clone(),
         }
     }
 }
@@ -923,6 +1063,89 @@ mod tests {
         .with_dedupe_key(IoDedupeKey::for_source(&source, "update:999"))
     }
 
+    fn attributed_envelope() -> IngressEnvelope {
+        telegram_like_envelope()
+            .with_delivery(IoDelivery::new("update:999").with_attempt(2))
+            .with_principal(IoPrincipal::new("tenant-a", "user-a", "route:main"))
+    }
+
+    fn attributed_target(tenant_id: &str) -> ResolvedIoTarget {
+        ResolvedIoTarget::new(ThreadAddress::new(tenant_id, "user-a", "session-a"))
+    }
+
+    #[test]
+    fn effective_dedupe_prefers_explicit_key_and_derives_when_absent() {
+        let explicit = attributed_envelope();
+        assert_eq!(
+            explicit
+                .effective_dedupe_key()
+                .as_ref()
+                .map(IoDedupeKey::stable_key),
+            Some("telegram.bot:main:update:999".to_string())
+        );
+
+        let mut derived = explicit;
+        derived.dedupe_key = None;
+        assert_eq!(
+            derived
+                .effective_dedupe_key()
+                .as_ref()
+                .map(IoDedupeKey::stable_key),
+            Some("telegram.bot:main:update:999".to_string())
+        );
+    }
+
+    #[test]
+    fn witnessed_validation_pins_missing_and_empty_delivery_errors() {
+        let legacy = telegram_like_envelope();
+        assert!(matches!(
+            legacy.require_witnessed(),
+            Err(IoError::InvalidEnvelope(message)) if message == "delivery is required"
+        ));
+
+        let empty = legacy.with_delivery(IoDelivery::new(""));
+        assert!(matches!(
+            empty.require_witnessed(),
+            Err(IoError::InvalidEnvelope(message))
+                if message == "delivery.delivery_id cannot be empty"
+        ));
+
+        let source = IoSource::new("external.test", "main");
+        let witnessed = IngressEnvelope::new(
+            source,
+            IoConversation::new("conversation", ConversationKind::Direct),
+            IngressContent::text("hello"),
+            1,
+        )
+        .with_delivery(IoDelivery::new("delivery-1"));
+        assert!(witnessed.require_witnessed().is_ok());
+    }
+
+    #[test]
+    fn attributed_validation_pins_absence_and_tenant_mismatch_errors() {
+        let target = attributed_target("tenant-a");
+        let unattributed = telegram_like_envelope().with_delivery(IoDelivery::new("update:999"));
+        assert!(matches!(
+            unattributed.require_attributed(&target),
+            Err(IoError::InvalidEnvelope(message)) if message == "principal is required"
+        ));
+
+        let mismatched = attributed_envelope();
+        let target = attributed_target("tenant-b");
+        assert!(matches!(
+            mismatched.require_attributed(&target),
+            Err(IoError::InvalidEnvelope(message))
+                if message
+                    == "principal tenant \"tenant-a\" does not match resolved target tenant \"tenant-b\""
+        ));
+
+        assert!(
+            attributed_envelope()
+                .require_attributed(&attributed_target("tenant-a"))
+                .is_ok()
+        );
+    }
+
     #[test]
     fn telegram_like_envelope_has_stable_dedupe_and_text_projection() {
         let envelope = telegram_like_envelope();
@@ -947,6 +1170,26 @@ mod tests {
 
         let roundtrip: IngressEnvelope = serde_json::from_value(value).unwrap();
         assert_eq!(roundtrip, envelope);
+    }
+
+    #[test]
+    fn pre_contract_and_attributed_envelope_shapes_both_round_trip() {
+        let legacy_value = serde_json::to_value(telegram_like_envelope()).unwrap();
+        assert!(legacy_value.get("delivery").is_none());
+        assert!(legacy_value.get("principal").is_none());
+        let legacy: IngressEnvelope = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(legacy.delivery, None);
+        assert_eq!(legacy.principal, None);
+
+        let attributed = attributed_envelope();
+        let value = serde_json::to_value(&attributed).unwrap();
+        assert_eq!(value["delivery"]["delivery_id"], "update:999");
+        assert_eq!(value["delivery"]["attempt"], 2);
+        assert_eq!(value["principal"]["tenant_id"], "tenant-a");
+        assert_eq!(value["principal"]["principal_id"], "user-a");
+        assert_eq!(value["principal"]["via"], "route:main");
+        let roundtrip: IngressEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip, attributed);
     }
 
     #[test]
@@ -1070,9 +1313,9 @@ mod tests {
 
     #[test]
     fn kernel_receipt_extracts_submission_identity_from_decision() {
-        let envelope = telegram_like_envelope();
+        let envelope = attributed_envelope();
         let target = ResolvedIoTarget::new(
-            ThreadAddress::new("local", "user", "session").with_thread_id("thread-1"),
+            ThreadAddress::new("tenant-a", "user-a", "session").with_thread_id("thread-1"),
         );
         let decision = AdmissionDecision::queue("turn-1", IoTurnInput::text("hello"));
 
@@ -1082,5 +1325,36 @@ mod tests {
         assert_eq!(receipt.mode, AdmissionMode::Queue);
         assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
         assert_eq!(receipt.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(receipt.principal, envelope.principal);
+    }
+
+    #[test]
+    fn kernel_receipts_copy_principal_for_every_admitted_runtime_mode() {
+        let envelope = attributed_envelope();
+        let target = attributed_target("tenant-a");
+        let input = IoTurnInput::text("hello");
+        let decisions = [
+            AdmissionDecision::queue("turn-queue", input.clone()),
+            AdmissionDecision::steer("turn-steer", Some("active".to_string()), input.clone()),
+            AdmissionDecision::Interrupt {
+                reason: "replace".to_string(),
+                replacement_turn_id: Some("turn-interrupt".to_string()),
+                replacement: Some(input.clone()),
+            },
+            AdmissionDecision::Fork {
+                child_key: "child-fork".to_string(),
+                input,
+            },
+        ];
+
+        for decision in decisions {
+            let receipt = KernelIoReceipt::new(&envelope, target.clone(), &decision);
+            assert_eq!(
+                receipt.principal,
+                envelope.principal,
+                "{:?}",
+                decision.mode()
+            );
+        }
     }
 }

@@ -25,12 +25,45 @@ The durable ingress queue wrapper lives in `crates/cooldis-io-pgqrs`.
 The daemon-owned runtime bridge lives in `crates/cooldis-kernel` so it can call
 `CooldisSupervisor` without making adapter crates depend on the kernel.
 
+## Adapter Envelope Contract
+
+Every admissible ingress envelope carries two typed facts defined by
+[ADR 0007](adr/0007-adapter-envelope-contract-v0.md):
+
+- `delivery: IoDelivery` names the external delivery. Its `delivery_id` is the
+  Telegram update id, webhook or queue message id, or the clock occurrence
+  `"{mandate_event_id}:{occurrence_index}"`. An explicit `dedupe_key` wins;
+  otherwise the effective key is derived by scoping `delivery_id` to the
+  envelope source.
+- `principal: IoPrincipal` records the tenant and principal on whose authority
+  the event acts, plus how that attribution was established. Self-attributing
+  sources such as the clock stamp the mandate holder at construction. Protocol
+  adapters leave it unset, and the daemon route binding stamps it before
+  admission. External actor identity is provenance, not authority.
+
+The contract is enforced twice. Production submit sinks reject an envelope
+without a non-empty delivery identity and effective dedupe key before it can be
+queued or applied. After target resolution, the admission boundary requires
+principal attribution and exact agreement between `principal.tenant_id` and
+the resolved target tenant. An attribution validation failure is admitted only
+as a witnessed, terminal Reject outcome; the durable queue completes it and
+redelivery folds to the settled reject. Resolver and other transient bridge
+errors remain retryable.
+
+The optional wire fields are a bounded upgrade ramp, not a second producer
+contract. When a pre-contract queued envelope is leased with `dedupe_key` but
+without `delivery`, the daemon deterministically uses the dedupe key's `key` as
+`delivery_id`; the explicit dedupe key still wins, so its effective key remains
+byte-identical across the upgrade. An envelope with neither identity is
+terminally rejected. New producers must always set `delivery` directly.
+
 ## Terms
 
 - **Protocol adapter**: understands one wire protocol, such as Telegram
   webhooks, a websocket TUI, local CLI stdin/stdout, or generic HTTP webhooks.
 - **Ingress envelope**: normalized inbound event with source, conversation,
-  actor, content, attachments, metadata, and a protocol-provided dedupe key.
+  actor, content, attachments, delivery provenance, principal attribution,
+  metadata, and a redelivery dedupe identity.
 - **Queue / dedupe**: durable admission buffer that enforces idempotency,
   ordering, retry, and dead-letter behavior before events touch the runtime.
 - **Resolver**: maps external source/conversation/actor identity into a
@@ -294,7 +327,13 @@ clock route
      source.instance_id = "clock-main",
      conversation.external_conversation_id = "thread:<thread_id>",
      conversation.kind = "system",
+     delivery.delivery_id = "<mandate_event_id>:<occurrence_index>",
      dedupe_key = "clock.tick:clock-main:<mandate_event_id>:<occurrence_index>",
+     principal = {
+       tenant_id = "<mandate tenant>",
+       principal_id = "<mandate user>",
+       via = "mandate:<mandate_event_id>"
+     },
      content = Event {
        kind = "timer.fired",
        payload = {

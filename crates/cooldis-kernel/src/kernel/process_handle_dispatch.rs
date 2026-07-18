@@ -19,7 +19,8 @@ use crate::{
     RuntimeStore, ThreadCoordinates, control_stream_id,
 };
 use cooldis_io_core::{
-    ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoSource,
+    ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoDelivery,
+    IoPrincipal, IoSource,
 };
 use cooldis_process::{
     AsyncExecutionManager, AsyncProcessOutcome, AsyncProcessSnapshot, AsyncProcessStartRequest,
@@ -548,6 +549,12 @@ fn dispatch_envelope(binding: &HandleDispatchEnvelope) -> CooldisResult<IngressE
         HANDLE_DISPATCH_CONTENT_KIND,
         binding.dispatch_id.to_string(),
     ))
+    .with_delivery(IoDelivery::new(binding.dispatch_id.to_string()))
+    .with_principal(IoPrincipal::new(
+        binding.consumer.tenant_id.clone(),
+        binding.consumer.user_id.clone(),
+        format!("handle:{}", binding.dispatch_id),
+    ))
     .with_metadata("cooldis_route_id", HANDLE_DISPATCH_CONTENT_KIND)
     .with_metadata("cooldis_route_policy", "observe_only");
     envelope.id = deterministic_ingress_id("dispatch", &binding.dispatch_id);
@@ -637,6 +644,12 @@ fn outcome_envelope(
     .with_dedupe_key(IoDedupeKey::new(
         HANDLE_OUTCOME_CONTENT_KIND,
         binding.dispatch_id.to_string(),
+    ))
+    .with_delivery(IoDelivery::new(binding.dispatch_id.to_string()))
+    .with_principal(IoPrincipal::new(
+        binding.consumer.tenant_id.clone(),
+        binding.consumer.user_id.clone(),
+        format!("handle:{}", binding.dispatch_id),
     ))
     .with_metadata("cooldis_route_id", HANDLE_OUTCOME_CONTENT_KIND)
     .with_metadata("cooldis_route_policy", "queue_per_conversation");
