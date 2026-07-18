@@ -75,6 +75,26 @@ assert_file_line() {
   fi
 }
 
+assert_file_line_count() {
+  local file=$1
+  local expected=$2
+  local needle=$3
+  local name=$4
+  local actual=0
+
+  if [[ -f "$file" ]]; then
+    actual=$(grep -cFx "$needle" "$file" 2>/dev/null || true)
+  fi
+  if ((actual != expected)); then
+    fail "$name (expected $expected, got $actual)"
+    if [[ -f "$file" ]]; then
+      printf 'expected line: %s\nfile: %s\ncontents:\n%s\n' "$needle" "$file" "$(<"$file")" >&2
+    else
+      printf 'missing file: %s\n' "$file" >&2
+    fi
+  fi
+}
+
 wait_for_path() {
   local path=$1
   local name=$2
@@ -186,6 +206,8 @@ reset_call_environment() {
   CALLER_BASEDIRS=
   CALLER_CACHE_SIZE_SET=0
   CALLER_CACHE_SIZE=
+  CALLER_CI_SET=0
+  CALLER_CI=
 }
 
 prepare_call_environment() {
@@ -195,8 +217,9 @@ prepare_call_environment() {
   unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
   unset CARGO_PROFILE_TEST_DEBUG CARGO_BUILD_JOBS RUSTC_WRAPPER
   unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE COOLDIS_REAL_CARGO COOLDIS_CARGO_LANE_SCRIPT
-  unset COOLDIS_CARGO_SHIM_DIR
+  unset COOLDIS_CARGO_SHIM_DIR COOLDIS_VERIFY_MANAGED_CARGO
   unset COOLDIS_CARGO_LANE_INCREMENTAL CARGO_ALIAS_ESCAPE
+  unset CI
 
   export PATH="$TEST_PATH"
   if ((USE_LANE_ROOT_OVERRIDE)); then
@@ -250,6 +273,9 @@ prepare_call_environment() {
   if ((CALLER_CACHE_SIZE_SET)); then
     export SCCACHE_CACHE_SIZE="$CALLER_CACHE_SIZE"
   fi
+  if ((CALLER_CI_SET)); then
+    export CI="$CALLER_CI"
+  fi
 }
 
 run_lane() {
@@ -284,6 +310,37 @@ start_lane() {
   STARTED_PID=$!
 }
 
+run_hook() {
+  local cwd=$1
+  local lane_root=$2
+  local record=$3
+  local out_file=$4
+  local err_file=$5
+  local hook=$6
+
+  (
+    cd "$cwd" || exit 1
+    prepare_call_environment "$lane_root" "$record"
+    "$hook"
+  ) >"$out_file" 2>"$err_file"
+}
+
+start_hook() {
+  local cwd=$1
+  local lane_root=$2
+  local record=$3
+  local out_file=$4
+  local err_file=$5
+  local hook=$6
+
+  (
+    cd "$cwd" || exit 1
+    prepare_call_environment "$lane_root" "$record"
+    exec "$hook"
+  ) >"$out_file" 2>"$err_file" &
+  STARTED_PID=$!
+}
+
 FAKE_BIN="$TMP_DIR/fake-bin"
 FAKE_BIN_NO_SCCACHE="$TMP_DIR/fake-bin-no-sccache"
 FAKE_STATE="$TMP_DIR/fake-state"
@@ -305,9 +362,13 @@ trap 'cleanup_active; exit 129' HUP
 trap 'cleanup_active; exit 130' INT
 trap 'cleanup_active; exit 143' TERM
 
-mkdir -p "$CARGO_TARGET_DIR" "$(dirname "$FAKE_CARGO_RECORD")" "$FAKE_CARGO_STATE"
+target_dir=${CARGO_TARGET_DIR-<unset>}
+if [[ "$target_dir" != '<unset>' ]]; then
+  mkdir -p "$target_dir"
+fi
+mkdir -p "$(dirname "$FAKE_CARGO_RECORD")" "$FAKE_CARGO_STATE"
 {
-  printf 'target=%s\n' "$CARGO_TARGET_DIR"
+  printf 'target=%s\n' "$target_dir"
   printf 'build_target=%s\n' "${CARGO_BUILD_TARGET_DIR-<unset>}"
   printf 'incremental=%s\n' "${CARGO_INCREMENTAL-<unset>}"
   printf 'dev_debug=%s\n' "${CARGO_PROFILE_DEV_DEBUG-<unset>}"
@@ -324,6 +385,7 @@ mkdir -p "$CARGO_TARGET_DIR" "$(dirname "$FAKE_CARGO_RECORD")" "$FAKE_CARGO_STAT
     printf 'arg=%s\n' "$arg"
   done
 } >"$FAKE_CARGO_RECORD"
+printf '%s\n' "$target_dir" >>"$FAKE_CARGO_STATE/calls-$FAKE_CARGO_LABEL"
 
 if [[ -n "${FAKE_CARGO_FORBID_PATH:-}" && -e "$FAKE_CARGO_FORBID_PATH" ]]; then
   : >"$FAKE_CARGO_STATE/forbidden-path-present-$FAKE_CARGO_LABEL"
@@ -331,7 +393,10 @@ if [[ -n "${FAKE_CARGO_FORBID_PATH:-}" && -e "$FAKE_CARGO_FORBID_PATH" ]]; then
 fi
 
 if [[ "${FAKE_CARGO_MODE:-record}" == hold ]]; then
-  lane=${CARGO_TARGET_DIR##*/}
+  if [[ "$target_dir" == '<unset>' ]]; then
+    exit 93
+  fi
+  lane=${target_dir##*/}
   active_dir="$FAKE_CARGO_STATE/active-$lane"
   if ! mkdir "$active_dir" 2>/dev/null; then
     : >"$FAKE_CARGO_STATE/overlap-$lane"
@@ -362,7 +427,7 @@ REPO="$TMP_DIR/repo"
 FEATURE_A="$TMP_DIR/feature-a"
 FEATURE_B="$TMP_DIR/feature-b"
 INTEGRATION_WT="$TMP_DIR/integration-wt"
-mkdir -p "$REPO/.cargo"
+mkdir -p "$REPO/.cargo" "$REPO/scripts"
 
 git -C "$REPO" init -b main >/dev/null
 git -C "$REPO" config user.email cargo-lane-test@example.invalid
@@ -372,7 +437,12 @@ cat >"$REPO/.cargo/config.toml" <<'CONFIG'
 [build]
 target-dir = "../.cargo-target/cooldis"
 CONFIG
-git -C "$REPO" add README.md .cargo/config.toml
+cp "$SCRIPT_DIR/cargo-lane.sh" "$REPO/scripts/cargo-lane.sh"
+cp "$SCRIPT_DIR/check-pre-commit.sh" "$REPO/scripts/check-pre-commit.sh"
+cp "$SCRIPT_DIR/check-pre-push.sh" "$REPO/scripts/check-pre-push.sh"
+cp "$SCRIPT_DIR/guard-rails.sh" "$REPO/scripts/guard-rails.sh"
+cp "$SCRIPT_DIR/verify.sh" "$REPO/scripts/verify.sh"
+git -C "$REPO" add README.md .cargo/config.toml scripts
 git -C "$REPO" commit -m fixture >/dev/null
 git -C "$REPO" worktree add -q -b feature/alpha "$FEATURE_A"
 git -C "$REPO" worktree add -q -b feature/beta "$FEATURE_B"
@@ -402,6 +472,83 @@ assert_eq 0 "$?" 'default lane root invocation succeeded'
 assert_file_line "$TMP_DIR/default-root.record" "target=$DEFAULT_ROOT/targets/feature" 'default lane root is below Git common directory'
 
 reset_call_environment
+
+# Hook and local verification scripts keep their existing output while every
+# Cargo subprocess enters the managed lane. Clean CI continues to use Cargo
+# directly so the workflow's target/cache behavior does not change.
+HOOK_SERIAL_ROOT="$TMP_DIR/lanes-hook-serial"
+TEST_LABEL=hook-pre-commit-a
+run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-commit-a.record" "$TMP_DIR/hook-pre-commit-a.out" "$TMP_DIR/hook-pre-commit-a.err" "$FEATURE_A/scripts/check-pre-commit.sh"
+assert_eq 0 "$?" 'first worktree pre-commit hook succeeded'
+assert_file_line_count "$FAKE_STATE/calls-hook-pre-commit-a" 2 "$HOOK_SERIAL_ROOT/targets/feature" 'first pre-commit routed both Cargo calls through its feature lane'
+assert_file_contains "$TMP_DIR/hook-pre-commit-a.out" '==> cargo fmt --all -- --check' 'pre-commit kept its Cargo command output shape'
+assert_file_contains "$TMP_DIR/hook-pre-commit-a.out" 'Cooldis pre-commit checks passed.' 'pre-commit kept its success output'
+
+reset_call_environment
+DISPATCH_SHIM_DIR="$TMP_DIR/hook-dispatch-shim"
+mkdir -p "$DISPATCH_SHIM_DIR"
+cat >"$DISPATCH_SHIM_DIR/cargo" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$COOLDIS_CARGO_LANE_SCRIPT" "$@"
+SHIM
+chmod +x "$DISPATCH_SHIM_DIR/cargo"
+TEST_PATH="$DISPATCH_SHIM_DIR:$PATH_WITH_SCCACHE"
+TEST_LABEL=hook-pre-commit-dispatch
+CALLER_LANE_SCRIPT_SET=1
+CALLER_LANE_SCRIPT="$FEATURE_A/scripts/cargo-lane.sh"
+run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-commit-dispatch.record" "$TMP_DIR/hook-pre-commit-dispatch.out" "$TMP_DIR/hook-pre-commit-dispatch.err" "$FEATURE_A/scripts/check-pre-commit.sh"
+assert_eq 0 "$?" 'dispatch-shim pre-commit hook succeeded without recursive lane acquisition'
+assert_file_line_count "$FAKE_STATE/calls-hook-pre-commit-dispatch" 2 "$HOOK_SERIAL_ROOT/targets/feature" 'dispatch-shim pre-commit routed both Cargo calls once'
+assert_file_line "$TMP_DIR/hook-pre-commit-dispatch.record" "cargo_path=$FAKE_CARGO" 'dispatch-shim pre-commit removed the shim before entering Cargo'
+
+reset_call_environment
+TEST_LABEL=hook-pre-commit-main
+run_hook "$REPO" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-commit-main.record" "$TMP_DIR/hook-pre-commit-main.out" "$TMP_DIR/hook-pre-commit-main.err" "$REPO/scripts/check-pre-commit.sh"
+assert_eq 0 "$?" 'primary checkout pre-commit hook succeeded'
+assert_file_line_count "$FAKE_STATE/calls-hook-pre-commit-main" 2 "$HOOK_SERIAL_ROOT/targets/integration" 'primary checkout pre-commit selected the integration lane'
+
+reset_call_environment
+TEST_LABEL=hook-pre-commit-b
+run_hook "$FEATURE_B" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-commit-b.record" "$TMP_DIR/hook-pre-commit-b.out" "$TMP_DIR/hook-pre-commit-b.err" "$FEATURE_B/scripts/check-pre-commit.sh"
+assert_eq 0 "$?" 'second worktree pre-commit hook succeeded serially'
+assert_file_line_count "$FAKE_STATE/calls-hook-pre-commit-b" 2 "$HOOK_SERIAL_ROOT/targets/feature" 'second pre-commit routed both Cargo calls through its feature lane'
+
+reset_call_environment
+TEST_LABEL=hook-pre-push-a
+run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-push-a.record" "$TMP_DIR/hook-pre-push-a.out" "$TMP_DIR/hook-pre-push-a.err" "$FEATURE_A/scripts/check-pre-push.sh"
+assert_eq 0 "$?" 'first worktree pre-push hook succeeded'
+assert_file_line_count "$FAKE_STATE/calls-hook-pre-push-a" 6 "$HOOK_SERIAL_ROOT/targets/feature" 'pre-push and nested verify routed every Cargo call through the feature lane'
+assert_file_contains "$TMP_DIR/hook-pre-push-a.out" '==> cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious -D clippy::perf' 'pre-push kept its Cargo command output shape'
+assert_file_contains "$TMP_DIR/hook-pre-push-a.out" 'Cooldis pre-push checks passed.' 'pre-push kept its success output'
+
+reset_call_environment
+TEST_LABEL=hook-pre-push-ci
+CALLER_CI_SET=1
+CALLER_CI=true
+run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-push-ci.record" "$TMP_DIR/hook-pre-push-ci.out" "$TMP_DIR/hook-pre-push-ci.err" "$FEATURE_A/scripts/check-pre-push.sh"
+assert_eq 0 "$?" 'pre-push hook kept nested verify in the managed lane when CI was inherited'
+assert_file_line_count "$FAKE_STATE/calls-hook-pre-push-ci" 6 "$HOOK_SERIAL_ROOT/targets/feature" 'pre-push hook left no direct Cargo path when CI was inherited'
+
+reset_call_environment
+TEST_LABEL=hook-pre-push-b
+run_hook "$FEATURE_B" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-push-b.record" "$TMP_DIR/hook-pre-push-b.out" "$TMP_DIR/hook-pre-push-b.err" "$FEATURE_B/scripts/check-pre-push.sh"
+assert_eq 0 "$?" 'second worktree pre-push hook succeeded serially'
+assert_file_line_count "$FAKE_STATE/calls-hook-pre-push-b" 6 "$HOOK_SERIAL_ROOT/targets/feature" 'second pre-push routed every Cargo call through its feature lane'
+
+reset_call_environment
+TEST_LABEL=verify-local
+run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/verify-local.record" "$TMP_DIR/verify-local.out" "$TMP_DIR/verify-local.err" "$FEATURE_A/scripts/verify.sh"
+assert_eq 0 "$?" 'standalone local verify succeeded'
+assert_file_line_count "$FAKE_STATE/calls-verify-local" 5 "$HOOK_SERIAL_ROOT/targets/feature" 'standalone local verify routed every Cargo call through the feature lane'
+
+reset_call_environment
+TEST_LABEL=verify-ci
+CALLER_CI_SET=1
+CALLER_CI=true
+run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/verify-ci.record" "$TMP_DIR/verify-ci.out" "$TMP_DIR/verify-ci.err" "$FEATURE_A/scripts/verify.sh"
+assert_eq 0 "$?" 'clean CI verify succeeded without the local lane'
+assert_file_line_count "$FAKE_STATE/calls-verify-ci" 5 '<unset>' 'clean CI verify preserved direct Cargo behavior'
 
 # Same-owner commands reuse the target. A different feature owner rotates it.
 REUSE_ROOT="$TMP_DIR/lanes-reuse"
@@ -696,6 +843,51 @@ wait_for_path "$FAKE_STATE/started-serial-two" 'second feature Cargo command sta
 : >"$FAKE_STATE/release-serial-two"
 wait_for_pid "$serial_two_pid" 0 'second serialized feature command succeeded'
 assert_no_path "$FAKE_STATE/overlap-feature" 'fake Cargo observed no feature overlap'
+
+# Full hook processes from different feature worktrees may interleave commands,
+# but their Cargo subprocesses remain exclusive lane writers.
+HOOK_PARALLEL_ROOT="$TMP_DIR/lanes-hook-parallel"
+reset_call_environment
+TEST_MODE=hold
+TEST_LABEL=parallel-pre-commit-a
+start_hook "$FEATURE_A" "$HOOK_PARALLEL_ROOT" "$TMP_DIR/parallel-pre-commit-a.record" "$TMP_DIR/parallel-pre-commit-a.out" "$TMP_DIR/parallel-pre-commit-a.err" "$FEATURE_A/scripts/check-pre-commit.sh"
+parallel_pre_commit_a_pid=$STARTED_PID
+wait_for_path "$FAKE_STATE/started-parallel-pre-commit-a" 'first concurrent pre-commit entered Cargo'
+
+TEST_LABEL=parallel-pre-commit-b
+start_hook "$FEATURE_B" "$HOOK_PARALLEL_ROOT" "$TMP_DIR/parallel-pre-commit-b.record" "$TMP_DIR/parallel-pre-commit-b.out" "$TMP_DIR/parallel-pre-commit-b.err" "$FEATURE_B/scripts/check-pre-commit.sh"
+parallel_pre_commit_b_pid=$STARTED_PID
+wait_for_text "$TMP_DIR/parallel-pre-commit-b.err" 'waiting for feature Cargo lane' 'second concurrent pre-commit waited for the feature lane'
+assert_no_path "$FAKE_STATE/started-parallel-pre-commit-b" 'concurrent pre-commit Cargo calls did not overlap'
+: >"$FAKE_STATE/release-parallel-pre-commit-a"
+wait_for_path "$FAKE_STATE/started-parallel-pre-commit-b" 'second concurrent pre-commit entered Cargo after release'
+: >"$FAKE_STATE/release-parallel-pre-commit-b"
+wait_for_pid "$parallel_pre_commit_a_pid" 0 'first concurrent pre-commit succeeded'
+wait_for_pid "$parallel_pre_commit_b_pid" 0 'second concurrent pre-commit succeeded'
+assert_file_line_count "$FAKE_STATE/calls-parallel-pre-commit-a" 2 "$HOOK_PARALLEL_ROOT/targets/feature" 'first concurrent pre-commit kept both Cargo calls in the feature lane'
+assert_file_line_count "$FAKE_STATE/calls-parallel-pre-commit-b" 2 "$HOOK_PARALLEL_ROOT/targets/feature" 'second concurrent pre-commit kept both Cargo calls in the feature lane'
+assert_no_path "$FAKE_STATE/overlap-feature" 'concurrent pre-commit hooks never overlapped lane writers'
+
+reset_call_environment
+TEST_MODE=hold
+TEST_LABEL=parallel-pre-push-a
+start_hook "$FEATURE_A" "$HOOK_PARALLEL_ROOT" "$TMP_DIR/parallel-pre-push-a.record" "$TMP_DIR/parallel-pre-push-a.out" "$TMP_DIR/parallel-pre-push-a.err" "$FEATURE_A/scripts/check-pre-push.sh"
+parallel_pre_push_a_pid=$STARTED_PID
+wait_for_path "$FAKE_STATE/started-parallel-pre-push-a" 'first concurrent pre-push entered Cargo'
+
+TEST_LABEL=parallel-pre-push-b
+start_hook "$FEATURE_B" "$HOOK_PARALLEL_ROOT" "$TMP_DIR/parallel-pre-push-b.record" "$TMP_DIR/parallel-pre-push-b.out" "$TMP_DIR/parallel-pre-push-b.err" "$FEATURE_B/scripts/check-pre-push.sh"
+parallel_pre_push_b_pid=$STARTED_PID
+wait_for_text "$TMP_DIR/parallel-pre-push-b.err" 'waiting for feature Cargo lane' 'second concurrent pre-push waited for the feature lane'
+assert_no_path "$FAKE_STATE/started-parallel-pre-push-b" 'concurrent pre-push Cargo calls did not overlap'
+: >"$FAKE_STATE/release-parallel-pre-push-a"
+wait_for_path "$FAKE_STATE/started-parallel-pre-push-b" 'second concurrent pre-push entered Cargo after release'
+: >"$FAKE_STATE/release-parallel-pre-push-b"
+wait_for_pid "$parallel_pre_push_a_pid" 0 'first concurrent pre-push succeeded'
+wait_for_pid "$parallel_pre_push_b_pid" 0 'second concurrent pre-push succeeded'
+assert_file_line_count "$FAKE_STATE/calls-parallel-pre-push-a" 6 "$HOOK_PARALLEL_ROOT/targets/feature" 'first concurrent pre-push kept every Cargo call in the feature lane'
+assert_file_line_count "$FAKE_STATE/calls-parallel-pre-push-b" 6 "$HOOK_PARALLEL_ROOT/targets/feature" 'second concurrent pre-push kept every Cargo call in the feature lane'
+assert_no_path "$FAKE_STATE/overlap-feature" 'concurrent pre-push hooks never overlapped lane writers'
 
 # Feature and integration lanes can execute at the same time.
 PARALLEL_ROOT="$TMP_DIR/lanes-parallel"
