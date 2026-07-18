@@ -3063,7 +3063,7 @@ async fn append_terminal_join_until_recorded(
             Ok(_) => return,
             Err(err) => {
                 eprintln!(
-                    "cooldis agent loop could not persist {terminal_state:?} thread.joined for {}: {err}; retrying",
+                    "cooldis provider runtime could not persist {terminal_state:?} thread.joined for {}: {err}; retrying",
                     context.coordinates.thread_id,
                 );
                 tokio::time::sleep(Duration::from_millis(250)).await;
