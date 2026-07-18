@@ -92,8 +92,8 @@ fn scenario_thread_load_root_barrier(
 
 use async_trait::async_trait;
 use cooldis::{
-    AgentKernelToolCall, AgentKernelToolProvider, AgentRuntime, AgentRuntimeFactory,
-    AgentToolRouter, CanonicalMessage, CanonicalProviderRuntimeFactory, CooldisResult, HookHandler,
+    AgentKernelToolCall, AgentKernelToolProvider, AgentLoopFactory, AgentRuntime,
+    AgentRuntimeFactory, AgentToolRouter, CanonicalMessage, CooldisResult, HookHandler,
     HookHandlerOutput, HookHandlerSpec, HookPipeline, HookRequest, InMemorySessionStore,
     OperationRegistry, RuntimeEventKind, RuntimeServices, ThreadCommand, ThreadContext,
     ThreadEvent, ThreadStatus, ToolDefinition, ToolPermissionDecision, ToolPermissionGate,
@@ -249,11 +249,11 @@ impl ToolPermissionGate for DenyGate {
 }
 
 pub struct RootProviderChildEchoFactory {
-    root: Arc<CanonicalProviderRuntimeFactory>,
+    root: Arc<AgentLoopFactory>,
 }
 
 impl RootProviderChildEchoFactory {
-    pub fn new(root: Arc<CanonicalProviderRuntimeFactory>) -> Self {
+    pub fn new(root: Arc<AgentLoopFactory>) -> Self {
         Self { root }
     }
 }

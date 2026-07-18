@@ -165,7 +165,7 @@ and prints `[unverified-offline]` for `op://` rows.
 The local plugin catalog is the agent-facing layer above this registry. It loads
 published records, verifies the active blob and manifest, attaches configured VFS
 mounts, and registers the operation artifacts into an in-memory
-`OperationRegistry` for the provider runtime.
+`OperationRegistry` for the agent loop.
 
 When an app-server has capsule bindings configured, default-manifest synthesis
 lowers configured active records into pinned manifest tool rows. Durable binding
@@ -176,7 +176,7 @@ The path-3 development loop is:
 
 ```text
 Rust source -> cooldis tool publish -> LocalPluginCatalog
-  -> CanonicalProviderRuntimeFactory::with_operation_registry(...)
+  -> AgentLoopFactory::with_operation_registry(...)
   -> agent-visible LLM tool -> Wasm operation with shared plugin VFS
 ```
 

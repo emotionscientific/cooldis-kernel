@@ -52,7 +52,7 @@ The public console defaults to:
 
 Seeding is idempotent and does not overwrite stored credentials, so a daemon or
 app-server restart reloads the provider catalog from durable project metadata
-before it constructs the provider runtime, then resolves credentials from the
+before it constructs the agent loop, then resolves credentials from the
 user auth store.
 
 ## Built-In Seeds

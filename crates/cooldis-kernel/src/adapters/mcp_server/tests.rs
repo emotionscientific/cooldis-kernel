@@ -3,8 +3,8 @@ use crate::adapters::app_server::{
     runtime_factory_from_provider_parts, runtime_factory_from_provider_parts_with_secret_resolver,
 };
 use crate::{
-    APP_SERVER_OPENAI_COMPATIBLE_MODEL, APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AppServerListenAddr,
-    CanonicalContent, CanonicalProviderRuntimeConfig, CanonicalStopReason, CanonicalUsage,
+    APP_SERVER_OPENAI_COMPATIBLE_MODEL, APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentLoopConfig,
+    AppServerListenAddr, CanonicalContent, CanonicalStopReason, CanonicalUsage,
     CapsuleBindingsConfig, CooldisAppServer, CooldisAppServerConfig, EventStore, EventStreamId,
     LocalOperationRegistry, ProviderApi, ProviderClient, ProviderRequest, ProviderResponse,
     ProviderResult, PublishOperationRequest, PublishedOperationSource, SecretSourceKind,
@@ -223,7 +223,7 @@ async fn mcp_prompt_lets_model_shaped_agent_see_and_call_search_shell_command() 
     publish_exa_without_secret(&registry_root).await;
     let provider = Arc::new(ModelVbinLifecycleClient::default());
     let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::OpenAIChatCompletions,
         APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
         APP_SERVER_OPENAI_COMPATIBLE_MODEL,
@@ -309,7 +309,7 @@ async fn mcp_capsule_binding_tools_update_global_scope() {
     publish_exa_without_secret(&registry_root).await;
     let provider = Arc::new(ModelVbinLifecycleClient::default());
     let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::OpenAIChatCompletions,
         APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
         APP_SERVER_OPENAI_COMPATIBLE_MODEL,
@@ -445,7 +445,7 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
         .unwrap();
     let provider = Arc::new(ModelVbinLifecycleClient::expecting_search_success());
     let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::OpenAIChatCompletions,
         APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
         APP_SERVER_OPENAI_COMPATIBLE_MODEL,
@@ -523,7 +523,7 @@ async fn mcp_prompt_rejects_thread_capsule_bindings() {
     publish_exa_without_secret(&registry_root).await;
     let provider = Arc::new(ModelVbinLifecycleClient::default());
     let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::OpenAIChatCompletions,
         APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
         APP_SERVER_OPENAI_COMPATIBLE_MODEL,

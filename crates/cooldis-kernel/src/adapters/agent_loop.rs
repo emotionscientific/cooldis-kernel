@@ -1,4 +1,4 @@
-//! Canonical provider turn-loop adapter.
+//! The kernel's native agent loop: thread stream -> model -> thread stream.
 //!
 //! A tool round ends only after the assistant entry and every tool result have
 //! been persisted. Before polling the next model-request assembly, the loop
@@ -151,7 +151,7 @@ fn default_process_dispatcher_cwd() -> PathBuf {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CanonicalProviderRuntimeConfig {
+pub struct AgentLoopConfig {
     pub provider: String,
     pub api: ProviderApi,
     pub model: String,
@@ -168,7 +168,7 @@ pub struct CanonicalProviderRuntimeConfig {
     pub stream: bool,
 }
 
-impl CanonicalProviderRuntimeConfig {
+impl AgentLoopConfig {
     pub fn new(api: ProviderApi, provider: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: provider.into(),
@@ -250,13 +250,13 @@ impl Default for ModelRequestRetryPolicy {
 
 #[derive(Clone)]
 struct ModelRequestEndpoint {
-    config: CanonicalProviderRuntimeConfig,
+    config: AgentLoopConfig,
     client: Arc<dyn ProviderClient>,
 }
 
 #[derive(Clone)]
-pub struct CanonicalProviderRuntimeFactory {
-    config: CanonicalProviderRuntimeConfig,
+pub struct AgentLoopFactory {
+    config: AgentLoopConfig,
     client: Arc<dyn ProviderClient>,
     model_request_retry_policy: ModelRequestRetryPolicy,
     model_request_fallbacks: Vec<ModelRequestEndpoint>,
@@ -270,8 +270,8 @@ pub struct CanonicalProviderRuntimeFactory {
     max_tool_rounds: Option<usize>,
 }
 
-impl CanonicalProviderRuntimeFactory {
-    pub fn new(config: CanonicalProviderRuntimeConfig, client: Arc<dyn ProviderClient>) -> Self {
+impl AgentLoopFactory {
+    pub fn new(config: AgentLoopConfig, client: Arc<dyn ProviderClient>) -> Self {
         Self {
             config,
             client,
@@ -295,7 +295,7 @@ impl CanonicalProviderRuntimeFactory {
 
     pub fn with_model_request_fallback(
         mut self,
-        config: CanonicalProviderRuntimeConfig,
+        config: AgentLoopConfig,
         client: Arc<dyn ProviderClient>,
     ) -> Self {
         self.model_request_fallbacks
@@ -352,7 +352,7 @@ impl CanonicalProviderRuntimeFactory {
 }
 
 #[async_trait]
-impl AgentRuntimeFactory for CanonicalProviderRuntimeFactory {
+impl AgentRuntimeFactory for AgentLoopFactory {
     async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
         let max_tool_rounds = match context
             .metadata
@@ -375,7 +375,7 @@ impl AgentRuntimeFactory for CanonicalProviderRuntimeFactory {
             }
             None => self.max_tool_rounds,
         };
-        Ok(Box::new(CanonicalProviderRuntime {
+        Ok(Box::new(AgentLoop {
             config: self.config.clone(),
             client: Arc::clone(&self.client),
             model_request_retry_policy: self.model_request_retry_policy,
@@ -394,8 +394,8 @@ impl AgentRuntimeFactory for CanonicalProviderRuntimeFactory {
     }
 }
 
-struct CanonicalProviderRuntime {
-    config: CanonicalProviderRuntimeConfig,
+struct AgentLoop {
+    config: AgentLoopConfig,
     client: Arc<dyn ProviderClient>,
     model_request_retry_policy: ModelRequestRetryPolicy,
     model_request_fallbacks: Vec<ModelRequestEndpoint>,
@@ -411,7 +411,7 @@ struct CanonicalProviderRuntime {
 }
 
 #[async_trait]
-impl AgentRuntime for CanonicalProviderRuntime {
+impl AgentRuntime for AgentLoop {
     async fn run(
         self: Box<Self>,
         context: ThreadContext,
@@ -558,7 +558,7 @@ impl AgentRuntime for CanonicalProviderRuntime {
     }
 }
 
-impl CanonicalProviderRuntime {
+impl AgentLoop {
     async fn mount_agent_process_tools(
         &mut self,
         context: &ThreadContext,
@@ -900,7 +900,7 @@ impl CanonicalProviderRuntime {
 /// missing. In particular, a completion that legally follows the parent's
 /// terminal `thread.joined` is included and is never overwritten by recovery.
 async fn sweep_cancelled_turn_tool_calls(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     thread_context: &ThreadContext,
     services: &RuntimeServices,
     thread_id: crate::ThreadId,
@@ -1116,7 +1116,7 @@ async fn sweep_cancelled_turn_tool_calls(
 }
 
 async fn run_idle_provider_command(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     thread_context: &ThreadContext,
     command: ThreadCommand,
     coordinates: &crate::ThreadCoordinates,
@@ -1358,7 +1358,7 @@ async fn run_idle_provider_command(
 }
 
 async fn run_auto_compaction_if_needed(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     thread_context: &ThreadContext,
     turn_id: String,
     coordinates: &crate::ThreadCoordinates,
@@ -1447,7 +1447,7 @@ async fn persisted_thread_anchor_timestamp_ms(
 }
 
 async fn run_compaction(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     thread_context: &ThreadContext,
     turn_id: String,
     trigger: CompactionTrigger,
@@ -1568,7 +1568,7 @@ async fn run_compaction(
 }
 
 async fn generate_compaction_summary(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     turn_context: &TurnContext,
     services: &RuntimeServices,
     events: &broadcast::Sender<ThreadEvent>,
@@ -1643,7 +1643,7 @@ impl ModelRequestAttemptError {
 }
 
 async fn execute_provider_request(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     turn_context: &TurnContext,
     coordinates: &crate::ThreadCoordinates,
     request: &ProviderRequest,
@@ -1859,10 +1859,7 @@ async fn execute_provider_request_attempt(
     }
 }
 
-fn request_for_endpoint(
-    request: &ProviderRequest,
-    config: &CanonicalProviderRuntimeConfig,
-) -> ProviderRequest {
+fn request_for_endpoint(request: &ProviderRequest, config: &AgentLoopConfig) -> ProviderRequest {
     let mut request = request.clone();
     request.api = config.api.clone();
     request.provider = config.provider.clone();
@@ -1970,7 +1967,7 @@ fn response_content_text(content: &[CanonicalContent]) -> String {
 }
 
 async fn run_provider_turn(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     thread_context: &ThreadContext,
     turn_id: String,
     turn_input: TurnInput,
@@ -3066,7 +3063,7 @@ async fn append_terminal_join_until_recorded(
             Ok(_) => return,
             Err(err) => {
                 eprintln!(
-                    "cooldis provider runtime could not persist {terminal_state:?} thread.joined for {}: {err}; retrying",
+                    "cooldis agent loop could not persist {terminal_state:?} thread.joined for {}: {err}; retrying",
                     context.coordinates.thread_id,
                 );
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -3518,7 +3515,7 @@ fn context_compile_receipt_payload(
 }
 
 async fn resume_pending_tool_call(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     thread_context: &ThreadContext,
     turn_id: &str,
     call_id: &str,
@@ -3753,7 +3750,7 @@ async fn append_deferred_tool_batch_terminal(
 
 #[allow(clippy::too_many_arguments)]
 async fn append_tool_results_while_handling_commands(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     turn_context: &TurnContext,
     services: &RuntimeServices,
     thread_id: crate::ThreadId,
@@ -3930,7 +3927,7 @@ async fn append_tool_results_while_handling_commands(
 }
 
 async fn prepare_tool_results(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     turn_context: &TurnContext,
     services: &RuntimeServices,
     events: &broadcast::Sender<ThreadEvent>,
@@ -6111,7 +6108,7 @@ mod intra_turn_steering_context_tests {
 }
 
 async fn run_stop_hooks(
-    runtime: &CanonicalProviderRuntime,
+    runtime: &AgentLoop,
     turn_context: &TurnContext,
     services: &RuntimeServices,
     thread_id: crate::ThreadId,

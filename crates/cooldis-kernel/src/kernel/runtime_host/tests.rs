@@ -40,9 +40,8 @@ use crate::kernel::history::{
 };
 use crate::test_support::FaultingRuntimeStore;
 use crate::{
-    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CooldisDaemonClockRoute,
-    CouplingScheduler, DaemonClock, LocalOfflineProviderClient, SqliteSessionStore,
-    StdlibCouplingExecutor,
+    AgentLoopConfig, AgentLoopFactory, CooldisDaemonClockRoute, CouplingScheduler, DaemonClock,
+    LocalOfflineProviderClient, SqliteSessionStore, StdlibCouplingExecutor,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
@@ -2611,14 +2610,14 @@ async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider
     let store = SqliteSessionStore::open(root.join("history.sqlite3"))
         .await
         .unwrap();
-    let mut config = CanonicalProviderRuntimeConfig::new(
+    let mut config = AgentLoopConfig::new(
         ProviderApi::Other("local_offline".to_string()),
         "local_offline",
         "gpt-test",
     );
     config.max_tokens = 128;
     let provider = Arc::new(LocalOfflineProviderClient::new("local_offline", "gpt-test"));
-    let factory = Arc::new(CanonicalProviderRuntimeFactory::new(config, provider));
+    let factory = Arc::new(AgentLoopFactory::new(config, provider));
     let host = RuntimeHost::with_session_store(factory, Arc::new(store.clone()));
     let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "scheduled");
     let thread = host

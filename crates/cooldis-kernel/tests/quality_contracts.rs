@@ -374,7 +374,7 @@ fn non_test_request_paths_do_not_reintroduce_panic_shortcuts() {
         "crates/cooldis-kernel/src/adapters/app_server/subscriptions.rs",
         "crates/cooldis-kernel/src/adapters/app_server/threads.rs",
         "crates/cooldis-kernel/src/adapters/mcp_server.rs",
-        "crates/cooldis-kernel/src/adapters/provider_runtime.rs",
+        "crates/cooldis-kernel/src/adapters/agent_loop.rs",
         "crates/cooldis-kernel/src/capabilities/execution.rs",
         "crates/cooldis-kernel/src/capabilities/wasm_runner.rs",
         "crates/cooldis-kernel/src/kernel/coupling_scheduler.rs",

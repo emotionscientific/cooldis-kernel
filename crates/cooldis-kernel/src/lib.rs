@@ -167,12 +167,12 @@ fn scenario_thread_load_root_barrier(
 
 pub mod adapters {
     pub mod acp_agent;
+    pub mod agent_loop;
     pub mod app_server;
     pub mod codex_tui;
     pub mod mcp_client;
     pub mod mcp_server;
     pub mod provider;
-    pub mod provider_runtime;
     pub mod provider_transform;
 }
 
@@ -245,6 +245,7 @@ pub mod operations {
 }
 
 pub use adapters::acp_agent::{ACP_PROTOCOL_VERSION, CooldisAcpAgentConfig, serve_acp_stdio};
+pub use adapters::agent_loop::{AgentLoopConfig, AgentLoopFactory, ModelRequestRetryPolicy};
 pub use adapters::app_server::{
     APP_SERVER_ANTHROPIC_BEDROCK_MODEL, APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
     APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
@@ -273,9 +274,6 @@ pub use adapters::provider::{
     ProviderStreamEvent, ProviderToolResultConstraints, ProviderWireAdapter, SystemBlock,
     ThinkingConfig, ThinkingEffort, ToolDefinition, compile_provider_context,
     compile_provider_request_context,
-};
-pub use adapters::provider_runtime::{
-    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, ModelRequestRetryPolicy,
 };
 pub use adapters::provider_transform::{
     ReplayTransform, ReplayTransformCounts, normalize_history_for_target,

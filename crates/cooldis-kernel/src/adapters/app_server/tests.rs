@@ -1885,11 +1885,8 @@ async fn model_list_projects_catalog_provider_models() {
     sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
-        ProviderApi::OpenAIResponses,
-        "fixture",
-        "fixture-large",
-    );
+    let runtime_config =
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "fixture", "fixture-large");
     let runtime_factory = runtime_factory_from_provider_parts(
         runtime_config,
         Arc::new(InspectingCapsuleClient::default()),
@@ -1952,11 +1949,8 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
     sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
-        ProviderApi::OpenAIResponses,
-        "fixture",
-        "fixture-default",
-    );
+    let runtime_config =
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "fixture", "fixture-default");
     let runtime_factory = runtime_factory_from_provider_parts(
         runtime_config,
         Arc::new(InspectingCapsuleClient::default()),
@@ -2588,7 +2582,7 @@ allow = ["default_cwd"]
         .await
         .unwrap();
     let session_path = config.state_home.join("session_history.sqlite3");
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::OpenAIChatCompletions,
         "fixture",
         "fixture-large",
@@ -2751,7 +2745,7 @@ allow = ["default_cwd"]
     sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::OpenAIChatCompletions,
         "fixture",
         "fixture-large",
@@ -3286,7 +3280,7 @@ streaming = false
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     config.skill_registry_root = skill_registry_root.clone();
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -3530,7 +3524,7 @@ streaming = false
         host_path: host_workspace.clone(),
         mode: crate::AgentManifestWorkspaceMode::ReadWrite,
     });
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -3783,7 +3777,7 @@ budget_share = 0.75
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     config.blob_registry_root = blob_registry_root;
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -4138,7 +4132,7 @@ max_tool_rounds = 64
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::Other("local_offline".to_string()),
         "local_offline",
         "echo",
@@ -6570,7 +6564,7 @@ streaming = false
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let mut runtime_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
     let runtime_factory = runtime_factory_from_provider_parts(
         runtime_config,
@@ -6677,7 +6671,7 @@ streaming = false
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let mut runtime_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
     let runtime_factory =
         runtime_factory_from_provider_parts(runtime_config, provider_client, capsule_bindings);
@@ -7133,7 +7127,7 @@ streaming = false
     config.agent_registry_root = agent_registry_root;
     let session_path = config.state_home.join("session_history.sqlite3");
     let mut runtime_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
     let runtime_factory =
         runtime_factory_from_provider_parts(runtime_config, provider_client, capsule_bindings);
@@ -7180,7 +7174,7 @@ streaming = false
         holds: Vec::new(),
     };
     assert_eq!(
-        crate::adapters::provider_runtime::effect_class_for_request(&events, &request).unwrap(),
+        crate::adapters::agent_loop::effect_class_for_request(&events, &request).unwrap(),
         EffectClass::Idempotent,
         "the runtime lookup must read the class from the real top-level bind receipt shape"
     );
@@ -7249,8 +7243,7 @@ fn apply_manifest_runtime_metadata_injects_tool_use_instruction_once() {
         ThreadTopology::root(),
         metadata,
     );
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.system.push(SystemBlock::text("Base instruction."));
 
     apply_manifest_runtime_metadata(&context, &mut config).unwrap();
@@ -7284,8 +7277,7 @@ fn apply_manifest_runtime_metadata_injects_legacy_tool_use_instruction() {
         ThreadTopology::root(),
         metadata,
     );
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
 
     apply_manifest_runtime_metadata(&context, &mut config).unwrap();
 
@@ -11171,7 +11163,7 @@ async fn thinking_precedence_flows_to_provider_requests() {
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     let mut runtime_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.thinking = Some(ThinkingConfig::Budget { budget_tokens: 99 });
     let runtime_factory =
         runtime_factory_from_provider_parts(runtime_config, provider_client, Default::default());
@@ -11538,7 +11530,7 @@ async fn test_app_with_provider_and_capsule_bindings(
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let mut runtime_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
     // lexicon-allow: capsule - existing app-server config parameter
     let runtime_factory =
@@ -11627,7 +11619,7 @@ async fn test_app_with_provider_root_listen_and_stream(
         );
     }
     let mut runtime_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
     runtime_config.stream = stream;
     // lexicon-allow: capsule - existing app-server test helper
@@ -11844,7 +11836,7 @@ where
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,

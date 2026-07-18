@@ -1,7 +1,7 @@
 use super::kernel_test::{
-    CanonicalContent, CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory,
-    CanonicalStopReason, CanonicalUsage, ProviderApi, ProviderCapabilityRecord, ProviderClient,
-    ProviderError, ProviderRequest, ProviderResponse, ProviderResult, ProviderStreamEvent,
+    AgentLoopConfig, AgentLoopFactory, CanonicalContent, CanonicalStopReason, CanonicalUsage,
+    ProviderApi, ProviderCapabilityRecord, ProviderClient, ProviderError, ProviderRequest,
+    ProviderResponse, ProviderResult, ProviderStreamEvent,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -121,19 +121,15 @@ pub fn response_tool_call_with_id(call_id: &str, name: &str, arguments: Value) -
     }
 }
 
-pub fn provider_factory(client: Arc<dyn ProviderClient>) -> Arc<CanonicalProviderRuntimeFactory> {
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+pub fn provider_factory(client: Arc<dyn ProviderClient>) -> Arc<AgentLoopFactory> {
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
+    Arc::new(AgentLoopFactory::new(config, client))
 }
 
-pub fn streaming_provider_factory(
-    client: Arc<dyn ProviderClient>,
-) -> Arc<CanonicalProviderRuntimeFactory> {
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+pub fn streaming_provider_factory(client: Arc<dyn ProviderClient>) -> Arc<AgentLoopFactory> {
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     config.stream = true;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
+    Arc::new(AgentLoopFactory::new(config, client))
 }

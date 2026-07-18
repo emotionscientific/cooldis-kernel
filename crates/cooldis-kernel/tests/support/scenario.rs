@@ -18,16 +18,15 @@ use super::fault_plan::{
     SplitMix64,
 };
 use super::kernel_test::{
-    APP_SERVER_LOCAL_MODEL, APP_SERVER_LOCAL_PROVIDER, AppServerListenAddr,
-    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, CooldisAppServer,
-    CooldisAppServerConfig, CooldisDaemonIoBridge, CooldisDaemonQueueWorker,
-    CooldisEgressRetryConfig, CooldisIoRouteConfig, EventKind, EventProvenance, EventRecord,
-    EventRecordId, EventSequence, EventStore, EventStreamId, HistoryResult,
-    LocalOfflineProviderClient, NewEventRecord, NewObservationRecord, ObservationRecord,
-    ObservationStore, ProviderApi, ProviderCapabilityRecord, ProviderClient, ProviderRequest,
-    ProviderResponse, ProviderResult, RuntimeHost, RuntimeStore, SessionContext, SessionEntry,
-    SessionEntryId, SessionEntryKind, SessionStore, StreamCursorV1, ThreadBaseRef, ThreadCommand,
-    ThreadCoordinates, ThreadEvent, ThreadId, ThreadStatus, TurnSubmissionMode,
+    APP_SERVER_LOCAL_MODEL, APP_SERVER_LOCAL_PROVIDER, AgentLoopConfig, AgentLoopFactory,
+    AppServerListenAddr, CooldisAppServer, CooldisAppServerConfig, CooldisDaemonIoBridge,
+    CooldisDaemonQueueWorker, CooldisEgressRetryConfig, CooldisIoRouteConfig, EventKind,
+    EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore, EventStreamId,
+    HistoryResult, LocalOfflineProviderClient, NewEventRecord, NewObservationRecord,
+    ObservationRecord, ObservationStore, ProviderApi, ProviderCapabilityRecord, ProviderClient,
+    ProviderRequest, ProviderResponse, ProviderResult, RuntimeHost, RuntimeStore, SessionContext,
+    SessionEntry, SessionEntryId, SessionEntryKind, SessionStore, StreamCursorV1, ThreadBaseRef,
+    ThreadCommand, ThreadCoordinates, ThreadEvent, ThreadId, ThreadStatus, TurnSubmissionMode,
 };
 use super::simulated_io::{
     CrashSurvival, IO_SYNC, IO_WRITE, IoFaultPlan, IoTranscriptEntry, SimulatedIo,
@@ -694,14 +693,13 @@ impl ScenarioHarness {
         );
         let queue: Arc<dyn IngressQueueStore> = Arc::new(applied.queue);
         let provider: Arc<dyn ProviderClient> = Arc::new(applied.provider);
-        let runtime_config = CanonicalProviderRuntimeConfig::new(
+        let runtime_config = AgentLoopConfig::new(
             ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
             APP_SERVER_LOCAL_PROVIDER,
             APP_SERVER_LOCAL_MODEL,
         );
-        let runtime_factory: Arc<dyn super::kernel_test::AgentRuntimeFactory> = Arc::new(
-            CanonicalProviderRuntimeFactory::new(runtime_config, provider),
-        );
+        let runtime_factory: Arc<dyn super::kernel_test::AgentRuntimeFactory> =
+            Arc::new(AgentLoopFactory::new(runtime_config, provider));
 
         let socket = root.join("app-server.sock");
         let listen = AppServerListenAddr::parse(&format!("unix://{}", socket.display()))

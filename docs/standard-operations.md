@@ -161,7 +161,7 @@ and `threadId` to bind the handle settlement consumer.
 V1 intentionally does not add `cooldis-process` to the default manifest and
 `load_all_active_when_unbound` skips it. Host process authority must be declared
 explicitly by a manifest or registry binding. When a manifest binds these rows,
-the provider runtime mounts a kernel dispatcher over `AsyncExecutionManager` and
+the agent loop mounts a kernel dispatcher over `AsyncExecutionManager` and
 `HostBashLiveBackend`, so direct-tool aliases can start, poll, write to, and
 terminate host process handles through the stable package ABI. The app-server
 `command/exec` RPC remains a separate browser-facing projection with camelCase

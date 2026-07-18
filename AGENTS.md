@@ -7,7 +7,7 @@ Keep this repo focused on runtime primitives:
 - multi-tenant host and supervisor;
 - thread lifecycle, subthread relationships, events, cancellation, resume, and
   shutdown;
-- provider runtime adapters;
+- agent loop and provider adapters;
 - virtual bash, VFS, sandbox, procedure/reducer, and provider adapter seams.
 - ABI docs and contracts: host-facing ABI powers, guest-declared operations,
   and CLI/API/tool projections.

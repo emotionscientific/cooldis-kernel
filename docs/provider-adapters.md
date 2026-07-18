@@ -65,7 +65,7 @@ thinking and unsupported effort values fail closed before dispatch.
 
 ## Context Compilation
 
-Provider runtime now uses the kernel-level `AgentContextCompiler` before
+Agent loop now uses the kernel-level `AgentContextCompiler` before
 provider request construction. The compiler takes explicit inputs for system
 blocks, canonical session entries, compaction summaries, hook-added context,
 turn/environment context, attachments, and tool definitions. It returns the
@@ -79,7 +79,7 @@ outcomes are recorded as secret-free mutation witness observations before the
 runtime applies them.
 
 Provider-specific context policy still runs after that kernel compilation in
-`CanonicalProviderRuntimeFactory` when the client exposes capabilities.
+`AgentLoopFactory` when the client exposes capabilities.
 The runtime emits a `context_compiled` event after both compilation passes so
 host code can observe kernel diagnostics alongside provider-specific message
 drops and text truncation.
@@ -134,7 +134,7 @@ string metadata for host dashboards or audit sinks.
 
 ## Compaction
 
-Provider runtime supports manual Cooldis compaction through
+Agent loop supports manual Cooldis compaction through
 `RuntimeHost::compact_thread`. Manual compaction runs `PreCompact` and
 `PostCompact` hooks, optionally asks the configured provider client for a
 summary, and appends a `SessionEntryKind::Compaction` record. Compaction records

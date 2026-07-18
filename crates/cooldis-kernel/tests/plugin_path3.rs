@@ -1,8 +1,8 @@
 mod support;
 
 use cooldis::{
-    BashkitExecutionHarness, CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory,
-    LocalOperationRegistry, LocalPluginCatalog, LocalPluginCatalogConfig, PluginMount, ProviderApi,
+    AgentLoopConfig, AgentLoopFactory, BashkitExecutionHarness, LocalOperationRegistry,
+    LocalPluginCatalog, LocalPluginCatalogConfig, PluginMount, ProviderApi,
     PublishOperationRequest, PublishedOperationSource, RuntimeHost, RustWasmBuildOptions,
     ThreadCoordinates, ThreadTopology, VirtualBashRuntimeConfig, build_rust_wasm_module,
 };
@@ -63,10 +63,9 @@ async fn path3_local_plugin_build_publish_mount_and_agent_confirm() {
         response_tool_call("tailcat_cat", json!({"input": "/workspace/input.txt"})),
         response_text("confirmed: hello from live plugin fs"),
     ]));
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    let factory = CanonicalProviderRuntimeFactory::new(config, client.clone())
+    let factory = AgentLoopFactory::new(config, client.clone())
         .with_operation_registry(catalog.operation_registry());
     let host = RuntimeHost::new(Arc::new(factory));
     let thread = host
