@@ -22,6 +22,14 @@ jobs:
       - name: Verify remote sentinel
         run: scripts/check-remote-ci.sh
 
+  script-tests:
+    name: Script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Guard-rails test suite
+        run: scripts/guard-rails-test.sh
+
   tests:
     name: Workspace tests
     runs-on: ubuntu-latest
