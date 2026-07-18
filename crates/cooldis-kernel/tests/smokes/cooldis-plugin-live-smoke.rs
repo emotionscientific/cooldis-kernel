@@ -1,7 +1,7 @@
 use cooldis::{
-    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, LocalOperationRegistry,
-    LocalPluginCatalog, LocalPluginCatalogConfig, OpenAIReasoningSummary, OpenAIResponsesAdapter,
-    PluginMount, ProviderApi, ProviderEndpoint, ProviderHttpClient, ProviderWireAdapter,
+    AgentLoopConfig, AgentLoopFactory, LocalOperationRegistry, LocalPluginCatalog,
+    LocalPluginCatalogConfig, OpenAIReasoningSummary, OpenAIResponsesAdapter, PluginMount,
+    ProviderApi, ProviderEndpoint, ProviderHttpClient, ProviderWireAdapter,
     PublishOperationRequest, PublishedOperationSource, RuntimeEventKind, RuntimeHost,
     RustWasmBuildOptions, SystemBlock, ThreadCoordinates, ThreadEvent, ThreadTopology,
     build_rust_wasm_module,
@@ -59,18 +59,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProviderEndpoint::openai_responses(&config.base_url, config.api_key.clone()),
         adapter,
     )?);
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
-        ProviderApi::OpenAIResponses,
-        "openai",
-        config.model.clone(),
-    );
+    let mut runtime_config =
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", config.model.clone());
     runtime_config.max_tokens = 256;
     runtime_config.system.push(SystemBlock::text(format!(
         "You are testing a newly installed Cooldis plugin. You must call the {TOOL_NAME} tool with input /workspace/input.txt before answering. After the tool result is visible, reply with exactly: {FINAL_MARKER}: <file content>. Do not invent the file content."
     )));
 
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(runtime_config, client)
+        AgentLoopFactory::new(runtime_config, client)
             .with_operation_registry(catalog.operation_registry()),
     ));
     let thread = host

@@ -558,7 +558,7 @@ cursor contract.
 The implemented V1 memory lane consumes this general shape conservatively:
 `std::memory.extract` discharges `context.summary.completed` records into
 `derived:memory`, `std::memory.recall` emits a `context.read_plan.set` into
-`derived:context`, and provider runtime assembly reduces the latest
+`derived:context`, and agent loop assembly reduces the latest
 `pipeline_id = "context.memory"` read plan into a deterministic
 `<memory_context>` block before model dispatch. History/default read plans stay
 recorded as authority facts; replacing raw history ranges with summary entries
@@ -567,7 +567,7 @@ is a later assembler extension.
 The implemented V1 dynamic-instruction lane uses the same reducer shape:
 `std::prompt.dynamic_instructions` discharges instruction text as
 `context.summary.completed`, emits a `context.read_plan.set` with
-`pipeline_id = "context.instructions"`, and provider runtime assembly reduces
+`pipeline_id = "context.instructions"`, and agent loop assembly reduces
 the latest plan into a deterministic `<instruction_context>` block before model
 dispatch.
 

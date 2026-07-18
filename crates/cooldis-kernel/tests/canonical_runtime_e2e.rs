@@ -1,10 +1,10 @@
 use cooldis::{
-    AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage, CanonicalProviderRuntimeConfig,
-    CanonicalProviderRuntimeFactory, CanonicalStopReason, CooldisSupervisor,
-    OpenAIChatCompletionsAdapter, OpenAIReasoningSummary, OpenAIResponsesAdapter, ProviderApi,
-    ProviderAuth, ProviderEndpoint, ProviderHttpClient, ProviderWireAdapter, RuntimeEventKind,
-    RuntimeHost, SessionEntryKind, SessionStore, SqliteSessionStore, TenantRegistration,
-    TenantRuntimeContext, ThreadCoordinates, ThreadEvent, ThreadStartRequest, ThreadTopology,
+    AgentLoopConfig, AgentLoopFactory, AnthropicMessagesAdapter, CanonicalContent,
+    CanonicalMessage, CanonicalStopReason, CooldisSupervisor, OpenAIChatCompletionsAdapter,
+    OpenAIReasoningSummary, OpenAIResponsesAdapter, ProviderApi, ProviderAuth, ProviderEndpoint,
+    ProviderHttpClient, ProviderWireAdapter, RuntimeEventKind, RuntimeHost, SessionEntryKind,
+    SessionStore, SqliteSessionStore, TenantRegistration, TenantRuntimeContext, ThreadCoordinates,
+    ThreadEvent, ThreadStartRequest, ThreadTopology,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
@@ -663,7 +663,7 @@ async fn openai_supervisor(
     supervisor
 }
 
-fn openai_factory(server: &MockHttpServer, stream: bool) -> Arc<CanonicalProviderRuntimeFactory> {
+fn openai_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory> {
     let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(OpenAIResponsesAdapter {
         include_encrypted_reasoning: false,
         reasoning_summary: OpenAIReasoningSummary::Auto,
@@ -681,11 +681,10 @@ fn openai_factory(server: &MockHttpServer, stream: bool) -> Arc<CanonicalProvide
         )
         .unwrap(),
     );
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-e2e");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-e2e");
     config.max_tokens = 64;
     config.stream = stream;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
+    Arc::new(AgentLoopFactory::new(config, client))
 }
 
 async fn chat_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
@@ -704,7 +703,7 @@ async fn chat_streaming_host(server: &MockHttpServer, db_path: &Path) -> Runtime
     )
 }
 
-fn chat_factory(server: &MockHttpServer, stream: bool) -> Arc<CanonicalProviderRuntimeFactory> {
+fn chat_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory> {
     let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(OpenAIChatCompletionsAdapter);
     let client = Arc::new(
         ProviderHttpClient::new(
@@ -719,14 +718,14 @@ fn chat_factory(server: &MockHttpServer, stream: bool) -> Arc<CanonicalProviderR
         )
         .unwrap(),
     );
-    let mut config = CanonicalProviderRuntimeConfig::new(
+    let mut config = AgentLoopConfig::new(
         ProviderApi::OpenAIChatCompletions,
         "openai-compatible",
         "chat-e2e",
     );
     config.max_tokens = 64;
     config.stream = stream;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
+    Arc::new(AgentLoopFactory::new(config, client))
 }
 
 async fn anthropic_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
@@ -745,10 +744,7 @@ async fn anthropic_streaming_host(server: &MockHttpServer, db_path: &Path) -> Ru
     )
 }
 
-fn anthropic_factory(
-    server: &MockHttpServer,
-    stream: bool,
-) -> Arc<CanonicalProviderRuntimeFactory> {
+fn anthropic_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory> {
     let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(AnthropicMessagesAdapter);
     let client = Arc::new(
         ProviderHttpClient::new(
@@ -763,14 +759,11 @@ fn anthropic_factory(
         )
         .unwrap(),
     );
-    let mut config = CanonicalProviderRuntimeConfig::new(
-        ProviderApi::AnthropicMessages,
-        "anthropic",
-        "claude-e2e",
-    );
+    let mut config =
+        AgentLoopConfig::new(ProviderApi::AnthropicMessages, "anthropic", "claude-e2e");
     config.max_tokens = 64;
     config.stream = stream;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
+    Arc::new(AgentLoopFactory::new(config, client))
 }
 
 async fn next_output(events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>) -> String {

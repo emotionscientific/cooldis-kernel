@@ -1180,11 +1180,11 @@ mod tests {
         APP_SERVER_LOCAL_MODEL,
         APP_SERVER_OPENAI_COMPATIBLE_MODEL,
         APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        AgentLoopConfig,
+        AgentLoopFactory,
         AppServerListenAddr,
         AppServerProviderConfig,
         CanonicalContent,
-        CanonicalProviderRuntimeConfig,
-        CanonicalProviderRuntimeFactory,
         CanonicalStopReason,
         CanonicalUsage,
         // lexicon-allow: capsule - existing app-server config type used by test runtime factory
@@ -1690,9 +1690,9 @@ mod tests {
             provider_text("handled missing tool", 5, 6),
         ]));
         let runtime_config =
-            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
         let runtime_factory = Arc::new(
-            CanonicalProviderRuntimeFactory::new(runtime_config, provider.clone())
+            AgentLoopFactory::new(runtime_config, provider.clone())
                 .with_operation_registry(Arc::new(OperationRegistry::new())),
         );
         let app = CooldisAppServer::with_runtime_factory(app_config, runtime_factory)
@@ -1806,7 +1806,7 @@ mod tests {
         let app_config = isolated_app_config(listen.clone(), &root);
         let provider = Arc::new(PendingProviderClient::default());
         let runtime_config =
-            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
         let runtime_factory = runtime_factory_from_provider_parts(
             runtime_config,
             provider.clone(),
@@ -1901,7 +1901,7 @@ mod tests {
         let app_config = isolated_app_config(listen.clone(), &root);
         let provider = Arc::new(PendingProviderClient::default());
         let runtime_config =
-            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
         let runtime_factory = runtime_factory_from_provider_parts(
             runtime_config,
             provider.clone(),

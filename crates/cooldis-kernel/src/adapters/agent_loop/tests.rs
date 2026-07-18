@@ -873,39 +873,34 @@ fn tool_round_responses(rounds: usize) -> Vec<crate::ProviderResponse> {
     responses
 }
 
-fn runtime_factory(client: Arc<dyn ProviderClient>) -> Arc<CanonicalProviderRuntimeFactory> {
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+fn runtime_factory(client: Arc<dyn ProviderClient>) -> Arc<AgentLoopFactory> {
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
+    Arc::new(AgentLoopFactory::new(config, client))
 }
 
 fn runtime_factory_with_registry(
     client: Arc<dyn ProviderClient>,
     registry: Arc<OperationRegistry>,
-) -> Arc<CanonicalProviderRuntimeFactory> {
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+) -> Arc<AgentLoopFactory> {
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client).with_operation_registry(registry))
+    Arc::new(AgentLoopFactory::new(config, client).with_operation_registry(registry))
 }
 
-fn streaming_runtime_factory(
-    client: Arc<dyn ProviderClient>,
-) -> Arc<CanonicalProviderRuntimeFactory> {
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+fn streaming_runtime_factory(client: Arc<dyn ProviderClient>) -> Arc<AgentLoopFactory> {
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     config.stream = true;
-    Arc::new(CanonicalProviderRuntimeFactory::new(config, client))
+    Arc::new(AgentLoopFactory::new(config, client))
 }
 
-fn factory(client: Arc<RecordingClient>) -> Arc<CanonicalProviderRuntimeFactory> {
+fn factory(client: Arc<RecordingClient>) -> Arc<AgentLoopFactory> {
     runtime_factory(client)
 }
 
 struct RootProviderChildEchoFactory {
-    root: Arc<CanonicalProviderRuntimeFactory>,
+    root: Arc<AgentLoopFactory>,
 }
 
 #[async_trait]
@@ -1132,11 +1127,10 @@ async fn runtime_uses_agent_context_compiler_before_provider_policy() {
         response_text("first reply"),
         response_text("second reply"),
     ]));
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let factory = Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, client.clone()).with_context_compile_policy(
+        AgentLoopFactory::new(config, client.clone()).with_context_compile_policy(
             AgentContextCompilePolicy {
                 max_messages: Some(1),
                 max_text_bytes: None,
@@ -1172,9 +1166,8 @@ async fn runtime_includes_memory_read_plan_context_before_provider_request() {
     let client = Arc::new(RecordingClient::with_responses(vec![response_text(
         "memory-aware reply",
     )]));
-    let config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    let factory = Arc::new(CanonicalProviderRuntimeFactory::new(config, client.clone()));
+    let config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let factory = Arc::new(AgentLoopFactory::new(config, client.clone()));
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(factory, store.clone());
     let thread = host
@@ -1283,9 +1276,8 @@ async fn runtime_includes_instruction_read_plan_context_before_provider_request(
     let client = Arc::new(RecordingClient::with_responses(vec![response_text(
         "instruction-aware reply",
     )]));
-    let config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    let factory = Arc::new(CanonicalProviderRuntimeFactory::new(config, client.clone()));
+    let config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let factory = Arc::new(AgentLoopFactory::new(config, client.clone()));
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(factory, store.clone());
     let thread = host
@@ -1529,11 +1521,10 @@ async fn model_request_retries_retryable_provider_error() {
             .fail_nth_http("complete", 1, "temporary outage")
             .delay_nth("complete", 2, Duration::from_millis(25)),
     );
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let factory = Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, client.clone())
+        AgentLoopFactory::new(config, client.clone())
             .with_model_request_retry_policy(ModelRequestRetryPolicy::fixed(2, 50)),
     );
     let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
@@ -1583,11 +1574,10 @@ async fn model_request_does_not_retry_fatal_provider_error() {
         ScriptedResponse::Error(crate::ProviderError::Decode("bad json".to_string())),
         ScriptedResponse::Response(response_text("unused reply")),
     ]));
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let factory = Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, client.clone())
+        AgentLoopFactory::new(config, client.clone())
             .with_model_request_retry_policy(ModelRequestRetryPolicy::fixed(2, 0)),
     );
     let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
@@ -1635,15 +1625,12 @@ async fn model_request_falls_back_after_retry_exhaustion() {
         "fallback reply",
     )]));
     let mut primary_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     primary_config.max_tokens = 128;
-    let fallback_config = CanonicalProviderRuntimeConfig::new(
-        ProviderApi::OpenAIResponses,
-        "fallback",
-        "gpt-fallback",
-    );
+    let fallback_config =
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "fallback", "gpt-fallback");
     let factory = Arc::new(
-        CanonicalProviderRuntimeFactory::new(primary_config, primary_client.clone())
+        AgentLoopFactory::new(primary_config, primary_client.clone())
             .with_model_request_fallback(fallback_config, fallback_client.clone()),
     );
     let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
@@ -1847,11 +1834,10 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
     ));
     let pre_handler: Arc<dyn HookHandler> = pre_hook.clone();
     let post_handler: Arc<dyn HookHandler> = post_hook.clone();
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let factory = Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, client.clone()).with_hook_pipeline(Arc::new(
+        AgentLoopFactory::new(config, client.clone()).with_hook_pipeline(Arc::new(
             HookPipeline::new()
                 .with_handler(pre_handler)
                 .with_handler(post_handler),
@@ -1999,8 +1985,8 @@ async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() 
         .unwrap();
     assert_eq!(assistant.parent_entry_id, Some(first_user.entry_id));
     let host = RuntimeHost::with_session_store(
-        Arc::new(CanonicalProviderRuntimeFactory::new(
-            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+        Arc::new(AgentLoopFactory::new(
+            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
             client.clone(),
         )),
         store,
@@ -2040,11 +2026,10 @@ async fn auto_compaction_triggers_before_next_submit_when_budget_is_exceeded() {
         response_text("auto summary"),
         response_text("second reply"),
     ]));
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let factory = Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, client.clone())
+        AgentLoopFactory::new(config, client.clone())
             .with_compaction_policy(CompactionPolicy::auto_at_text_bytes(5)),
     );
     let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
@@ -2604,14 +2589,11 @@ async fn independent_thread_holds_overlap_results_append_in_call_order_and_finis
         response_text("final reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
-        Arc::new(
-            CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
-        ),
+        Arc::new(AgentLoopFactory::new(config, provider_client).with_tool_router(router)),
         store.clone(),
     );
     let thread = host
@@ -2696,12 +2678,8 @@ async fn duplicate_model_tool_call_ids_fail_before_the_batch_is_witnessed() {
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 client,
             )
             .with_tool_router(router),
@@ -2769,12 +2747,8 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
     let pause = Arc::clone(&store.pause);
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 client,
             )
             .with_tool_router(router),
@@ -2957,12 +2931,8 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
     let pause = Arc::clone(&store.pause);
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 client,
             )
             .with_tool_router(router),
@@ -3053,11 +3023,10 @@ async fn conflicting_thread_holds_serialize_in_model_call_order() {
         response_text("final reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
     ));
     let thread = host
         .start_thread(
@@ -3122,11 +3091,10 @@ async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
         response_text("final reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
     ));
     let thread = host
         .start_thread(
@@ -3185,14 +3153,11 @@ async fn suspended_batch_finishes_and_appends_other_members_before_turn_waits() 
         ],
     )]));
     let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
-        Arc::new(
-            CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
-        ),
+        Arc::new(AgentLoopFactory::new(config, provider_client).with_tool_router(router)),
         store.clone(),
     );
     let thread = host
@@ -3276,12 +3241,8 @@ async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 provider_client,
             )
             .with_tool_router(router),
@@ -3395,11 +3356,10 @@ async fn failed_tool_call_does_not_cancel_independent_sibling() {
         response_text("final reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
     ));
     let thread = host
         .start_thread(
@@ -3468,12 +3428,8 @@ async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 client,
             )
             .with_tool_router(router),
@@ -3554,14 +3510,11 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
         response_text("replacement reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
-        Arc::new(
-            CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
-        ),
+        Arc::new(AgentLoopFactory::new(config, provider_client).with_tool_router(router)),
         store.clone(),
     );
     let thread = host
@@ -3710,12 +3663,8 @@ async fn invocation_panic_after_grace_still_self_settles_exactly_once() {
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 client,
             )
             .with_tool_router(router),
@@ -3783,12 +3732,8 @@ async fn invocation_panic_before_cancellation_is_a_failed_completion() {
     let store = Arc::new(InMemorySessionStore::new());
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 client,
             )
             .with_tool_router(router),
@@ -3846,12 +3791,8 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
     let store = Arc::new(FaultingRuntimeStore::new(inner.clone()));
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 client,
             )
             .with_tool_router(router),
@@ -4280,8 +4221,8 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
 
     let client: Arc<dyn ProviderClient> = Arc::new(RecordingClient::default());
     let host = RuntimeHost::with_session_store(
-        Arc::new(CanonicalProviderRuntimeFactory::new(
-            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+        Arc::new(AgentLoopFactory::new(
+            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
             client,
         )),
         store.clone(),
@@ -4813,8 +4754,8 @@ async fn runtime_bash_tool_advertises_and_executes_operation_shell_commands() {
         .with_operation_registry(registry)
         .with_capability_grants(cooldis_threads_kernel_package().capability_grants);
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(
-            CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+        AgentLoopFactory::new(
+            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
             provider_client,
         )
         .with_bash_tool(bash_config),
@@ -4894,8 +4835,8 @@ async fn runtime_bash_tool_executes_kernel_thread_operation_commands_without_age
     let bash_config = VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry)
         .with_capability_grants(cooldis_threads_kernel_package().capability_grants);
-    let root_factory = CanonicalProviderRuntimeFactory::new(
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let root_factory = AgentLoopFactory::new(
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
         provider_client,
     )
     .with_bash_tool(bash_config);
@@ -4989,11 +4930,10 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
         response_text("final reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, provider_client)
+        AgentLoopFactory::new(config, provider_client)
             .with_operation_registry(registry)
             .with_hook_pipeline(hook_pipeline),
     ));
@@ -5127,12 +5067,11 @@ async fn mutating_tool_hooks_append_secret_free_witnesses_before_effects() {
         response_text("final reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(config, provider_client)
+            AgentLoopFactory::new(config, provider_client)
                 .with_tool_router(router)
                 .with_hook_pipeline(hook_pipeline),
         ),
@@ -5221,11 +5160,10 @@ async fn pre_tool_hook_can_block_tool_execution() {
         response_text("final reply"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, provider_client)
+        AgentLoopFactory::new(config, provider_client)
             .with_operation_registry(registry)
             .with_hook_pipeline(hook_pipeline),
     ));
@@ -5308,12 +5246,11 @@ async fn block_stop_and_observe_only_hook_witnessing() {
         response_text("final reply"),
     ]));
     let block_provider_client: Arc<dyn ProviderClient> = block_client.clone();
-    let mut block_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut block_config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     block_config.max_tokens = 128;
     let block_host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(block_config, block_provider_client)
+            AgentLoopFactory::new(block_config, block_provider_client)
                 .with_operation_registry(echo_registry("echo").await)
                 .with_hook_pipeline(block_hook_pipeline),
         ),
@@ -5366,12 +5303,8 @@ async fn block_stop_and_observe_only_hook_witnessing() {
     let stop_provider_client: Arc<dyn ProviderClient> = stop_client.clone();
     let stop_host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(
-                CanonicalProviderRuntimeConfig::new(
-                    ProviderApi::OpenAIResponses,
-                    "openai",
-                    "gpt-test",
-                ),
+            AgentLoopFactory::new(
+                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
                 stop_provider_client,
             )
             .with_hook_pipeline(stop_hook_pipeline),
@@ -5430,11 +5363,11 @@ async fn block_stop_and_observe_only_hook_witnessing() {
     ]));
     let observe_provider_client: Arc<dyn ProviderClient> = observe_client.clone();
     let mut observe_config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     observe_config.max_tokens = 128;
     let observe_host = RuntimeHost::with_session_store(
         Arc::new(
-            CanonicalProviderRuntimeFactory::new(observe_config, observe_provider_client)
+            AgentLoopFactory::new(observe_config, observe_provider_client)
                 .with_operation_registry(echo_registry("echo").await)
                 .with_hook_pipeline(observe_hook_pipeline),
         ),
@@ -5489,12 +5422,11 @@ async fn runtime_passes_turn_context_to_tool_router() {
         ),
         response_text("final reply"),
     ]));
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
     let provider_client: Arc<dyn ProviderClient> = client.clone();
     let host = RuntimeHost::new(Arc::new(
-        CanonicalProviderRuntimeFactory::new(config, provider_client).with_tool_router(router),
+        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
     ));
     let thread = host
         .start_thread(
@@ -5511,7 +5443,7 @@ async fn runtime_passes_turn_context_to_tool_router() {
         crate::TurnInput::text("record context")
             .with_cwd("/tmp/cooldis-turn")
             .with_permission_profile("workspace-write")
-            .with_metadata("source", "provider-runtime-test"),
+            .with_metadata("source", "agent-loop-test"),
     )
     .await
     .unwrap();
@@ -5533,7 +5465,7 @@ async fn runtime_passes_turn_context_to_tool_router() {
     );
     assert_eq!(
         snapshot.metadata.get("source").map(String::as_str),
-        Some("provider-runtime-test")
+        Some("agent-loop-test")
     );
     assert_eq!(
         snapshot.budget.max_tool_rounds,
@@ -5557,10 +5489,9 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
         response_text("spawned child"),
     ]));
     let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    let root_factory = CanonicalProviderRuntimeFactory::new(config, provider_client)
+    let root_factory = AgentLoopFactory::new(config, provider_client)
         .with_tool_router(Arc::new(kernel_thread_router().await))
         .with_thread_spawn_agent_resolver(Arc::new(StaticThreadSpawnAgentResolver));
     let host = RuntimeHost::new(Arc::new(RootProviderChildEchoFactory {

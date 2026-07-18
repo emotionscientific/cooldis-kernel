@@ -1,9 +1,9 @@
 use cooldis::{
-    AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage,
-    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, OpenAIReasoningSummary,
-    OpenAIResponsesAdapter, ProviderApi, ProviderClient, ProviderEndpoint, ProviderHttpClient,
-    ProviderRequest, ProviderStreamEvent, ProviderWireAdapter, RuntimeHost, ThreadCoordinates,
-    ThreadEvent, ThreadTopology,
+    AgentLoopConfig, AgentLoopFactory, AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter,
+    CanonicalContent, CanonicalMessage, OpenAIReasoningSummary, OpenAIResponsesAdapter,
+    ProviderApi, ProviderClient, ProviderEndpoint, ProviderHttpClient, ProviderRequest,
+    ProviderStreamEvent, ProviderWireAdapter, RuntimeHost, ThreadCoordinates, ThreadEvent,
+    ThreadTopology,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -432,17 +432,14 @@ async fn smoke_canonical_openai_runtime(
         ProviderEndpoint::openai_responses(&config.openai.base_url, config.openai.api_key.clone()),
         adapter,
     )?);
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::OpenAIResponses,
         "openai",
         config.openai.model.clone(),
     );
     runtime_config.max_tokens = 32;
     runtime_config.stream = true;
-    let host = RuntimeHost::new(Arc::new(CanonicalProviderRuntimeFactory::new(
-        runtime_config,
-        client,
-    )));
+    let host = RuntimeHost::new(Arc::new(AgentLoopFactory::new(runtime_config, client)));
     run_canonical_runtime_smoke(
         host,
         "canonical_openai",
@@ -463,17 +460,14 @@ async fn smoke_canonical_anthropic_runtime(
         ),
         adapter,
     )?);
-    let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+    let mut runtime_config = AgentLoopConfig::new(
         ProviderApi::AnthropicMessages,
         "anthropic",
         config.anthropic.model.clone(),
     );
     runtime_config.max_tokens = 32;
     runtime_config.stream = true;
-    let host = RuntimeHost::new(Arc::new(CanonicalProviderRuntimeFactory::new(
-        runtime_config,
-        client,
-    )));
+    let host = RuntimeHost::new(Arc::new(AgentLoopFactory::new(runtime_config, client)));
     run_canonical_runtime_smoke(
         host,
         "canonical_anthropic",

@@ -1868,7 +1868,7 @@ pub(super) fn thread_manifest_skill_context_segments(
 }
 
 pub(super) struct CapsuleBindingRuntimeFactory {
-    pub(super) config: CanonicalProviderRuntimeConfig,
+    pub(super) config: AgentLoopConfig,
     pub(super) client: Arc<dyn ProviderClient>,
     pub(super) capsule_bindings: CapsuleBindingsConfig,
     pub(super) secret_resolver: Option<Arc<dyn SecretResolver>>,
@@ -1897,7 +1897,7 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
     async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
         let mut config = self.config.clone();
         apply_manifest_runtime_metadata(context, &mut config)?;
-        let mut factory = CanonicalProviderRuntimeFactory::new(config, Arc::clone(&self.client));
+        let mut factory = AgentLoopFactory::new(config, Arc::clone(&self.client));
         if let Some(policy) = manifest_compaction_policy(context)? {
             factory = factory.with_compaction_policy(policy);
         }
@@ -2285,9 +2285,7 @@ fn bash_config_with_skill_files(
     config
 }
 
-fn provider_surface_for_runtime_config(
-    config: &CanonicalProviderRuntimeConfig,
-) -> AgentManifestProviderSurface {
+fn provider_surface_for_runtime_config(config: &AgentLoopConfig) -> AgentManifestProviderSurface {
     let supports_streaming = !matches!(config.api, ProviderApi::Other(_));
     AgentManifestProviderSurface::single(config.provider.clone(), config.model.clone())
         .with_supports_streaming(supports_streaming)
@@ -2295,7 +2293,7 @@ fn provider_surface_for_runtime_config(
 
 pub(super) fn apply_manifest_runtime_metadata(
     context: &ThreadContext,
-    config: &mut CanonicalProviderRuntimeConfig,
+    config: &mut AgentLoopConfig,
 ) -> CooldisResult<()> {
     if let Some(thinking) = thread_metadata_thinking(&context.metadata)? {
         config.thinking = Some(thinking);

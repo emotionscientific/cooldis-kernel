@@ -1,18 +1,17 @@
 mod support;
 
 use cooldis::{
-    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider, AgentToolRouter,
-    BashExecutionPolicy, CanonicalMessage, CanonicalProviderRuntimeConfig,
-    CanonicalProviderRuntimeFactory, CanonicalStopReason, CanonicalUsage, CompactionTrigger,
-    CooldisResult, EventKind, EventStore, EventStreamId, HookEventName, HookHandler,
-    HookHandlerOutput, HookRequest, HookRunStatus, InMemorySessionStore,
-    KernelOperationRegistration, OperationRegistry, OperationToolAlias, ProviderApi,
-    ProviderClient, ProviderRequest, ProviderResponse, ProviderResult, ProviderStreamEvent,
-    RuntimeEventKind, RuntimeHost, RuntimeModelRequestMode, RuntimeModelRequestPurpose,
-    RuntimePermissionDecision, RuntimeToolLogLevel, SessionContext, SqliteSessionStore,
-    THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadEvent, ThreadSignal, ThreadSignalKind,
-    ThreadStatus, ThreadTopology, ToolCallCancellation, ToolCallCompletedPayload, ToolDefinition,
-    ToolInvocationCancellation, TurnSubmissionMode, VirtualBashRuntimeConfig,
+    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider, AgentLoopConfig,
+    AgentLoopFactory, AgentToolRouter, BashExecutionPolicy, CanonicalMessage, CanonicalStopReason,
+    CanonicalUsage, CompactionTrigger, CooldisResult, EventKind, EventStore, EventStreamId,
+    HookEventName, HookHandler, HookHandlerOutput, HookRequest, HookRunStatus,
+    InMemorySessionStore, KernelOperationRegistration, OperationRegistry, OperationToolAlias,
+    ProviderApi, ProviderClient, ProviderRequest, ProviderResponse, ProviderResult,
+    ProviderStreamEvent, RuntimeEventKind, RuntimeHost, RuntimeModelRequestMode,
+    RuntimeModelRequestPurpose, RuntimePermissionDecision, RuntimeToolLogLevel, SessionContext,
+    SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadCoordinates, ThreadEvent, ThreadSignal,
+    ThreadSignalKind, ThreadStatus, ThreadTopology, ToolCallCancellation, ToolCallCompletedPayload,
+    ToolDefinition, ToolInvocationCancellation, TurnSubmissionMode, VirtualBashRuntimeConfig,
     VirtualBashRuntimeFactory, cooldis_threads_kernel_package,
 };
 use serde_json::json;
@@ -952,7 +951,7 @@ async fn cancel_during_tool_execution_cancels_in_flight_batch_and_keeps_thread_r
 }
 
 #[tokio::test]
-async fn steer_append_failure_at_tool_boundary_fails_the_provider_runtime() {
+async fn steer_append_failure_at_tool_boundary_fails_the_agent_loop() {
     let client = Arc::new(ScriptedProviderClient::with_responses(vec![
         response_tool_call("failed_boundary_echo", json!({"input": "original"})),
     ]));
@@ -1372,15 +1371,14 @@ async fn manual_compaction_checkpoint_resume_scenario_replays_summary() {
     );
 }
 
-fn provider_factory<P>(client: Arc<P>) -> CanonicalProviderRuntimeFactory
+fn provider_factory<P>(client: Arc<P>) -> AgentLoopFactory
 where
     P: ProviderClient + 'static,
 {
     let client: Arc<dyn ProviderClient> = client;
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    CanonicalProviderRuntimeFactory::new(config, client)
+    AgentLoopFactory::new(config, client)
 }
 
 async fn start_thread(host: &RuntimeHost) -> cooldis::RuntimeThreadHandle {

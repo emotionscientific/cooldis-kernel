@@ -3,38 +3,37 @@ use crate::daemon::daemon_io::CooldisDaemonIoBridge;
 use crate::daemon::recovery_sweep::StartupRecoverySweep;
 use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use crate::{
-    AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindOverrides,
-    AgentManifestBoundThread, AgentManifestModelProfileSelection, AgentManifestOperationBinding,
-    AgentManifestPlacementBinding, AgentManifestProviderSurface,
+    AgentKernelToolCall, AgentKernelToolProvider, AgentLoopConfig, AgentLoopFactory,
+    AgentManifestBindOverrides, AgentManifestBoundThread, AgentManifestModelProfileSelection,
+    AgentManifestOperationBinding, AgentManifestPlacementBinding, AgentManifestProviderSurface,
     AgentManifestResolvedWorkspaceMount, AgentManifestSkillDiscovery,
     AgentManifestSkillPackageBinding, AgentManifestWorkspaceBinding, AgentRecordRef, AgentRuntime,
     AgentRuntimeFactory, AgentToolRouter, AnthropicBedrockMessagesAdapter,
-    AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage, CanonicalProviderRuntimeConfig,
-    CanonicalProviderRuntimeFactory, CanonicalStopReason, CanonicalUsage,
-    CapsuleBindingResolutionRequest, CapsuleBindingScope, CooldisError, CooldisResult,
-    CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence, EventStore, EventStreamId,
-    KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver, LlmProviderAuthContext,
-    LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue, LlmProviderRecord,
-    LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry, LocalPluginCatalog,
-    LocalPluginCatalogRecord, LocalSkillRegistry, MandateCatchUpPolicy, MandateSchedulePayload,
-    McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport, McpToolUniverseDiscoverer,
-    MountedToolUniverse, OPENAI_COMPATIBLE_DEFAULT_MODEL, OpenAIChatCompletionsAdapter,
-    OpenAIReasoningSummary, OpenAIResponsesAdapter, OperationRegistry, OperationToolAlias,
-    PluginMount, ProviderAbiProjection, ProviderApi, ProviderAuth, ProviderCapabilityRecord,
-    ProviderClient, ProviderEndpoint, ProviderHttpClient, ProviderRequest, ProviderRequestMode,
-    ProviderResponse, ProviderResult, ProviderToolResultConstraints, ProviderWireAdapter,
-    RuntimeEventKind, RuntimeStore, RuntimeTerminalState, RuntimeThreadHandle, SecretResolver,
-    SecretSourceKind, SecretStoreError, SessionEntry, SessionEntryKind, SessionStore,
-    SqliteMcpSourceRegistry, SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore,
-    SystemBlock, THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA,
-    THREAD_AGENT_SKILL_DISCOVERY_METADATA, THREAD_AGENT_SKILL_PACKAGES_METADATA,
-    THREAD_BOUND_COUPLING_SET_METADATA, THREAD_OPERATION_REGISTRY_ROOT_METADATA,
-    TenantRegistration, TenantRuntimeContext, ThinkingConfig, ThinkingEffort, ThreadBaseRef,
-    ThreadCheckpointId, ThreadContext, ThreadEvent, ThreadForkReason, ThreadId,
-    ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus, ThreadMetadataStore,
-    ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding, ToolUniverseCaller,
-    ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent, TurnInput,
-    TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualFile,
+    AnthropicMessagesAdapter, CanonicalContent, CanonicalMessage, CanonicalStopReason,
+    CanonicalUsage, CapsuleBindingResolutionRequest, CapsuleBindingScope, CooldisError,
+    CooldisResult, CooldisSupervisor, DEBUG_THREAD_EXPORT_SCHEMA_V1, EventSequence, EventStore,
+    EventStreamId, KernelThreadSpawnAgentBinding, KernelThreadSpawnAgentResolver,
+    LlmProviderAuthContext, LlmProviderAuthStore, LlmProviderCatalogStore, LlmProviderConfigValue,
+    LlmProviderRecord, LlmProviderStoreError, LocalAgentRegistry, LocalOperationRegistry,
+    LocalPluginCatalog, LocalPluginCatalogRecord, LocalSkillRegistry, MandateCatchUpPolicy,
+    MandateSchedulePayload, McpRemoteServerConfig, McpRemoteToolProvider, McpRemoteTransport,
+    McpToolUniverseDiscoverer, MountedToolUniverse, OPENAI_COMPATIBLE_DEFAULT_MODEL,
+    OpenAIChatCompletionsAdapter, OpenAIReasoningSummary, OpenAIResponsesAdapter,
+    OperationRegistry, OperationToolAlias, PluginMount, ProviderAbiProjection, ProviderApi,
+    ProviderAuth, ProviderCapabilityRecord, ProviderClient, ProviderEndpoint, ProviderHttpClient,
+    ProviderRequest, ProviderRequestMode, ProviderResponse, ProviderResult,
+    ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind, RuntimeStore,
+    RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind, SecretStoreError,
+    SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry, SqliteMetadataStore,
+    SqliteSecretStore, SqliteSessionStore, SystemBlock,
+    THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_DISCOVERY_METADATA,
+    THREAD_AGENT_SKILL_PACKAGES_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
+    THREAD_OPERATION_REGISTRY_ROOT_METADATA, TenantRegistration, TenantRuntimeContext,
+    ThinkingConfig, ThinkingEffort, ThreadBaseRef, ThreadCheckpointId, ThreadContext, ThreadEvent,
+    ThreadForkReason, ThreadId, ThreadLifecycleRecord, ThreadLifecycleSink, ThreadLifecycleStatus,
+    ThreadMetadataStore, ThreadStartRequest, ThreadStatus, ThreadTopology, ToolUniverseBinding,
+    ToolUniverseCaller, ToolUniverseDiscoveryReceipt, ToolUniverseSearchSurface, TurnContent,
+    TurnInput, TurnSubmissionMode, VirtualBashRuntimeConfig, VirtualFile,
     bind_published_agent_record_with_placement, default_blob_registry_root_for_agent_registry_root,
     ensure_cooldis_notify_published, ensure_cooldis_process_published,
     ensure_cooldis_schedule_published, ensure_cooldis_threads_published, resolve_llm_provider_auth,
@@ -129,7 +128,7 @@ const THREAD_AGENT_PLACEMENT_METADATA: &str = "cooldis.agent.placement";
 pub(crate) const THREAD_AGENT_WORKSPACE_METADATA: &str = "cooldis.agent.workspace";
 const THREAD_AGENT_RUNTIME_STREAMING_METADATA: &str = "cooldis.agent.runtime.streaming";
 const THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA: &str =
-    crate::adapters::provider_runtime::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA;
+    crate::adapters::agent_loop::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA;
 const THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA: &str =
     "cooldis.agent.runtime.compaction.auto_at_text_bytes";
 const THREAD_AGENT_OPERATION_BINDINGS_METADATA: &str = "cooldis.agent.operation_bindings";
@@ -1033,7 +1032,7 @@ impl CooldisAppServer {
 }
 
 struct ResolvedCatalogOpenAIChatCompletionsProvider {
-    runtime_config: CanonicalProviderRuntimeConfig,
+    runtime_config: AgentLoopConfig,
     endpoint: ProviderEndpoint,
 }
 
@@ -1100,8 +1099,7 @@ where
     }
     endpoint.headers = resolve_catalog_headers(&headers, auth_context)?;
 
-    let mut runtime_config =
-        CanonicalProviderRuntimeConfig::new(api, provider.provider_id.clone(), model_id);
+    let mut runtime_config = AgentLoopConfig::new(api, provider.provider_id.clone(), model_id);
     runtime_config.max_tokens = max_tokens;
     runtime_config.stream = stream;
     Ok(ResolvedCatalogOpenAIChatCompletionsProvider {
@@ -1307,7 +1305,7 @@ async fn runtime_factory_from_config(
         AppServerProviderConfig::LocalOffline => {
             let provider = config.model_provider.clone();
             let model = config.model.clone();
-            let runtime_config = CanonicalProviderRuntimeConfig::new(
+            let runtime_config = AgentLoopConfig::new(
                 ProviderApi::Other(provider.clone()),
                 provider.clone(),
                 model.clone(),
@@ -1343,7 +1341,7 @@ async fn runtime_factory_from_config(
                     ))
                 })?,
             );
-            let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+            let mut runtime_config = AgentLoopConfig::new(
                 ProviderApi::OpenAIResponses,
                 APP_SERVER_BIFROST_PROVIDER,
                 model.clone(),
@@ -1376,7 +1374,7 @@ async fn runtime_factory_from_config(
                     "failed to build OpenAI Chat Completions provider client: {err}"
                 ))
             })?);
-            let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+            let mut runtime_config = AgentLoopConfig::new(
                 ProviderApi::OpenAIChatCompletions,
                 provider.clone(),
                 model.clone(),
@@ -1411,7 +1409,7 @@ async fn runtime_factory_from_config(
                     ))
                 })?,
             );
-            let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+            let mut runtime_config = AgentLoopConfig::new(
                 ProviderApi::AnthropicMessages,
                 APP_SERVER_ANTHROPIC_PROVIDER,
                 model.clone(),
@@ -1461,7 +1459,7 @@ async fn runtime_factory_from_config(
                     "failed to build Anthropic Bedrock provider client: {err}"
                 ))
             })?);
-            let mut runtime_config = CanonicalProviderRuntimeConfig::new(
+            let mut runtime_config = AgentLoopConfig::new(
                 ProviderApi::AnthropicMessages,
                 APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
                 model.clone(),
@@ -1515,7 +1513,7 @@ async fn runtime_factory_from_config(
 
 #[cfg(test)]
 pub(crate) fn runtime_factory_from_provider_parts(
-    runtime_config: CanonicalProviderRuntimeConfig,
+    runtime_config: AgentLoopConfig,
     client: Arc<dyn ProviderClient>,
     capsule_bindings: CapsuleBindingsConfig,
 ) -> Arc<dyn crate::AgentRuntimeFactory> {
@@ -1529,7 +1527,7 @@ pub(crate) fn runtime_factory_from_provider_parts(
 
 #[cfg(test)]
 pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
-    runtime_config: CanonicalProviderRuntimeConfig,
+    runtime_config: AgentLoopConfig,
     client: Arc<dyn ProviderClient>,
     // lexicon-allow: capsule - existing app-server config field name
     capsule_bindings: CapsuleBindingsConfig,
@@ -1555,7 +1553,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
 }
 
 pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
-    runtime_config: CanonicalProviderRuntimeConfig,
+    runtime_config: AgentLoopConfig,
     client: Arc<dyn ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type name
     capsule_bindings: CapsuleBindingsConfig,
@@ -1582,7 +1580,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
 }
 
 fn runtime_factory_from_provider_parts_with_store_paths(
-    runtime_config: CanonicalProviderRuntimeConfig,
+    runtime_config: AgentLoopConfig,
     client: Arc<dyn ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type name
     capsule_bindings: CapsuleBindingsConfig,

@@ -495,13 +495,12 @@ mod tests {
     use crate::kernel::process_handle_dispatch::{command_digest, recovery_outcome_envelope};
     use crate::test_support::{CrashCutHost, CrashCutSeam, FaultingRuntimeStore, run_crash_cut};
     use crate::{
-        CanonicalContent, CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory,
-        CanonicalStopReason, CanonicalUsage, CooldisAppServer, CooldisAppServerConfig, EventKind,
-        EventProvenance, EventStore, EventStreamId, IoIngressReceivedPayload, NewEventRecord,
-        ProviderApi, ProviderClient, ProviderRequest, ProviderResponse, ProviderResult,
-        RuntimeHost, RuntimeStore, ThreadCoordinates, ThreadId, ThreadJoinedPayload,
-        ThreadSpawnRequestedPayload, ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology,
-        control_stream_id,
+        AgentLoopConfig, AgentLoopFactory, CanonicalContent, CanonicalStopReason, CanonicalUsage,
+        CooldisAppServer, CooldisAppServerConfig, EventKind, EventProvenance, EventStore,
+        EventStreamId, IoIngressReceivedPayload, NewEventRecord, ProviderApi, ProviderClient,
+        ProviderRequest, ProviderResponse, ProviderResult, RuntimeHost, RuntimeStore,
+        ThreadCoordinates, ThreadId, ThreadJoinedPayload, ThreadSpawnRequestedPayload,
+        ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology, control_stream_id,
     };
     use cooldis_io_core::{IngressContent, IngressEnvelope, IoDedupeKey};
     use cooldis_process::{
@@ -919,16 +918,13 @@ mod tests {
                     Duration::from_secs(60),
                 ),
             );
-            let mut config = CanonicalProviderRuntimeConfig::new(
+            let mut config = AgentLoopConfig::new(
                 ProviderApi::Other("recovery-cut".to_string()),
                 "recovery-cut",
                 "recovery-cut-model",
             );
             config.max_tokens = 32;
-            let factory = Arc::new(CanonicalProviderRuntimeFactory::new(
-                config,
-                Arc::new(RecoveryCutProvider),
-            ));
+            let factory = Arc::new(AgentLoopFactory::new(config, Arc::new(RecoveryCutProvider)));
             let host = RuntimeHost::with_session_store(
                 factory,
                 fault_store.clone() as Arc<dyn RuntimeStore>,
@@ -983,7 +979,7 @@ mod tests {
                 }
             })
             .await
-            .expect("provider runtime did not reach the pre-join commit cut");
+            .expect("agent loop did not reach the pre-join commit cut");
             let child_events = self
                 .store
                 .read_events(&EventStreamId::for_thread(&self.child), None)

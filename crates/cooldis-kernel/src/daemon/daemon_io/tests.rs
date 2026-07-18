@@ -4,12 +4,12 @@ use crate::test_support::FaultingIngressQueue;
 use crate::{
     APP_SERVER_LOCAL_MODEL,
     APP_SERVER_LOCAL_PROVIDER,
+    AgentLoopConfig,
+    AgentLoopFactory,
     AgentRuntime,
     AgentRuntimeFactory,
     AppServerListenAddr,
     CanonicalContent,
-    CanonicalProviderRuntimeConfig,
-    CanonicalProviderRuntimeFactory,
     CanonicalStopReason,
     CanonicalUsage,
     // lexicon-allow: capsule - existing app-server manifest binding config type
@@ -644,7 +644,7 @@ async fn test_server_with_provider_at_root(
     config.state_home = fixture_root.join("state");
     config.user_state_home = fixture_root.join("user-state");
     apply_test_identity(&mut config, fixture_root);
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -684,7 +684,7 @@ async fn test_server_with_route_provider_at_root(
     config.blob_registry_root =
         crate::default_blob_registry_root_for_agent_registry_root(agent_registry_root);
     apply_test_identity(&mut config, fixture_root);
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -866,7 +866,7 @@ impl RuntimeBuildFailureProbe {
 }
 
 struct SelectiveRuntimeFactory {
-    inner: CanonicalProviderRuntimeFactory,
+    inner: AgentLoopFactory,
     probe: RuntimeBuildFailureProbe,
 }
 
@@ -898,7 +898,7 @@ async fn bridge_with_runtime_build_failure(
 ) -> (CooldisDaemonIoBridge, RuntimeBuildFailureProbe) {
     let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
     let user_id = format!("user-{}", uuid::Uuid::now_v7());
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -906,7 +906,7 @@ async fn bridge_with_runtime_build_failure(
     let client: Arc<dyn ProviderClient> = Arc::new(RecordingRouteProviderClient::default());
     let probe = RuntimeBuildFailureProbe::default();
     let runtime_factory = Arc::new(SelectiveRuntimeFactory {
-        inner: CanonicalProviderRuntimeFactory::new(runtime_config, client),
+        inner: AgentLoopFactory::new(runtime_config, client),
         probe: probe.clone(),
     });
     let supervisor = CooldisSupervisor::new();
@@ -940,13 +940,13 @@ async fn bridge_with_execution_policy(
 ) -> CooldisDaemonIoBridge {
     let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
     let user_id = format!("user-{}", uuid::Uuid::now_v7());
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
     );
     let client: Arc<dyn ProviderClient> = Arc::new(RecordingRouteProviderClient::default());
-    let runtime_factory = Arc::new(CanonicalProviderRuntimeFactory::new(runtime_config, client));
+    let runtime_factory = Arc::new(AgentLoopFactory::new(runtime_config, client));
     let context = TenantRuntimeContext::local(
         tenant_id.clone(),
         fixture_root.join("runtime"),
@@ -1112,14 +1112,14 @@ struct FailOnceRuntimeState {
     failed: Notify,
 }
 
-struct FailOnceThenProviderRuntimeFactory {
+struct FailOnceThenAgentLoopFactory {
     builds: AtomicUsize,
     state: Arc<FailOnceRuntimeState>,
-    provider: CanonicalProviderRuntimeFactory,
+    provider: AgentLoopFactory,
 }
 
 #[async_trait]
-impl AgentRuntimeFactory for FailOnceThenProviderRuntimeFactory {
+impl AgentRuntimeFactory for FailOnceThenAgentLoopFactory {
     async fn build(&self, context: &ThreadContext) -> CooldisResult<Box<dyn AgentRuntime>> {
         if self.builds.fetch_add(1, Ordering::SeqCst) == 0 {
             return Ok(Box::new(FailBeforeEvidenceRuntime {
@@ -1228,7 +1228,7 @@ impl RuntimeBuildGateProbe {
 }
 
 struct GatedRuntimeFactory {
-    inner: CanonicalProviderRuntimeFactory,
+    inner: AgentLoopFactory,
     probe: RuntimeBuildGateProbe,
 }
 
@@ -1258,7 +1258,7 @@ async fn bridge_with_runtime_build_gate(
 ) -> (CooldisDaemonIoBridge, RuntimeBuildGateProbe) {
     let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
     let user_id = format!("user-{}", uuid::Uuid::now_v7());
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -1266,7 +1266,7 @@ async fn bridge_with_runtime_build_gate(
     let client: Arc<dyn ProviderClient> = Arc::new(RecordingRouteProviderClient::default());
     let probe = RuntimeBuildGateProbe::default();
     let runtime_factory = Arc::new(GatedRuntimeFactory {
-        inner: CanonicalProviderRuntimeFactory::new(runtime_config, client),
+        inner: AgentLoopFactory::new(runtime_config, client),
         probe: probe.clone(),
     });
     let supervisor = CooldisSupervisor::new();
@@ -3918,14 +3918,14 @@ async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() 
 async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
     let fixture_root = test_root("fork-spawn-before-settle-cut");
     let egress_db = fixture_root.join("io.sqlite");
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
     );
     let bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
-        Arc::new(CanonicalProviderRuntimeFactory::new(
+        Arc::new(AgentLoopFactory::new(
             runtime_config.clone(),
             Arc::new(RecordingRouteProviderClient::default()),
         )),
@@ -3995,7 +3995,7 @@ async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
 
     let restarted_bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
-        Arc::new(CanonicalProviderRuntimeFactory::new(
+        Arc::new(AgentLoopFactory::new(
             runtime_config,
             Arc::new(RecordingRouteProviderClient::default()),
         )),
@@ -4843,7 +4843,7 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
     let fixture_root = test_root("queue-runtime-failure-reservation");
     let egress_db = fixture_root.join("io.sqlite");
     let state = Arc::new(FailOnceRuntimeState::default());
-    let runtime_config = CanonicalProviderRuntimeConfig::new(
+    let runtime_config = AgentLoopConfig::new(
         ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
         APP_SERVER_LOCAL_PROVIDER,
         APP_SERVER_LOCAL_MODEL,
@@ -4852,10 +4852,10 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
         Arc::new(RecordingRouteProviderClient::default());
     let bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
-        Arc::new(FailOnceThenProviderRuntimeFactory {
+        Arc::new(FailOnceThenAgentLoopFactory {
             builds: AtomicUsize::new(0),
             state: Arc::clone(&state),
-            provider: CanonicalProviderRuntimeFactory::new(runtime_config, provider_client),
+            provider: AgentLoopFactory::new(runtime_config, provider_client),
         }),
     )
     .await;
@@ -4942,8 +4942,8 @@ async fn concurrent_lazy_load_of_cyclic_topology_fails_closed_without_lock_deadl
     let fixture_root = test_root("lazy-load-cyclic-topology");
     let bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
-        Arc::new(CanonicalProviderRuntimeFactory::new(
-            CanonicalProviderRuntimeConfig::new(
+        Arc::new(AgentLoopFactory::new(
+            AgentLoopConfig::new(
                 ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
                 APP_SERVER_LOCAL_PROVIDER,
                 APP_SERVER_LOCAL_MODEL,
@@ -7065,8 +7065,8 @@ async fn daemon_lazy_reload_recovers_unwitnessed_workspace_metadata_as_unbound()
     let root = test_root("daemon-lazy-workspace-witness");
     let bridge = bridge_with_runtime_factory_at_root(
         &root,
-        Arc::new(CanonicalProviderRuntimeFactory::new(
-            CanonicalProviderRuntimeConfig::new(
+        Arc::new(AgentLoopFactory::new(
+            AgentLoopConfig::new(
                 ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
                 APP_SERVER_LOCAL_PROVIDER,
                 APP_SERVER_LOCAL_MODEL,
@@ -7133,8 +7133,8 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
     std::fs::create_dir_all(&workspace).unwrap();
     let bridge = bridge_with_runtime_factory_at_root(
         &root,
-        Arc::new(CanonicalProviderRuntimeFactory::new(
-            CanonicalProviderRuntimeConfig::new(
+        Arc::new(AgentLoopFactory::new(
+            AgentLoopConfig::new(
                 ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
                 APP_SERVER_LOCAL_PROVIDER,
                 APP_SERVER_LOCAL_MODEL,

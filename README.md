@@ -120,7 +120,7 @@ stateful product harnesses are future direction. See
   rules.
 - [Chat console](docs/chat.md): local terminal console over the app-server RPC
   boundary.
-- [Provider adapters](docs/provider-adapters.md): provider runtime boundary.
+- [Provider adapters](docs/provider-adapters.md): agent loop boundary.
 - [Daemon and RPC](docs/app-server.md): app-server control plane.
 - [Testing guidelines](docs/testing-guidelines.md): runtime test expectations.
 - [Release guide](RELEASE.md): tags, targets, package smoke tests, and

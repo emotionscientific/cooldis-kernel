@@ -1,11 +1,10 @@
 mod support;
 
 use cooldis::{
-    CanonicalProviderRuntimeConfig, CanonicalProviderRuntimeFactory, LocalOperationRegistry,
-    LocalPluginCatalog, LocalPluginCatalogConfig, ProviderApi, PublishOperationRequest,
-    PublishedOperationSource, RuntimeEventKind, RuntimeHost, RustWasmBuildOptions,
-    ThreadCoordinates, ThreadTopology, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
-    build_rust_wasm_module,
+    AgentLoopConfig, AgentLoopFactory, LocalOperationRegistry, LocalPluginCatalog,
+    LocalPluginCatalogConfig, ProviderApi, PublishOperationRequest, PublishedOperationSource,
+    RuntimeEventKind, RuntimeHost, RustWasmBuildOptions, ThreadCoordinates, ThreadTopology,
+    WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory, build_rust_wasm_module,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,10 +89,9 @@ async fn agent_authored_wasm_operation_is_published_and_provider_invoked() {
         ),
         response_text("profiled: score mean 10.333333333333334 and risk has 1 empty cell"),
     ]));
-    let mut config =
-        CanonicalProviderRuntimeConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    let factory = CanonicalProviderRuntimeFactory::new(config, client.clone())
+    let factory = AgentLoopFactory::new(config, client.clone())
         .with_operation_registry(catalog.operation_registry());
     let host = RuntimeHost::new(Arc::new(factory));
     let thread = host
