@@ -1,5 +1,7 @@
 use crate::ProcessHandleIngressSink;
+use crate::daemon::daemon_config::synthesized_local_daemon_identity_config;
 use crate::daemon::daemon_io::CooldisDaemonIoBridge;
+use crate::daemon::identity::{IdentityMode, PrincipalId};
 use crate::daemon::recovery_sweep::StartupRecoverySweep;
 use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use crate::{
@@ -196,6 +198,8 @@ pub struct CooldisAppServerConfig {
     pub cwd: PathBuf,
     pub tenant_id: String,
     pub user_id: String,
+    pub identity_mode: IdentityMode,
+    pub console_principal: Option<PrincipalId>,
     pub model: String,
     pub model_provider: String,
     pub provider: AppServerProviderConfig,
@@ -216,14 +220,23 @@ pub struct CooldisAppServerConfig {
 impl CooldisAppServerConfig {
     pub fn local(listen: AppServerListenAddr, cwd: impl Into<PathBuf>) -> Self {
         let root = std::env::temp_dir().join(format!("cooldis-app-server-{}", Uuid::now_v7()));
+        let identity = synthesized_local_daemon_identity_config();
+        let tenant_id = identity.tenant_id.unwrap_or_default();
+        let user_id = identity
+            .console_principal
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         Self {
             listen,
             runtime_home: root.join("runtime"),
             state_home: root.join("state"),
             user_state_home: root.join("user-state"),
             cwd: cwd.into(),
-            tenant_id: "cooldis_app_server".to_string(),
-            user_id: "local_user".to_string(),
+            tenant_id,
+            user_id,
+            identity_mode: identity.mode,
+            console_principal: identity.console_principal,
             model: APP_SERVER_LOCAL_MODEL.to_string(),
             model_provider: APP_SERVER_LOCAL_PROVIDER.to_string(),
             provider: AppServerProviderConfig::LocalOffline,

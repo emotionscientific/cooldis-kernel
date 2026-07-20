@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::identity::{IdentityMode, PrincipalId};
 use crate::{
     AgentManifestPlacementBinding, AgentManifestWorkspaceBinding, AgentManifestWorkspaceMode,
     CooldisDaemonConfig,
@@ -80,6 +81,25 @@ fn daemon_app_server_config_from_loaded_keeps_registry_defaults_when_unset() {
         AgentManifestPlacementBinding::default()
     );
     assert_eq!(app_config.default_workspace, None);
+}
+
+#[test]
+fn daemon_app_server_config_from_loaded_applies_identity_config() {
+    let mut daemon_config = CooldisDaemonConfig::default();
+    daemon_config.identity.mode = IdentityMode::Managed;
+    daemon_config.identity.tenant_id = Some("tenant-configured".to_string());
+    daemon_config.identity.console_principal = Some(PrincipalId::new("operator-configured"));
+
+    let app_config =
+        daemon_app_server_config_from_loaded(&loaded_daemon_config(daemon_config)).unwrap();
+
+    assert_eq!(app_config.tenant_id, "tenant-configured");
+    assert_eq!(app_config.user_id, "operator-configured");
+    assert_eq!(app_config.identity_mode, IdentityMode::Managed);
+    assert_eq!(
+        app_config.console_principal,
+        Some(PrincipalId::new("operator-configured"))
+    );
 }
 
 #[test]

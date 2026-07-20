@@ -1175,15 +1175,13 @@ pub enum IdentityMode {
     Managed,
 }
 
-/// The `[daemon.identity]` config section (ADR 0008 D5). Wiring into
-/// `CooldisDaemonConfig` (defaults, presence, layer merge, validation) is
-/// implementation ticket 4; this struct is the shape.
+/// The `[daemon.identity]` config section (ADR 0008 D5).
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CooldisDaemonIdentityConfig {
     #[serde(default)]
     pub mode: IdentityMode,
-    /// Replaces the hard-coded `cooldis_app_server` tenant. Required in
-    /// managed mode; a local-mode default is synthesized when absent.
+    /// Replaces the legacy hard-coded app-server tenant. Required in managed
+    /// mode; a local-mode default is synthesized when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
     /// The principal the bundled console resolves to (in v0, the operator).
