@@ -764,6 +764,7 @@ dependencies = [
  "crossterm 0.28.1",
  "futures-executor",
  "futures-util",
+ "getrandom 0.3.4",
  "libc",
  "object_store",
  "ratatui",

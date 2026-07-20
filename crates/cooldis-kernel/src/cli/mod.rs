@@ -67,6 +67,7 @@ mod coupling;
 mod daemon;
 mod debug_bind;
 mod debug_rpc;
+mod identity;
 mod import;
 mod rpc;
 mod secret;
@@ -81,6 +82,7 @@ use coupling::*;
 use daemon::*;
 use debug_bind::*;
 use debug_rpc::*;
+use identity::*;
 use import::*;
 use rpc::*;
 use secret::*;
@@ -130,6 +132,7 @@ pub async fn run() -> CooldisResult<()> {
         "skill" => run_skill(args).await,
         "secret" => run_secret(args).await,
         "auth" => run_auth(args).await,
+        "identity" => run_identity(args).await,
         "console" => run_console(args).await,
         "chat" => run_chat(args).await,
         "debug" => run_debug(args).await,
@@ -250,6 +253,20 @@ fn print_command_help(path: &[String]) -> CooldisResult<()> {
         [command, subcommand] if command == "auth" && subcommand == "delete" => {
             print_auth_delete_help()
         }
+        [command] if command == "identity" => print_identity_help(),
+        [command, subcommand] if command == "identity" => match subcommand.as_str() {
+            "bootstrap" => print_identity_bootstrap_help(),
+            "declare" => print_identity_declare_help(),
+            "mint" => print_identity_mint_help(),
+            "revoke-credential" => print_identity_revoke_credential_help(),
+            "revoke-principal" => print_identity_revoke_principal_help(),
+            "list" => print_identity_list_help(),
+            other => {
+                return Err(usage_error(format!(
+                    "unknown identity help command {other:?}"
+                )));
+            }
+        },
         [command] if command == "secret" => print_secret_help(),
         [command, subcommand] if command == "secret" && subcommand == "import" => {
             print_secret_import_help()
@@ -335,6 +352,12 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "cooldis auth status <provider-id> [--state-home ~/.cooldis/state]",
     "cooldis auth set <provider-id> --api-key-stdin [--state-home ~/.cooldis/state]",
     "cooldis auth delete <provider-id> [--state-home ~/.cooldis/state]",
+    "cooldis identity bootstrap <principal-id> --display <display> [--state-home ~/.cooldis/state]",
+    "cooldis identity declare <principal-id> --kind adapter --display <display> --declared-by <principal-id> [--state-home ~/.cooldis/state]",
+    "cooldis identity mint <principal-id> --minted-by <principal-id> [--expires-at-ms <ms>] [--state-home ~/.cooldis/state]",
+    "cooldis identity revoke-credential <credential-id> --revoked-by <principal-id> [--state-home ~/.cooldis/state]",
+    "cooldis identity revoke-principal <principal-id> --revoked-by <principal-id> [--state-home ~/.cooldis/state]",
+    "cooldis identity list [--state-home ~/.cooldis/state]",
     "cooldis secret import <name> --from-env <ENV> [--state-home ~/.cooldis/state]",
     "cooldis secret set <name> --value-stdin [--state-home ~/.cooldis/state]",
     "cooldis secret list [--state-home ~/.cooldis/state]",
