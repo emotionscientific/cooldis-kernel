@@ -10143,8 +10143,10 @@ async fn app_server_websocket_listen_accepts_codex_tui_client() {
         CapsuleBindingsConfig::default(), // lexicon-allow: capsule - existing test helper parameter type
     )
     .await;
-    let server_task = tokio::spawn(async move { app.serve(listen).await });
-    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc")).await;
+    let token = mint_app_server_test_token(&app).await;
+    let server = app.clone();
+    let server_task = tokio::spawn(async move { server.serve(listen).await });
+    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &token).await;
 
     assert_eq!(
         client.initialize_result()["userAgent"],
@@ -10190,9 +10192,10 @@ async fn app_server_websocket_query_methods_are_callable() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let app = CooldisAppServer::new_local(config).await.unwrap();
+    let token = mint_app_server_test_token(&app).await;
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
-    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc")).await;
+    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &token).await;
 
     let agents = client.request("agent/list", json!({})).await.unwrap();
     assert!(
@@ -10325,7 +10328,8 @@ async fn app_server_websocket_listen_serves_console_assets() {
     );
     assert!(response.contains("Content-Type: text/html"));
     assert!(response.contains("__COOLDIS_CONSOLE_CONFIG__"));
-    assert!(response.contains("fixture-token"));
+    assert!(!response.contains("fixture-token"));
+    assert!(response.contains("cooldis_id_"));
 
     let response = get_tcp_response(addr, "/index.html").await;
     assert!(
@@ -10372,6 +10376,8 @@ async fn app_server_websocket_listen_requires_console_session_token() {
     config.agent_registry_root = root.join("agents");
     let app = CooldisAppServer::new_local(config).await.unwrap();
     let server_task = tokio::spawn(async move { app.serve(listen).await });
+    let index = get_tcp_response(addr, "/").await;
+    let session_token = console_token_from_response(&index);
 
     let missing = get_tcp_raw_response(
         addr,
@@ -10388,7 +10394,7 @@ async fn app_server_websocket_listen_requires_console_session_token() {
     let wrong = get_tcp_raw_response(
         addr,
         &format!(
-            "GET /rpc?token=wrong HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            "GET /rpc?token={session_token} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         ),
     )
     .await;
@@ -10397,8 +10403,7 @@ async fn app_server_websocket_listen_requires_console_session_token() {
         "unexpected wrong-token response: {wrong:?}"
     );
 
-    let mut client =
-        connect_ws_tui_test_client(&format!("ws://{addr}/rpc?token=fixture-token")).await;
+    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &session_token).await;
     assert_eq!(
         client.initialize_result()["userAgent"],
         "cooldis-app-server/0.1"
@@ -11494,9 +11499,17 @@ fn test_connection(
     app: CooldisAppServer,
 ) -> (ConnectionState, mpsc::UnboundedReceiver<JsonRpcMessage>) {
     let (outbound, rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
+    let resolved_principal = ResolvedPrincipal {
+        principal_id: PrincipalId::new(app.user_id()),
+        kind: PrincipalKind::Operator,
+        auth: AuthenticationPath::PeerUid {
+            uid: current_effective_uid(),
+        },
+    };
     (
         ConnectionState {
             app,
+            resolved_principal,
             outbound,
             handshake: Arc::new(Mutex::new(HandshakeState::default())),
             opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
@@ -13511,13 +13524,17 @@ async fn connect_tui_test_client(
     );
 }
 
-async fn connect_ws_tui_test_client(url: &str) -> crate::CodexTuiTestClient<tokio::net::TcpStream> {
+async fn connect_ws_tui_test_client(
+    url: &str,
+    token: &str,
+) -> crate::CodexTuiTestClient<tokio::net::TcpStream> {
     let mut last_error = None;
     for _ in 0..100 {
         match crate::CodexTuiTestClient::connect_websocket(
             url,
             crate::CodexTuiConnectConfig {
                 client_name: "websocket-listen-test".to_string(),
+                bearer_token: Some(token.to_string()),
                 ..crate::CodexTuiConnectConfig::default()
             },
         )
@@ -13534,6 +13551,28 @@ async fn connect_ws_tui_test_client(url: &str) -> crate::CodexTuiTestClient<toki
         "timed out connecting Codex TUI test client to {url}; last error: {}",
         last_error.unwrap_or_else(|| "none".to_string())
     );
+}
+
+async fn mint_app_server_test_token(app: &CooldisAppServer) -> String {
+    let store = SqliteSessionStore::open(app.session_store_path())
+        .await
+        .unwrap();
+    let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None)
+        .await
+        .unwrap();
+    let principal = PrincipalId::new(app.user_id());
+    authority
+        .mint_credential(&principal, &principal, None)
+        .await
+        .unwrap()
+        .1
+}
+
+fn console_token_from_response(response: &str) -> String {
+    let marker = "sessionToken:";
+    let start = response.find(marker).unwrap() + marker.len();
+    let value = response[start..].split('}').next().unwrap();
+    serde_json::from_str(value).unwrap()
 }
 
 fn unused_loopback_addr() -> std::net::SocketAddr {

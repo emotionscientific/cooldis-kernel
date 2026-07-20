@@ -13,6 +13,8 @@ use tokio::net::TcpStream;
 use tokio::net::UnixStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, Request};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
@@ -24,22 +26,48 @@ const CODEX_TUI_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Cooldis-owned copy of the Codex TUI remote-client path, trimmed to a
 /// headless driver for app-server tests.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CodexTuiConnectConfig {
     pub client_name: String,
     pub client_version: String,
     pub experimental_api: bool,
     pub opt_out_notification_methods: Vec<String>,
+    pub bearer_token: Option<String>,
 }
 
 impl Default for CodexTuiConnectConfig {
     fn default() -> Self {
+        // MCP, ACP, debug RPC, and other daemon clients inherit this config.
+        // Managed callers provide their boundary credential via
+        // COOLDIS_APP_SERVER_TOKEN; an explicit field value may override it.
+        let bearer_token = std::env::var("COOLDIS_APP_SERVER_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty());
         Self {
             client_name: CODEX_TUI_TEST_CLIENT_NAME.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             experimental_api: true,
             opt_out_notification_methods: Vec::new(),
+            bearer_token,
         }
+    }
+}
+
+impl std::fmt::Debug for CodexTuiConnectConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexTuiConnectConfig")
+            .field("client_name", &self.client_name)
+            .field("client_version", &self.client_version)
+            .field("experimental_api", &self.experimental_api)
+            .field(
+                "opt_out_notification_methods",
+                &self.opt_out_notification_methods,
+            )
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
     }
 }
 
@@ -88,9 +116,10 @@ impl CodexTuiTestClient<UnixStream> {
     ) -> CooldisResult<Self> {
         let socket_path = socket_path.into();
         let endpoint = format!("unix://{}", socket_path.display());
-        let request = CODEX_TUI_UDS_WEBSOCKET_HANDSHAKE_URL
+        let mut request = CODEX_TUI_UDS_WEBSOCKET_HANDSHAKE_URL
             .into_client_request()
             .map_err(|err| tui_error(format!("invalid UDS websocket handshake URL: {err}")))?;
+        set_bearer_token(&mut request, config.bearer_token.as_deref())?;
         let stream = UnixStream::connect(&socket_path).await.map_err(|err| {
             tui_error(format!(
                 "failed to connect Codex TUI test client to `{endpoint}`: {err}"
@@ -115,9 +144,10 @@ impl CodexTuiTestClient<TcpStream> {
     ) -> CooldisResult<Self> {
         let endpoint = url.to_string();
         let authority = websocket_tcp_authority(url)?;
-        let request = url
+        let mut request = url
             .into_client_request()
             .map_err(|err| tui_error(format!("invalid TCP websocket URL `{endpoint}`: {err}")))?;
+        set_bearer_token(&mut request, config.bearer_token.as_deref())?;
         let stream = TcpStream::connect(authority).await.map_err(|err| {
             tui_error(format!(
                 "failed to connect Codex TUI test client to `{endpoint}`: {err}"
@@ -133,6 +163,16 @@ impl CodexTuiTestClient<TcpStream> {
                 })?;
         Self::connect_with_websocket(websocket, endpoint, config).await
     }
+}
+
+fn set_bearer_token(request: &mut Request<()>, token: Option<&str>) -> CooldisResult<()> {
+    let Some(token) = token else {
+        return Ok(());
+    };
+    let value = HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| tui_error("Cooldis app-server bearer token is not a valid HTTP header"))?;
+    request.headers_mut().insert(AUTHORIZATION, value);
+    Ok(())
 }
 
 impl<S> CodexTuiTestClient<S>

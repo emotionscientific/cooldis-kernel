@@ -1,5 +1,11 @@
 use crate::ProcessHandleIngressSink;
 use crate::daemon::daemon_io::CooldisDaemonIoBridge;
+use crate::daemon::identity::{
+    AuthenticationPath, BoundarySurface, CooldisDaemonIdentityConfig,
+    IDENTITY_AUTH_REJECTION_SCHEMA_V1, IDENTITY_SESSION_SCHEMA_V1, IdentityAuthRejectionReason,
+    IdentityAuthRejectionV1, IdentityAuthority, IdentityMode, IdentitySessionV1, PrincipalId,
+    PrincipalKind, ResolvedPrincipal, SqliteIdentityAuthority, identity_token_digest,
+};
 use crate::daemon::recovery_sweep::StartupRecoverySweep;
 use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use crate::{
@@ -25,7 +31,7 @@ use crate::{
     ProviderToolResultConstraints, ProviderWireAdapter, RuntimeEventKind, RuntimeStore,
     RuntimeTerminalState, RuntimeThreadHandle, SecretResolver, SecretSourceKind, SecretStoreError,
     SessionEntry, SessionEntryKind, SessionStore, SqliteMcpSourceRegistry, SqliteMetadataStore,
-    SqliteSecretStore, SqliteSessionStore, SystemBlock,
+    SqliteSecretStore, SqliteSessionStore, SystemBlock, SystemDaemonClock,
     THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA, THREAD_AGENT_SKILL_DISCOVERY_METADATA,
     THREAD_AGENT_SKILL_PACKAGES_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
     THREAD_OPERATION_REGISTRY_ROOT_METADATA, TenantRegistration, TenantRuntimeContext,
@@ -53,6 +59,8 @@ use std::io;
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -65,8 +73,10 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, OnceCell, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{WebSocketStream, accept_async_with_config};
+use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 use uuid::Uuid;
 mod connection;
 mod default_manifest;
@@ -102,7 +112,7 @@ pub const APP_SERVER_ANTHROPIC_BEDROCK_MODEL: &str =
 const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
 const APP_SERVER_HEALTH_RESPONSE_BODY: &str = "{\"status\":\"ok\"}";
 const APP_SERVER_USER_AGENT: &str = "cooldis-app-server/0.1";
-const HTTP_UNAUTHORIZED_BODY: &str = "missing or invalid Cooldis console session token";
+const HTTP_UNAUTHORIZED_BODY: &str = "authentication required";
 const MAX_HTTP_REQUEST_HEADER_BYTES: usize = 8192;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_COMMAND_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
@@ -373,10 +383,19 @@ impl CooldisAppServerConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ConsoleAssetConfig {
     pub root: PathBuf,
     pub session_token: String,
+}
+
+impl std::fmt::Debug for ConsoleAssetConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsoleAssetConfig")
+            .field("root", &self.root)
+            .field("session_token", &"<redacted>")
+            .finish()
+    }
 }
 
 fn operation_registry_root_for_kernel_publish(config: &CooldisAppServerConfig) -> Option<&Path> {
@@ -496,6 +515,9 @@ struct CooldisAppServerInner {
     default_workspace: Option<AgentManifestWorkspaceBinding>,
     remote_event_store_served: Arc<AtomicBool>,
     console_assets: Option<ConsoleAssetConfig>,
+    identity_authority: Arc<dyn IdentityAuthority>,
+    identity_clock: Arc<dyn crate::DaemonClock>,
+    identity_mode: IdentityMode,
     cwd: PathBuf,
     codex_home: PathBuf,
     metadata_store_path: PathBuf,
@@ -581,7 +603,14 @@ impl ProviderClient for AppServerOfflineProviderClient {
 }
 
 impl CooldisAppServer {
-    pub async fn new_local(mut config: CooldisAppServerConfig) -> CooldisResult<Self> {
+    pub async fn new_local(config: CooldisAppServerConfig) -> CooldisResult<Self> {
+        Self::new(config, CooldisDaemonIdentityConfig::default()).await
+    }
+
+    pub async fn new(
+        mut config: CooldisAppServerConfig,
+        identity: CooldisDaemonIdentityConfig,
+    ) -> CooldisResult<Self> {
         let metadata_store = open_and_seed_metadata_store(config.metadata_store_path()).await?;
         let user_metadata_store =
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
@@ -594,6 +623,7 @@ impl CooldisAppServer {
             runtime_factory,
             metadata_store,
             user_metadata_store,
+            identity,
         )
         .await
     }
@@ -601,6 +631,19 @@ impl CooldisAppServer {
     pub async fn with_runtime_factory(
         config: CooldisAppServerConfig,
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
+    ) -> CooldisResult<Self> {
+        Self::with_runtime_factory_and_identity(
+            config,
+            runtime_factory,
+            CooldisDaemonIdentityConfig::default(),
+        )
+        .await
+    }
+
+    pub async fn with_runtime_factory_and_identity(
+        config: CooldisAppServerConfig,
+        runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
+        identity: CooldisDaemonIdentityConfig,
     ) -> CooldisResult<Self> {
         let metadata_store = SqliteMetadataStore::in_memory()
             .await
@@ -613,6 +656,7 @@ impl CooldisAppServer {
             runtime_factory,
             metadata_store,
             user_metadata_store,
+            identity,
         )
         .await
     }
@@ -635,6 +679,7 @@ impl CooldisAppServer {
             metadata_store,
             user_metadata_store,
             Some(Box::new(decorate)),
+            CooldisDaemonIdentityConfig::default(),
         )
         .await
     }
@@ -652,6 +697,7 @@ impl CooldisAppServer {
             runtime_factory,
             metadata_store,
             user_metadata_store,
+            CooldisDaemonIdentityConfig::default(),
         )
         .await
     }
@@ -661,6 +707,7 @@ impl CooldisAppServer {
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
         metadata_store: SqliteMetadataStore,
         user_metadata_store: SqliteMetadataStore,
+        identity: CooldisDaemonIdentityConfig,
     ) -> CooldisResult<Self> {
         Self::with_runtime_factory_and_metadata_stores_inner(
             config,
@@ -668,6 +715,7 @@ impl CooldisAppServer {
             metadata_store,
             user_metadata_store,
             None,
+            identity,
         )
         .await
     }
@@ -680,6 +728,7 @@ impl CooldisAppServer {
         session_store_decorator: Option<
             Box<dyn FnOnce(Arc<dyn RuntimeStore>) -> Arc<dyn RuntimeStore> + Send>,
         >,
+        identity: CooldisDaemonIdentityConfig,
     ) -> CooldisResult<Self> {
         normalize_registry_roots(&mut config);
         let provider_surface =
@@ -713,6 +762,19 @@ impl CooldisAppServer {
                 runtime_factory,
             })
             .await?;
+        let identity_clock: Arc<dyn crate::DaemonClock> = Arc::new(SystemDaemonClock);
+        let identity_store = SqliteSessionStore::open(&session_store_path)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        let identity_authority = initialize_boundary_identity(
+            identity_store,
+            Arc::clone(&identity_clock),
+            identity.mode,
+            identity.console_principal,
+            &config.user_id,
+            config.console_assets.as_mut(),
+        )
+        .await?;
         let app = Self {
             inner: Arc::new(CooldisAppServerInner {
                 supervisor,
@@ -729,6 +791,9 @@ impl CooldisAppServer {
                 default_workspace: config.default_workspace,
                 remote_event_store_served: config.remote_event_store_served,
                 console_assets: config.console_assets,
+                identity_authority,
+                identity_clock,
+                identity_mode: identity.mode,
                 cwd: config.cwd,
                 codex_home,
                 metadata_store_path,
@@ -855,6 +920,12 @@ impl CooldisAppServer {
                 path.display()
             ))
         })?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to secure Cooldis app-server socket {}: {err}",
+                path.display()
+            ))
+        })?;
 
         loop {
             let (stream, _) = listener.accept().await.map_err(|err| {
@@ -862,9 +933,17 @@ impl CooldisAppServer {
                     "failed to accept Cooldis app-server connection: {err}"
                 ))
             })?;
+            let peer_uid = stream
+                .peer_cred()
+                .map_err(|err| {
+                    CooldisError::RuntimeFactory(format!(
+                        "failed to inspect Cooldis app-server peer credentials: {err}"
+                    ))
+                })?
+                .uid();
             let app = self.clone();
             tokio::spawn(async move {
-                if let Err(err) = app.handle_unix_stream(stream).await {
+                if let Err(err) = app.handle_unix_stream(stream, peer_uid).await {
                     eprintln!("cooldis app-server connection failed: {err}");
                 }
             });
@@ -911,15 +990,22 @@ impl CooldisAppServer {
     }
 
     #[cfg(unix)]
-    async fn handle_unix_stream(&self, stream: UnixStream) -> CooldisResult<()> {
-        let websocket = accept_async_with_config(stream, Some(websocket_config()))
+    async fn handle_unix_stream(&self, mut stream: UnixStream, peer_uid: u32) -> CooldisResult<()> {
+        let Some(resolved_principal) = self
+            .authenticate_unix_websocket(&mut stream, peer_uid)
+            .await?
+        else {
+            return Ok(());
+        };
+        let websocket = accept_authenticated_websocket(stream)
             .await
             .map_err(|err| {
                 CooldisError::RuntimeFactory(format!(
                     "failed to upgrade Cooldis app-server unix socket websocket: {err}"
                 ))
             })?;
-        self.handle_websocket(websocket).await
+        self.handle_websocket(websocket, resolved_principal, BoundarySurface::UnixSocket)
+            .await
     }
 
     async fn handle_tcp_stream(&self, stream: TcpStream) -> CooldisResult<()> {
@@ -927,17 +1013,20 @@ impl CooldisAppServer {
         if self.handle_http_request(&mut stream).await? {
             return Ok(());
         }
-        if !self.authorize_console_websocket(&mut stream).await? {
+        let Some((resolved_principal, surface)) =
+            self.authenticate_tcp_websocket(&mut stream).await?
+        else {
             return Ok(());
-        }
-        let websocket = accept_async_with_config(stream, Some(websocket_config()))
+        };
+        let websocket = accept_authenticated_websocket(stream)
             .await
             .map_err(|err| {
                 CooldisError::RuntimeFactory(format!(
                     "failed to upgrade Cooldis app-server tcp websocket: {err}"
                 ))
             })?;
-        self.handle_websocket(websocket).await
+        self.handle_websocket(websocket, resolved_principal, surface)
+            .await
     }
 
     async fn handle_http_request(&self, stream: &mut TcpStream) -> CooldisResult<bool> {
@@ -1006,19 +1095,125 @@ impl CooldisAppServer {
         Ok(true)
     }
 
-    async fn authorize_console_websocket(&self, stream: &mut TcpStream) -> CooldisResult<bool> {
-        let Some(console) = &self.inner.console_assets else {
-            return Ok(true);
-        };
-        let Some(request) = peek_http_request(stream).await? else {
-            return Ok(true);
-        };
-        if request.path != "/rpc" {
-            return Ok(true);
+    async fn authenticate_tcp_websocket(
+        &self,
+        stream: &mut TcpStream,
+    ) -> CooldisResult<Option<(ResolvedPrincipal, BoundarySurface)>> {
+        let request = peek_http_request(stream).await?;
+        let token_and_surface = request.as_ref().and_then(request_bearer_token);
+        if let Some((token, surface)) = token_and_surface
+            && let Some(principal) = self.inner.identity_authority.verify_token(token).await?
+        {
+            return Ok(Some((principal, surface)));
         }
-        if console_request_has_token(&request, &console.session_token) {
-            return Ok(true);
+        let surface = token_and_surface
+            .map(|(_, surface)| surface)
+            .unwrap_or(BoundarySurface::Websocket);
+        let reason = match token_and_surface {
+            Some((token, _)) => self.token_rejection_reason(token).await?,
+            None => IdentityAuthRejectionReason::CredentialUnknown,
+        };
+        self.reject_websocket_auth(stream, surface, reason).await?;
+        Ok(None)
+    }
+
+    #[cfg(unix)]
+    async fn authenticate_unix_websocket(
+        &self,
+        stream: &mut UnixStream,
+        peer_uid: u32,
+    ) -> CooldisResult<Option<ResolvedPrincipal>> {
+        let same_uid = peer_uid == current_effective_uid();
+        if self.inner.identity_mode == IdentityMode::Local
+            && same_uid
+            && let Some(principal) = self
+                .inner
+                .identity_authority
+                .resolve_peer_uid(peer_uid)
+                .await?
+        {
+            return Ok(Some(principal));
         }
+        let request = peek_unix_http_request(stream).await?;
+        let token = request
+            .as_ref()
+            .and_then(request_bearer_token)
+            .map(|(token, _)| token);
+        if let Some(token) = token
+            && let Some(principal) = self.inner.identity_authority.verify_token(token).await?
+        {
+            return Ok(Some(principal));
+        }
+        let reason = match token {
+            Some(token) => self.token_rejection_reason(token).await?,
+            None if same_uid && self.inner.identity_mode == IdentityMode::Managed => {
+                IdentityAuthRejectionReason::PeerMappingDisabled { uid: peer_uid }
+            }
+            None => IdentityAuthRejectionReason::CredentialUnknown,
+        };
+        self.reject_websocket_auth(stream, BoundarySurface::UnixSocket, reason)
+            .await?;
+        Ok(None)
+    }
+
+    async fn token_rejection_reason(
+        &self,
+        token: &str,
+    ) -> CooldisResult<IdentityAuthRejectionReason> {
+        let digest = identity_token_digest(token);
+        let now_ms = self.inner.identity_clock.now().timestamp_millis();
+        for principal in self.inner.identity_authority.list_principals().await? {
+            for credential in self
+                .inner
+                .identity_authority
+                .list_credentials(&principal.principal_id)
+                .await?
+            {
+                if credential.token_digest != digest {
+                    continue;
+                }
+                if credential.revoked_at_ms.is_some() {
+                    return Ok(IdentityAuthRejectionReason::CredentialRevoked {
+                        credential_id: credential.credential_id,
+                    });
+                }
+                if credential
+                    .expires_at_ms
+                    .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
+                {
+                    return Ok(IdentityAuthRejectionReason::CredentialExpired {
+                        credential_id: credential.credential_id,
+                    });
+                }
+                if principal.revoked_at_ms.is_some() {
+                    return Ok(IdentityAuthRejectionReason::PrincipalRevoked {
+                        principal_id: principal.principal_id,
+                    });
+                }
+            }
+        }
+        Ok(IdentityAuthRejectionReason::CredentialUnknown)
+    }
+
+    async fn reject_websocket_auth<S>(
+        &self,
+        stream: &mut S,
+        surface: BoundarySurface,
+        reason: IdentityAuthRejectionReason,
+    ) -> CooldisResult<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.inner
+            .identity_authority
+            .witness_auth_rejected(&IdentityAuthRejectionV1 {
+                schema: IDENTITY_AUTH_REJECTION_SCHEMA_V1.to_string(),
+                surface,
+                reason,
+                principal_id: None,
+                rejected_at_ms: self.inner.identity_clock.now().timestamp_millis(),
+            })
+            .await?;
         consume_http_request_headers(stream).await?;
         write_http_response(
             stream,
@@ -1026,9 +1221,53 @@ impl CooldisAppServer {
             "text/plain; charset=utf-8",
             HTTP_UNAUTHORIZED_BODY.as_bytes(),
         )
-        .await?;
-        Ok(false)
+        .await
     }
+}
+
+async fn initialize_boundary_identity(
+    store: SqliteSessionStore,
+    clock: Arc<dyn crate::DaemonClock>,
+    mode: IdentityMode,
+    console_principal: Option<PrincipalId>,
+    default_operator_id: &str,
+    console_assets: Option<&mut ConsoleAssetConfig>,
+) -> CooldisResult<Arc<dyn IdentityAuthority>> {
+    let authority = SqliteIdentityAuthority::new(store.clone(), Arc::clone(&clock), None).await?;
+    let mut operator = authority
+        .list_principals()
+        .await?
+        .into_iter()
+        .find(|principal| {
+            principal.kind == PrincipalKind::Operator && principal.revoked_at_ms.is_none()
+        })
+        .map(|principal| principal.principal_id);
+    if mode == IdentityMode::Local && operator.is_none() {
+        let principal_id = PrincipalId::new(default_operator_id);
+        authority
+            .bootstrap_operator(&principal_id, "Local operator")
+            .await?;
+        operator = Some(principal_id);
+    }
+    let peer_operator = (mode == IdentityMode::Local)
+        .then(|| operator.clone())
+        .flatten();
+    let authority = SqliteIdentityAuthority::new(store, clock, peer_operator).await?;
+    if let Some(console) = console_assets {
+        let principal_id = console_principal
+            .or_else(|| (mode == IdentityMode::Local).then_some(operator).flatten())
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(
+                    "console authentication requires a configured active operator principal"
+                        .to_string(),
+                )
+            })?;
+        let (_, token) = authority
+            .mint_credential(&principal_id, &principal_id, None)
+            .await?;
+        console.session_token = token;
+    }
+    Ok(Arc::new(authority))
 }
 
 struct ResolvedCatalogOpenAIChatCompletionsProvider {
@@ -1631,6 +1870,35 @@ fn websocket_config() -> WebSocketConfig {
         .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_SIZE))
 }
 
+#[allow(clippy::result_large_err)]
+async fn accept_authenticated_websocket<S>(
+    stream: S,
+) -> Result<WebSocketStream<S>, tokio_tungstenite::tungstenite::Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    accept_hdr_async_with_config(
+        stream,
+        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+         mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            if let Some(protocol) = request
+                .headers()
+                .get(SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').map(str::trim).next())
+                .and_then(|protocol| HeaderValue::from_str(protocol).ok())
+            {
+                response
+                    .headers_mut()
+                    .insert(SEC_WEBSOCKET_PROTOCOL, protocol);
+            }
+            Ok(response)
+        },
+        Some(websocket_config()),
+    )
+    .await
+}
+
 async fn bind_websocket_listener(addr: SocketAddr) -> CooldisResult<TcpListener> {
     if !addr.ip().is_loopback() {
         return Err(CooldisError::RuntimeFactory(format!(
@@ -1644,11 +1912,9 @@ async fn bind_websocket_listener(addr: SocketAddr) -> CooldisResult<TcpListener>
     })
 }
 
-#[derive(Debug)]
 struct HttpRequestHead {
     method: String,
     path: String,
-    query: Option<String>,
     headers: Vec<(String, String)>,
 }
 
@@ -1662,7 +1928,45 @@ async fn peek_http_request(stream: &TcpStream) -> CooldisResult<Option<HttpReque
     if len == 0 {
         return Ok(None);
     }
-    Ok(parse_http_request_head(&request[..len]))
+    let parsed = parse_http_request_head(&request[..len]);
+    request[..len].fill(0);
+    Ok(parsed)
+}
+
+#[cfg(unix)]
+async fn peek_unix_http_request(stream: &UnixStream) -> CooldisResult<Option<HttpRequestHead>> {
+    let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
+    loop {
+        stream.readable().await.map_err(|err| {
+            CooldisError::RuntimeFactory(format!(
+                "failed to inspect Cooldis app-server unix request: {err}"
+            ))
+        })?;
+        let len = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                request.as_mut_ptr().cast(),
+                request.len(),
+                libc::MSG_PEEK,
+            )
+        };
+        if len < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                continue;
+            }
+            return Err(CooldisError::RuntimeFactory(format!(
+                "failed to inspect Cooldis app-server unix request: {error}"
+            )));
+        }
+        if len == 0 {
+            return Ok(None);
+        }
+        let len = len as usize;
+        let parsed = parse_http_request_head(&request[..len]);
+        request[..len].fill(0);
+        return Ok(parsed);
+    }
 }
 
 fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
@@ -1673,10 +1977,11 @@ fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next()?.to_string();
     let target = parts.next()?;
-    let (path, query) = match target.split_once('?') {
-        Some((path, query)) => (path.to_string(), Some(query.to_string())),
-        None => (target.to_string(), None),
-    };
+    let path = target
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(target)
+        .to_string();
     let headers = lines
         .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -1686,7 +1991,6 @@ fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
     Some(HttpRequestHead {
         method,
         path,
-        query,
         headers,
     })
 }
@@ -1731,29 +2035,27 @@ fn inject_console_config(html: &str, session_token: &str) -> String {
     }
 }
 
-fn console_request_has_token(request: &HttpRequestHead, expected: &str) -> bool {
+fn request_bearer_token(request: &HttpRequestHead) -> Option<(&str, BoundarySurface)> {
+    if let Some(token) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == "authorization")
+        .and_then(|(_, value)| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        return Some((token, BoundarySurface::Websocket));
+    }
     request
-        .query
-        .as_deref()
-        .is_some_and(|query| query_parameter_matches(query, "token", expected))
-        || request
-            .headers
-            .iter()
-            .filter(|(name, _)| name == "sec-websocket-protocol")
-            .flat_map(|(_, value)| value.split(',').map(str::trim))
-            .any(|protocol| {
-                protocol == expected
-                    || protocol
-                        .strip_prefix("cooldis-console-token.")
-                        .is_some_and(|token| token == expected)
-            })
-}
-
-fn query_parameter_matches(query: &str, key: &str, expected: &str) -> bool {
-    query.split('&').any(|pair| {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        name == key && value == expected
-    })
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "sec-websocket-protocol")
+        .flat_map(|(_, value)| value.split(',').map(str::trim))
+        .find_map(|protocol| {
+            let token = protocol
+                .strip_prefix("cooldis-console-token.")
+                .unwrap_or(protocol);
+            (!token.is_empty()).then_some((token, BoundarySurface::Console))
+        })
 }
 
 fn content_type_for_path(path: &Path) -> &'static str {
@@ -1773,12 +2075,15 @@ fn content_type_for_path(path: &Path) -> &'static str {
     }
 }
 
-async fn write_http_response(
-    stream: &mut TcpStream,
+async fn write_http_response<S>(
+    stream: &mut S,
     status: &str,
     content_type: &str,
     body: &[u8],
-) -> CooldisResult<()> {
+) -> CooldisResult<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -1796,9 +2101,12 @@ async fn write_http_response(
     Ok(())
 }
 
-async fn consume_http_request_headers(stream: &mut TcpStream) -> CooldisResult<()> {
-    let mut consumed = Vec::new();
+async fn consume_http_request_headers<S>(stream: &mut S) -> CooldisResult<()>
+where
+    S: AsyncRead + Unpin,
+{
     let mut chunk = [0_u8; 512];
+    let mut matched = 0;
     loop {
         let len = stream.read(&mut chunk).await.map_err(|err| {
             CooldisError::RuntimeFactory(format!(
@@ -1808,11 +2116,45 @@ async fn consume_http_request_headers(stream: &mut TcpStream) -> CooldisResult<(
         if len == 0 {
             return Ok(());
         }
-        consumed.extend_from_slice(&chunk[..len]);
-        if consumed.windows(4).any(|window| window == b"\r\n\r\n") || consumed.len() > 8192 {
+        let mut complete = false;
+        for byte in &chunk[..len] {
+            matched = match (matched, *byte) {
+                (0, b'\r') => 1,
+                (1, b'\n') => 2,
+                (2, b'\r') => 3,
+                (3, b'\n') => {
+                    complete = true;
+                    4
+                }
+                (_, b'\r') => 1,
+                _ => 0,
+            };
+            if complete {
+                break;
+            }
+        }
+        chunk[..len].fill(0);
+        if complete {
             return Ok(());
         }
     }
+}
+
+fn credential_ref(auth: &AuthenticationPath) -> String {
+    match auth {
+        AuthenticationPath::Credential { credential_id } => credential_id.clone(),
+        AuthenticationPath::PeerUid { uid } => format!("peer_uid:{uid}"),
+    }
+}
+
+#[cfg(unix)]
+fn current_effective_uid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn current_effective_uid() -> u32 {
+    0
 }
 
 fn split_websocket_listen_url(value: &str) -> (&str, &str) {

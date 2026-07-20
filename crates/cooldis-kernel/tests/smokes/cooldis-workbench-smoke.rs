@@ -1,13 +1,16 @@
+use cooldis::daemon::identity::{IdentityAuthority, PrincipalId, SqliteIdentityAuthority};
 use cooldis::{
     AppServerListenAddr, CapsuleBindingsConfig, CodexTuiConnectConfig, CodexTuiTestClient,
     CooldisAppServer, CooldisAppServerConfig, LocalAgentRegistry, LocalOperationRegistry,
     PublishedOperationBuild, PublishedOperationRecord, PublishedOperationSource,
-    RegisteredOperation, WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest,
-    WasmOperationMode, WasmOperationValueKind, wasm_sha256,
+    RegisteredOperation, SqliteSessionStore, SystemDaemonClock, WasmOperationDefinition,
+    WasmOperationEventKind, WasmOperationManifest, WasmOperationMode, WasmOperationValueKind,
+    wasm_sha256,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
@@ -41,7 +44,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = unused_loopback_addr()?;
     let listen = AppServerListenAddr::WebSocket(addr);
-    let server_task = start_server(
+    let (server_task, token) = start_server(
         root,
         &workspace,
         &agent_registry_root,
@@ -50,7 +53,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let result: Result<(), Box<dyn std::error::Error>> = async {
-        let mut client = connect_client(&format!("ws://{addr}/rpc")).await?;
+        let mut client = connect_client(&format!("ws://{addr}/rpc"), &token).await?;
         assert_eq!(
             client.initialize_result()["userAgent"],
             "cooldis-app-server/0.1"
@@ -142,7 +145,7 @@ async fn start_server(
     agent_registry_root: &Path,
     operation_registry_root: &Path,
     listen: AppServerListenAddr,
-) -> Result<JoinHandle<cooldis::CooldisResult<()>>, Box<dyn std::error::Error>> {
+) -> Result<(JoinHandle<cooldis::CooldisResult<()>>, String), Box<dyn std::error::Error>> {
     let mut config = CooldisAppServerConfig::local(listen.clone(), workspace)
         .with_capsule_bindings(
             CapsuleBindingsConfig::default().with_registry_root(operation_registry_root),
@@ -151,11 +154,22 @@ async fn start_server(
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
     let server = CooldisAppServer::new_local(config).await?;
-    Ok(tokio::spawn(async move { server.serve(listen).await }))
+    let store = SqliteSessionStore::open(server.session_store_path()).await?;
+    let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None).await?;
+    let principal = PrincipalId::new(server.user_id());
+    let token = authority
+        .mint_credential(&principal, &principal, None)
+        .await?
+        .1;
+    Ok((
+        tokio::spawn(async move { server.serve(listen).await }),
+        token,
+    ))
 }
 
 async fn connect_client(
     url: &str,
+    token: &str,
 ) -> Result<CodexTuiTestClient<TcpStream>, Box<dyn std::error::Error>> {
     let mut last_error = None;
     for _ in 0..100 {
@@ -163,6 +177,7 @@ async fn connect_client(
             url,
             CodexTuiConnectConfig {
                 client_name: "cooldis-workbench-smoke".to_string(),
+                bearer_token: Some(token.to_string()),
                 ..CodexTuiConnectConfig::default()
             },
         )

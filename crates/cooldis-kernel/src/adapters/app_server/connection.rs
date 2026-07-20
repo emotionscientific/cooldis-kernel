@@ -5,6 +5,8 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct ConnectionState {
     pub(super) app: CooldisAppServer,
+    #[allow(dead_code)]
+    pub(super) resolved_principal: ResolvedPrincipal,
     pub(super) outbound: mpsc::UnboundedSender<JsonRpcMessage>,
     pub(super) handshake: Arc<Mutex<HandshakeState>>,
     pub(super) opt_out_notifications: Arc<RwLock<HashSet<String>>>,
@@ -746,9 +748,20 @@ impl CooldisAppServer {
         method: &str,
         params: Value,
     ) -> CooldisResult<Value> {
+        let resolved_principal = self
+            .inner
+            .identity_authority
+            .resolve_peer_uid(current_effective_uid())
+            .await?
+            .ok_or_else(|| {
+                CooldisError::RuntimeFactory(
+                    "local JSON-RPC requires the local-mode operator principal".to_string(),
+                )
+            })?;
         let (outbound, _rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
         let connection = ConnectionState {
             app: self.clone(),
+            resolved_principal,
             outbound,
             handshake: Arc::new(Mutex::new(HandshakeState::default())),
             opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
@@ -774,10 +787,26 @@ impl CooldisAppServer {
     pub(super) async fn handle_websocket<S>(
         &self,
         websocket: WebSocketStream<S>,
+        resolved_principal: ResolvedPrincipal,
+        surface: BoundarySurface,
     ) -> CooldisResult<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let session_id = format!("session_{}", Uuid::new_v4());
+        self.inner
+            .identity_authority
+            .witness_session_opened(&IdentitySessionV1 {
+                schema: IDENTITY_SESSION_SCHEMA_V1.to_string(),
+                session_id: session_id.clone(),
+                principal_id: resolved_principal.principal_id.clone(),
+                kind: resolved_principal.kind,
+                surface,
+                credential_ref: credential_ref(&resolved_principal.auth),
+                opened_at_ms: self.inner.identity_clock.now().timestamp_millis(),
+                closed_at_ms: None,
+            })
+            .await?;
         let (mut sink, mut stream) = websocket.split();
         let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
         let writer = tokio::spawn(async move {
@@ -798,6 +827,7 @@ impl CooldisAppServer {
 
         let connection = ConnectionState {
             app: self.clone(),
+            resolved_principal,
             outbound,
             handshake: Arc::new(Mutex::new(HandshakeState::default())),
             opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
@@ -805,6 +835,7 @@ impl CooldisAppServer {
             fs_watches: Arc::new(Mutex::new(HashMap::new())),
         };
 
+        let mut read_result = Ok(());
         while let Some(message) = stream.next().await {
             match message {
                 Ok(Message::Text(text)) => {
@@ -818,16 +849,24 @@ impl CooldisAppServer {
                 | Ok(Message::Pong(_))
                 | Ok(Message::Frame(_)) => {}
                 Err(err) => {
-                    return Err(CooldisError::RuntimeFactory(format!(
+                    read_result = Err(CooldisError::RuntimeFactory(format!(
                         "Cooldis app-server websocket read failed: {err}"
                     )));
+                    break;
                 }
             }
         }
 
         connection.abort_subscriptions().await;
         writer.abort();
-        Ok(())
+        self.inner
+            .identity_authority
+            .witness_session_closed(
+                &session_id,
+                self.inner.identity_clock.now().timestamp_millis(),
+            )
+            .await?;
+        read_result
     }
 
     pub(super) async fn handle_request(

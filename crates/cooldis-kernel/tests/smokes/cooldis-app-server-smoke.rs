@@ -1,8 +1,10 @@
+use cooldis::daemon::identity::{IdentityAuthority, PrincipalId, SqliteIdentityAuthority};
 use cooldis::{
     AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, CooldisAppServer,
-    CooldisAppServerConfig,
+    CooldisAppServerConfig, SqliteSessionStore, SystemDaemonClock,
 };
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
@@ -89,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = restarted_task.await;
 
     let tcp_addr = unused_loopback_addr()?;
-    let tcp_task = start_tcp_server(&root, tcp_addr).await?;
+    let (tcp_task, tcp_token) = start_tcp_server(&root, tcp_addr).await?;
     let health = tcp_health_response(tcp_addr, "/healthz").await?;
     if !health.starts_with("HTTP/1.1 200 OK") || !health.contains("{\"status\":\"ok\"}") {
         return Err(format!("unexpected TCP health response: {health:?}").into());
@@ -97,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tcp_client = connect_tcp_client(
         &format!("ws://{tcp_addr}/rpc"),
         "cooldis-app-server-smoke-tcp",
+        &tcp_token,
     )
     .await?;
     let tcp_completed = tcp_client
@@ -134,13 +137,23 @@ async fn start_server(
 async fn start_tcp_server(
     root: &Path,
     addr: std::net::SocketAddr,
-) -> Result<JoinHandle<cooldis::CooldisResult<()>>, Box<dyn std::error::Error>> {
+) -> Result<(JoinHandle<cooldis::CooldisResult<()>>, String), Box<dyn std::error::Error>> {
     let listen = AppServerListenAddr::WebSocket(addr);
     let mut config = CooldisAppServerConfig::local(listen.clone(), std::env::current_dir()?);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     let server = CooldisAppServer::new_local(config).await?;
-    Ok(tokio::spawn(async move { server.serve(listen).await }))
+    let store = SqliteSessionStore::open(server.session_store_path()).await?;
+    let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None).await?;
+    let principal = PrincipalId::new(server.user_id());
+    let token = authority
+        .mint_credential(&principal, &principal, None)
+        .await?
+        .1;
+    Ok((
+        tokio::spawn(async move { server.serve(listen).await }),
+        token,
+    ))
 }
 
 async fn connect_client(
@@ -176,6 +189,7 @@ async fn connect_client(
 async fn connect_tcp_client(
     url: &str,
     client_name: &str,
+    token: &str,
 ) -> Result<CodexTuiTestClient<TcpStream>, Box<dyn std::error::Error>> {
     let mut last_error = None;
     for _ in 0..100 {
@@ -183,6 +197,7 @@ async fn connect_tcp_client(
             url,
             CodexTuiConnectConfig {
                 client_name: client_name.to_string(),
+                bearer_token: Some(token.to_string()),
                 ..CodexTuiConnectConfig::default()
             },
         )
