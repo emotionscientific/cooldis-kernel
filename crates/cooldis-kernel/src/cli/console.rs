@@ -30,7 +30,6 @@ pub(super) async fn run_console(args: Vec<OsString>) -> CooldisResult<()> {
         .map_err(|err| usage_error(format!("failed to inspect Cooldis console listener: {err}")))?;
     let listen = AppServerListenAddr::WebSocket(bound_addr);
     let assets = resolve_console_asset_root()?;
-    let session_token = generate_console_session_token()?;
     let resolved = resolve_console_app_server_config(&options, listen.clone())?;
     let project_root = resolved.project_root.clone();
     let config_path = resolved.config_path.clone();
@@ -38,7 +37,7 @@ pub(super) async fn run_console(args: Vec<OsString>) -> CooldisResult<()> {
     let state_home = config.state_home.clone();
     config.console_assets = Some(ConsoleAssetConfig {
         root: assets,
-        session_token,
+        session_token: String::new(),
     });
     prepare_console_project_storage(&config)?;
 
@@ -215,20 +214,6 @@ pub(super) fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
     }
-}
-
-pub(super) fn generate_console_session_token() -> CooldisResult<String> {
-    let mut random = [0_u8; 32];
-    getrandom::fill(&mut random)
-        .map_err(|err| usage_error(format!("failed to generate console session token: {err}")))?;
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut token = String::with_capacity("cooldis_console_".len() + random.len() * 2);
-    token.push_str("cooldis_console_");
-    for byte in random {
-        token.push(HEX[(byte >> 4) as usize] as char);
-        token.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    Ok(token)
 }
 
 pub(super) fn resolve_console_asset_root() -> CooldisResult<PathBuf> {

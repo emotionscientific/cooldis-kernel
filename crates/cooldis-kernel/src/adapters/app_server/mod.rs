@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
+use std::io::Write as _;
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -64,7 +65,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
@@ -114,6 +115,9 @@ const APP_SERVER_HEALTH_RESPONSE_BODY: &str = "{\"status\":\"ok\"}";
 const APP_SERVER_USER_AGENT: &str = "cooldis-app-server/0.1";
 const HTTP_UNAUTHORIZED_BODY: &str = "authentication required";
 const MAX_HTTP_REQUEST_HEADER_BYTES: usize = 8192;
+const HTTP_REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const CONSOLE_TOKEN_PROTOCOL_PREFIX: &str = "cooldis-console-token.";
+const CONSOLE_CREDENTIAL_ID_FILE: &str = "console-credential-id";
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_COMMAND_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 const DEFAULT_AGENT_REGISTRY_ROOT: &str = ".cooldis/agents";
@@ -518,6 +522,7 @@ struct CooldisAppServerInner {
     identity_authority: Arc<dyn IdentityAuthority>,
     identity_clock: Arc<dyn crate::DaemonClock>,
     identity_mode: IdentityMode,
+    console_credential: Option<ConsoleCredentialLease>,
     cwd: PathBuf,
     codex_home: PathBuf,
     metadata_store_path: PathBuf,
@@ -529,6 +534,95 @@ struct CooldisAppServerInner {
     process_dispatcher: OnceCell<ProcessHandleDispatcher>,
     subscriptions: Mutex<AppServerSubscriptions>,
     state: RwLock<AppServerState>,
+}
+
+struct ConsoleCredentialLease {
+    credential_id: String,
+    principal_id: PrincipalId,
+    record_path: PathBuf,
+}
+
+struct SessionCloseWitness {
+    authority: Arc<dyn IdentityAuthority>,
+    clock: Arc<dyn crate::DaemonClock>,
+    session_id: String,
+    armed: bool,
+}
+
+impl SessionCloseWitness {
+    fn new(
+        authority: Arc<dyn IdentityAuthority>,
+        clock: Arc<dyn crate::DaemonClock>,
+        session_id: String,
+    ) -> Self {
+        Self {
+            authority,
+            clock,
+            session_id,
+            armed: true,
+        }
+    }
+
+    async fn close(&mut self) -> CooldisResult<()> {
+        // `witness_session_closed` starts its cancellation-safe transaction on
+        // the first poll, so disarming here prevents a cancelled await from
+        // scheduling a duplicate close witness.
+        self.armed = false;
+        self.authority
+            .witness_session_closed(&self.session_id, self.clock.now().timestamp_millis())
+            .await
+    }
+}
+
+impl Drop for SessionCloseWitness {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let authority = Arc::clone(&self.authority);
+        let session_id = self.session_id.clone();
+        let closed_at_ms = self.clock.now().timestamp_millis();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = authority
+                    .witness_session_closed(&session_id, closed_at_ms)
+                    .await
+                {
+                    eprintln!("failed to witness aborted Cooldis app-server session: {error}");
+                }
+            });
+        }
+    }
+}
+
+impl Drop for CooldisAppServerInner {
+    fn drop(&mut self) {
+        let Some(credential) = self.console_credential.take() else {
+            return;
+        };
+        let authority = Arc::clone(&self.identity_authority);
+        let cleanup = std::thread::Builder::new()
+            .name("cooldis-console-credential-cleanup".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                runtime
+                    .block_on(retire_console_credential(authority, &credential))
+                    .map_err(|error| error.to_string())
+            });
+        match cleanup {
+            Ok(cleanup) => match cleanup.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    eprintln!("failed to retire Cooldis console credential: {error}")
+                }
+                Err(_) => eprintln!("Cooldis console credential cleanup thread panicked"),
+            },
+            Err(error) => eprintln!("failed to start Cooldis console credential cleanup: {error}"),
+        }
+    }
 }
 
 struct AppServerProcessHandleIngress {
@@ -766,13 +860,18 @@ impl CooldisAppServer {
         let identity_store = SqliteSessionStore::open(&session_store_path)
             .await
             .map_err(|err| CooldisError::History(err.to_string()))?;
-        let identity_authority = initialize_boundary_identity(
+        let console_credential_record_path = session_store_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(CONSOLE_CREDENTIAL_ID_FILE);
+        let (identity_authority, console_credential) = initialize_boundary_identity(
             identity_store,
             Arc::clone(&identity_clock),
             identity.mode,
             identity.console_principal,
             &config.user_id,
             config.console_assets.as_mut(),
+            &console_credential_record_path,
         )
         .await?;
         let app = Self {
@@ -794,6 +893,7 @@ impl CooldisAppServer {
                 identity_authority,
                 identity_clock,
                 identity_mode: identity.mode,
+                console_credential,
                 cwd: config.cwd,
                 codex_home,
                 metadata_store_path,
@@ -1177,17 +1277,17 @@ impl CooldisAppServer {
                         credential_id: credential.credential_id,
                     });
                 }
+                if principal.revoked_at_ms.is_some() {
+                    return Ok(IdentityAuthRejectionReason::PrincipalRevoked {
+                        principal_id: principal.principal_id,
+                    });
+                }
                 if credential
                     .expires_at_ms
                     .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
                 {
                     return Ok(IdentityAuthRejectionReason::CredentialExpired {
                         credential_id: credential.credential_id,
-                    });
-                }
-                if principal.revoked_at_ms.is_some() {
-                    return Ok(IdentityAuthRejectionReason::PrincipalRevoked {
-                        principal_id: principal.principal_id,
                     });
                 }
             }
@@ -1232,7 +1332,8 @@ async fn initialize_boundary_identity(
     console_principal: Option<PrincipalId>,
     default_operator_id: &str,
     console_assets: Option<&mut ConsoleAssetConfig>,
-) -> CooldisResult<Arc<dyn IdentityAuthority>> {
+    console_credential_record_path: &Path,
+) -> CooldisResult<(Arc<dyn IdentityAuthority>, Option<ConsoleCredentialLease>)> {
     let authority = SqliteIdentityAuthority::new(store.clone(), Arc::clone(&clock), None).await?;
     let mut operator = authority
         .list_principals()
@@ -1253,6 +1354,7 @@ async fn initialize_boundary_identity(
         .then(|| operator.clone())
         .flatten();
     let authority = SqliteIdentityAuthority::new(store, clock, peer_operator).await?;
+    let mut console_credential = None;
     if let Some(console) = console_assets {
         let principal_id = console_principal
             .or_else(|| (mode == IdentityMode::Local).then_some(operator).flatten())
@@ -1262,12 +1364,129 @@ async fn initialize_boundary_identity(
                         .to_string(),
                 )
             })?;
-        let (_, token) = authority
+        if let Some(predecessor_id) = read_console_credential_id(console_credential_record_path)? {
+            ignore_missing_credential(
+                authority
+                    .revoke_credential(&principal_id, &predecessor_id)
+                    .await,
+            )?;
+        }
+        let (credential, token) = authority
             .mint_credential(&principal_id, &principal_id, None)
             .await?;
+        // A purpose-labeled or ephemeral credential class in the identity
+        // schema should replace this lifecycle file in a future ticket.
+        if let Err(error) =
+            persist_console_credential_id(console_credential_record_path, &credential.credential_id)
+        {
+            let _ = authority
+                .revoke_credential(&principal_id, &credential.credential_id)
+                .await;
+            return Err(error);
+        }
         console.session_token = token;
+        console_credential = Some(ConsoleCredentialLease {
+            credential_id: credential.credential_id,
+            principal_id,
+            record_path: console_credential_record_path.to_path_buf(),
+        });
     }
-    Ok(Arc::new(authority))
+    Ok((Arc::new(authority), console_credential))
+}
+
+fn read_console_credential_id(path: &Path) -> CooldisResult<Option<String>> {
+    let value = match std::fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(CooldisError::RuntimeFactory(format!(
+                "failed to read Cooldis console credential record {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let credential_id = value.trim();
+    if credential_id.is_empty() || credential_id.chars().any(char::is_whitespace) {
+        return Err(CooldisError::RuntimeFactory(format!(
+            "Cooldis console credential record {} is malformed",
+            path.display()
+        )));
+    }
+    Ok(Some(credential_id.to_string()))
+}
+
+fn persist_console_credential_id(path: &Path, credential_id: &str) -> CooldisResult<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| {
+        CooldisError::RuntimeFactory(format!(
+            "failed to prepare Cooldis console credential record directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+    let temporary = parent.join(format!(
+        ".{CONSOLE_CREDENTIAL_ID_FILE}.{}.tmp",
+        Uuid::now_v7()
+    ));
+    let write_result = (|| -> io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(credential_id.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(CooldisError::RuntimeFactory(format!(
+            "failed to persist Cooldis console credential record {}: {error}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ignore_missing_credential(result: CooldisResult<()>) -> CooldisResult<()> {
+    match result {
+        Err(error)
+            if error
+                .to_string()
+                .contains("identity credential was not found") =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+async fn retire_console_credential(
+    authority: Arc<dyn IdentityAuthority>,
+    credential: &ConsoleCredentialLease,
+) -> CooldisResult<()> {
+    ignore_missing_credential(
+        authority
+            .revoke_credential(&credential.principal_id, &credential.credential_id)
+            .await,
+    )?;
+    let current = read_console_credential_id(&credential.record_path)?;
+    if current.as_deref() == Some(credential.credential_id.as_str()) {
+        match std::fs::remove_file(&credential.record_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "failed to clear Cooldis console credential record {}: {error}",
+                    credential.record_path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 struct ResolvedCatalogOpenAIChatCompletionsProvider {
@@ -1877,15 +2096,17 @@ async fn accept_authenticated_websocket<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    accept_hdr_async_with_config(
+    let upgrade = accept_hdr_async_with_config(
         stream,
         |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
          mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
             if let Some(protocol) = request
                 .headers()
-                .get(SEC_WEBSOCKET_PROTOCOL)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(',').map(str::trim).next())
+                .get_all(SEC_WEBSOCKET_PROTOCOL)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(',').map(str::trim))
+                .find(|protocol| console_protocol_token(protocol).is_some())
                 .and_then(|protocol| HeaderValue::from_str(protocol).ok())
             {
                 response
@@ -1895,8 +2116,15 @@ where
             Ok(response)
         },
         Some(websocket_config()),
-    )
-    .await
+    );
+    tokio::time::timeout(HTTP_REQUEST_HEADER_TIMEOUT, upgrade)
+        .await
+        .map_err(|_| {
+            tokio_tungstenite::tungstenite::Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Cooldis app-server websocket upgrade timed out",
+            ))
+        })?
 }
 
 async fn bind_websocket_listener(addr: SocketAddr) -> CooldisResult<TcpListener> {
@@ -1920,58 +2148,84 @@ struct HttpRequestHead {
 
 async fn peek_http_request(stream: &TcpStream) -> CooldisResult<Option<HttpRequestHead>> {
     let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
-    let len = stream.peek(&mut request).await.map_err(|err| {
-        CooldisError::RuntimeFactory(format!(
-            "failed to inspect Cooldis app-server tcp request: {err}"
-        ))
-    })?;
-    if len == 0 {
-        return Ok(None);
+    let inspected = tokio::time::timeout(HTTP_REQUEST_HEADER_TIMEOUT, async {
+        loop {
+            let len = stream.peek(&mut request).await.map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to inspect Cooldis app-server tcp request: {err}"
+                ))
+            })?;
+            if len == 0 {
+                return Ok(None);
+            }
+            if request[..len].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                return Ok(parse_http_request_head(&request[..len]));
+            }
+            if len == request.len() {
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    request.fill(0);
+    match inspected {
+        Ok(result) => result,
+        Err(_) => Ok(None),
     }
-    let parsed = parse_http_request_head(&request[..len]);
-    request[..len].fill(0);
-    Ok(parsed)
 }
 
 #[cfg(unix)]
 async fn peek_unix_http_request(stream: &UnixStream) -> CooldisResult<Option<HttpRequestHead>> {
     let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
-    loop {
-        stream.readable().await.map_err(|err| {
-            CooldisError::RuntimeFactory(format!(
-                "failed to inspect Cooldis app-server unix request: {err}"
-            ))
-        })?;
-        let len = unsafe {
-            libc::recv(
-                stream.as_raw_fd(),
-                request.as_mut_ptr().cast(),
-                request.len(),
-                libc::MSG_PEEK,
-            )
-        };
-        if len < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock {
-                continue;
+    let inspected = tokio::time::timeout(HTTP_REQUEST_HEADER_TIMEOUT, async {
+        loop {
+            stream.readable().await.map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to inspect Cooldis app-server unix request: {err}"
+                ))
+            })?;
+            let len = unsafe {
+                libc::recv(
+                    stream.as_raw_fd(),
+                    request.as_mut_ptr().cast(),
+                    request.len(),
+                    libc::MSG_PEEK,
+                )
+            };
+            if len < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    continue;
+                }
+                return Err(CooldisError::RuntimeFactory(format!(
+                    "failed to inspect Cooldis app-server unix request: {error}"
+                )));
             }
-            return Err(CooldisError::RuntimeFactory(format!(
-                "failed to inspect Cooldis app-server unix request: {error}"
-            )));
+            if len == 0 {
+                return Ok(None);
+            }
+            let len = len as usize;
+            if request[..len].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                return Ok(parse_http_request_head(&request[..len]));
+            }
+            if len == request.len() {
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
-        if len == 0 {
-            return Ok(None);
-        }
-        let len = len as usize;
-        let parsed = parse_http_request_head(&request[..len]);
-        request[..len].fill(0);
-        return Ok(parsed);
+    })
+    .await;
+    request.fill(0);
+    match inspected {
+        Ok(result) => result,
+        Err(_) => Ok(None),
     }
 }
 
 fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
     let text = std::str::from_utf8(bytes).ok()?;
-    let header_end = text.find("\r\n\r\n").unwrap_or(text.len());
+    let header_end = text.find("\r\n\r\n")?;
     let mut lines = text[..header_end].split("\r\n");
     let request_line = lines.next()?;
     let mut parts = request_line.split_whitespace();
@@ -2039,9 +2293,8 @@ fn request_bearer_token(request: &HttpRequestHead) -> Option<(&str, BoundarySurf
     if let Some(token) = request
         .headers
         .iter()
-        .find(|(name, _)| name == "authorization")
-        .and_then(|(_, value)| value.strip_prefix("Bearer "))
-        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+        .filter(|(name, _)| name == "authorization")
+        .find_map(|(_, value)| authorization_bearer_token(value))
     {
         return Some((token, BoundarySurface::Websocket));
     }
@@ -2051,11 +2304,21 @@ fn request_bearer_token(request: &HttpRequestHead) -> Option<(&str, BoundarySurf
         .filter(|(name, _)| name == "sec-websocket-protocol")
         .flat_map(|(_, value)| value.split(',').map(str::trim))
         .find_map(|protocol| {
-            let token = protocol
-                .strip_prefix("cooldis-console-token.")
-                .unwrap_or(protocol);
-            (!token.is_empty()).then_some((token, BoundarySurface::Console))
+            console_protocol_token(protocol).map(|token| (token, BoundarySurface::Console))
         })
+}
+
+fn authorization_bearer_token(value: &str) -> Option<&str> {
+    let mut parts = value.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    (scheme.eq_ignore_ascii_case("bearer") && parts.next().is_none()).then_some(token)
+}
+
+fn console_protocol_token(protocol: &str) -> Option<&str> {
+    protocol
+        .strip_prefix(CONSOLE_TOKEN_PROTOCOL_PREFIX)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
 }
 
 fn content_type_for_path(path: &Path) -> &'static str {
@@ -2106,37 +2369,47 @@ where
     S: AsyncRead + Unpin,
 {
     let mut chunk = [0_u8; 512];
-    let mut matched = 0;
-    loop {
-        let len = stream.read(&mut chunk).await.map_err(|err| {
-            CooldisError::RuntimeFactory(format!(
-                "failed to read Cooldis app-server HTTP request: {err}"
-            ))
-        })?;
-        if len == 0 {
-            return Ok(());
-        }
-        let mut complete = false;
-        for byte in &chunk[..len] {
-            matched = match (matched, *byte) {
-                (0, b'\r') => 1,
-                (1, b'\n') => 2,
-                (2, b'\r') => 3,
-                (3, b'\n') => {
-                    complete = true;
-                    4
+    let consumed = tokio::time::timeout(HTTP_REQUEST_HEADER_TIMEOUT, async {
+        let mut matched = 0;
+        let mut total = 0;
+        loop {
+            let len = stream.read(&mut chunk).await.map_err(|err| {
+                CooldisError::RuntimeFactory(format!(
+                    "failed to read Cooldis app-server HTTP request: {err}"
+                ))
+            })?;
+            if len == 0 {
+                return Ok(());
+            }
+            total += len;
+            let mut complete = false;
+            for byte in &chunk[..len] {
+                matched = match (matched, *byte) {
+                    (0, b'\r') => 1,
+                    (1, b'\n') => 2,
+                    (2, b'\r') => 3,
+                    (3, b'\n') => {
+                        complete = true;
+                        4
+                    }
+                    (_, b'\r') => 1,
+                    _ => 0,
+                };
+                if complete {
+                    break;
                 }
-                (_, b'\r') => 1,
-                _ => 0,
-            };
-            if complete {
-                break;
+            }
+            chunk[..len].fill(0);
+            if complete || total >= MAX_HTTP_REQUEST_HEADER_BYTES {
+                return Ok(());
             }
         }
-        chunk[..len].fill(0);
-        if complete {
-            return Ok(());
-        }
+    })
+    .await;
+    chunk.fill(0);
+    match consumed {
+        Ok(result) => result,
+        Err(_) => Ok(()),
     }
 }
 

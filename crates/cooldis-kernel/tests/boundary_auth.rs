@@ -1,5 +1,5 @@
 use cooldis::daemon::identity::{
-    CooldisDaemonIdentityConfig, IdentityAuthority, IdentityMode, PrincipalId,
+    CooldisDaemonIdentityConfig, IdentityAuthority, IdentityMode, PrincipalId, PrincipalKind,
     SqliteIdentityAuthority,
 };
 use cooldis::{
@@ -57,6 +57,64 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
         .revoke_credential(&operator, &revoked.credential_id)
         .await
         .unwrap();
+    let revoked_operator = PrincipalId::new("operator:revoked");
+    authority
+        .declare_principal(
+            &operator,
+            &revoked_operator,
+            PrincipalKind::Operator,
+            "Revoked operator",
+        )
+        .await
+        .unwrap();
+    let (_, revoked_operator_token) = authority
+        .mint_credential(&operator, &revoked_operator, None)
+        .await
+        .unwrap();
+    authority
+        .revoke_principal(&operator, &revoked_operator)
+        .await
+        .unwrap();
+    let expired_revoked_operator = PrincipalId::new("operator:expired-and-revoked");
+    authority
+        .declare_principal(
+            &operator,
+            &expired_revoked_operator,
+            PrincipalKind::Operator,
+            "Expired and revoked operator",
+        )
+        .await
+        .unwrap();
+    let (_, expired_revoked_operator_token) = authority
+        .mint_credential(&operator, &expired_revoked_operator, Some(1))
+        .await
+        .unwrap();
+    authority
+        .revoke_principal(&operator, &expired_revoked_operator)
+        .await
+        .unwrap();
+    let fully_revoked_operator = PrincipalId::new("operator:credential-and-principal-revoked");
+    authority
+        .declare_principal(
+            &operator,
+            &fully_revoked_operator,
+            PrincipalKind::Operator,
+            "Credential and principal revoked operator",
+        )
+        .await
+        .unwrap();
+    let (fully_revoked_credential, fully_revoked_token) = authority
+        .mint_credential(&operator, &fully_revoked_operator, Some(1))
+        .await
+        .unwrap();
+    authority
+        .revoke_credential(&operator, &fully_revoked_credential.credential_id)
+        .await
+        .unwrap();
+    authority
+        .revoke_principal(&operator, &fully_revoked_operator)
+        .await
+        .unwrap();
     drop(authority);
 
     let app = CooldisAppServer::new(
@@ -93,6 +151,9 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
         websocket_request(addr, "/rpc", Some("unknown-token")),
         websocket_request(addr, "/rpc", Some(&expired_token)),
         websocket_request(addr, "/rpc", Some(&revoked_token)),
+        websocket_request(addr, "/rpc", Some(&revoked_operator_token)),
+        websocket_request(addr, "/rpc", Some(&expired_revoked_operator_token)),
+        websocket_request(addr, "/rpc", Some(&fully_revoked_token)),
         websocket_request(addr, &format!("/rpc?token={accepted_token}"), None),
     ] {
         let response = raw_tcp_request(addr, &request).await;
@@ -103,7 +164,29 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
         assert!(!response.contains(&accepted_token));
         assert!(!response.contains(&expired_token));
         assert!(!response.contains(&revoked_token));
+        assert!(!response.contains(&revoked_operator_token));
+        assert!(!response.contains(&expired_revoked_operator_token));
+        assert!(!response.contains(&fully_revoked_token));
+        assert!(response.ends_with("authentication required"));
+        assert!(!response.contains("credential_revoked"));
+        assert!(!response.contains("credential_expired"));
+        assert!(!response.contains("principal_revoked"));
     }
+
+    let fragmented_request = websocket_request(addr, "/rpc", Some(&accepted_token));
+    let fragmented_response = fragmented_tcp_response_head(addr, &fragmented_request).await;
+    assert!(
+        fragmented_response.starts_with("HTTP/1.1 101 Switching Protocols"),
+        "fragmented authenticated handshake was not upgraded"
+    );
+
+    let case_insensitive_request =
+        websocket_request_with_authorization(addr, &format!("   bEaReR\t  {accepted_token}   "));
+    let case_insensitive_response = tcp_response_head(addr, &case_insensitive_request).await;
+    assert!(
+        case_insensitive_response.starts_with("HTTP/1.1 101 Switching Protocols"),
+        "case-insensitive bearer handshake was not upgraded"
+    );
 
     let index = raw_tcp_request(
         addr,
@@ -117,10 +200,33 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
         HeaderValue::from_str(&format!("cooldis-console-token.{console_token}")).unwrap(),
     );
     let stream = TcpStream::connect(addr).await.unwrap();
-    let (mut console, _) = tokio_tungstenite::client_async(request, stream)
+    let (mut console, response) = tokio_tungstenite::client_async(request, stream)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| panic!("console WebSocket handshake failed"));
+    let expected_protocol = format!("cooldis-console-token.{console_token}");
+    assert!(
+        response
+            .headers()
+            .get(SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|value| value.to_str().ok())
+            == Some(expected_protocol.as_str()),
+        "server did not echo the authenticated console subprotocol"
+    );
     console.send(Message::Close(None)).await.unwrap();
+
+    let listed_protocol_request = format!(
+        "GET /rpc HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: unrelated.v1\r\nSec-WebSocket-Protocol: metrics.v1, cooldis-console-token.{console_token}\r\n\r\n"
+    );
+    let listed_protocol_response = tcp_response_head(addr, &listed_protocol_request).await;
+    assert!(
+        listed_protocol_response.starts_with("HTTP/1.1 101 Switching Protocols"),
+        "recognized non-first console subprotocol was not upgraded"
+    );
+    assert!(
+        response_header(&listed_protocol_response, "sec-websocket-protocol")
+            == Some(expected_protocol.as_str()),
+        "server did not select the recognized console subprotocol"
+    );
 
     for path in ["/healthz", "/readyz"] {
         let response = raw_tcp_request(
@@ -137,7 +243,7 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
     wait_for_sql_count(
         &store_path,
         "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
-        2,
+        5,
     )
     .await;
     assert_eq!(
@@ -147,7 +253,7 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
             params![OPERATOR_ID],
         )
         .await,
-        4
+        10
     );
     assert_eq!(
         sql_count(
@@ -156,7 +262,7 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
             (),
         )
         .await,
-        5
+        8
     );
     assert_eq!(
         sql_count(
@@ -170,15 +276,25 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
     assert_eq!(
         sql_count(
             &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE reason_json LIKE '%principal_revoked%'",
+            (),
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        sql_count(
+            &store_path,
             "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE reason_json LIKE '%credential_revoked%'",
             (),
         )
         .await,
-        1
+        2
     );
 
     server_task.abort();
     let _ = server_task.await;
+    drop(app);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -241,6 +357,24 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         .revoke_credential(&operator, &revoked_credential.credential_id)
         .await
         .unwrap();
+    let revoked_operator = PrincipalId::new("operator:revoked");
+    authority
+        .declare_principal(
+            &operator,
+            &revoked_operator,
+            PrincipalKind::Operator,
+            "Revoked operator",
+        )
+        .await
+        .unwrap();
+    let (_, revoked_operator_token) = authority
+        .mint_credential(&operator, &revoked_operator, None)
+        .await
+        .unwrap();
+    authority
+        .revoke_principal(&operator, &revoked_operator)
+        .await
+        .unwrap();
     drop(authority);
     let managed_app = CooldisAppServer::new(
         managed_config,
@@ -253,6 +387,15 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     .await
     .unwrap();
     let managed_store = managed_app.session_store_path().to_path_buf();
+    let local_dispatch = managed_app
+        .local_json_rpc_request("account/read", serde_json::json!({}))
+        .await
+        .unwrap_err();
+    assert!(
+        local_dispatch
+            .to_string()
+            .contains("local-mode operator principal")
+    );
     let managed_server = managed_app.clone();
     let managed_listen = AppServerListenAddr::Unix(managed_socket.clone());
     let mut managed_task = tokio::spawn(async move { managed_server.serve(managed_listen).await });
@@ -294,7 +437,7 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     };
     assert!(unknown_token.to_string().contains("401"));
 
-    for rejected_token in [expired_token, revoked_token] {
+    for rejected_token in [expired_token, revoked_token, revoked_operator_token] {
         let rejected = CodexTuiTestClient::connect_unix(
             &managed_socket,
             CodexTuiConnectConfig {
@@ -313,17 +456,25 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     let mut token_client = CodexTuiTestClient::connect_unix(
         &managed_socket,
         CodexTuiConnectConfig {
-            bearer_token: Some(token),
+            bearer_token: Some(token.clone()),
             ..CodexTuiConnectConfig::default()
         },
     )
     .await
     .unwrap();
     token_client.close().await.unwrap();
+    let fragmented_request =
+        websocket_request("127.0.0.1:80".parse().unwrap(), "/rpc", Some(&token));
+    let fragmented_response =
+        fragmented_unix_response_head(&managed_socket, &fragmented_request).await;
+    assert!(
+        fragmented_response.starts_with("HTTP/1.1 101 Switching Protocols"),
+        "fragmented authenticated Unix handshake was not upgraded"
+    );
     wait_for_sql_count(
         &managed_store,
         "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
-        1,
+        2,
     )
     .await;
     assert_eq!(
@@ -333,12 +484,21 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
             params![credential.credential_id],
         )
         .await,
-        2
+        4
     );
     assert_eq!(
         sql_count(
             &managed_store,
             "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE surface = 'unix_socket' AND reason_json LIKE '%peer_mapping_disabled%'",
+            (),
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        sql_count(
+            &managed_store,
+            "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE surface = 'unix_socket' AND reason_json LIKE '%principal_revoked%'",
             (),
         )
         .await,
@@ -380,6 +540,70 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     let _ = std::fs::remove_dir_all(managed_root);
 }
 
+#[tokio::test]
+async fn console_credential_lifecycle_keeps_one_active_credential_across_restarts() {
+    let root = test_root("console-lifecycle");
+    let assets = root.join("console");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<html><head></head><body>console</body></html>",
+    )
+    .unwrap();
+    let operator = PrincipalId::new(OPERATOR_ID);
+    let bootstrap_config = app_config(
+        &root,
+        AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
+    );
+    let authority = identity_authority(&bootstrap_config).await;
+    authority
+        .bootstrap_operator(&operator, "Root operator")
+        .await
+        .unwrap();
+    drop(authority);
+    let store_path = bootstrap_config.state_home.join("session_history.sqlite3");
+    let baseline = active_credential_count(&store_path, OPERATOR_ID).await;
+
+    let mut generations = Vec::new();
+    for _ in 0..4 {
+        let mut config = app_config(
+            &root,
+            AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
+        );
+        config.console_assets = Some(ConsoleAssetConfig {
+            root: assets.clone(),
+            session_token: "replaced-at-construction".to_string(),
+        });
+        let app = CooldisAppServer::new(
+            config,
+            CooldisDaemonIdentityConfig {
+                mode: IdentityMode::Managed,
+                tenant_id: Some("test-tenant".to_string()),
+                console_principal: Some(operator.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        generations.push(app);
+        assert_eq!(
+            active_credential_count(&store_path, OPERATOR_ID).await,
+            baseline + 1,
+            "a restart left more than one active console credential"
+        );
+    }
+
+    let record_path = root.join("state").join("console-credential-id");
+    assert!(record_path.is_file());
+    drop(generations);
+    assert_eq!(
+        active_credential_count(&store_path, OPERATOR_ID).await,
+        baseline,
+        "graceful app-server shutdown did not revoke its console credential"
+    );
+    assert!(!record_path.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn app_config(root: &Path, listen: AppServerListenAddr) -> CooldisAppServerConfig {
     let mut config = CooldisAppServerConfig::local(listen, root.join("workspace"));
     config.runtime_home = root.join("runtime");
@@ -408,12 +632,92 @@ fn websocket_request(addr: std::net::SocketAddr, path: &str, token: Option<&str>
     )
 }
 
+fn websocket_request_with_authorization(addr: std::net::SocketAddr, authorization: &str) -> String {
+    format!(
+        "GET /rpc HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\naUtHoRiZaTiOn:{authorization}\r\n\r\n"
+    )
+}
+
 async fn raw_tcp_request(addr: std::net::SocketAddr, request: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await.unwrap();
     String::from_utf8(response).unwrap()
+}
+
+async fn fragmented_tcp_response_head(addr: std::net::SocketAddr, request: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let first = request.len() / 3;
+    let second = first * 2;
+    stream
+        .write_all(&request.as_bytes()[..first])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    stream
+        .write_all(&request.as_bytes()[first..second])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    stream
+        .write_all(&request.as_bytes()[second..])
+        .await
+        .unwrap();
+    read_response_head(&mut stream).await
+}
+
+#[cfg(unix)]
+async fn fragmented_unix_response_head(path: &Path, request: &str) -> String {
+    let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+    let first = request.len() / 3;
+    let second = first * 2;
+    stream
+        .write_all(&request.as_bytes()[..first])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    stream
+        .write_all(&request.as_bytes()[first..second])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    stream
+        .write_all(&request.as_bytes()[second..])
+        .await
+        .unwrap();
+    read_response_head(&mut stream).await
+}
+
+async fn tcp_response_head(addr: std::net::SocketAddr, request: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    read_response_head(&mut stream).await
+}
+
+async fn read_response_head<S>(stream: &mut S) -> String
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut byte = [0_u8; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.unwrap();
+            response.push(byte[0]);
+        }
+    })
+    .await
+    .unwrap();
+    String::from_utf8(response).unwrap()
+}
+
+fn response_header<'a>(response: &'a str, expected_name: &str) -> Option<&'a str> {
+    response.split("\r\n").find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(expected_name)
+            .then_some(value.trim())
+    })
 }
 
 fn injected_console_token(response: &str) -> String {
@@ -468,6 +772,15 @@ where
     let connection = database.connect().await.unwrap();
     let mut rows = connection.query(query, params).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn active_credential_count(path: &Path, principal_id: &str) -> i64 {
+    sql_count(
+        path,
+        "SELECT COUNT(*) FROM cooldis_identity_credentials WHERE principal_id = ?1 AND revoked_at_ms IS NULL",
+        params![principal_id],
+    )
+    .await
 }
 
 fn test_root(label: &str) -> PathBuf {

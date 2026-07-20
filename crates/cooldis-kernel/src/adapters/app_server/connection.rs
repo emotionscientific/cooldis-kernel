@@ -793,7 +793,7 @@ impl CooldisAppServer {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let session_id = format!("session_{}", Uuid::new_v4());
+        let session_id = format!("session_{}", Uuid::now_v7());
         self.inner
             .identity_authority
             .witness_session_opened(&IdentitySessionV1 {
@@ -807,6 +807,11 @@ impl CooldisAppServer {
                 closed_at_ms: None,
             })
             .await?;
+        let mut close_witness = SessionCloseWitness::new(
+            Arc::clone(&self.inner.identity_authority),
+            Arc::clone(&self.inner.identity_clock),
+            session_id,
+        );
         let (mut sink, mut stream) = websocket.split();
         let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
         let writer = tokio::spawn(async move {
@@ -859,14 +864,8 @@ impl CooldisAppServer {
 
         connection.abort_subscriptions().await;
         writer.abort();
-        self.inner
-            .identity_authority
-            .witness_session_closed(
-                &session_id,
-                self.inner.identity_clock.now().timestamp_millis(),
-            )
-            .await?;
-        read_result
+        let close_result = close_witness.close().await;
+        finish_websocket_session(read_result, close_result)
     }
 
     pub(super) async fn handle_request(
@@ -4181,6 +4180,23 @@ impl CooldisAppServer {
             "analytics": null,
             "desktop": null,
         })
+    }
+}
+
+pub(super) fn finish_websocket_session(
+    read_result: CooldisResult<()>,
+    close_result: CooldisResult<()>,
+) -> CooldisResult<()> {
+    match (read_result, close_result) {
+        (Err(read_error), Err(close_error)) => {
+            eprintln!(
+                "failed to witness closing a failed Cooldis app-server session: {close_error}"
+            );
+            Err(read_error)
+        }
+        (Err(read_error), Ok(())) => Err(read_error),
+        (Ok(()), Err(close_error)) => Err(close_error),
+        (Ok(()), Ok(())) => Ok(()),
     }
 }
 

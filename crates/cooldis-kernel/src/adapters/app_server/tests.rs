@@ -10416,6 +10416,187 @@ async fn app_server_websocket_listen_requires_console_session_token() {
 }
 
 #[test]
+fn boundary_bearer_parser_accepts_case_and_whitespace_and_skips_unrelated_protocols() {
+    let authorization = parse_http_request_head(
+        b"GET /rpc HTTP/1.1\r\naUtHoRiZaTiOn:   bEaReR\t boundary-token   \r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        request_bearer_token(&authorization),
+        Some(("boundary-token", BoundarySurface::Websocket))
+    );
+
+    let protocols = parse_http_request_head(
+        b"GET /rpc HTTP/1.1\r\nSec-WebSocket-Protocol: unrelated.v1\r\nsEc-WeBsOcKeT-pRoToCoL: metrics.v1, cooldis-console-token.console-secret\r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        request_bearer_token(&protocols),
+        Some(("console-secret", BoundarySurface::Console))
+    );
+}
+
+#[test]
+fn session_close_witness_failure_does_not_mask_the_read_error() {
+    let read_error = CooldisError::RuntimeFactory("original websocket read error".to_string());
+    let close_error = CooldisError::History("close witness failed".to_string());
+    let error = finish_websocket_session(Err(read_error), Err(close_error)).unwrap_err();
+    assert!(error.to_string().contains("original websocket read error"));
+    assert!(!error.to_string().contains("close witness failed"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_peer_mapping_rejects_a_uid_other_than_the_daemon_euid() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    let request = b"GET /rpc HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    client.write_all(request).await.unwrap();
+
+    let mismatched_uid = current_effective_uid().wrapping_add(1);
+    let resolved = app
+        .authenticate_unix_websocket(&mut server, mismatched_uid)
+        .await
+        .unwrap();
+    assert!(resolved.is_none());
+    drop(server);
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 401 Unauthorized"));
+    assert_eq!(
+        identity_sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE surface = 'unix_socket'",
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn aborted_websocket_session_still_witnesses_its_close() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let resolved_principal = app
+        .inner
+        .identity_authority
+        .resolve_peer_uid(current_effective_uid())
+        .await
+        .unwrap()
+        .unwrap();
+    let (_client_io, server_io) = tokio::io::duplex(1024);
+    let websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        server_io,
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        Some(websocket_config()),
+    )
+    .await;
+    let server = app.clone();
+    let task = tokio::spawn(async move {
+        server
+            .handle_websocket(websocket, resolved_principal, BoundarySurface::UnixSocket)
+            .await
+    });
+
+    wait_for_identity_sql_count(
+        &store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NULL",
+        1,
+    )
+    .await;
+    task.abort();
+    let _ = task.await;
+    wait_for_identity_sql_count(
+        &store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
+        1,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (mut server, _) = listener.accept().await.unwrap();
+    let _client = connect.await.unwrap();
+
+    assert!(peek_http_request(&server).await.unwrap().is_none());
+    consume_http_request_headers(&mut server).await.unwrap();
+
+    #[cfg(unix)]
+    {
+        let (_client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        assert!(peek_unix_http_request(&server).await.unwrap().is_none());
+        consume_http_request_headers(&mut server).await.unwrap();
+    }
+
+    let (_client_io, server_io) = tokio::io::duplex(1024);
+    let error = accept_authenticated_websocket(server_io).await.unwrap_err();
+    assert!(error.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn oversized_pre_upgrade_headers_fail_closed_with_one_witness() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (mut server, _) = listener.accept().await.unwrap();
+    let mut client = connect.await.unwrap();
+    let request = format!(
+        "GET /rpc HTTP/1.1\r\nHost: {addr}\r\nX-Oversized: {}\r\n\r\n",
+        "x".repeat(MAX_HTTP_REQUEST_HEADER_BYTES)
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+
+    assert!(
+        app.authenticate_tcp_websocket(&mut server)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut response = vec![0_u8; 256];
+    let len = tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response[..len].starts_with(b"HTTP/1.1 401 Unauthorized"));
+    assert_eq!(
+        identity_sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE surface = 'websocket'",
+        )
+        .await,
+        1
+    );
+    response.fill(0);
+}
+
+async fn identity_sql_count(path: &Path, query: &str) -> i64 {
+    let store = SqliteSessionStore::open(path).await.unwrap();
+    let connection = store.sqlite_database().connect().await.unwrap();
+    let mut rows = connection.query(query, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn wait_for_identity_sql_count(path: &Path, query: &str, expected: i64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if identity_sql_count(path, query).await >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
 fn app_server_listen_addr_parses_websocket_urls() {
     let addr: std::net::SocketAddr = "127.0.0.1:8765".parse().unwrap();
     assert_eq!(

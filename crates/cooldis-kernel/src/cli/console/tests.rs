@@ -1,16 +1,6 @@
 use super::*;
 
 #[test]
-fn console_session_tokens_use_fresh_csprng_material() {
-    let first = generate_console_session_token().unwrap();
-    let second = generate_console_session_token().unwrap();
-    assert_ne!(first, second);
-    let random = first.strip_prefix("cooldis_console_").unwrap();
-    assert_eq!(random.len(), 64);
-    assert!(random.bytes().all(|byte| byte.is_ascii_hexdigit()));
-}
-
-#[test]
 fn parse_chat_args_collects_prompt_and_homes() {
     let args = vec![
         "--cwd",
