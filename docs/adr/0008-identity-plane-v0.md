@@ -1,7 +1,8 @@
 # ADR 0008: Identity Plane v0 (Principals, Credentials, and the Authenticated Boundary)
 
-Status: proposed
-Date: 2026-07-18
+Status: accepted (ratified by the anchor 2026-07-20, with the member-kind
+deferral described in D1)
+Date: 2026-07-18 (revised 2026-07-20)
 
 ## Context
 
@@ -67,6 +68,18 @@ named principals. Multi-tenant boundary authentication, a role system, and the
 per-method grant algebra are foreclosed consciously (see Out of scope), not
 built.
 
+One layering principle governs every decision below: **the kernel is an
+identity receptor, not an identity provider.** The kernel needs a slot where
+"who" plugs in, because host authority can only be gated inside the dispatcher
+and because the record's attribution must be attested by the runtime itself,
+not relayed from a fronting proxy. Everything that provides identities (user
+accounts, login flows, SSO, directory sync) is a separate service above the
+kernel: Cooldis Cloud for the managed lane, or a deployment's own identity
+service for self-hosting. This mirrors the Unix split (user ids live in the
+kernel; login systems live outside it) and rejects the Docker split (no
+identity in the daemon at all, so socket access equals root and cannot be
+fixed after the fact).
+
 ## Decision
 
 ### D1: Principals are declared records
@@ -77,13 +90,25 @@ event in the stream and folded into a boundary-readable set. Fields:
 declaring principal (the "who granted what" attestation hook: a principal's
 existence names who created it).
 
-Kinds in v0:
+Kinds implemented in v0:
 
-- `operator`: full host authority (command exec, filesystem, secrets, debug).
-  The identity that possesses the host box.
-- `member`: interactive thread and agent use; no host authority.
+- `operator`: full host authority (command exec, filesystem, secrets, debug)
+  plus interactive use. The identity that possesses the host box.
 - `adapter`: ingress submission only; the identity a route binding names when
   it stamps `via="route:{route_id}"`.
+
+One kind is **reserved but not implemented**: `member`, interactive thread and
+agent use without host authority. The kind value exists in the record schema
+so its later arrival is additive, but declaring a member principal is rejected
+in v0. Rationale (the receptor-not-provider principle applied): no v0
+deployment gives an end user direct daemon access. Customers reach agents
+through adapters, and the envelope already records end-user attribution as
+adapter-supplied testimony: the kernel attests which authenticated adapter
+delivered the event, and records the external actor the adapter claims, as a
+claim. That split (attested carrier, claimed author) is the formally honest
+shape. Per-person accounts, when a deployment actually needs them, arrive as
+an external identity service that maps humans onto member principals; the
+kernel's job is only to have the slot ready.
 
 Principals are declared and revoked through witnessed events; the fold is the
 authority, and the boundary cache rebuilds from it at daemon start. Cache
@@ -145,6 +170,7 @@ both, and it happens at the upgrade, before the existing initialize-first rule
 - **Console:** the session token is regenerated from a CSPRNG (today it is two
   concatenated UUIDv7 values, `cli/console.rs:220-222`, which are time-ordered
   and guessable) and resolves the console connection to a configured principal
+  (in v0, the operator: every v0 console user is whoever operates the daemon)
   instead of standing in for an anonymous transport secret. Static asset serving
   is unchanged.
 - **MCP / ACP / debug RPC:** daemon clients, not surfaces of their own. Each
@@ -171,13 +197,20 @@ one gate. After authentication a connection carries a resolved principal; before
 dispatch, the method is checked against the principal's authority, derived
 directly from `principal.kind`:
 
-- **Host authority (operator only):** `command/exec` and its family,
-  `thread/shellCommand`, all `fs/*` methods, process-handle methods,
-  `modelProvider/auth/*`, `mcpSource/upsert`, and debug methods.
-- **Interactive (member and up):** `thread/*`, `turn/*`, `mandate/start`, and
-  the read methods.
-- **Ingress (adapter and up):** envelope submission; the route binding must
-  name the adapter principal it stamps.
+The method taxonomy has three classes; it is the durable part of this
+decision and does not change when the reserved `member` kind ships:
+
+- **Host authority:** `command/exec` and its family, `thread/shellCommand`,
+  all `fs/*` methods, process-handle methods, `modelProvider/auth/*`,
+  `mcpSource/upsert`, and debug methods.
+- **Interactive:** `thread/*`, `turn/*`, `mandate/start`, and the read
+  methods.
+- **Ingress:** envelope submission; the route binding must name the adapter
+  principal it stamps.
+
+The v0 kind-to-class mapping: `operator` reaches all three classes; `adapter`
+reaches ingress only. When `member` ships it will reach interactive and
+ingress but never host authority; nothing about the taxonomy moves.
 
 The host-authority list is explicit and takes precedence: `thread/shellCommand`
 is host authority even though it matches the `thread/*` interactive prefix. A
@@ -249,24 +282,33 @@ foreclosed to a later version.
 
 ## Consequences
 
-- The managed instance can name its operator, its console member, and its
-  adapter principals, and can prove each caller is who it claims before any host
-  authority is exercised. This is the precondition for standing the internal
-  managed instance up.
+- The managed instance can name its operator and its adapter principals, and
+  can prove each caller is who it claims before any host authority is
+  exercised. This is the precondition for standing the internal managed
+  instance up.
 - A single-user developer keeps working unchanged: `local` mode with no identity
   section plus the same-uid peer mapping means host CLI usage needs no token,
   while every remote or multi-principal path authenticates.
 - The console stops being authenticated by a guessable token.
-- The three authority classes are coarse. The first tenant with two humans, or
-  the first need to grant one principal a single host method, forces the grant
-  algebra; the declaration and mint events already record the attestation trail,
-  so adding per-method grant records then is additive.
+- The authority classes are coarse, and two future triggers are named. The
+  first deployment where an end user needs direct daemon access (rather than
+  reaching agents through an adapter) triggers implementing the reserved
+  `member` kind, fed by an external identity service. The first need to grant
+  one principal a single host method triggers the per-method grant algebra.
+  The declaration and mint events already record the attestation trail, so
+  both arrivals are additive.
 
 ## Out of scope (foreclosed consciously, not forgotten)
 
+- **Member principals and per-person accounts.** The `member` kind value is
+  reserved in the schema and rejected at declaration (D1). End users reach
+  agents through adapters, attributed as adapter testimony on the envelope.
+  When a deployment needs direct end-user daemon access, members ship, fed by
+  an external identity service (Cloud-side or deployment-owned); the kernel
+  never becomes an identity provider.
 - **Role / membership model (RBAC) and the per-method grant algebra.** Triggered
-  by a second human in one tenant, or the first per-method grant ask. v0
-  authority classes are not roles, and default authority is not persisted.
+  by the first per-method grant ask. v0 authority classes are not roles, and
+  default authority is not persisted.
 - **Agents as principals.** Agents act under ADR 0007 mandate/handle/remote
   schemes; giving an agent its own credential is a later, separate decision.
 - **Cross-tenant boundary authentication.** One tenant per daemon; no boundary
@@ -277,6 +319,30 @@ foreclosed to a later version.
   per-connection recheck waits for a killable-in-flight requirement.
 - **Durable ingress principal projection.** EMO-494, design-gated separately.
 
+## Related surfaces (public references)
+
+Two shipped systems were compared while revising this design; both citations
+are public.
+
+- **Everruns** (github.com/everruns/everruns) independently converged on the
+  same credential shape: high-entropy random tokens shown once at creation and
+  stored only as SHA-256 digests. Its role ladder measures organization
+  seniority rather than machine authority, its inbound channels authenticate
+  with shared per-channel tokens bound to no named principal, and its internal
+  worker fleet authenticates with a single shared token, which this design
+  treats as a counterexample: workers get per-worker scoped credentials, never
+  a fleet secret.
+- **Anthropic's Managed Agents API** (platform.claude.com docs) has one
+  data-plane authority class: any workspace API key holds full authority over
+  every agent, session, and stored credential in the workspace. Sessions
+  record no initiating user; end users exist only as caller-supplied metadata
+  on credential containers. Its credential rotation re-resolving into running
+  sessions is what prompted D6's explicit revocation-timing decision here.
+
+Neither system carries a data-plane distinction like operator / adapter /
+(reserved) member, and neither records who initiated a session in an attested
+record. That gap is the part of this design that is not catch-up.
+
 ## Lexicon additions (naming-law receipt)
 
 This ADR names four primitives the lexicon uses or now requires but has not
@@ -286,7 +352,8 @@ be added to `formalism/lexicon.md` before the phase-2 implementation tickets:
 
 - **principal**: a named identity within a tenant, on whose authority effects
   act; declared as a witnessed record. Already load-bearing in the `envelope`
-  entry ("resolves to a principal").
+  entry ("resolves to a principal"). The `member` kind value is reserved, not
+  implemented; it receives a full lexicon treatment when it ships.
 - **credential**: a witnessed binding of a bearer secret (stored as a digest
   only) to one principal, with which a caller authenticates at a boundary.
 - **tenant**: the isolation unit that owns principals, streams, and grants;
@@ -300,17 +367,19 @@ be added to `formalism/lexicon.md` before the phase-2 implementation tickets:
 Each kernel ticket is security-adjacent and dispatched with an explicit list of
 failure modes to defend against (enforcement bypass, cross-principal confusion,
 credential leakage, escalation through the peer mapping) and a second
-independent review before it lands.
+independent review before it lands. With the member deferral, every ticket
+builds two kinds, not three.
 
-1. Principal and credential records, the fold, and the CLI command that
-   bootstraps the first operator (declare + mint in one step).
+1. Principal and credential records (operator and adapter kinds; member
+   reserved and rejected), the fold, and the CLI command that bootstraps the
+   first operator (declare + mint in one step).
 2. Boundary authentication: token verification on the shared WebSocket upgrade,
    the same-uid peer mapping, and the resolved principal on the connection;
    regenerate the console token from a CSPRNG.
-3. Dispatcher authorization classes, host-authority gating with the precedence
-   rule, the distinct authorization error, and the witnessed session,
-   host-effect, and authentication-rejected events; stamp
-   `via="caller:{session_id}"` on caller-authenticated ingress.
+3. Dispatcher authorization: the method taxonomy, the operator / adapter
+   kind-to-class mapping with the precedence rule, the distinct authorization
+   error, and the witnessed session, host-effect, and authentication-rejected
+   events; stamp `via="caller:{session_id}"` on caller-authenticated ingress.
 4. Config: `[daemon.identity]` with `mode`, removal of the hard-coded tenant,
    and the migration note.
 5. Docs: `threat-model.md` update and an authentication section in
