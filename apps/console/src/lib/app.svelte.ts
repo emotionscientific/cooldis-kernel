@@ -91,24 +91,13 @@ function injectedConsoleConfig(): ConsoleConfig | undefined {
   return typeof window === "undefined" ? undefined : window.__COOLDIS_CONSOLE_CONFIG__;
 }
 
-function endpointWithSessionToken(endpoint: string, sessionToken?: string) {
-  if (!sessionToken) return endpoint;
-  try {
-    const url = new URL(endpoint);
-    if (!url.searchParams.has("token")) url.searchParams.set("token", sessionToken);
-    return url.toString();
-  } catch {
-    return endpoint;
-  }
-}
-
 function defaultRpcEndpoint() {
   const config = injectedConsoleConfig();
-  if (config?.rpcUrl) return endpointWithSessionToken(config.rpcUrl, config.sessionToken);
+  if (config?.rpcUrl) return config.rpcUrl;
   if (typeof window !== "undefined" && window.location.protocol.startsWith("http")) {
     const url = new URL("/rpc", window.location.href);
     url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return endpointWithSessionToken(url.toString(), config?.sessionToken);
+    return url.toString();
   }
   return "ws://127.0.0.1:49200/rpc";
 }
@@ -409,7 +398,8 @@ export class AppState {
     this.status = "connecting";
     const generation = ++this.connectGeneration;
     this.activeEndpoint = this.endpoint;
-    const client = new CooldisRpcClient(this.endpoint);
+    const sessionToken = this.endpoint === DEFAULT_ENDPOINT ? injectedConsoleConfig()?.sessionToken : undefined;
+    const client = new CooldisRpcClient(this.endpoint, sessionToken);
     this.connectingClient = client;
     const unNotif = client.onNotification(this.handleNotification);
     const unEvt = client.onEvent((e) => {

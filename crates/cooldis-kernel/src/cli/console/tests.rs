@@ -1,4 +1,5 @@
 use super::*;
+
 #[test]
 fn parse_chat_args_collects_prompt_and_homes() {
     let args = vec![

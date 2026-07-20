@@ -3,6 +3,17 @@ use crate::{AppServerListenAddr, CooldisAppServer, CooldisAppServerConfig};
 use uuid::Uuid;
 
 #[test]
+fn codex_tui_connect_config_redacts_bearer_token() {
+    let config = CodexTuiConnectConfig {
+        bearer_token: Some("do-not-log-this-token".to_string()),
+        ..CodexTuiConnectConfig::default()
+    };
+    let debug = format!("{config:?}");
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains("do-not-log-this-token"));
+}
+
+#[test]
 fn codex_tui_initialize_request_uses_codex_remote_shape() {
     let message = JsonRpcMessage::Request(JsonRpcRequest {
         id: RequestId::String("initialize".to_string()),

@@ -1,11 +1,14 @@
+use cooldis::daemon::identity::{IdentityAuthority, PrincipalId, SqliteIdentityAuthority};
 use cooldis::{
     AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, CooldisAppServer,
     CooldisAppServerConfig, EventKind, EventStore, EventStreamId, SqliteSessionStore,
+    SystemDaemonClock,
 };
 use serde_json::Value;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -20,21 +23,28 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     let url = format!("ws://{addr}/rpc");
     let server = DebugRpcServer::start(&root, &workspace, addr).await;
 
-    let call = run_cooldis(["debug", "rpc", "call", "thread/list", "--url", url.as_str()]).await;
+    let call = run_cooldis(
+        ["debug", "rpc", "call", "thread/list", "--url", url.as_str()],
+        Some(&server.token),
+    )
+    .await;
     assert_success(&call);
     let thread_list: Value = serde_json::from_slice(&call.stdout).unwrap();
     assert!(thread_list["data"].as_array().is_some());
 
-    let first = run_cooldis([
-        "debug",
-        "rpc",
-        "turn",
-        "--new",
-        "--json",
-        "first debug rpc turn",
-        "--url",
-        url.as_str(),
-    ])
+    let first = run_cooldis(
+        [
+            "debug",
+            "rpc",
+            "turn",
+            "--new",
+            "--json",
+            "first debug rpc turn",
+            "--url",
+            url.as_str(),
+        ],
+        Some(&server.token),
+    )
     .await;
     assert_success(&first);
     let thread_id = String::from_utf8(first.stderr.clone())
@@ -58,14 +68,17 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         "completed text did not include prompt: {completed_text:?}"
     );
 
-    let live_bind = run_cooldis([
-        "debug",
-        "bind",
-        thread_id.as_str(),
-        "--json",
-        "--url",
-        url.as_str(),
-    ])
+    let live_bind = run_cooldis(
+        [
+            "debug",
+            "bind",
+            thread_id.as_str(),
+            "--json",
+            "--url",
+            url.as_str(),
+        ],
+        Some(&server.token),
+    )
     .await;
     assert_success(&live_bind);
     let live_explanation: Value = serde_json::from_slice(&live_bind.stdout).unwrap();
@@ -73,13 +86,16 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     assert_eq!(live_explanation["model"]["origin"], "manifest-default");
 
     let missing_thread_id = Uuid::now_v7().to_string();
-    let missing_bind = run_cooldis([
-        "debug",
-        "bind",
-        missing_thread_id.as_str(),
-        "--url",
-        url.as_str(),
-    ])
+    let missing_bind = run_cooldis(
+        [
+            "debug",
+            "bind",
+            missing_thread_id.as_str(),
+            "--url",
+            url.as_str(),
+        ],
+        Some(&server.token),
+    )
     .await;
     assert!(!missing_bind.status.success());
     assert!(
@@ -88,16 +104,19 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         String::from_utf8_lossy(&missing_bind.stderr)
     );
 
-    let resumed = run_cooldis([
-        "debug",
-        "rpc",
-        "turn",
-        "--thread",
-        thread_id.as_str(),
-        "second debug rpc turn",
-        "--url",
-        url.as_str(),
-    ])
+    let resumed = run_cooldis(
+        [
+            "debug",
+            "rpc",
+            "turn",
+            "--thread",
+            thread_id.as_str(),
+            "second debug rpc turn",
+            "--url",
+            url.as_str(),
+        ],
+        Some(&server.token),
+    )
     .await;
     assert_success(&resumed);
     let resumed_stdout = String::from_utf8(resumed.stdout).unwrap();
@@ -121,14 +140,17 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
 
     server.stop().await;
     let journal = root.join("state/session_history.sqlite3");
-    let offline_bind = run_cooldis([
-        "debug",
-        "bind",
-        thread_id.as_str(),
-        "--json",
-        "--journal",
-        journal.to_str().unwrap(),
-    ])
+    let offline_bind = run_cooldis(
+        [
+            "debug",
+            "bind",
+            thread_id.as_str(),
+            "--json",
+            "--journal",
+            journal.to_str().unwrap(),
+        ],
+        None,
+    )
     .await;
     assert_success(&offline_bind);
     let offline_explanation: Value = serde_json::from_slice(&offline_bind.stdout).unwrap();
@@ -171,6 +193,7 @@ fn assert_admission_precedes_execution(
 }
 
 struct DebugRpcServer {
+    token: String,
     task: JoinHandle<cooldis::CooldisResult<()>>,
 }
 
@@ -181,9 +204,21 @@ impl DebugRpcServer {
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         let app = CooldisAppServer::new_local(config).await.unwrap();
+        let store = SqliteSessionStore::open(app.session_store_path())
+            .await
+            .unwrap();
+        let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None)
+            .await
+            .unwrap();
+        let principal = PrincipalId::new(app.user_id());
+        let token = authority
+            .mint_credential(&principal, &principal, None)
+            .await
+            .unwrap()
+            .1;
         let task = tokio::spawn(async move { app.serve(listen).await });
-        wait_for_websocket(&format!("ws://{addr}/rpc")).await;
-        Self { task }
+        wait_for_websocket(&format!("ws://{addr}/rpc"), &token).await;
+        Self { token, task }
     }
 
     async fn stop(self) {
@@ -192,13 +227,14 @@ impl DebugRpcServer {
     }
 }
 
-async fn wait_for_websocket(url: &str) {
+async fn wait_for_websocket(url: &str, token: &str) {
     let mut last_error = None;
     for _ in 0..100 {
         match CodexTuiTestClient::connect_websocket(
             url,
             CodexTuiConnectConfig {
                 client_name: "cooldis-debug-rpc-test-wait".to_string(),
+                bearer_token: Some(token.to_string()),
                 ..CodexTuiConnectConfig::default()
             },
         )
@@ -220,13 +256,13 @@ async fn wait_for_websocket(url: &str) {
     );
 }
 
-async fn run_cooldis<const N: usize>(args: [&str; N]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_cooldis"))
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .unwrap()
+async fn run_cooldis<const N: usize>(args: [&str; N], token: Option<&str>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cooldis"));
+    command.args(args).stdin(Stdio::null());
+    if let Some(token) = token {
+        command.env("COOLDIS_APP_SERVER_TOKEN", token);
+    }
+    command.output().await.unwrap()
 }
 
 fn assert_success(output: &Output) {

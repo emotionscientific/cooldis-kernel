@@ -10184,8 +10184,10 @@ async fn app_server_websocket_listen_accepts_codex_tui_client() {
         CapsuleBindingsConfig::default(), // lexicon-allow: capsule - existing test helper parameter type
     )
     .await;
-    let server_task = tokio::spawn(async move { app.serve(listen).await });
-    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc")).await;
+    let token = mint_app_server_test_token(&app).await;
+    let server = app.clone();
+    let server_task = tokio::spawn(async move { server.serve(listen).await });
+    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &token).await;
 
     assert_eq!(
         client.initialize_result()["userAgent"],
@@ -10231,9 +10233,10 @@ async fn app_server_websocket_query_methods_are_callable() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let app = CooldisAppServer::new_local(config).await.unwrap();
+    let token = mint_app_server_test_token(&app).await;
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
-    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc")).await;
+    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &token).await;
 
     let agents = client.request("agent/list", json!({})).await.unwrap();
     assert!(
@@ -10366,7 +10369,8 @@ async fn app_server_websocket_listen_serves_console_assets() {
     );
     assert!(response.contains("Content-Type: text/html"));
     assert!(response.contains("__COOLDIS_CONSOLE_CONFIG__"));
-    assert!(response.contains("fixture-token"));
+    assert!(!response.contains("fixture-token"));
+    assert!(response.contains("cooldis_id_"));
 
     let response = get_tcp_response(addr, "/index.html").await;
     assert!(
@@ -10413,6 +10417,8 @@ async fn app_server_websocket_listen_requires_console_session_token() {
     config.agent_registry_root = root.join("agents");
     let app = CooldisAppServer::new_local(config).await.unwrap();
     let server_task = tokio::spawn(async move { app.serve(listen).await });
+    let index = get_tcp_response(addr, "/").await;
+    let session_token = console_token_from_response(&index);
 
     let missing = get_tcp_raw_response(
         addr,
@@ -10429,7 +10435,7 @@ async fn app_server_websocket_listen_requires_console_session_token() {
     let wrong = get_tcp_raw_response(
         addr,
         &format!(
-            "GET /rpc?token=wrong HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            "GET /rpc?token={session_token} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         ),
     )
     .await;
@@ -10438,8 +10444,7 @@ async fn app_server_websocket_listen_requires_console_session_token() {
         "unexpected wrong-token response: {wrong:?}"
     );
 
-    let mut client =
-        connect_ws_tui_test_client(&format!("ws://{addr}/rpc?token=fixture-token")).await;
+    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &session_token).await;
     assert_eq!(
         client.initialize_result()["userAgent"],
         "cooldis-app-server/0.1"
@@ -10449,6 +10454,187 @@ async fn app_server_websocket_listen_requires_console_session_token() {
     server_task.abort();
     let _ = server_task.await;
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn boundary_bearer_parser_accepts_case_and_whitespace_and_skips_unrelated_protocols() {
+    let authorization = parse_http_request_head(
+        b"GET /rpc HTTP/1.1\r\naUtHoRiZaTiOn:   bEaReR\t boundary-token   \r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        request_bearer_token(&authorization),
+        Some(("boundary-token", BoundarySurface::Websocket))
+    );
+
+    let protocols = parse_http_request_head(
+        b"GET /rpc HTTP/1.1\r\nSec-WebSocket-Protocol: unrelated.v1\r\nsEc-WeBsOcKeT-pRoToCoL: metrics.v1, cooldis-console-token.console-secret\r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        request_bearer_token(&protocols),
+        Some(("console-secret", BoundarySurface::Console))
+    );
+}
+
+#[test]
+fn session_close_witness_failure_does_not_mask_the_read_error() {
+    let read_error = CooldisError::RuntimeFactory("original websocket read error".to_string());
+    let close_error = CooldisError::History("close witness failed".to_string());
+    let error = finish_websocket_session(Err(read_error), Err(close_error)).unwrap_err();
+    assert!(error.to_string().contains("original websocket read error"));
+    assert!(!error.to_string().contains("close witness failed"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_peer_mapping_rejects_a_uid_other_than_the_daemon_euid() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    let request = b"GET /rpc HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    client.write_all(request).await.unwrap();
+
+    let mismatched_uid = current_effective_uid().wrapping_add(1);
+    let resolved = app
+        .authenticate_unix_websocket(&mut server, mismatched_uid)
+        .await
+        .unwrap();
+    assert!(resolved.is_none());
+    drop(server);
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 401 Unauthorized"));
+    assert_eq!(
+        identity_sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE surface = 'unix_socket'",
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn aborted_websocket_session_still_witnesses_its_close() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let resolved_principal = app
+        .inner
+        .identity_authority
+        .resolve_peer_uid(current_effective_uid())
+        .await
+        .unwrap()
+        .unwrap();
+    let (_client_io, server_io) = tokio::io::duplex(1024);
+    let websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        server_io,
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        Some(websocket_config()),
+    )
+    .await;
+    let server = app.clone();
+    let task = tokio::spawn(async move {
+        server
+            .handle_websocket(websocket, resolved_principal, BoundarySurface::UnixSocket)
+            .await
+    });
+
+    wait_for_identity_sql_count(
+        &store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NULL",
+        1,
+    )
+    .await;
+    task.abort();
+    let _ = task.await;
+    wait_for_identity_sql_count(
+        &store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
+        1,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (mut server, _) = listener.accept().await.unwrap();
+    let _client = connect.await.unwrap();
+
+    assert!(peek_http_request(&server).await.unwrap().is_none());
+    consume_http_request_headers(&mut server).await.unwrap();
+
+    #[cfg(unix)]
+    {
+        let (_client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        assert!(peek_unix_http_request(&server).await.unwrap().is_none());
+        consume_http_request_headers(&mut server).await.unwrap();
+    }
+
+    let (_client_io, server_io) = tokio::io::duplex(1024);
+    let error = accept_authenticated_websocket(server_io).await.unwrap_err();
+    assert!(error.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn oversized_pre_upgrade_headers_fail_closed_with_one_witness() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (mut server, _) = listener.accept().await.unwrap();
+    let mut client = connect.await.unwrap();
+    let request = format!(
+        "GET /rpc HTTP/1.1\r\nHost: {addr}\r\nX-Oversized: {}\r\n\r\n",
+        "x".repeat(MAX_HTTP_REQUEST_HEADER_BYTES)
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+
+    assert!(
+        app.authenticate_tcp_websocket(&mut server)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut response = vec![0_u8; 256];
+    let len = tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response[..len].starts_with(b"HTTP/1.1 401 Unauthorized"));
+    assert_eq!(
+        identity_sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE surface = 'websocket'",
+        )
+        .await,
+        1
+    );
+    response.fill(0);
+}
+
+async fn identity_sql_count(path: &Path, query: &str) -> i64 {
+    let store = SqliteSessionStore::open(path).await.unwrap();
+    let connection = store.sqlite_database().connect().await.unwrap();
+    let mut rows = connection.query(query, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn wait_for_identity_sql_count(path: &Path, query: &str, expected: i64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if identity_sql_count(path, query).await >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[test]
@@ -11535,9 +11721,17 @@ fn test_connection(
     app: CooldisAppServer,
 ) -> (ConnectionState, mpsc::UnboundedReceiver<JsonRpcMessage>) {
     let (outbound, rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
+    let resolved_principal = ResolvedPrincipal {
+        principal_id: PrincipalId::new(app.user_id()),
+        kind: PrincipalKind::Operator,
+        auth: AuthenticationPath::PeerUid {
+            uid: current_effective_uid(),
+        },
+    };
     (
         ConnectionState {
             app,
+            resolved_principal,
             outbound,
             handshake: Arc::new(Mutex::new(HandshakeState::default())),
             opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
@@ -13552,13 +13746,17 @@ async fn connect_tui_test_client(
     );
 }
 
-async fn connect_ws_tui_test_client(url: &str) -> crate::CodexTuiTestClient<tokio::net::TcpStream> {
+async fn connect_ws_tui_test_client(
+    url: &str,
+    token: &str,
+) -> crate::CodexTuiTestClient<tokio::net::TcpStream> {
     let mut last_error = None;
     for _ in 0..100 {
         match crate::CodexTuiTestClient::connect_websocket(
             url,
             crate::CodexTuiConnectConfig {
                 client_name: "websocket-listen-test".to_string(),
+                bearer_token: Some(token.to_string()),
                 ..crate::CodexTuiConnectConfig::default()
             },
         )
@@ -13575,6 +13773,28 @@ async fn connect_ws_tui_test_client(url: &str) -> crate::CodexTuiTestClient<toki
         "timed out connecting Codex TUI test client to {url}; last error: {}",
         last_error.unwrap_or_else(|| "none".to_string())
     );
+}
+
+async fn mint_app_server_test_token(app: &CooldisAppServer) -> String {
+    let store = SqliteSessionStore::open(app.session_store_path())
+        .await
+        .unwrap();
+    let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None)
+        .await
+        .unwrap();
+    let principal = PrincipalId::new(app.user_id());
+    authority
+        .mint_credential(&principal, &principal, None)
+        .await
+        .unwrap()
+        .1
+}
+
+fn console_token_from_response(response: &str) -> String {
+    let marker = "sessionToken:";
+    let start = response.find(marker).unwrap() + marker.len();
+    let value = response[start..].split('}').next().unwrap();
+    serde_json::from_str(value).unwrap()
 }
 
 fn unused_loopback_addr() -> std::net::SocketAddr {

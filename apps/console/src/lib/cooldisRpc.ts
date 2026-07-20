@@ -80,7 +80,10 @@ export class CooldisRpcClient {
   private notifications = new Set<(notification: RpcNotification) => void>();
   private events = new Set<(event: RpcEvent) => void>();
 
-  constructor(private readonly url: string) {}
+  constructor(
+    private readonly url: string,
+    private readonly sessionToken?: string,
+  ) {}
 
   get connected() {
     return this.socket?.readyState === WebSocket.OPEN;
@@ -311,7 +314,8 @@ export class CooldisRpcClient {
 
   private openSocket() {
     return new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(this.url);
+      const protocols = this.sessionToken ? [`cooldis-console-token.${this.sessionToken}`] : undefined;
+      const socket = new WebSocket(this.url, protocols);
       this.socket = socket;
 
       socket.addEventListener("open", () => {
