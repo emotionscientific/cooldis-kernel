@@ -117,16 +117,12 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
         .unwrap();
     drop(authority);
 
-    let app = CooldisAppServer::new(
-        config,
-        CooldisDaemonIdentityConfig {
-            mode: IdentityMode::Managed,
-            tenant_id: Some("test-tenant".to_string()),
-            console_principal: Some(operator),
-        },
-    )
-    .await
-    .unwrap();
+    config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Managed,
+        tenant_id: Some("test-tenant".to_string()),
+        console_principal: Some(operator),
+    });
+    let app = CooldisAppServer::new(config).await.unwrap();
     let store_path = app.session_store_path().to_path_buf();
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve_websocket_listener(listener).await });
@@ -335,7 +331,7 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
 
     let managed_root = test_root("unix-managed");
     let managed_socket = managed_root.join("app-server.sock");
-    let managed_config = app_config(
+    let mut managed_config = app_config(
         &managed_root,
         AppServerListenAddr::Unix(managed_socket.clone()),
     );
@@ -376,16 +372,12 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         .await
         .unwrap();
     drop(authority);
-    let managed_app = CooldisAppServer::new(
-        managed_config,
-        CooldisDaemonIdentityConfig {
-            mode: IdentityMode::Managed,
-            tenant_id: Some("test-tenant".to_string()),
-            console_principal: None,
-        },
-    )
-    .await
-    .unwrap();
+    managed_config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Managed,
+        tenant_id: Some("test-tenant".to_string()),
+        console_principal: None,
+    });
+    let managed_app = CooldisAppServer::new(managed_config).await.unwrap();
     let managed_store = managed_app.session_store_path().to_path_buf();
     let local_dispatch = managed_app
         .local_json_rpc_request("account/read", serde_json::json!({}))
@@ -574,16 +566,12 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
             root: assets.clone(),
             session_token: "replaced-at-construction".to_string(),
         });
-        let app = CooldisAppServer::new(
-            config,
-            CooldisDaemonIdentityConfig {
-                mode: IdentityMode::Managed,
-                tenant_id: Some("test-tenant".to_string()),
-                console_principal: Some(operator.clone()),
-            },
-        )
-        .await
-        .unwrap();
+        config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+            mode: IdentityMode::Managed,
+            tenant_id: Some("test-tenant".to_string()),
+            console_principal: Some(operator.clone()),
+        });
+        let app = CooldisAppServer::new(config).await.unwrap();
         generations.push(app);
         assert_eq!(
             active_credential_count(&store_path, OPERATOR_ID).await,

@@ -493,6 +493,33 @@ async fn thread_compact_start_dispatches_to_runtime() {
 }
 
 #[tokio::test]
+async fn app_server_retains_identity_boundary_config() {
+    let listen = AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("cooldis-identity-config-{}.sock", Uuid::now_v7())),
+    );
+    let root = unique_test_root("app-server-identity-config");
+    let mut config = CooldisAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Managed,
+        tenant_id: Some("tenant-managed".to_string()),
+        console_principal: Some(PrincipalId::new("operator-managed")),
+    });
+
+    let app = CooldisAppServer::new_local(config).await.unwrap();
+
+    assert_eq!(
+        app.identity_boundary_config(),
+        (
+            IdentityMode::Managed,
+            Some(&PrincipalId::new("operator-managed"))
+        )
+    );
+}
+
+#[tokio::test]
 async fn app_server_new_local_seeds_default_provider_store() {
     let listen = AppServerListenAddr::Unix(
         std::env::temp_dir().join(format!("cooldis-provider-store-{}.sock", Uuid::now_v7())),
@@ -1997,6 +2024,13 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
+    config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Local,
+        tenant_id: Some("tenant-configured".to_string()),
+        console_principal: Some(PrincipalId::new("principal-configured")),
+    });
+    let expected_tenant_id = config.tenant_id.clone();
+    let expected_user_id = config.user_id.clone();
     let metadata_path = config.metadata_store_path();
 
     let app = CooldisAppServer::new_local(config).await.unwrap();
@@ -2019,8 +2053,8 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
         .await
         .unwrap()
         .expect("app-server thread/start should persist thread lifecycle metadata");
-    assert_eq!(record.coordinates.tenant_id, "cooldis_app_server");
-    assert_eq!(record.coordinates.user_id, "local_user");
+    assert_eq!(record.coordinates.tenant_id, expected_tenant_id);
+    assert_eq!(record.coordinates.user_id, expected_user_id);
     assert_eq!(record.status, crate::ThreadLifecycleStatus::Idle);
     assert_eq!(record.topology, ThreadTopology::root());
     assert_eq!(
@@ -6336,6 +6370,13 @@ streaming = false
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
+    config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Local,
+        tenant_id: Some("tenant-manifest".to_string()),
+        console_principal: Some(PrincipalId::new("principal-manifest")),
+    });
+    let tenant_id = config.tenant_id.clone();
+    let user_id = config.user_id.clone();
     let metadata_path = config.metadata_store_path();
     let session_path = config.state_home.join("session_history.sqlite3");
     let app = CooldisAppServer::new_local(config).await.unwrap();
@@ -6502,7 +6543,7 @@ streaming = false
     let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
     assert_eq!(
         metadata_store
-            .list_thread_lifecycle_for_user("cooldis_app_server", "local_user")
+            .list_thread_lifecycle_for_user(&tenant_id, &user_id)
             .await
             .unwrap()
             .len(),

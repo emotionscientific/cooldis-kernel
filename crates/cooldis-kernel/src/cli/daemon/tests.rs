@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::identity::{IdentityMode, PrincipalId};
 use crate::{
     AgentManifestPlacementBinding, AgentManifestWorkspaceBinding, AgentManifestWorkspaceMode,
     CooldisDaemonConfig,
@@ -80,6 +81,55 @@ fn daemon_app_server_config_from_loaded_keeps_registry_defaults_when_unset() {
         AgentManifestPlacementBinding::default()
     );
     assert_eq!(app_config.default_workspace, None);
+}
+
+#[test]
+fn daemon_app_server_config_from_loaded_applies_identity_config() {
+    let mut daemon_config = CooldisDaemonConfig::default();
+    daemon_config.identity.mode = IdentityMode::Managed;
+    daemon_config.identity.tenant_id = Some("tenant-configured".to_string());
+    daemon_config.identity.console_principal = Some(PrincipalId::new("operator-configured"));
+
+    let app_config =
+        daemon_app_server_config_from_loaded(&loaded_daemon_config(daemon_config)).unwrap();
+
+    assert_eq!(app_config.tenant_id, "tenant-configured");
+    assert_eq!(app_config.user_id, "operator-configured");
+    assert_eq!(app_config.identity_mode, IdentityMode::Managed);
+    assert_eq!(
+        app_config.console_principal,
+        Some(PrincipalId::new("operator-configured"))
+    );
+}
+
+#[test]
+fn daemon_app_server_config_from_loaded_revalidates_identity_config() {
+    for (tenant_id, console_principal, expected_field) in [
+        (
+            Some("   ".to_string()),
+            Some(PrincipalId::new("operator")),
+            "tenant_id",
+        ),
+        (Some("tenant".to_string()), None, "console_principal"),
+        (
+            Some("tenant".to_string()),
+            Some(PrincipalId::new("\t")),
+            "console_principal",
+        ),
+    ] {
+        let mut daemon_config = CooldisDaemonConfig::default();
+        daemon_config.identity.mode = IdentityMode::Managed;
+        daemon_config.identity.tenant_id = tenant_id;
+        daemon_config.identity.console_principal = console_principal;
+
+        let error =
+            daemon_app_server_config_from_loaded(&loaded_daemon_config(daemon_config)).unwrap_err();
+
+        assert!(
+            error.to_string().contains(expected_field),
+            "expected {expected_field} validation error, got {error}"
+        );
+    }
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use crate::ProcessHandleIngressSink;
+use crate::daemon::daemon_config::synthesized_local_daemon_identity_config;
 use crate::daemon::daemon_io::CooldisDaemonIoBridge;
 use crate::daemon::identity::{
     AuthenticationPath, BoundarySurface, CooldisDaemonIdentityConfig,
@@ -210,6 +211,8 @@ pub struct CooldisAppServerConfig {
     pub cwd: PathBuf,
     pub tenant_id: String,
     pub user_id: String,
+    pub identity_mode: IdentityMode,
+    pub console_principal: Option<PrincipalId>,
     pub model: String,
     pub model_provider: String,
     pub provider: AppServerProviderConfig,
@@ -230,14 +233,17 @@ pub struct CooldisAppServerConfig {
 impl CooldisAppServerConfig {
     pub fn local(listen: AppServerListenAddr, cwd: impl Into<PathBuf>) -> Self {
         let root = std::env::temp_dir().join(format!("cooldis-app-server-{}", Uuid::now_v7()));
-        Self {
+        let identity = synthesized_local_daemon_identity_config();
+        let mut config = Self {
             listen,
             runtime_home: root.join("runtime"),
             state_home: root.join("state"),
             user_state_home: root.join("user-state"),
             cwd: cwd.into(),
-            tenant_id: "cooldis_app_server".to_string(),
-            user_id: "local_user".to_string(),
+            tenant_id: String::new(),
+            user_id: String::new(),
+            identity_mode: IdentityMode::Local,
+            console_principal: None,
             model: APP_SERVER_LOCAL_MODEL.to_string(),
             model_provider: APP_SERVER_LOCAL_PROVIDER.to_string(),
             provider: AppServerProviderConfig::LocalOffline,
@@ -250,7 +256,23 @@ impl CooldisAppServerConfig {
             default_workspace: None,
             remote_event_store_served: Arc::new(AtomicBool::new(false)),
             console_assets: None,
-        }
+        };
+        config.apply_daemon_identity_config(&identity);
+        config
+    }
+
+    /// Project a daemon identity config onto this app-server config. This is
+    /// the single seam through which mode, tenant, and console principal reach
+    /// the server; the boundary authority is initialized from these fields.
+    pub fn apply_daemon_identity_config(&mut self, identity: &CooldisDaemonIdentityConfig) {
+        self.identity_mode = identity.mode;
+        self.tenant_id = identity.tenant_id.clone().unwrap_or_default();
+        self.console_principal = identity.console_principal.clone();
+        self.user_id = self
+            .console_principal
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
     }
 
     pub fn with_bifrost_openai(
@@ -508,6 +530,8 @@ struct CooldisAppServerInner {
     supervisor: CooldisSupervisor,
     tenant_id: String,
     user_id: String,
+    identity_mode: IdentityMode,
+    console_principal: Option<PrincipalId>,
     model: String,
     model_provider: String,
     provider: AppServerProviderConfig,
@@ -521,7 +545,6 @@ struct CooldisAppServerInner {
     console_assets: Option<ConsoleAssetConfig>,
     identity_authority: Arc<dyn IdentityAuthority>,
     identity_clock: Arc<dyn crate::DaemonClock>,
-    identity_mode: IdentityMode,
     console_credential: Option<ConsoleCredentialLease>,
     cwd: PathBuf,
     codex_home: PathBuf,
@@ -697,14 +720,14 @@ impl ProviderClient for AppServerOfflineProviderClient {
 }
 
 impl CooldisAppServer {
+    /// Same constructor as [`Self::new`]; the name survives from before
+    /// identity modes existed and remains the conventional entry point for
+    /// configs built with [`CooldisAppServerConfig::local`].
     pub async fn new_local(config: CooldisAppServerConfig) -> CooldisResult<Self> {
-        Self::new(config, CooldisDaemonIdentityConfig::default()).await
+        Self::new(config).await
     }
 
-    pub async fn new(
-        mut config: CooldisAppServerConfig,
-        identity: CooldisDaemonIdentityConfig,
-    ) -> CooldisResult<Self> {
+    pub async fn new(mut config: CooldisAppServerConfig) -> CooldisResult<Self> {
         let metadata_store = open_and_seed_metadata_store(config.metadata_store_path()).await?;
         let user_metadata_store =
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
@@ -717,7 +740,6 @@ impl CooldisAppServer {
             runtime_factory,
             metadata_store,
             user_metadata_store,
-            identity,
         )
         .await
     }
@@ -725,19 +747,6 @@ impl CooldisAppServer {
     pub async fn with_runtime_factory(
         config: CooldisAppServerConfig,
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
-    ) -> CooldisResult<Self> {
-        Self::with_runtime_factory_and_identity(
-            config,
-            runtime_factory,
-            CooldisDaemonIdentityConfig::default(),
-        )
-        .await
-    }
-
-    pub async fn with_runtime_factory_and_identity(
-        config: CooldisAppServerConfig,
-        runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
-        identity: CooldisDaemonIdentityConfig,
     ) -> CooldisResult<Self> {
         let metadata_store = SqliteMetadataStore::in_memory()
             .await
@@ -750,7 +759,6 @@ impl CooldisAppServer {
             runtime_factory,
             metadata_store,
             user_metadata_store,
-            identity,
         )
         .await
     }
@@ -773,7 +781,6 @@ impl CooldisAppServer {
             metadata_store,
             user_metadata_store,
             Some(Box::new(decorate)),
-            CooldisDaemonIdentityConfig::default(),
         )
         .await
     }
@@ -791,7 +798,6 @@ impl CooldisAppServer {
             runtime_factory,
             metadata_store,
             user_metadata_store,
-            CooldisDaemonIdentityConfig::default(),
         )
         .await
     }
@@ -801,7 +807,6 @@ impl CooldisAppServer {
         runtime_factory: Arc<dyn crate::AgentRuntimeFactory>,
         metadata_store: SqliteMetadataStore,
         user_metadata_store: SqliteMetadataStore,
-        identity: CooldisDaemonIdentityConfig,
     ) -> CooldisResult<Self> {
         Self::with_runtime_factory_and_metadata_stores_inner(
             config,
@@ -809,7 +814,6 @@ impl CooldisAppServer {
             metadata_store,
             user_metadata_store,
             None,
-            identity,
         )
         .await
     }
@@ -822,7 +826,6 @@ impl CooldisAppServer {
         session_store_decorator: Option<
             Box<dyn FnOnce(Arc<dyn RuntimeStore>) -> Arc<dyn RuntimeStore> + Send>,
         >,
-        identity: CooldisDaemonIdentityConfig,
     ) -> CooldisResult<Self> {
         normalize_registry_roots(&mut config);
         let provider_surface =
@@ -867,8 +870,8 @@ impl CooldisAppServer {
         let (identity_authority, console_credential) = initialize_boundary_identity(
             identity_store,
             Arc::clone(&identity_clock),
-            identity.mode,
-            identity.console_principal,
+            config.identity_mode,
+            config.console_principal.clone(),
             &config.user_id,
             config.console_assets.as_mut(),
             &console_credential_record_path,
@@ -879,6 +882,8 @@ impl CooldisAppServer {
                 supervisor,
                 tenant_id: config.tenant_id,
                 user_id: config.user_id,
+                identity_mode: config.identity_mode,
+                console_principal: config.console_principal,
                 model: config.model,
                 model_provider: config.model_provider,
                 provider: config.provider,
@@ -892,7 +897,6 @@ impl CooldisAppServer {
                 console_assets: config.console_assets,
                 identity_authority,
                 identity_clock,
-                identity_mode: identity.mode,
                 console_credential,
                 cwd: config.cwd,
                 codex_home,
@@ -983,6 +987,16 @@ impl CooldisAppServer {
 
     pub fn user_id(&self) -> &str {
         &self.inner.user_id
+    }
+
+    /// Identity boundary settings retained from the construction config, for
+    /// consumers past the connection handshake (dispatcher authorization).
+    #[allow(dead_code)]
+    pub(crate) fn identity_boundary_config(&self) -> (IdentityMode, Option<&PrincipalId>) {
+        (
+            self.inner.identity_mode,
+            self.inner.console_principal.as_ref(),
+        )
     }
 
     pub fn model(&self) -> &str {

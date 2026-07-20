@@ -1,5 +1,6 @@
 use super::*;
 use crate::daemon::handle_ingress::ThreadHandleIngressAdapter;
+use crate::daemon::identity::{CooldisDaemonIdentityConfig, IdentityMode, PrincipalId};
 use crate::test_support::FaultingIngressQueue;
 use crate::{
     APP_SERVER_LOCAL_MODEL,
@@ -814,8 +815,11 @@ fn apply_test_identity(config: &mut CooldisAppServerConfig, fixture_root: &Path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("daemon-io");
-    config.tenant_id = format!("app-server-{suffix}");
-    config.user_id = format!("local-user-{suffix}");
+    config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Local,
+        tenant_id: Some(format!("app-server-{suffix}")),
+        console_principal: Some(PrincipalId::new(format!("local-user-{suffix}"))),
+    });
 }
 
 #[derive(Default)]
