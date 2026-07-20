@@ -21,8 +21,7 @@ async fn bootstrap_prints_one_secret_and_refuses_a_second_root() {
     ]);
     assert!(
         first.status.success(),
-        "bootstrap failed\nstdout:\n{}\nstderr:\n{}",
-        stdout(&first),
+        "bootstrap failed\nstderr:\n{}",
         stderr(&first)
     );
     let first_stdout = stdout(&first);
@@ -142,6 +141,17 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
     assert!(!list_stdout.contains(token));
     assert!(!list_stdout.contains("token_digest"));
     assert!(!list_stdout.contains("sha256:"));
+    let listed: serde_json::Value = serde_json::from_str(&list_stdout).unwrap();
+    let kinds = listed["principals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|principal| principal["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds.len(), 2);
+    assert!(kinds.contains(&"operator"));
+    assert!(kinds.contains(&"adapter"));
+    assert!(!kinds.contains(&"member"));
 
     let revoke_credential = run_identity([
         "identity",
@@ -205,6 +215,51 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
     );
     drop(authority);
 
+    remove_sqlite_state(&state_home);
+}
+
+#[test]
+fn revoking_a_bogus_id_fails_without_printing_success() {
+    let state_home = temp_state_home();
+    std::fs::create_dir_all(&state_home).unwrap();
+    let state_home_arg = state_home.to_string_lossy().to_string();
+    let revoke = run_identity([
+        "identity",
+        "revoke-credential",
+        "credential_missing",
+        "--revoked-by",
+        "operator:root",
+        "--state-home",
+        &state_home_arg,
+    ]);
+
+    assert!(!revoke.status.success());
+    assert!(stderr(&revoke).contains("credential was not found"));
+    assert!(!stdout(&revoke).contains("revoked"));
+    assert!(!stderr(&revoke).contains("revoked credential"));
+
+    remove_sqlite_state(&state_home);
+}
+
+#[tokio::test]
+async fn locked_store_tells_the_user_to_stop_the_daemon() {
+    let state_home = temp_state_home();
+    std::fs::create_dir_all(&state_home).unwrap();
+    let state_home_arg = state_home.to_string_lossy().to_string();
+    let store = SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+        .await
+        .unwrap();
+    let clock: Arc<dyn DaemonClock> = Arc::new(SystemDaemonClock);
+    let authority = SqliteIdentityAuthority::new(store, clock, None)
+        .await
+        .unwrap();
+
+    let list = run_identity(["identity", "list", "--state-home", &state_home_arg]);
+    assert!(!list.status.success());
+    assert!(stderr(&list).contains("another process holds this database"));
+    assert!(stderr(&list).contains("stop the daemon and retry"));
+
+    drop(authority);
     remove_sqlite_state(&state_home);
 }
 

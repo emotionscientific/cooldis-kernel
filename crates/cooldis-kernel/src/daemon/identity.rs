@@ -581,12 +581,15 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
-            if let Some(revoked_at_ms) = principal_revocation(&transaction, &principal_id).await? {
+            if let Some(status) = principal_status(&transaction, &principal_id).await? {
                 transaction.rollback().await.map_err(storage_error)?;
-                let message = if revoked_at_ms.is_none() {
-                    format!("active principal {principal_id} is already declared")
-                } else {
-                    format!("principal {principal_id} was already declared")
+                let message = match status {
+                    PrincipalStatus::Active => {
+                        format!("active principal {principal_id} is already declared")
+                    }
+                    PrincipalStatus::Revoked => {
+                        format!("principal {principal_id} was already declared")
+                    }
                 };
                 return Err(authority_error(message));
             }
@@ -639,7 +642,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 .await
                 .map_err(storage_error)?;
             let now_ms = clock.now().timestamp_millis();
-            transaction
+            let updated = transaction
                 .execute(
                     "UPDATE cooldis_identity_principals
                      SET revoked_at_ms = COALESCE(revoked_at_ms, ?2),
@@ -649,6 +652,10 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 )
                 .await
                 .map_err(storage_error)?;
+            if updated == 0 {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Err(authority_error("identity principal was not found"));
+            }
             transaction.commit().await.map_err(storage_error)?;
             Ok(())
         })
@@ -735,16 +742,20 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 .await
                 .map_err(storage_error)?;
             let now_ms = clock.now().timestamp_millis();
-            transaction
+            let updated = transaction
                 .execute(
                     "UPDATE cooldis_identity_credentials
                      SET revoked_at_ms = COALESCE(revoked_at_ms, ?2),
                          revoked_by = COALESCE(revoked_by, ?3)
                      WHERE credential_id = ?1",
-                    params![credential_id, now_ms, revoked_by.as_str()],
+                    params![credential_id.as_str(), now_ms, revoked_by.as_str()],
                 )
                 .await
                 .map_err(storage_error)?;
+            if updated == 0 {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Err(authority_error("identity credential was not found"));
+            }
             transaction.commit().await.map_err(storage_error)?;
             Ok(())
         })
@@ -766,8 +777,14 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                    AND credential.revoked_at_ms IS NULL
                    AND (credential.expires_at_ms IS NULL OR credential.expires_at_ms > ?2)
                    AND principal.revoked_at_ms IS NULL
+                   AND principal.kind IN (?3, ?4)
                  LIMIT 1",
-                params![digest, now_ms],
+                params![
+                    digest,
+                    now_ms,
+                    principal_kind_text(PrincipalKind::Operator),
+                    principal_kind_text(PrincipalKind::Adapter),
+                ],
             )
             .await
             .map_err(storage_error)?;
@@ -863,6 +880,11 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         if session.schema != IDENTITY_SESSION_SCHEMA_V1 {
             return Err(authority_error(
                 "identity session schema id is not supported",
+            ));
+        }
+        if !session.kind.is_declarable() {
+            return Err(authority_error(
+                "member principals cannot open sessions in identity plane v0",
             ));
         }
         let store = self.store.clone();
@@ -1019,10 +1041,16 @@ async fn principal_is_active(
     Ok(rows.next().await.map_err(storage_error)?.is_some())
 }
 
-async fn principal_revocation(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrincipalStatus {
+    Active,
+    Revoked,
+}
+
+async fn principal_status(
     connection: &Connection,
     principal_id: &PrincipalId,
-) -> CooldisResult<Option<Option<i64>>> {
+) -> CooldisResult<Option<PrincipalStatus>> {
     let mut rows = connection
         .query(
             "SELECT revoked_at_ms
@@ -1034,7 +1062,14 @@ async fn principal_revocation(
         .await
         .map_err(storage_error)?;
     match rows.next().await.map_err(storage_error)? {
-        Some(row) => Ok(Some(row.get(0).map_err(storage_error)?)),
+        Some(row) => {
+            let revoked_at_ms = row.get::<Option<i64>>(0).map_err(storage_error)?;
+            Ok(Some(if revoked_at_ms.is_some() {
+                PrincipalStatus::Revoked
+            } else {
+                PrincipalStatus::Active
+            }))
+        }
         None => Ok(None),
     }
 }
@@ -1350,6 +1385,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoking_an_unknown_principal_fails() {
+        let (authority, _, _) = authority(1_000, None).await;
+        let error = authority
+            .revoke_principal(
+                &PrincipalId::new("operator:root"),
+                &PrincipalId::new("adapter:missing"),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("principal was not found"));
+    }
+
+    #[tokio::test]
+    async fn revoking_an_unknown_credential_fails() {
+        let (authority, _, _) = authority(1_000, None).await;
+        let error = authority
+            .revoke_credential(&PrincipalId::new("operator:root"), "credential_missing")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("credential was not found"));
+    }
+
+    #[tokio::test]
+    async fn revoking_principals_and_credentials_is_idempotent() {
+        let operator = PrincipalId::new("operator:root");
+        let adapter = PrincipalId::new("adapter:webhook");
+        let (authority, _, clock) = authority(1_000, None).await;
+        authority
+            .bootstrap_operator(&operator, "Root operator")
+            .await
+            .unwrap();
+        authority
+            .declare_principal(
+                &operator,
+                &adapter,
+                PrincipalKind::Adapter,
+                "Webhook adapter",
+            )
+            .await
+            .unwrap();
+        let (credential, _) = authority
+            .mint_credential(&operator, &adapter, None)
+            .await
+            .unwrap();
+
+        authority
+            .revoke_credential(&operator, &credential.credential_id)
+            .await
+            .unwrap();
+        authority
+            .revoke_principal(&operator, &adapter)
+            .await
+            .unwrap();
+        clock.set(2_000);
+        authority
+            .revoke_credential(&operator, &credential.credential_id)
+            .await
+            .unwrap();
+        authority
+            .revoke_principal(&operator, &adapter)
+            .await
+            .unwrap();
+
+        let credential = authority
+            .list_credentials(&adapter)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let principal = authority
+            .list_principals()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.principal_id == adapter)
+            .unwrap();
+        assert_eq!(credential.revoked_at_ms, Some(1_000));
+        assert_eq!(principal.revoked_at_ms, Some(1_000));
+    }
+
+    #[tokio::test]
     async fn credential_verification_fails_closed_for_expiry_and_both_revocations() {
         let operator = PrincipalId::new("operator:root");
         let adapter = PrincipalId::new("adapter:webhook");
@@ -1440,6 +1559,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reserved_member_records_never_resolve_or_open_sessions() {
+        let member = PrincipalId::new("member:reserved");
+        let token = "test-only-member-token";
+        let (authority, store, _) = authority(1_000, None).await;
+        let database = store.sqlite_database();
+        let connection = database.connect().await.unwrap();
+        connection
+            .execute(
+                "INSERT INTO cooldis_identity_principals (
+                    schema, principal_id, kind, display, declared_by, declared_at_ms,
+                    revoked_at_ms, revoked_by, bootstrap_root
+                 ) VALUES (?1, ?2, 'member', ?3, ?2, ?4, NULL, NULL, 0)",
+                params![
+                    IDENTITY_PRINCIPAL_SCHEMA_V1,
+                    member.as_str(),
+                    "Reserved member",
+                    1_000_i64,
+                ],
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cooldis_identity_credentials (
+                    schema, credential_id, principal_id, token_digest, minted_by,
+                    minted_at_ms, expires_at_ms, revoked_at_ms, revoked_by
+                 ) VALUES (?1, ?2, ?3, ?4, ?3, ?5, NULL, NULL, NULL)",
+                params![
+                    IDENTITY_CREDENTIAL_SCHEMA_V1,
+                    "credential_member",
+                    member.as_str(),
+                    identity_token_digest(token),
+                    1_000_i64,
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert!(authority.verify_token(token).await.unwrap().is_none());
+        let error = authority
+            .witness_session_opened(&IdentitySessionV1 {
+                schema: IDENTITY_SESSION_SCHEMA_V1.to_string(),
+                session_id: "session-member".to_string(),
+                principal_id: member,
+                kind: PrincipalKind::Member,
+                surface: BoundarySurface::Websocket,
+                credential_ref: "credential_member".to_string(),
+                opened_at_ms: 1_000,
+                closed_at_ms: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("member"));
+    }
+
+    #[tokio::test]
     async fn minted_secret_is_256_bit_prefixed_and_only_its_digest_is_persisted() {
         let operator = PrincipalId::new("operator:root");
         let (authority, store, _) = authority(1_000, None).await;
@@ -1454,20 +1629,58 @@ mod tests {
         let connection = database.connect().await.unwrap();
         let mut rows = connection
             .query(
-                "SELECT token_digest FROM cooldis_identity_credentials WHERE credential_id = ?1",
+                "SELECT schema, credential_id, principal_id, token_digest, minted_by
+                 FROM cooldis_identity_credentials
+                 WHERE credential_id = ?1",
                 params![credential.credential_id],
             )
             .await
             .unwrap();
-        let digest = rows
-            .next()
+        let row = rows.next().await.unwrap().unwrap();
+        let persisted = (0..5)
+            .map(|index| row.get::<String>(index).unwrap())
+            .collect::<Vec<_>>();
+        let digest = &persisted[3];
+        assert_eq!(digest.as_str(), identity_token_digest(&token));
+        assert!(persisted.iter().all(|value| !value.contains(&token)));
+    }
+
+    #[tokio::test]
+    async fn credential_digest_uniqueness_prevents_ambiguous_verification() {
+        let operator = PrincipalId::new("operator:root");
+        let (authority, store, _) = authority(1_000, None).await;
+        let (_, credential, token) = authority
+            .bootstrap_operator(&operator, "Root operator")
             .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
             .unwrap();
-        assert_eq!(digest, identity_token_digest(&token));
-        assert!(!digest.contains(&token));
+        let database = store.sqlite_database();
+        let connection = database.connect().await.unwrap();
+        let collision = connection
+            .execute(
+                "INSERT INTO cooldis_identity_credentials (
+                    schema, credential_id, principal_id, token_digest, minted_by,
+                    minted_at_ms, expires_at_ms, revoked_at_ms, revoked_by
+                 ) VALUES (?1, ?2, ?3, ?4, ?3, ?5, NULL, NULL, NULL)",
+                params![
+                    IDENTITY_CREDENTIAL_SCHEMA_V1,
+                    "credential_collision",
+                    operator.as_str(),
+                    identity_token_digest(&token),
+                    1_001_i64,
+                ],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(!collision.to_string().contains(&token));
+        let resolved = authority.verify_token(&token).await.unwrap().unwrap();
+        assert_eq!(resolved.principal_id, operator);
+        assert_eq!(
+            resolved.auth,
+            AuthenticationPath::Credential {
+                credential_id: credential.credential_id,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1503,6 +1716,84 @@ mod tests {
                 })
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_after_root_revocation_preserves_one_active_root() {
+        let first = PrincipalId::new("operator:first");
+        let second = PrincipalId::new("operator:second");
+        let (authority, _, clock) = authority(1_000, None).await;
+        let (_, _, first_token) = authority
+            .bootstrap_operator(&first, "First operator")
+            .await
+            .unwrap();
+        clock.set(2_000);
+        authority.revoke_principal(&first, &first).await.unwrap();
+        let (_, _, second_token) = authority
+            .bootstrap_operator(&second, "Second operator")
+            .await
+            .unwrap();
+
+        assert!(
+            authority
+                .verify_token(&first_token)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            authority
+                .verify_token(&second_token)
+                .await
+                .unwrap()
+                .unwrap()
+                .principal_id,
+            second
+        );
+        let principals = authority.list_principals().await.unwrap();
+        assert_eq!(principals.len(), 2);
+        assert_eq!(
+            principals
+                .iter()
+                .filter(|record| {
+                    record.kind == PrincipalKind::Operator && record.revoked_at_ms.is_none()
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_initialization_is_idempotent_and_preserves_records() {
+        let operator = PrincipalId::new("operator:root");
+        let (authority, store, clock) = authority(1_000, None).await;
+        let (_, credential, token) = authority
+            .bootstrap_operator(&operator, "Root operator")
+            .await
+            .unwrap();
+        drop(authority);
+
+        let reopened = SqliteIdentityAuthority::new(
+            store,
+            Arc::clone(&clock) as Arc<dyn crate::DaemonClock>,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened.list_principals().await.unwrap().len(), 1);
+        assert_eq!(
+            reopened.list_credentials(&operator).await.unwrap(),
+            vec![credential]
+        );
+        assert_eq!(
+            reopened
+                .verify_token(&token)
+                .await
+                .unwrap()
+                .unwrap()
+                .principal_id,
+            operator
         );
     }
 
