@@ -87,12 +87,10 @@ mode = "managed"
 tenant_id = "tenant-overlay"
 "#,
     ])
-    .unwrap();
-    assert_eq!(
-        partial_managed_overlay.identity.tenant_id.as_deref(),
-        Some("tenant-overlay")
-    );
-    assert_eq!(partial_managed_overlay.identity.console_principal, None);
+    .unwrap_err();
+    assert!(partial_managed_overlay.to_string().contains(
+        "managed mode requires [daemon.identity] console_principal; see docs/adr/0008-identity-plane-v0.md D5"
+    ));
 }
 
 #[test]
@@ -175,6 +173,44 @@ console_principal = "operator-managed"
             .to_string()
             .contains("managed mode requires [daemon.identity] tenant_id; see docs/adr/0008-identity-plane-v0.md D5")
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn managed_daemon_identity_with_blank_tenant_or_missing_console_principal_hard_fails() {
+    let root = temp_root("identity-managed-blank-fields");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("cooldis.toml");
+
+    std::fs::write(
+        &path,
+        r#"
+[daemon.identity]
+mode = "managed"
+tenant_id = "   "
+console_principal = "operator-managed"
+"#,
+    )
+    .unwrap();
+    let error = load_cooldis_daemon_config(Some(&path)).unwrap_err();
+    assert!(error.to_string().contains(
+        "managed mode requires [daemon.identity] tenant_id; see docs/adr/0008-identity-plane-v0.md D5"
+    ));
+
+    std::fs::write(
+        &path,
+        r#"
+[daemon.identity]
+mode = "managed"
+tenant_id = "tenant-managed"
+"#,
+    )
+    .unwrap();
+    let error = load_cooldis_daemon_config(Some(&path)).unwrap_err();
+    assert!(error.to_string().contains(
+        "managed mode requires [daemon.identity] console_principal; see docs/adr/0008-identity-plane-v0.md D5"
+    ));
 
     let _ = std::fs::remove_dir_all(root);
 }

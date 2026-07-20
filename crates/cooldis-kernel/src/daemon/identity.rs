@@ -1185,22 +1185,36 @@ pub struct CooldisDaemonIdentityConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
     /// The principal the bundled console resolves to (in v0, the operator).
+    /// In managed mode this is required and also serves as the daemon's
+    /// legacy single-user coordinate until per-principal attribution lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub console_principal: Option<PrincipalId>,
 }
 
 impl CooldisDaemonIdentityConfig {
     /// The ratified hard-fail rule (ADR 0008 D5): managed mode without an
-    /// explicit tenant identity refuses to start. Local mode validates
+    /// explicit tenant identity and console principal refuses to start.
+    /// Blank-after-trim values count as absent. Local mode validates
     /// vacuously.
     pub fn validate(&self) -> Result<(), String> {
         match self.mode {
             IdentityMode::Local => Ok(()),
             IdentityMode::Managed => {
-                if self.tenant_id.as_deref().unwrap_or("").is_empty() {
+                if self.tenant_id.as_deref().unwrap_or("").trim().is_empty() {
                     return Err("managed mode requires [daemon.identity] tenant_id; \
                          see docs/adr/0008-identity-plane-v0.md D5"
                         .to_string());
+                }
+                if self
+                    .console_principal
+                    .as_ref()
+                    .is_none_or(|principal| principal.as_str().trim().is_empty())
+                {
+                    return Err(
+                        "managed mode requires [daemon.identity] console_principal; \
+                         see docs/adr/0008-identity-plane-v0.md D5"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -1309,6 +1323,47 @@ mod tests {
         assert!(config.validate().is_err());
         let local = CooldisDaemonIdentityConfig::default();
         assert!(local.validate().is_ok());
+    }
+
+    #[test]
+    fn managed_mode_rejects_blank_identity_fields() {
+        let blank_tenant = CooldisDaemonIdentityConfig {
+            mode: IdentityMode::Managed,
+            tenant_id: Some("   ".to_string()),
+            console_principal: Some(PrincipalId::new("operator:root")),
+        };
+        assert!(blank_tenant.validate().unwrap_err().contains("tenant_id"));
+
+        let missing_console = CooldisDaemonIdentityConfig {
+            mode: IdentityMode::Managed,
+            tenant_id: Some("tenant-a".to_string()),
+            console_principal: None,
+        };
+        assert!(
+            missing_console
+                .validate()
+                .unwrap_err()
+                .contains("console_principal")
+        );
+
+        let blank_console = CooldisDaemonIdentityConfig {
+            mode: IdentityMode::Managed,
+            tenant_id: Some("tenant-a".to_string()),
+            console_principal: Some(PrincipalId::new(" ")),
+        };
+        assert!(
+            blank_console
+                .validate()
+                .unwrap_err()
+                .contains("console_principal")
+        );
+
+        let complete = CooldisDaemonIdentityConfig {
+            mode: IdentityMode::Managed,
+            tenant_id: Some("tenant-a".to_string()),
+            console_principal: Some(PrincipalId::new("operator:root")),
+        };
+        assert!(complete.validate().is_ok());
     }
 
     #[test]
