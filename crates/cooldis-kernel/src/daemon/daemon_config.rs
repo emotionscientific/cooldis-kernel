@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::AgentManifestWorkspaceMode;
+use crate::daemon::identity::{CooldisDaemonIdentityConfig, IdentityMode, PrincipalId};
 use crate::daemon::remote_store::endpoint::CooldisDaemonSyncConfig;
 use crate::{
     AgentManifestPlacementBinding, AgentManifestWorkspaceBinding, AgentRecordRef,
@@ -44,6 +45,8 @@ pub struct CooldisProjectDiscovery {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CooldisDaemonConfig {
     #[serde(default)]
+    pub identity: CooldisDaemonIdentityConfig,
+    #[serde(default)]
     pub runtime: CooldisRuntimeConfig,
     #[serde(default)]
     pub app_server: CooldisDaemonAppServerConfig,
@@ -62,6 +65,7 @@ pub struct CooldisDaemonConfig {
 impl Default for CooldisDaemonConfig {
     fn default() -> Self {
         Self {
+            identity: synthesized_local_daemon_identity_config(),
             runtime: CooldisRuntimeConfig::default(),
             app_server: CooldisDaemonAppServerConfig::default(),
             registries: CooldisDaemonRegistriesConfig::default(),
@@ -88,6 +92,10 @@ impl CooldisDaemonConfig {
 
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+
+        if let Err(err) = self.identity.validate() {
+            errors.push(format!("identity: {err}"));
+        }
 
         if let Err(err) = self.app_server.listen_addr() {
             errors.push(format!("app_server.listen: {err}"));
@@ -153,6 +161,14 @@ impl CooldisDaemonConfig {
             self.provider.env_file = Some(resolve_config_path(base, path));
         }
         self.io.resolve_paths(base);
+    }
+}
+
+pub(crate) fn synthesized_local_daemon_identity_config() -> CooldisDaemonIdentityConfig {
+    CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Local,
+        tenant_id: Some("cooldis_app_server".to_string()),
+        console_principal: Some(PrincipalId::new("local_user")),
     }
 }
 
@@ -866,6 +882,7 @@ pub fn discover_cooldis_project(start: &Path) -> CooldisResult<CooldisProjectDis
 
 #[derive(Default)]
 struct DaemonConfigPresence {
+    identity: bool,
     runtime: RuntimePresence,
     app_server: AppServerPresence,
     registries: RegistriesPresence,
@@ -933,6 +950,7 @@ fn daemon_config_presence(text: &str) -> CooldisResult<DaemonConfigPresence> {
         .unwrap_or(&root);
 
     Ok(DaemonConfigPresence {
+        identity: table.contains_key("identity"),
         runtime: RuntimePresence {
             cwd: section_has_key(table, "runtime", "cwd"),
             runtime_home: section_has_key(table, "runtime", "runtime_home"),
@@ -989,6 +1007,18 @@ fn merge_daemon_config_layer(
     mut layer: CooldisDaemonConfig,
     presence: DaemonConfigPresence,
 ) {
+    if presence.identity {
+        config.identity = layer.identity;
+        if config.identity.mode == IdentityMode::Local {
+            let defaults = synthesized_local_daemon_identity_config();
+            if config.identity.tenant_id.is_none() {
+                config.identity.tenant_id = defaults.tenant_id;
+            }
+            if config.identity.console_principal.is_none() {
+                config.identity.console_principal = defaults.console_principal;
+            }
+        }
+    }
     if presence.runtime.cwd {
         config.runtime.cwd = layer.runtime.cwd.take();
     }

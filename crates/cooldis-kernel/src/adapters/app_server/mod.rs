@@ -1,5 +1,7 @@
 use crate::ProcessHandleIngressSink;
+use crate::daemon::daemon_config::synthesized_local_daemon_identity_config;
 use crate::daemon::daemon_io::CooldisDaemonIoBridge;
+use crate::daemon::identity::{CooldisDaemonIdentityConfig, IdentityMode, PrincipalId};
 use crate::daemon::recovery_sweep::StartupRecoverySweep;
 use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
 use crate::{
@@ -196,6 +198,8 @@ pub struct CooldisAppServerConfig {
     pub cwd: PathBuf,
     pub tenant_id: String,
     pub user_id: String,
+    pub identity_mode: IdentityMode,
+    pub console_principal: Option<PrincipalId>,
     pub model: String,
     pub model_provider: String,
     pub provider: AppServerProviderConfig,
@@ -216,14 +220,17 @@ pub struct CooldisAppServerConfig {
 impl CooldisAppServerConfig {
     pub fn local(listen: AppServerListenAddr, cwd: impl Into<PathBuf>) -> Self {
         let root = std::env::temp_dir().join(format!("cooldis-app-server-{}", Uuid::now_v7()));
-        Self {
+        let identity = synthesized_local_daemon_identity_config();
+        let mut config = Self {
             listen,
             runtime_home: root.join("runtime"),
             state_home: root.join("state"),
             user_state_home: root.join("user-state"),
             cwd: cwd.into(),
-            tenant_id: "cooldis_app_server".to_string(),
-            user_id: "local_user".to_string(),
+            tenant_id: String::new(),
+            user_id: String::new(),
+            identity_mode: IdentityMode::Local,
+            console_principal: None,
             model: APP_SERVER_LOCAL_MODEL.to_string(),
             model_provider: APP_SERVER_LOCAL_PROVIDER.to_string(),
             provider: AppServerProviderConfig::LocalOffline,
@@ -236,7 +243,20 @@ impl CooldisAppServerConfig {
             default_workspace: None,
             remote_event_store_served: Arc::new(AtomicBool::new(false)),
             console_assets: None,
-        }
+        };
+        config.apply_daemon_identity_config(&identity);
+        config
+    }
+
+    pub(crate) fn apply_daemon_identity_config(&mut self, identity: &CooldisDaemonIdentityConfig) {
+        self.identity_mode = identity.mode;
+        self.tenant_id = identity.tenant_id.clone().unwrap_or_default();
+        self.console_principal = identity.console_principal.clone();
+        self.user_id = self
+            .console_principal
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
     }
 
     pub fn with_bifrost_openai(
@@ -485,6 +505,8 @@ struct CooldisAppServerInner {
     supervisor: CooldisSupervisor,
     tenant_id: String,
     user_id: String,
+    identity_mode: IdentityMode,
+    console_principal: Option<PrincipalId>,
     model: String,
     model_provider: String,
     provider: AppServerProviderConfig,
@@ -718,6 +740,8 @@ impl CooldisAppServer {
                 supervisor,
                 tenant_id: config.tenant_id,
                 user_id: config.user_id,
+                identity_mode: config.identity_mode,
+                console_principal: config.console_principal,
                 model: config.model,
                 model_provider: config.model_provider,
                 provider: config.provider,
@@ -818,6 +842,15 @@ impl CooldisAppServer {
 
     pub fn user_id(&self) -> &str {
         &self.inner.user_id
+    }
+
+    /// Constructor-injected seam consumed by boundary authentication.
+    #[allow(dead_code)]
+    pub(crate) fn identity_boundary_config(&self) -> (IdentityMode, Option<&PrincipalId>) {
+        (
+            self.inner.identity_mode,
+            self.inner.console_principal.as_ref(),
+        )
     }
 
     pub fn model(&self) -> &str {

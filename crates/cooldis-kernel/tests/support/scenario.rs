@@ -715,6 +715,9 @@ impl ScenarioHarness {
         config.capsule_bindings.registry_root = None;
         config.tenant_id = format!("scenario-{:016x}", plan.seed);
         config.user_id = "scenario-user".to_string();
+        config.console_principal = Some(super::kernel_test::daemon::identity::PrincipalId::new(
+            "scenario-user",
+        ));
 
         let decorated_slot = Arc::new(Mutex::new(None::<Arc<dyn RuntimeStore>>));
         let decorated_capture = Arc::clone(&decorated_slot);
