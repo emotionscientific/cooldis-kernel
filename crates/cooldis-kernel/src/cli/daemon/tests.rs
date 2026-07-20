@@ -103,6 +103,36 @@ fn daemon_app_server_config_from_loaded_applies_identity_config() {
 }
 
 #[test]
+fn daemon_app_server_config_from_loaded_revalidates_identity_config() {
+    for (tenant_id, console_principal, expected_field) in [
+        (
+            Some("   ".to_string()),
+            Some(PrincipalId::new("operator")),
+            "tenant_id",
+        ),
+        (Some("tenant".to_string()), None, "console_principal"),
+        (
+            Some("tenant".to_string()),
+            Some(PrincipalId::new("\t")),
+            "console_principal",
+        ),
+    ] {
+        let mut daemon_config = CooldisDaemonConfig::default();
+        daemon_config.identity.mode = IdentityMode::Managed;
+        daemon_config.identity.tenant_id = tenant_id;
+        daemon_config.identity.console_principal = console_principal;
+
+        let error =
+            daemon_app_server_config_from_loaded(&loaded_daemon_config(daemon_config)).unwrap_err();
+
+        assert!(
+            error.to_string().contains(expected_field),
+            "expected {expected_field} validation error, got {error}"
+        );
+    }
+}
+
+#[test]
 fn daemon_app_server_config_from_loaded_applies_placement_default() {
     let mut daemon_config = CooldisDaemonConfig::default();
     daemon_config.runtime.placement = Some(AgentManifestPlacementBinding {

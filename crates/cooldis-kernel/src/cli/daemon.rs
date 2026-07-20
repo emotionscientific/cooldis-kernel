@@ -53,6 +53,7 @@ pub(super) async fn daemon_run(args: Vec<OsString>) -> CooldisResult<()> {
 pub(super) fn daemon_app_server_config_from_loaded(
     loaded: &LoadedCooldisDaemonConfig,
 ) -> CooldisResult<CooldisAppServerConfig> {
+    loaded.config.validate()?;
     let listen = loaded.config.app_server.listen_addr()?;
     let cwd = match loaded.config.runtime.cwd.clone() {
         Some(cwd) => cwd,
