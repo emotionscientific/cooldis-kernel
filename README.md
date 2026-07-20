@@ -6,19 +6,38 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-yellow.svg)](README.md)
 
-> Status: Cooldis is experimental. APIs, behavior, and release packaging may
-> change before a stable public release.
+> Status: Cooldis Kernel is experimental. APIs, behavior, and release
+> packaging may change before a stable public release. It is the open-source
+> engine under Cooldis Cloud, the managed agents service.
 
 ## What Is Cooldis
 
-Cooldis is an open serverless agent platform.
+Cooldis Kernel is a declarative harness that grew into a complete runtime for
+agent workloads, written in Rust.
 
-At the kernel level, Cooldis is a Rust runtime for declared agent workloads. An
-agent declaration describes the model profile, tools, resources, secrets,
-permissions, context policy, and runtime defaults before execution. Cooldis
-turns that declaration into governed runtime work: capability grants, tool
+You declare an agent before anything runs. A manifest names the model profile,
+tools, resources, secrets, permissions, and context policy; the kernel turns
+that declaration into governed runtime work: capability grants, tool
 visibility, provider access, operation dispatch, event records, cancellation,
 resume, and audit receipts.
+
+It serves heterogeneous workloads on one machine. Agents, workflows, and
+sub-agents run on the same execution machinery and differ only in continuation
+policy: a workflow follows a fixed script, an agent chooses its next step.
+Bring a harness with you or declare one here; either way the kernel owns
+dispatch, authority, and the record.
+
+The engine is modular and recomposes without changing meaning. Embed it in a
+process, run it as a daemon, drive workflows with it: however it is assembled,
+it is the same machine, with the same behavior and the same event stream. And
+because an agent is a declaration plus content-addressed tools and named
+grants, an agent is packageable: exportable, diffable, and reproducible on
+another machine.
+
+Everything is event-sourced. Every action is an event in an append-only
+stream, and state is a fold over the stream. Durability, replay, resume,
+audit, and observability are properties of the storage model, not features
+added on top.
 
 Cooldis is not an agent, a graph framework, a provider SDK, or a product app.
 Product systems configure and call Cooldis. The kernel owns the runtime
@@ -37,8 +56,8 @@ which is an evaluator, and not "kernel" as in an orchestration SDK.) The
 **runtime** is that kernel in motion: the running system that
 executes turns and witnesses facts; when we say "the runtime did it," we mean
 an event whose authority is the system's own attestation, not some function's
-output. And a **harness** — the industry's word for everything wrapped around
-a model — is here not something you hand-write but something the system
+output. And a **harness** (the industry's word for everything wrapped around
+a model) is here not something you hand-write but something the system
 resolves: an agent's effective execution envelope, derived from its
 declarations and grants, exportable and diffable like a lockfile.
 
@@ -61,14 +80,10 @@ belong in product repos or adapters.
 
 For the detailed repository map, see [docs/repository-map.md](docs/repository-map.md).
 
-## Related Repositories
+## The Console
 
-- [cooldis-console](https://github.com/emotionscientific/cooldis-console):
-  desktop/web console and product-side client for the Cooldis app-server
-  protocol.
-
-When checked out as sibling repositories, the console usually lives at
-`../cooldis-console`.
+The web console lives in this repository at [apps/console](apps/console) and
+ships inside the kernel release: `cooldis console`.
 
 ## Current Status
 
@@ -96,8 +111,9 @@ The V1 work is focused on runtime primitives:
 - release packaging for `cooldis`, `cooldis-acp-agent`, and
   `cooldis-mcp-server`.
 
-Managed cloud placement, a public package registry, marketplace flows, and
-stateful product harnesses are future direction. See
+A managed service, Cooldis Cloud, runs on top of this kernel and is concierge
+today. Self-serve cloud placement, a public package registry, marketplace
+flows, and stateful product harnesses are future direction. See
 [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
