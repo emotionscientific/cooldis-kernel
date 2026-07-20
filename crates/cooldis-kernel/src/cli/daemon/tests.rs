@@ -1,5 +1,7 @@
 use super::*;
-use crate::daemon::identity::{IdentityMode, PrincipalId};
+use crate::daemon::identity::{
+    IdentityAuthority, IdentityMode, PrincipalId, SqliteIdentityAuthority,
+};
 use crate::{
     AgentManifestPlacementBinding, AgentManifestWorkspaceBinding, AgentManifestWorkspaceMode,
     CooldisDaemonConfig,
@@ -100,6 +102,105 @@ fn daemon_app_server_config_from_loaded_applies_identity_config() {
         app_config.console_principal,
         Some(PrincipalId::new("operator-configured"))
     );
+}
+
+#[tokio::test]
+async fn managed_identity_toml_reaches_initialized_boundary_authority() {
+    let root = daemon_test_root("managed-identity-boundary");
+    let workspace = root.join("workspace");
+    let console_assets = root.join("console");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&console_assets).unwrap();
+    fs::write(
+        console_assets.join("index.html"),
+        "<html><head></head><body>console</body></html>",
+    )
+    .unwrap();
+    let path = root.join("cooldis.toml");
+    fs::write(
+        &path,
+        r#"
+[daemon.identity]
+mode = "managed"
+tenant_id = "tenant-managed"
+console_principal = "operator-managed"
+
+[daemon.runtime]
+cwd = "workspace"
+runtime_home = "runtime"
+state_home = "state"
+
+[daemon.app_server]
+listen = "unix://run/cooldis.sock"
+
+[daemon.registries]
+operations = "operations"
+agents = "agents"
+"#,
+    )
+    .unwrap();
+
+    let loaded = load_cooldis_daemon_config(Some(&path)).unwrap();
+    let mut app_config = daemon_app_server_config_from_loaded(&loaded).unwrap();
+    app_config.user_state_home = root.join("user-state");
+    app_config.console_assets = Some(ConsoleAssetConfig {
+        root: console_assets,
+        session_token: "replaced-at-construction".to_string(),
+    });
+
+    let operator = PrincipalId::new("operator-managed");
+    let identity_store =
+        SqliteSessionStore::open(app_config.state_home.join("session_history.sqlite3"))
+            .await
+            .unwrap();
+    let authority = SqliteIdentityAuthority::new(identity_store, Arc::new(SystemDaemonClock), None)
+        .await
+        .unwrap();
+    let _ = authority
+        .bootstrap_operator(&operator, "Managed operator")
+        .await
+        .unwrap();
+    let baseline_active_credentials = authority
+        .list_credentials(&operator)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|credential| credential.revoked_at_ms.is_none())
+        .count();
+
+    let app = CooldisAppServer::new_local(app_config).await.unwrap();
+
+    assert_eq!(app.tenant_id(), "tenant-managed");
+    assert_eq!(app.user_id(), "operator-managed");
+    assert_eq!(
+        app.identity_boundary_config(),
+        (IdentityMode::Managed, Some(&operator))
+    );
+    assert_eq!(
+        authority
+            .list_credentials(&operator)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|credential| credential.revoked_at_ms.is_none())
+            .count(),
+        baseline_active_credentials + 1,
+        "console initialization did not mint for the configured managed principal"
+    );
+
+    drop(app);
+    assert_eq!(
+        authority
+            .list_credentials(&operator)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|credential| credential.revoked_at_ms.is_none())
+            .count(),
+        baseline_active_credentials,
+        "managed console credential was not retired on shutdown"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
