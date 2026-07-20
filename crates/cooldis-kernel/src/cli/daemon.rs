@@ -61,14 +61,7 @@ pub(super) fn daemon_app_server_config_from_loaded(
         })?,
     };
     let mut config = CooldisAppServerConfig::local(listen, cwd);
-    config.identity_mode = loaded.config.identity.mode;
-    config.tenant_id = loaded.config.identity.tenant_id.clone().unwrap_or_default();
-    config.console_principal = loaded.config.identity.console_principal.clone();
-    config.user_id = config
-        .console_principal
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+    config.apply_daemon_identity_config(&loaded.config.identity);
     if let Some(runtime_home) = loaded.config.runtime.runtime_home.clone() {
         config.runtime_home = runtime_home;
     }

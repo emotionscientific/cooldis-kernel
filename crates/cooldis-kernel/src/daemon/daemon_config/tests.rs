@@ -8,6 +8,93 @@ fn temp_root(name: &str) -> PathBuf {
     ))
 }
 
+fn merge_daemon_identity_layers(layers: &[&str]) -> CooldisResult<CooldisDaemonConfig> {
+    let mut config = CooldisDaemonConfig::default();
+    for text in layers {
+        let presence = daemon_config_presence(text)?;
+        let layer = decode_daemon_config(text)?;
+        merge_daemon_config_layer(&mut config, layer, presence);
+    }
+    config.validate()?;
+    Ok(config)
+}
+
+#[test]
+fn daemon_identity_presence_tracks_supported_nesting_forms() {
+    for text in [
+        "[daemon.identity]\n",
+        "[daemon]\nidentity = {}\n",
+        "[identity]\n",
+        "identity = {}\n",
+    ] {
+        assert!(
+            daemon_config_presence(text).unwrap().identity,
+            "identity section should be present in {text:?}"
+        );
+    }
+
+    assert!(
+        !daemon_config_presence("[daemon.runtime]\ncwd = \"work\"\n")
+            .unwrap()
+            .identity
+    );
+}
+
+#[test]
+fn daemon_identity_layers_are_section_atomic_across_mode_flips() {
+    let local_to_managed = merge_daemon_identity_layers(&[
+        r#"
+[daemon.identity]
+mode = "local"
+tenant_id = "tenant-local"
+console_principal = "operator-local"
+"#,
+        r#"
+[daemon.identity]
+mode = "managed"
+"#,
+    ])
+    .unwrap_err();
+    assert!(local_to_managed.to_string().contains(
+        "managed mode requires [daemon.identity] tenant_id; see docs/adr/0008-identity-plane-v0.md D5"
+    ));
+
+    let managed_to_empty_local = merge_daemon_identity_layers(&[
+        r#"
+[daemon.identity]
+mode = "managed"
+tenant_id = "tenant-managed"
+console_principal = "operator-managed"
+"#,
+        "[daemon]\nidentity = {}\n",
+    ])
+    .unwrap();
+    assert_eq!(
+        managed_to_empty_local.identity,
+        synthesized_local_daemon_identity_config()
+    );
+
+    let partial_managed_overlay = merge_daemon_identity_layers(&[
+        r#"
+[daemon.identity]
+mode = "managed"
+tenant_id = "tenant-base"
+console_principal = "operator-base"
+"#,
+        r#"
+[daemon.identity]
+mode = "managed"
+tenant_id = "tenant-overlay"
+"#,
+    ])
+    .unwrap();
+    assert_eq!(
+        partial_managed_overlay.identity.tenant_id.as_deref(),
+        Some("tenant-overlay")
+    );
+    assert_eq!(partial_managed_overlay.identity.console_principal, None);
+}
+
 #[test]
 fn loads_toml_daemon_identity_config() {
     let root = temp_root("identity");

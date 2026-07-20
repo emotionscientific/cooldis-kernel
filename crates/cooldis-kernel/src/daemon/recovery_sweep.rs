@@ -492,6 +492,7 @@ fn history_error(err: impl std::fmt::Display) -> CooldisError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::identity::{CooldisDaemonIdentityConfig, IdentityMode, PrincipalId};
     use crate::kernel::process_handle_dispatch::{command_digest, recovery_outcome_envelope};
     use crate::test_support::{CrashCutHost, CrashCutSeam, FaultingRuntimeStore, run_crash_cut};
     use crate::{
@@ -1247,8 +1248,11 @@ mod tests {
 
         let listen = crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
         let mut config = CooldisAppServerConfig::local(listen, &root);
-        config.tenant_id = "tenant".to_string();
-        config.user_id = "user".to_string();
+        config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+            mode: IdentityMode::Local,
+            tenant_id: Some("tenant".to_string()),
+            console_principal: Some(PrincipalId::new("user")),
+        });
         config.runtime_home = runtime_home;
         config.state_home = state_home;
         config.user_state_home = root.join("user-state");
