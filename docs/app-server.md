@@ -32,10 +32,10 @@ It can also listen on a TCP WebSocket address:
 cargo run --bin cooldis -- rpc --listen ws://127.0.0.1:49200/rpc
 ```
 
-The TCP WebSocket listener is loopback-only until the auth/origin policy from
-[issue #108](https://github.com/emotionscientific/cooldis/issues/108) lands. Both
-paths accept WebSocket frames, handle Codex-style JSON-RPC without requiring a
-`jsonrpc` field, and expose the V1 method subset needed by Codex remote clients.
+Both transports authenticate every connection before any method dispatch; see
+the Authentication section below. Both paths accept WebSocket frames, handle
+Codex-style JSON-RPC without requiring a `jsonrpc` field, and expose the V1
+method subset needed by Codex remote clients.
 The direct app-server command currently uses the deterministic local/offline
 provider. The TCP WebSocket listener also serves `GET /healthz` and `GET
 /readyz` with a small JSON `200 OK` response.
@@ -95,6 +95,96 @@ cargo run --bin cooldis -- debug bind <thread-id> --journal .cooldis/state/sessi
 The command never resolves the manifest again or consults current daemon
 defaults to fill old receipt gaps. Legacy origins that were not recorded print
 as `[unrecorded]`.
+
+## Authentication
+
+Every connection resolves to a principal before any method is dispatched, on
+both transports. There is no unauthenticated fallthrough: a connection that
+fails to authenticate receives a uniform `401 Unauthorized`, opens no JSON-RPC
+session, and is witnessed as a rejection. The full design is ADR 0008
+(`docs/adr/0008-identity-plane-v0.md`, including its as-shipped addendum).
+
+### Modes
+
+`[daemon.identity]` in the daemon config selects the mode (see
+`daemon/daemon_config.rs`):
+
+- `local` (default when the section is absent): a synthesized single-operator
+  identity is projected into the app server, and a Unix-socket peer whose uid
+  matches the daemon's effective uid resolves to that operator without a
+  token, so `cooldis` CLI usage on the host keeps working with no migration.
+  The socket file is chmod `0o600` in every mode.
+- `managed`: requires explicit non-blank `tenant_id` and `console_principal`;
+  the daemon hard-fails at startup otherwise. Peer mapping is disabled; every
+  connection presents a credential.
+
+### Bootstrap and credentials
+
+```sh
+cooldis identity bootstrap <principal-id> --display "Root operator"
+```
+
+declares the first operator and mints its credential in one step. The token is
+printed exactly once; only its digest is stored. `cooldis identity declare`
+adds an adapter principal, `mint` issues additional credentials, `list` shows
+records, and `revoke-credential` / `revoke-principal` retire them. Revocation
+takes effect at the next connection; live sessions are not torn down.
+
+### Token carriers
+
+- `Authorization: Bearer <token>` on the WebSocket upgrade, both transports.
+  Header name and scheme are case-insensitive.
+- The console uses the WebSocket subprotocol carrier: the client offers
+  `cooldis-console-token.<token>` and the server echoes exactly that
+  recognized protocol. Query-parameter tokens are not accepted (they leak into
+  logs). The console credential itself is minted by the server at
+  construction: at most one is active per state home, a recorded predecessor
+  is revoked at startup, and the server retires its own credential on graceful
+  shutdown.
+- MCP, ACP, and debug-RPC clients read `COOLDIS_APP_SERVER_TOKEN` from the
+  environment (an explicit config field overrides it) and act with exactly the
+  authority of the principal that token resolves to.
+
+The pre-authentication handshake is bounded: a 10-second per-stage deadline
+and an 8 KiB header cap, failing closed.
+
+### Authorization
+
+Every dispatched method has an authority class, checked once at the top of the
+dispatcher against the principal's kind:
+
+- `Host`: methods that execute commands, mutate the filesystem, touch provider
+  or secret configuration, or construct/reconstruct runtime bindings
+  (`command/*`, `fs/*`, `modelProvider/*`, `mcpSource/*`, `thread/start`,
+  `thread/resume`, `approval/resolve`, ...). Operator-only.
+- `Interactive`: reads and conversational control on existing threads
+  (`thread/read`, `thread/list`, `turn/steer`, `mandate/*`, ...).
+- `Ingress`: input delivery. `turn/start` is the only Ingress RPC method and
+  the only method an adapter credential can call. It may lazily reconstruct a
+  thread from its committed metadata (replaying the operator's standing
+  grant), but adapter callers cannot supply the `cwd`, `model`, or `thinking`
+  turn controls.
+
+The normative method-to-class table is `DISPATCH_METHOD_AUTHORITY_CLASSES` in
+`adapters/app_server/connection.rs`, pinned by an exhaustive drift test.
+Unknown methods fail closed to Host. A refused request gets JSON-RPC error
+`-32003` with a generic message that does not reveal whether the method
+exists.
+
+### What gets witnessed
+
+Durable identity records (SQLite, same store as session history) capture:
+
+- session open and close, with principal, surface, and credential reference;
+- every failed authentication and every refused method, with the reason;
+- every host-authority effect (the `HOST_EFFECT_METHODS` subset: command
+  execution, filesystem mutations, provider/secret access, runtime
+  construction, approval release), as a row naming session, principal, method,
+  and timestamp, written before the effect runs. A failed witness write blocks
+  the effect.
+
+Ingress submitted over an authenticated RPC session is stamped
+`via="caller:{session_id}"`, pointing at the witnessed session record.
 
 ## Provider Config
 
