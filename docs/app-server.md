@@ -23,13 +23,15 @@ client parity is not the target of that topology surface.
 ### Standalone RPC quick start
 
 Bootstrap an operator into an explicit state home before starting a standalone
-TCP WebSocket server. The identity command prints the token once. Copy the
-value from its `token` line for the client command below:
+TCP WebSocket server. The identity command prints the token once on a line in
+the form `token <value>`. Copy only `<value>` for the client command below. The
+`$HOME`-anchored state home identifies the same store from both terminals,
+regardless of their working directories:
 
 ```sh
 cooldis identity bootstrap operator:quick-start \
   --display "Quick-start operator" \
-  --state-home .cooldis/rpc-quick-start-state
+  --state-home "$HOME/.cooldis/rpc-quick-start-state"
 ```
 
 Start the server in one terminal:
@@ -37,7 +39,7 @@ Start the server in one terminal:
 ```sh
 cooldis rpc \
   --listen ws://127.0.0.1:49200/rpc \
-  --state-home .cooldis/rpc-quick-start-state
+  --state-home "$HOME/.cooldis/rpc-quick-start-state"
 ```
 
 Then call it from another terminal, replacing `<token>` with the token printed
@@ -66,7 +68,7 @@ a TCP WebSocket client. A Unix socket server can be started with:
 ```sh
 cooldis rpc \
   --listen unix:///tmp/cooldis.sock \
-  --state-home .cooldis/rpc-quick-start-state
+  --state-home "$HOME/.cooldis/rpc-quick-start-state"
 ```
 
 `cooldis console` starts the same loopback app-server shape for local browser

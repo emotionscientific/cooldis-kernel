@@ -32,7 +32,7 @@ pub(super) async fn run_rpc(args: Vec<OsString>) -> CooldisResult<()> {
     eprintln!("cooldis rpc state home: {}", state_home.display());
     match &options.listen {
         AppServerListenAddr::WebSocket(_) => eprintln!(
-            "WebSocket clients must set COOLDIS_APP_SERVER_TOKEN to a bearer token minted with `cooldis identity` against this state home before the server starts."
+            "Before starting this server, mint a bearer token with `cooldis identity` against this state home; WebSocket clients pass that token in COOLDIS_APP_SERVER_TOKEN."
         ),
         AppServerListenAddr::Unix(_) => {
             eprintln!("Same-uid Unix socket peers need no token.");

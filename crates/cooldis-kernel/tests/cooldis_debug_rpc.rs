@@ -6,19 +6,23 @@ use cooldis::{
 };
 use serde_json::Value;
 use std::net::{SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+static RPC_PROCESS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
 #[tokio::test]
 async fn rpc_cli_startup_names_websocket_state_home_and_credential_path() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
     let root =
-        PathBuf::from("/tmp").join(format!("cdis-rpc-startup-ws-{}", Uuid::now_v7().simple()));
+        std::env::temp_dir().join(format!("cdis-rpc-startup-ws-{}", Uuid::now_v7().simple()));
     let state_home = root.join("state");
     let runtime_home = root.join("runtime");
     let workspace = root.join("workspace");
@@ -34,7 +38,7 @@ async fn rpc_cli_startup_names_websocket_state_home_and_credential_path() {
     );
     assert_eq!(
         lines[2],
-        "WebSocket clients must set COOLDIS_APP_SERVER_TOKEN to a bearer token minted with `cooldis identity` against this state home before the server starts."
+        "Before starting this server, mint a bearer token with `cooldis identity` against this state home; WebSocket clients pass that token in COOLDIS_APP_SERVER_TOKEN."
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -43,8 +47,9 @@ async fn rpc_cli_startup_names_websocket_state_home_and_credential_path() {
 #[cfg(unix)]
 #[tokio::test]
 async fn rpc_cli_startup_names_unix_state_home_and_peer_authentication() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
     let root =
-        PathBuf::from("/tmp").join(format!("cdis-rpc-startup-unix-{}", Uuid::now_v7().simple()));
+        std::env::temp_dir().join(format!("cdis-rpc-startup-unix-{}", Uuid::now_v7().simple()));
     let state_home = root.join("state");
     let runtime_home = root.join("runtime");
     let workspace = root.join("workspace");
@@ -85,6 +90,7 @@ async fn rpc_startup_lines(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .expect("failed to spawn cooldis rpc");
     let stderr = child
@@ -107,7 +113,7 @@ async fn rpc_startup_lines(
             let line = line.trim_end();
             if line.starts_with("cooldis rpc listening on ")
                 || line.starts_with("cooldis rpc state home: ")
-                || line.starts_with("WebSocket clients must set ")
+                || line.starts_with("Before starting this server, mint ")
                 || line == "Same-uid Unix socket peers need no token."
             {
                 lines.push(line.to_string());
@@ -123,12 +129,12 @@ async fn rpc_startup_lines(
 
 #[tokio::test]
 async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
-    let root = PathBuf::from("/tmp").join(format!("cdis-debug-rpc-{}", Uuid::now_v7().simple()));
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
+    let root = std::env::temp_dir().join(format!("cdis-debug-rpc-{}", Uuid::now_v7().simple()));
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let addr = unused_loopback_addr();
-    let url = format!("ws://{addr}/rpc");
-    let server = DebugRpcServer::start(&root, &workspace, addr).await;
+    let server = DebugRpcServer::start(&root, &workspace).await;
+    let url = server.url.clone();
 
     let call = run_cooldis(
         ["debug", "rpc", "call", "thread/list", "--url", url.as_str()],
@@ -300,12 +306,15 @@ fn assert_admission_precedes_execution(
 }
 
 struct DebugRpcServer {
+    url: String,
     token: String,
-    task: JoinHandle<cooldis::CooldisResult<()>>,
+    task: Option<JoinHandle<cooldis::CooldisResult<()>>>,
 }
 
 impl DebugRpcServer {
-    async fn start(root: &Path, workspace: &Path, addr: SocketAddr) -> Self {
+    async fn start(root: &Path, workspace: &Path) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let listen = AppServerListenAddr::WebSocket(addr);
         let mut config = CooldisAppServerConfig::local(listen.clone(), workspace);
         config.runtime_home = root.join("runtime");
@@ -323,14 +332,28 @@ impl DebugRpcServer {
             .await
             .unwrap()
             .1;
-        let task = tokio::spawn(async move { app.serve(listen).await });
-        wait_for_websocket(&format!("ws://{addr}/rpc"), &token).await;
-        Self { token, task }
+        let task = tokio::spawn(async move { app.serve_websocket_listener(listener).await });
+        let url = format!("ws://{addr}/rpc");
+        wait_for_websocket(&url, &token).await;
+        Self {
+            url,
+            token,
+            task: Some(task),
+        }
     }
 
-    async fn stop(self) {
-        self.task.abort();
-        let _ = self.task.await;
+    async fn stop(mut self) {
+        let task = self.task.take().unwrap();
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+impl Drop for DebugRpcServer {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
