@@ -7,17 +7,131 @@ use cooldis::{
     SystemDaemonClock,
 };
 use serde_json::Value;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+static RPC_PROCESS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[tokio::test]
+async fn rpc_cli_startup_names_websocket_state_home_and_credential_path() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
+    let root =
+        std::env::temp_dir().join(format!("cdis-rpc-startup-ws-{}", Uuid::now_v7().simple()));
+    let state_home = root.join("state");
+    let runtime_home = root.join("runtime");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let listen = format!("ws://{}/rpc", unused_loopback_addr());
+
+    let lines = rpc_startup_lines(&listen, &state_home, &runtime_home, &workspace).await;
+
+    assert_eq!(lines[0], format!("cooldis rpc listening on {listen}"));
+    assert_eq!(
+        lines[1],
+        format!("cooldis rpc state home: {}", state_home.display())
+    );
+    assert_eq!(
+        lines[2],
+        "Before starting this server, mint a bearer token with `cooldis identity` against this state home; WebSocket clients pass that token in COOLDIS_APP_SERVER_TOKEN."
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rpc_cli_startup_names_unix_state_home_and_peer_authentication() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
+    let root =
+        std::env::temp_dir().join(format!("cdis-rpc-startup-unix-{}", Uuid::now_v7().simple()));
+    let state_home = root.join("state");
+    let runtime_home = root.join("runtime");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let socket = root.join("rpc.sock");
+    let listen = format!("unix://{}", socket.display());
+
+    let lines = rpc_startup_lines(&listen, &state_home, &runtime_home, &workspace).await;
+
+    assert_eq!(lines[0], format!("cooldis rpc listening on {listen}"));
+    assert_eq!(
+        lines[1],
+        format!("cooldis rpc state home: {}", state_home.display())
+    );
+    assert_eq!(lines[2], "Same-uid Unix socket peers need no token.");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+async fn rpc_startup_lines(
+    listen: &str,
+    state_home: &Path,
+    runtime_home: &Path,
+    workspace: &Path,
+) -> Vec<String> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cooldis"))
+        .args([
+            "rpc",
+            "--listen",
+            listen,
+            "--state-home",
+            state_home.to_str().unwrap(),
+            "--runtime-home",
+            runtime_home.to_str().unwrap(),
+            "--cwd",
+            workspace.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("failed to spawn cooldis rpc");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("cooldis rpc stderr should be piped");
+    let mut reader = BufReader::new(stderr);
+    let lines = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut lines = Vec::new();
+        while lines.len() < 3 {
+            let mut line = String::new();
+            let bytes = reader
+                .read_line(&mut line)
+                .await
+                .expect("failed to read cooldis rpc startup output");
+            assert_ne!(
+                bytes, 0,
+                "cooldis rpc exited before startup output completed"
+            );
+            let line = line.trim_end();
+            if line.starts_with("cooldis rpc listening on ")
+                || line.starts_with("cooldis rpc state home: ")
+                || line.starts_with("Before starting this server, mint ")
+                || line == "Same-uid Unix socket peers need no token."
+            {
+                lines.push(line.to_string());
+            }
+        }
+        lines
+    })
+    .await
+    .expect("timed out waiting for cooldis rpc startup output");
+    child.kill().await.expect("failed to stop cooldis rpc");
+    lines
+}
+
 #[tokio::test]
 async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
     let root = TestRoot::new("cdis-debug-rpc");
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -160,6 +274,7 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
 
 #[tokio::test]
 async fn debug_rpc_cli_renders_rpc_client_errors_without_internal_names() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
     let closed_url = "ws://127.0.0.1:0/rpc";
     let closed = run_cooldis(
         ["debug", "rpc", "call", "thread/list", "--url", closed_url],
@@ -317,7 +432,7 @@ impl DebugRpcServer {
 
 impl Drop for DebugRpcServer {
     fn drop(&mut self) {
-        if let Some(task) = &self.task {
+        if let Some(task) = self.task.take() {
             task.abort();
         }
     }
@@ -327,7 +442,7 @@ struct TestRoot(PathBuf);
 
 impl TestRoot {
     fn new(prefix: &str) -> Self {
-        Self(PathBuf::from("/tmp").join(format!("{prefix}-{}", Uuid::now_v7().simple())))
+        Self(std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7().simple())))
     }
 
     fn path(&self) -> &Path {
@@ -339,6 +454,13 @@ impl Drop for TestRoot {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+fn unused_loopback_addr() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
 }
 
 async fn wait_for_websocket(url: &str, token: &str) {

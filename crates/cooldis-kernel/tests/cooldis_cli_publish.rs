@@ -326,6 +326,10 @@ fn cooldis_cli_uses_clean_public_entrypoints() {
     let rpc = run_cooldis(["rpc", "--help"]);
     assert!(rpc.contains("cooldis rpc"));
     assert!(rpc.contains("--listen"));
+    assert!(rpc.contains("--state-home"));
+    assert!(rpc.contains("--runtime-home"));
+    assert!(rpc.contains("--cwd"));
+    assert!(rpc.contains("fresh temporary state home"));
 
     let console = run_cooldis(["console", "--help"]);
     assert!(console.contains("local browser console"));

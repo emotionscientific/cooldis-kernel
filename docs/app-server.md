@@ -20,25 +20,56 @@ client parity is not the target of that topology surface.
 
 ## Current Surfaces
 
-`cooldis rpc` starts the Cooldis app-server on a Unix socket:
+### Standalone RPC quick start
+
+Bootstrap an operator into an explicit state home before starting a standalone
+TCP WebSocket server. The identity command prints the token once on a line in
+the form `token <value>`. Copy only `<value>` for the client command below. The
+`$HOME`-anchored state home identifies the same store from both terminals,
+regardless of their working directories:
 
 ```sh
-cargo run --bin cooldis -- rpc --listen unix:///tmp/cooldis.sock
+cooldis identity bootstrap operator:quick-start \
+  --display "Quick-start operator" \
+  --state-home "$HOME/.cooldis/rpc-quick-start-state"
 ```
 
-It can also listen on a TCP WebSocket address:
+Start the server in one terminal:
 
 ```sh
-cargo run --bin cooldis -- rpc --listen ws://127.0.0.1:49200/rpc
+cooldis rpc \
+  --listen ws://127.0.0.1:49200/rpc \
+  --state-home "$HOME/.cooldis/rpc-quick-start-state"
+```
+
+Then call it from another terminal, replacing `<token>` with the token printed
+by `identity bootstrap`:
+
+```sh
+COOLDIS_APP_SERVER_TOKEN="<token>" \
+  cooldis debug rpc call thread/list
 ```
 
 Both transports authenticate every connection before any method dispatch; see
-the Authentication section below. Both paths accept WebSocket frames, handle
+[Authentication](#authentication). A TCP WebSocket client must present a
+bearer token. A same-uid Unix socket peer needs no token in local mode. Both
+paths accept WebSocket frames, handle
 Codex-style JSON-RPC without requiring a `jsonrpc` field, and expose the V1
 method subset needed by Codex remote clients.
 The direct app-server command currently uses the deterministic local/offline
 provider. The TCP WebSocket listener also serves `GET /healthz` and `GET
 /readyz` with a small JSON `200 OK` response.
+
+`cooldis rpc` also accepts `--runtime-home` and `--cwd`. Without
+`--state-home`, it creates a fresh per-process temporary state home and prints
+that path at startup. Use an explicit state home when minting a credential for
+a TCP WebSocket client. A Unix socket server can be started with:
+
+```sh
+cooldis rpc \
+  --listen unix:///tmp/cooldis.sock \
+  --state-home "$HOME/.cooldis/rpc-quick-start-state"
+```
 
 `cooldis console` starts the same loopback app-server shape for local browser
 operation, binds `127.0.0.1:<port>`, serves the bundled Svelte console from `/`,
@@ -62,13 +93,15 @@ With a prompt argument, it opens the terminal console and submits that prompt:
 cargo run --bin cooldis -- chat "hello from cooldis"
 ```
 
-`cooldis debug rpc` connects to a running daemon's WebSocket app server instead
-of starting a private one. It is useful for protocol debugging and for checking
-the live daemon state from scripts:
+`cooldis debug rpc` connects to a running standalone or daemon WebSocket app
+server instead of starting a private one. It is useful for protocol debugging
+and for checking live state from scripts. Export the credential first so each
+command presents it:
 
 ```sh
-cargo run --bin cooldis -- debug rpc call thread/list
-cargo run --bin cooldis -- debug rpc call thread/read '{"threadId":"...","includeTurns":false}'
+export COOLDIS_APP_SERVER_TOKEN="<token>"
+cooldis debug rpc call thread/list
+cooldis debug rpc call thread/read '{"threadId":"...","includeTurns":false}'
 ```
 
 By default it connects to `ws://127.0.0.1:49200/rpc`. Pass `--url` for another
@@ -76,9 +109,9 @@ running WebSocket endpoint, or `--config` to read `daemon.app_server.listen`
 from a `cooldis.toml`:
 
 ```sh
-cargo run --bin cooldis -- debug rpc turn --new "hello from the daemon"
-cargo run --bin cooldis -- debug rpc turn --thread <thread-id> --json "resume here"
-cargo run --bin cooldis -- debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
+cooldis debug rpc turn --new "hello from the daemon"
+cooldis debug rpc turn --thread <thread-id> --json "resume here"
+cooldis debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 ```
 
 `cooldis debug bind` answers why a thread has its effective configuration by
