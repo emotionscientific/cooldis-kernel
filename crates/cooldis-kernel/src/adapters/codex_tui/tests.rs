@@ -14,6 +14,19 @@ fn codex_tui_connect_config_redacts_bearer_token() {
 }
 
 #[test]
+fn rpc_client_errors_render_without_the_runtime_factory_prefix() {
+    assert_eq!(
+        tui_error("failed to connect to the Cooldis RPC endpoint `ws://127.0.0.1:1/rpc`")
+            .to_string(),
+        "failed to connect to the Cooldis RPC endpoint `ws://127.0.0.1:1/rpc`"
+    );
+    assert_eq!(
+        CooldisError::RuntimeFactory("fixture failure".to_string()).to_string(),
+        "runtime factory failed: fixture failure"
+    );
+}
+
+#[test]
 fn codex_tui_initialize_request_uses_codex_remote_shape() {
     let message = JsonRpcMessage::Request(JsonRpcRequest {
         id: RequestId::String("initialize".to_string()),

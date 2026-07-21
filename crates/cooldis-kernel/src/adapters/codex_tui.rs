@@ -118,11 +118,11 @@ impl CodexTuiTestClient<UnixStream> {
         let endpoint = format!("unix://{}", socket_path.display());
         let mut request = CODEX_TUI_UDS_WEBSOCKET_HANDSHAKE_URL
             .into_client_request()
-            .map_err(|err| tui_error(format!("invalid UDS websocket handshake URL: {err}")))?;
+            .map_err(|err| tui_error(format!("invalid Cooldis RPC handshake URL: {err}")))?;
         set_bearer_token(&mut request, config.bearer_token.as_deref())?;
         let stream = UnixStream::connect(&socket_path).await.map_err(|err| {
             tui_error(format!(
-                "failed to connect Codex TUI test client to `{endpoint}`: {err}"
+                "failed to connect to the Cooldis RPC endpoint `{endpoint}`: {err}"
             ))
         })?;
         let (websocket, _) =
@@ -130,7 +130,7 @@ impl CodexTuiTestClient<UnixStream> {
                 .await
                 .map_err(|err| {
                     tui_error(format!(
-                        "failed to upgrade Codex TUI test client at `{endpoint}`: {err}"
+                        "failed to connect to the Cooldis RPC endpoint `{endpoint}`: {err}"
                     ))
                 })?;
         Self::connect_with_websocket(websocket, endpoint, config).await
@@ -146,11 +146,11 @@ impl CodexTuiTestClient<TcpStream> {
         let authority = websocket_tcp_authority(url)?;
         let mut request = url
             .into_client_request()
-            .map_err(|err| tui_error(format!("invalid TCP websocket URL `{endpoint}`: {err}")))?;
+            .map_err(|err| tui_error(format!("invalid Cooldis RPC URL `{endpoint}`: {err}")))?;
         set_bearer_token(&mut request, config.bearer_token.as_deref())?;
         let stream = TcpStream::connect(authority).await.map_err(|err| {
             tui_error(format!(
-                "failed to connect Codex TUI test client to `{endpoint}`: {err}"
+                "failed to connect to the Cooldis RPC endpoint `{endpoint}`: {err}"
             ))
         })?;
         let (websocket, _) =
@@ -158,7 +158,7 @@ impl CodexTuiTestClient<TcpStream> {
                 .await
                 .map_err(|err| {
                     tui_error(format!(
-                        "failed to upgrade Codex TUI test client at `{endpoint}`: {err}"
+                        "failed to connect to the Cooldis RPC endpoint `{endpoint}`: {err}"
                     ))
                 })?;
         Self::connect_with_websocket(websocket, endpoint, config).await
@@ -377,7 +377,7 @@ where
             tokio::select! {
                 _ = &mut deadline => {
                     return Err(tui_error(format!(
-                        "timed out waiting for Codex TUI turn `{turn_id}` to complete"
+                        "timed out waiting for Cooldis RPC turn `{turn_id}` to complete"
                     )));
                 }
                 event = self.next_event() => {
@@ -414,7 +414,7 @@ where
                         }
                         CodexTuiEvent::Error(error) => {
                             return Err(tui_error(format!(
-                                "Codex TUI test client received JSON-RPC error {}: {}",
+                                "Cooldis RPC client received JSON-RPC error {}: {}",
                                 error.error.code,
                                 error.error.message
                             )));
@@ -456,7 +456,7 @@ where
                 }
                 CodexTuiEvent::Error(error) if error.id == id => {
                     return Err(tui_error(format!(
-                        "Codex TUI request `{method}` failed: {}",
+                        "request `{method}` was refused: {}",
                         error.error.message
                     )));
                 }
@@ -489,8 +489,8 @@ where
                 .websocket
                 .next()
                 .await
-                .ok_or_else(|| tui_error("Codex TUI websocket closed"))?
-                .map_err(|err| tui_error(format!("Codex TUI websocket read failed: {err}")))?;
+                .ok_or_else(|| tui_error("Cooldis RPC connection closed"))?
+                .map_err(|err| tui_error(format!("Cooldis RPC connection read failed: {err}")))?;
             match message {
                 Message::Text(text) => return jsonrpc_event_from_text(&text),
                 Message::Close(frame) => {
@@ -500,7 +500,7 @@ where
                         .filter(|reason| !reason.is_empty())
                         .unwrap_or_else(|| "connection closed".to_string());
                     return Err(tui_error(format!(
-                        "Codex TUI websocket closed by remote: {reason}"
+                        "Cooldis RPC connection was closed by the endpoint: {reason}"
                     )));
                 }
                 Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
@@ -512,7 +512,7 @@ where
         self.websocket
             .close(None)
             .await
-            .map_err(|err| tui_error(format!("failed to close Codex TUI websocket: {err}")))
+            .map_err(|err| tui_error(format!("failed to close Cooldis RPC connection: {err}")))
     }
 }
 
@@ -560,7 +560,7 @@ where
                 }
                 CodexTuiEvent::Error(error) if error.id == initialize_request_id => {
                     break Err(tui_error(format!(
-                        "remote app server at `{endpoint}` rejected initialize: {}",
+                        "Cooldis RPC endpoint `{endpoint}` refused initialization: {}",
                         error.error.message
                     )));
                 }
@@ -595,15 +595,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let payload = serde_json::to_string(&message)
-        .map_err(|err| tui_error(format!("failed to encode Codex TUI JSON-RPC: {err}")))?;
+        .map_err(|err| tui_error(format!("failed to encode Cooldis RPC message: {err}")))?;
     websocket
         .send(Message::Text(payload.into()))
         .await
-        .map_err(|err| {
-            tui_error(format!(
-                "failed to write Codex TUI websocket message: {err}"
-            ))
-        })
+        .map_err(|err| tui_error(format!("failed to write Cooldis RPC message: {err}")))
 }
 
 async fn read_jsonrpc_event<S>(websocket: &mut WebSocketStream<S>) -> CooldisResult<CodexTuiEvent>
@@ -614,8 +610,8 @@ where
         let message = websocket
             .next()
             .await
-            .ok_or_else(|| tui_error("Codex TUI websocket closed"))?
-            .map_err(|err| tui_error(format!("Codex TUI websocket read failed: {err}")))?;
+            .ok_or_else(|| tui_error("Cooldis RPC connection closed"))?
+            .map_err(|err| tui_error(format!("Cooldis RPC connection read failed: {err}")))?;
         match message {
             Message::Text(text) => return jsonrpc_event_from_text(&text),
             Message::Close(frame) => {
@@ -625,7 +621,7 @@ where
                     .filter(|reason| !reason.is_empty())
                     .unwrap_or_else(|| "connection closed".to_string());
                 return Err(tui_error(format!(
-                    "Codex TUI websocket closed by remote: {reason}"
+                    "Cooldis RPC connection was closed by the endpoint: {reason}"
                 )));
             }
             Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
@@ -635,7 +631,7 @@ where
 
 fn jsonrpc_event_from_text(text: &str) -> CooldisResult<CodexTuiEvent> {
     match serde_json::from_str::<JsonRpcMessage>(text)
-        .map_err(|err| tui_error(format!("invalid Codex TUI JSON-RPC message: {err}")))?
+        .map_err(|err| tui_error(format!("invalid Cooldis RPC message: {err}")))?
     {
         JsonRpcMessage::Notification(notification) => Ok(CodexTuiEvent::Notification(notification)),
         JsonRpcMessage::Request(request) => Ok(CodexTuiEvent::Request(request)),
@@ -678,19 +674,19 @@ fn codex_tui_websocket_config() -> WebSocketConfig {
 fn websocket_tcp_authority(url: &str) -> CooldisResult<&str> {
     let rest = url
         .strip_prefix("ws://")
-        .ok_or_else(|| tui_error(format!("TCP websocket URL must start with ws://: {url:?}")))?;
+        .ok_or_else(|| tui_error(format!("Cooldis RPC URL must start with ws://: {url:?}")))?;
     let authority = rest
         .split_once('/')
         .map(|(authority, _)| authority)
         .unwrap_or(rest);
     if authority.is_empty() {
-        return Err(tui_error("TCP websocket URL requires host:port"));
+        return Err(tui_error("Cooldis RPC URL requires host:port"));
     }
     Ok(authority)
 }
 
 fn tui_error(message: impl Into<String>) -> CooldisError {
-    CooldisError::RuntimeFactory(message.into())
+    CooldisError::RpcClient(message.into())
 }
 
 #[cfg(test)]

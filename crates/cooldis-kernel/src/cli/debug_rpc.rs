@@ -179,10 +179,19 @@ pub(super) async fn run_debug_rpc_tail(args: Vec<OsString>) -> CooldisResult<()>
                 )));
             }
             Ok(CodexTuiEvent::Request(_) | CodexTuiEvent::Response(_)) => {}
-            Err(err) if err.to_string().contains("websocket closed") => return Ok(()),
+            Err(err) if rpc_connection_was_closed(&err) => return Ok(()),
             Err(err) => return Err(err),
         }
     }
+}
+
+fn rpc_connection_was_closed(err: &CooldisError) -> bool {
+    matches!(
+        err,
+        CooldisError::RpcClient(message)
+            if message == "Cooldis RPC connection closed"
+                || message.starts_with("Cooldis RPC connection was closed by the endpoint:")
+    )
 }
 
 pub(super) fn print_debug_rpc_help() {

@@ -128,3 +128,19 @@ fn notification_error_detection_handles_failed_completed_turn() {
         "provider failed"
     );
 }
+
+#[test]
+fn rpc_tail_treats_remote_connection_close_as_success() {
+    assert!(rpc_connection_was_closed(&CooldisError::RpcClient(
+        "Cooldis RPC connection closed".to_string()
+    )));
+    assert!(rpc_connection_was_closed(&CooldisError::RpcClient(
+        "Cooldis RPC connection was closed by the endpoint: going away".to_string()
+    )));
+    assert!(!rpc_connection_was_closed(&CooldisError::RpcClient(
+        "Cooldis RPC connection read failed: reset".to_string()
+    )));
+    assert!(!rpc_connection_was_closed(&CooldisError::RuntimeFactory(
+        "Cooldis RPC connection closed".to_string()
+    )));
+}
