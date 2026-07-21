@@ -28,6 +28,3 @@ crates/cooldis-kernel/src/bin/cooldis-wafer-glm-host-author-smoke.rs
 
 # Upstream Codex test fixtures can be too large for this repo's commit hooks.
 vendor/codex/codex-rs/tui/tests/fixtures/oss-story.jsonl
-
-# Local worktrees and their shared caches live under .wt; never commit them.
-.wt/

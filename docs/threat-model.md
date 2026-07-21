@@ -49,8 +49,8 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Severity: High
 - Threat: A process that reaches the daemon Unix socket or loopback WebSocket could invoke process, filesystem, provider-auth, approval, mandate, and binding methods without an application identity, and a guessable console token or loose socket permissions would widen that reach.
 - Affected surface: `crates/cooldis-kernel/src/adapters/app_server/mod.rs`, `crates/cooldis-kernel/src/adapters/app_server/connection.rs`
-- Mitigation: Existing: every connection resolves a principal before any method dispatch (bearer token on both transports, exact console subprotocol carrier, same-uid peer mapping in local mode only); failed authentication returns a uniform 401, opens no session, and is witnessed; the socket file is chmod 0o600; the console credential is minted from the identity authority per construction (CSPRNG token shown once, at most one active per state home); every dispatched method is authorized by authority class at the dispatcher with unknown methods failing closed to Host.
-- Deterministic guard: `crates/cooldis-kernel/tests/boundary_auth.rs` pins accepted/rejected/expired/revoked tokens, unauthenticated 401s on both transports, socket mode, forged peer uid rejection, adapter/operator authorization splits, and the console credential lifecycle; the exhaustive classification test in `crates/cooldis-kernel/src/adapters/app_server/tests.rs` fails on any unclassified dispatch arm.
+- Mitigation: Existing: every RPC WebSocket connection resolves a principal before any method dispatch (bearer token on both transports, exact console subprotocol carrier, same-uid peer mapping in local mode only); failed authentication returns a uniform 401, opens no session, and is witnessed; the socket file is chmod 0o600; the console credential is minted from a 256-bit CSPRNG secret per construction, only its digest is persisted, and at most one is active per state home; every dispatched method is authorized by authority class at the dispatcher with unknown methods failing closed to Host.
+- Deterministic guard: `crates/cooldis-kernel/tests/boundary_auth.rs` pins accepted/rejected/expired/revoked tokens, unauthenticated 401s on both transports, socket mode, adapter/operator authorization splits, and the console credential lifecycle; `unix_peer_mapping_rejects_a_uid_other_than_the_daemon_euid` and the exhaustive classification test in `crates/cooldis-kernel/src/adapters/app_server/tests.rs` pin mismatched peer rejection and fail on any unclassified dispatch arm.
 
 ## TM-INGRESS-003: MCP and ACP stdio delegate daemon authority without a principal
 
@@ -58,7 +58,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Severity: Medium
 - Threat: The MCP and ACP processes accept requests from any writer on their stdio pipes and proxy them to the daemon socket without a caller identity or delegated capability set. A launcher, plugin host, or future network wrapper can accidentally grant broader daemon authority than intended.
 - Affected surface: `crates/cooldis-kernel/src/adapters/mcp_server.rs`, `crates/cooldis-kernel/src/adapters/acp_agent.rs`, `crates/cooldis-kernel/src/bin/cooldis-mcp-server.rs`, `crates/cooldis-kernel/src/bin/cooldis-acp-agent.rs`
-- Mitigation: Existing: the daemon side of the projection now authenticates like any client (the connection presents a credential, resolves to a principal, and is authorized per method at the dispatcher), so a projection can no longer exceed the authority of the principal it presents. Required: define the launcher as an explicit trust boundary, issue least-authority daemon credentials per projection, and require authentication in any non-stdio wrapper.
+- Mitigation: Existing: the daemon side resolves the projection connection to a principal through a credential, or through the local-mode same-uid mapping, and authorizes each method at the dispatcher. The projection cannot exceed that resolved principal's authority, but a local launcher still delegates the full peer-mapped operator. Required: define the launcher as an explicit trust boundary, issue least-authority daemon credentials per projection, and require authentication in any non-stdio wrapper.
 - Deterministic guard: `crates/cooldis-kernel/tests/boundary_auth.rs` pins per-principal method authorization on the daemon socket. Required: projection tests that prove the delegated method set and reject credentials or methods outside it.
 
 ## TM-INGRESS-004: Debug RPC inherits the control plane's transport weakness
@@ -77,7 +77,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Threat: Mapping a same-uid Unix peer to the operator principal is a convenience for the host user, but a daemon-spawned process reconnecting through the socket runs as the same uid; if peer mapping applied in a managed deployment, an agent workload could re-enter the control plane as the operator.
 - Affected surface: `crates/cooldis-kernel/src/adapters/app_server/mod.rs`, `crates/cooldis-kernel/src/daemon/identity.rs`
 - Mitigation: Existing: peer mapping applies in `local` mode only and compares the peer uid against the daemon's effective uid; `managed` mode never maps a peer and requires a credential on every connection, witnessing the refusal.
-- Deterministic guard: `crates/cooldis-kernel/tests/boundary_auth.rs` pins same-uid mapping in local mode, the managed-mode refusal with a `PeerMappingDisabled` witness, and rejection of a forged mismatched uid.
+- Deterministic guard: `crates/cooldis-kernel/tests/boundary_auth.rs` pins same-uid mapping in local mode and the managed-mode refusal with a `PeerMappingDisabled` witness; `unix_peer_mapping_rejects_a_uid_other_than_the_daemon_euid` in `crates/cooldis-kernel/src/adapters/app_server/tests.rs` pins the mismatched-uid refusal and witness.
 
 ## TM-INGRESS-006: A managed daemon must not start with synthesized identity
 
@@ -86,7 +86,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Threat: If a managed-mode daemon could start with a missing or partial `[daemon.identity]` section, it would silently run with synthesized local defaults (permissive tenant, no expected principals) while operators believed managed-mode guarantees applied.
 - Affected surface: `crates/cooldis-kernel/src/daemon/identity.rs`, `crates/cooldis-kernel/src/daemon/daemon_config.rs`, `crates/cooldis-kernel/src/cli/daemon.rs`
 - Mitigation: Existing: `managed` mode hard-fails at startup unless `tenant_id` and `console_principal` are present and non-blank; the config layer merge is section-atomic so a managed overlay cannot inherit a lower layer's tenant; the CLI revalidates before constructing the app server; local-mode synthesis lives in exactly one code site.
-- Deterministic guard: config tests pin blank-field hard fails and section-atomic merges (`daemon/daemon_config/tests.rs`, `daemon/identity.rs` unit tests); `cli/daemon/tests.rs` pins a managed identity TOML reaching the initialized boundary authority through the production constructor.
+- Deterministic guard: config tests pin blank-field hard fails and section-atomic merges (`crates/cooldis-kernel/src/daemon/daemon_config/tests.rs`, `crates/cooldis-kernel/src/daemon/identity.rs` unit tests); `crates/cooldis-kernel/src/cli/daemon/tests.rs` pins a managed identity TOML reaching the initialized boundary authority through the production constructor.
 
 ## Authority and authorization
 
@@ -112,10 +112,10 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 
 - Status: OPEN
 - Severity: High
-- Threat: App-server methods can approve suspended tool calls and start or revoke recurring mandates after only the protocol initialize step. The durable records identify the thread and decision but not the authenticated operator or authorization policy.
+- Threat: Boundary authority classes now gate approval and mandate methods, but the durable approval and mandate records identify the thread and decision without the authenticated actor or authorization policy. They cannot prove who approved or mutated the record, or prevent an executing agent principal from approving itself once agent principals exist.
 - Affected surface: `crates/cooldis-kernel/src/adapters/app_server/connection.rs`, `crates/cooldis-kernel/src/kernel/mandate_lifecycle.rs`
 - Mitigation: Existing: `approval/resolve` is Host-class (adapter principals are refused) and writes a durable host-effect witness row naming the acting session, principal, and method before the effect proceeds; mandate mutation requires an authenticated Interactive-or-above principal. Required: persist the acting principal into the approval and mandate records themselves, and prevent self-approval by the executing agent principal.
-- Deterministic guard: `crates/cooldis-kernel/tests/boundary_auth.rs` pins the adapter refusal and host-effect witness rows. Required: denied-control tests for cross-tenant and self-approval callers.
+- Deterministic guard: the exhaustive table test in `crates/cooldis-kernel/src/adapters/app_server/tests.rs` pins `approval/resolve` as Host and mandate mutation as Interactive; `crates/cooldis-kernel/tests/boundary_auth.rs` pins the generic adapter-to-Host refusal and fail-closed host-effect witness path. Required: approval-specific actor-provenance, cross-tenant, and self-approval denied controls.
 
 ## TM-AUTHZ-004: Runtime coordinate checks isolate tenant and session topology
 
@@ -305,7 +305,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Threat: Each accepted app-server connection creates detached tasks and an unbounded outbound channel, while a single WebSocket message may be 128 MiB. A local attacker or compromised client can consume memory and task capacity faster than the runtime drains it.
 - Affected surface: `crates/cooldis-kernel/src/adapters/app_server/mod.rs`, `crates/cooldis-kernel/src/adapters/app_server/subscriptions.rs`
 - Mitigation: Existing: the pre-authentication handshake is bounded (10-second per-stage deadline, 8 KiB header cap), so unauthenticated peers cannot hold accept-path resources indefinitely. Required: cap concurrent connections, use bounded outbound queues with explicit slow-consumer behavior, reduce or budget message size, and add request deadlines.
-- Deterministic guard: None. Required: overload tests for connection count, message size, stalled writers, and subscription fanout.
+- Deterministic guard: `pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives` and `oversized_pre_upgrade_headers_fail_closed_with_one_witness` in `crates/cooldis-kernel/src/adapters/app_server/tests.rs` pin the handshake deadline and header cap. Required: overload tests for connection count, message size, stalled writers, and subscription fanout.
 
 ## TM-DOS-003: Async process count, idle lifetime, and normal output are bounded
 

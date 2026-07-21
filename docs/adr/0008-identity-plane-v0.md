@@ -388,9 +388,19 @@ builds two kinds, not three.
 ## Addendum: as shipped (2026-07-20)
 
 Phase 2 landed as four kernel changes (records and CLI, boundary
-authentication, dispatcher authorization, config wiring). The decisions above
-stand. Three places where the shipped mechanism refines the ratified wording,
-recorded here so the ADR stays truthful without rewriting history:
+authentication, dispatcher authorization, config wiring). The policy direction
+above stands, but the shipped persistence and enforcement differ from the
+ratified wording in several places. They are recorded here so the ADR stays
+truthful without rewriting history:
+
+- **D1, D2, and D6, "witnessed events" and "the fold":** principals,
+  credentials, sessions, authentication and authorization rejections, and
+  host effects are durable rows in identity-owned SQLite tables sharing the
+  session store's single-writer lane. They are not events on the runtime stream,
+  and the authority reads the tables directly instead of rebuilding or
+  refreshing a boundary cache. A mint or revoke is therefore visible to the
+  next connection without a restart. Projecting these records onto the event
+  stream, if ever needed, must not weaken the current fail-closed writes.
 
 - **D5, "removed from code":** the `cooldis_app_server` / `local_user` defaults
   were not deleted as strings; they live in exactly one site,
@@ -399,19 +409,32 @@ recorded here so the ADR stays truthful without rewriting history:
   them: `validate()` hard-fails a managed config whose `tenant_id` or
   `console_principal` is missing or blank. The single identity projection into
   the app server is `CooldisAppServerConfig::apply_daemon_identity_config`.
-- **D6, "emit witnessed events":** session open/close, authentication and
-  authorization rejections, and host-authority effects are witnessed as durable
-  rows in identity-owned SQLite tables sharing the session store's single
-  writer lane, not as events on the runtime stream. The row shapes are the new
-  record shapes this section promised; projecting identity witnessing onto the
-  event stream, if ever needed, is future work and must not weaken the
-  fail-closed row write (a failed witness blocks the effect).
 - **D6, ingress-principal projection:** the `caller:{session_id}` stamp needed
   a durable carrier immediately, so RPC-originated ingress carries the caller
   principal as a forward-compatible `principal` property on the
   `io.ingress.received/1` payload, included in the canonical digest. The typed
   schema evolution remains EMO-494 and inherits a compatibility constraint:
   records in the property form are in the wild as of this landing.
+
+Four ratified requirements are not fully enforced by the shipped code and
+remain design questions rather than documentation conventions:
+
+- Managed config validation hard-fails missing or blank `tenant_id` and
+  `console_principal`, but a headless daemon does not verify at startup that the
+  configured principal exists or has an active credential. Operators must
+  bootstrap the same state home before starting the daemon.
+- Authorization refusals are witnessed, and the explicit
+  `HOST_EFFECT_METHODS` subset is witnessed before the effect. Successful
+  Interactive reads and other allowed non-effect calls are not recorded as
+  individual authorization decisions, so the Context invariant's "every
+  authorization decision, allow or deny" is not fully shipped.
+- Client names do not constrain principal kind. `cooldis debug rpc` uses the
+  same bearer-token path as other clients and therefore acts with the class of
+  whichever credential it presents; it is not independently forced to an
+  operator principal.
+- `cooldis console` constructs a private local-mode app server and does not
+  apply `[daemon.identity]`. Its CSPRNG credential lifecycle is implemented,
+  but the command is not a console client for a running managed daemon.
 
 Two authorization behaviors were decided during implementation review and are
 part of the shipped policy:

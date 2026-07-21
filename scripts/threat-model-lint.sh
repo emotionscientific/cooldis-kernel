@@ -10,7 +10,17 @@ doc="docs/threat-model.md"
 
 problems=()
 
-ids=$(grep -oE '^## TM-[A-Z]+-[0-9]{3}' "$doc" | sed 's/^## //')
+header_report=$(awk '
+  /^#+[[:space:]]+TM-/ && $0 !~ /^## TM-[A-Z]+-[0-9][0-9][0-9]: [^[:space:]].*$/ {
+    print "malformed threat header: " $0
+  }
+' "$doc")
+if [[ -n "$header_report" ]]; then
+  while IFS= read -r line; do problems+=("$line"); done <<<"$header_report"
+fi
+
+ids=$(grep -E '^## TM-[A-Z]+-[0-9]{3}: [^[:space:]]' "$doc" \
+  | sed -E 's/^## (TM-[A-Z]+-[0-9]{3}): .*/\1/' || true)
 
 dupes=$(sort <<<"$ids" | uniq -d)
 [[ -z "$dupes" ]] || problems+=("duplicate threat ids: $(tr '\n' ' ' <<<"$dupes")")
@@ -48,11 +58,12 @@ if [[ -n "$field_report" ]]; then
   while IFS= read -r line; do problems+=("$line"); done <<<"$field_report"
 fi
 
-bad_status=$(grep -E '^- Status:' "$doc" | grep -vE '^- Status: (OPEN|MITIGATED)$' || true)
+bad_status=$(grep -E '^- Status:' "$doc" | grep -vE '^- Status: (OPEN|MITIGATED|ACCEPTED)$' || true)
 [[ -z "$bad_status" ]] || problems+=("unknown status value(s): $(tr '\n' ' ' <<<"$bad_status")")
 
 if ((${#problems[@]} > 0)); then
   printf 'threat-model-lint: %s\n' "${problems[@]}" >&2
   exit 1
 fi
-echo "threat-model lint passed ($(wc -l <<<"$ids" | tr -d ' ') entries)"
+entry_count=$(awk 'NF { count++ } END { print count + 0 }' <<<"$ids")
+echo "threat-model lint passed ($entry_count entries)"
