@@ -217,7 +217,7 @@ pub struct IoPrincipal {
     pub tenant_id: String,
     pub principal_id: String,
     /// How attribution happened: "mandate:{event_id}", "route:{route_id}",
-    /// or a caller-auth scheme once boundary authentication lands.
+    /// or "caller:{session_id}" for authenticated RPC ingress.
     pub via: String,
 }
 

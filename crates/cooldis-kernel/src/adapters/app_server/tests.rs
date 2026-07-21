@@ -8,6 +8,7 @@ use super::threads::{
     turn_input_from_values, user_input_preview,
 };
 use super::*;
+use crate::daemon::identity::{AuthorityClass, authority_class_for_method};
 use crate::{
     CHANNEL_EMIT_OPERATION, COOLDIS_NOTIFY_PACKAGE, COOLDIS_PROCESS_PACKAGE,
     COOLDIS_SCHEDULE_PACKAGE, COOLDIS_THREADS_PACKAGE, EffectClass, EventKind, EventOrigin,
@@ -21,6 +22,127 @@ use crate::{
     THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY, THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL,
     TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig, ThinkingEffort,
 };
+
+#[test]
+fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
+    use AuthorityClass::{Host, Ingress, Interactive};
+
+    const EXPECTED: &[(&str, AuthorityClass)] = &[
+        ("account/read", Interactive),
+        ("account/rateLimits/read", Interactive),
+        ("app/list", Interactive),
+        ("capsule/binding/set", Host), // lexicon-allow: capsule - existing RPC method.
+        ("capsule/binding/delete", Host), // lexicon-allow: capsule - existing RPC method.
+        ("capsule/binding/list", Host), // lexicon-allow: capsule - existing RPC method.
+        ("capsule/binding/resolve", Host), // lexicon-allow: capsule - existing RPC method.
+        ("agent/list", Interactive),
+        ("agent/read", Interactive),
+        ("agent/plan", Interactive),
+        ("agent/publish", Host),
+        ("operation/list", Interactive),
+        ("command/exec", Host),
+        ("command/exec/write", Host),
+        ("command/exec/terminate", Host),
+        ("command/exec/resize", Host),
+        ("model/list", Interactive),
+        ("modelProvider/capabilities/read", Interactive),
+        ("modelProvider/list", Host),
+        ("modelProvider/read", Host),
+        ("modelProvider/upsert", Host),
+        ("modelProvider/delete", Host),
+        ("modelProvider/auth/status", Host),
+        ("modelProvider/auth/set", Host),
+        ("modelProvider/auth/delete", Host),
+        ("experimentalFeature/list", Interactive),
+        ("experimentalFeature/enablement/set", Interactive),
+        ("getAuthStatus", Interactive),
+        ("getConversationSummary", Host),
+        ("thread/start", Host),
+        ("thread/spawn", Host),
+        ("thread/submit", Interactive),
+        ("thread/fork", Interactive),
+        ("thread/rebindFork", Host),
+        ("thread/resume", Host),
+        ("thread/read", Interactive),
+        ("thread/events/list", Interactive),
+        ("thread/couplings/list", Interactive),
+        ("thread/approvals/list", Interactive),
+        ("thread/waiting/list", Interactive),
+        ("approval/resolve", Host),
+        ("mandate/start", Interactive),
+        ("mandate/revoke", Interactive),
+        ("mandate/list", Interactive),
+        ("thread/debug/export", Host),
+        ("thread/list", Interactive),
+        ("thread/loaded/list", Interactive),
+        ("thread/unsubscribe", Interactive),
+        ("thread/name/set", Interactive),
+        ("thread/metadata/update", Interactive),
+        ("thread/compact/start", Interactive),
+        ("thread/shellCommand", Host),
+        ("turn/start", Ingress),
+        ("turn/steer", Interactive),
+        ("turn/interrupt", Interactive),
+        ("skills/list", Interactive),
+        ("plugin/list", Interactive),
+        ("hooks/list", Interactive),
+        ("mcpServerStatus/list", Host),
+        ("mcpSource/list", Host),
+        ("mcpSource/read", Host),
+        ("mcpSource/upsert", Host),
+        ("mcpSource/discover", Host),
+        ("mcpSource/delete", Host),
+        ("mcpSource/testTool", Host),
+        ("mcpSource/manifestPatch", Host),
+        ("fs/readFile", Host),
+        ("fs/writeFile", Host),
+        ("fs/createDirectory", Host),
+        ("fs/getMetadata", Host),
+        ("fs/readDirectory", Host),
+        ("fs/remove", Host),
+        ("fs/copy", Host),
+        ("fs/watch", Host),
+        ("fs/unwatch", Host),
+        ("config/read", Interactive),
+        ("configRequirements/read", Interactive),
+    ];
+
+    let dispatch_source = include_str!("connection.rs")
+        .split_once("pub(super) async fn dispatch_request")
+        .expect("dispatch_request source")
+        .1
+        .split_once("pub(super) async fn mcp_server_status_list")
+        .expect("method following dispatch_request")
+        .0;
+    let dispatch_methods = dispatch_source
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let rest = line.strip_prefix('"')?;
+            rest.split_once("\" =>").map(|(method, _)| method)
+        })
+        .collect::<Vec<_>>();
+    let expected_methods = EXPECTED
+        .iter()
+        .map(|(method, _)| *method)
+        .collect::<Vec<_>>();
+
+    assert_eq!(dispatch_methods, expected_methods);
+    assert_eq!(DISPATCH_METHOD_AUTHORITY_CLASSES, EXPECTED);
+    for (method, expected_class) in EXPECTED {
+        assert_eq!(
+            authority_class_for_method(method),
+            *expected_class,
+            "authority class drifted for {method}"
+        );
+    }
+    for method in HOST_EFFECT_METHODS {
+        assert!(
+            EXPECTED.contains(&(*method, Host)),
+            "host-effect witness method must have Host authority: {method}"
+        );
+    }
+}
 
 #[test]
 fn jsonrpc_decodes_initialize_without_jsonrpc_field() {
@@ -152,7 +274,7 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     use crate::EventStore;
 
     let app = test_app().await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -241,7 +363,7 @@ async fn concurrent_new_thread_turn_burst_surfaces_no_history_lock_errors() {
         let app = app.clone();
         let barrier = Arc::clone(&barrier);
         tasks.spawn(async move {
-            let (connection, _outbound_rx) = test_connection(app.clone());
+            let (connection, _outbound_rx) = test_connection(app.clone()).await;
             initialize_for_test(&connection).await;
             barrier.wait().await;
             let thread = app
@@ -472,7 +594,7 @@ fn reconcile_turn_assistant_text_keeps_prior_stream_when_saved_text_diverges() {
 #[tokio::test]
 async fn thread_compact_start_dispatches_to_runtime() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -585,7 +707,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
     drop(metadata_store);
 
     let app = CooldisAppServer::new_local(config.clone()).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let initial = app
@@ -730,7 +852,7 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
         .await
         .unwrap();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let list = app
@@ -799,7 +921,7 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
     let app = CooldisAppServer::new_local(config.clone()).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let created = app
@@ -895,7 +1017,7 @@ async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let inline = app
@@ -1002,7 +1124,7 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
         .await
         .unwrap();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let deleted = app
@@ -1094,7 +1216,7 @@ async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
         .unwrap();
 
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let user_db =
@@ -1222,7 +1344,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
     let metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let (mcp_url, mcp_task) = spawn_app_mcp_http_fixture("string").await;
 
@@ -1393,7 +1515,7 @@ server_ref = "mcp://arcade"
         )
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let preview = app
@@ -1486,7 +1608,7 @@ async fn agent_query_methods_project_local_registry_records() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let list = app
@@ -1615,7 +1737,7 @@ async fn agent_plan_validates_source_and_manifest_without_writes() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let source = r#"
@@ -1711,7 +1833,7 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let read = app
@@ -1797,7 +1919,7 @@ async fn operation_list_projects_published_registry_records() {
         CapsuleBindingsConfig::default().with_registry_root(&registry_root),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let list = app
@@ -1854,7 +1976,7 @@ async fn registry_roots_resolve_against_configured_cwd() {
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let agents = app
@@ -1926,7 +2048,7 @@ async fn model_list_projects_catalog_provider_models() {
     )
     .await
     .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let models = app
@@ -1990,7 +2112,7 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
     )
     .await
     .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let models = app
@@ -2034,7 +2156,7 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
     let metadata_path = config.metadata_store_path();
 
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app);
+    let (connection, _outbound_rx) = test_connection(app).await;
     initialize_for_test(&connection).await;
 
     let thread_start = connection
@@ -2080,7 +2202,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
     config.agent_registry_root = root.join("agents");
 
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let started = app
         .dispatch_request(&connection, "thread/start", Some(json!({})))
@@ -2297,7 +2419,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
     assert_eq!(default_record.tool_count, 0);
     assert_eq!(default_record.resource_count, 0);
 
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread_start = app
         .dispatch_request(
@@ -2402,7 +2524,7 @@ async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_on
         config: BTreeMap::new(),
     };
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let rejected = app
@@ -2472,7 +2594,7 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
         config: BTreeMap::new(),
     };
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let started = app
         .dispatch_request(
@@ -2633,7 +2755,7 @@ allow = ["default_cwd"]
     )
     .await
     .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -2796,7 +2918,7 @@ allow = ["default_cwd"]
     )
     .await
     .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let model_err = app
@@ -3081,7 +3203,7 @@ async fn startup_publishes_cooldis_threads_and_default_manifest_direct_rows() {
         );
     }
 
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread_start = app
         .dispatch_request(&connection, "thread/start", Some(json!({})))
@@ -3218,7 +3340,7 @@ streaming = false
         CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
         .dispatch_request(
@@ -3337,7 +3459,7 @@ streaming = false
     )
     .await
     .unwrap();
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -3582,7 +3704,7 @@ streaming = false
     )
     .await
     .unwrap();
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -3833,7 +3955,7 @@ budget_share = 0.75
     )
     .await
     .unwrap();
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -3965,7 +4087,7 @@ streaming = false
         CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let err = app
         .dispatch_request(
@@ -4076,7 +4198,7 @@ streaming = false
         CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -4190,7 +4312,7 @@ max_tool_rounds = 64
     )
     .await
     .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
         .dispatch_request(&connection, "thread/start", Some(json!({})))
@@ -4404,7 +4526,7 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
         config.model = "echo-v1".to_string();
         metadata_path = config.metadata_store_path();
         let app = CooldisAppServer::new_local(config).await.unwrap();
-        let (connection, _outbound_rx) = test_connection(app.clone());
+        let (connection, _outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread_start = app
@@ -4432,7 +4554,7 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
     restarted_config.agent_registry_root = agent_registry_root.clone();
     restarted_config.model = "echo-v2".to_string();
     let restarted = CooldisAppServer::new_local(restarted_config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(restarted.clone());
+    let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&connection).await;
 
     let latest = LocalAgentRegistry::new(&agent_registry_root)
@@ -4499,7 +4621,7 @@ async fn app_server_startup_skips_stale_manifest_threads() {
         config.agent_registry_root = agent_registry_root.clone();
         metadata_path = config.metadata_store_path();
         let app = CooldisAppServer::new_local(config).await.unwrap();
-        let (connection, _outbound_rx) = test_connection(app.clone());
+        let (connection, _outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread_start = app
@@ -4531,7 +4653,7 @@ async fn app_server_startup_skips_stale_manifest_threads() {
     restarted_config.state_home = root.join("state");
     restarted_config.agent_registry_root = agent_registry_root.clone();
     let restarted = CooldisAppServer::new_local(restarted_config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(restarted.clone());
+    let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&connection).await;
 
     let err = restarted
@@ -4599,7 +4721,7 @@ allow = ["streaming"]
     let metadata_path = config.metadata_store_path();
     let session_path = config.state_home.join("session_history.sqlite3");
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -4862,7 +4984,7 @@ streaming = false
     )
     .await
     .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let caller_app = app.clone();
@@ -4996,7 +5118,7 @@ server_ref = "mcp://arcade"
         )
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -5117,7 +5239,7 @@ pin = "mcptool://arcade/cooldis_mcp_echo@{schema_hash}"
         )
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -5184,7 +5306,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -6126,7 +6248,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
 #[tokio::test]
 async fn mandate_rpc_validates_and_folds_control_stream_events() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
         .dispatch_request(&connection, "thread/start", Some(json!({})))
@@ -6380,7 +6502,7 @@ streaming = false
     let metadata_path = config.metadata_store_path();
     let session_path = config.state_home.join("session_history.sqlite3");
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let cwd_start = app
@@ -6615,7 +6737,7 @@ streaming = false
     let app = CooldisAppServer::with_runtime_factory(config, runtime_factory)
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -6719,7 +6841,7 @@ streaming = false
     let app = CooldisAppServer::with_runtime_factory(config, runtime_factory)
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -6806,7 +6928,7 @@ streaming = false
         CapsuleBindingsConfig::default(),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let undeclared = app
@@ -6988,7 +7110,7 @@ streaming = false
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -7175,7 +7297,7 @@ streaming = false
     let app = CooldisAppServer::with_runtime_factory(config, runtime_factory)
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -7414,7 +7536,7 @@ async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_sto
 #[tokio::test]
 async fn thread_fork_creates_child_app_server_thread() {
     let app = test_app().await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7486,7 +7608,7 @@ async fn thread_fork_creates_child_app_server_thread() {
 #[tokio::test]
 async fn thread_fork_can_use_explicit_checkpoint_id() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7564,7 +7686,7 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
 #[tokio::test]
 async fn thread_fork_rejects_invalid_checkpoint_id() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7592,7 +7714,7 @@ async fn thread_fork_rejects_invalid_checkpoint_id() {
 #[tokio::test]
 async fn thread_fork_rejects_unavailable_checkpoint_id() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7622,7 +7744,7 @@ async fn thread_fork_rejects_unavailable_checkpoint_id() {
 #[tokio::test]
 async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
     let app = test_app().await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7779,7 +7901,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
 #[tokio::test]
 async fn thread_rebind_fork_rejects_active_source_thread() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7814,7 +7936,7 @@ async fn thread_rebind_fork_rejects_active_source_thread() {
 #[tokio::test]
 async fn thread_start_accepts_parent_thread_shorthand() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let root = app
@@ -7855,7 +7977,7 @@ async fn thread_start_accepts_parent_thread_shorthand() {
 #[tokio::test]
 async fn thread_resume_returns_loaded_thread() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7888,7 +8010,7 @@ async fn thread_resume_returns_loaded_thread() {
 #[tokio::test]
 async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -7962,7 +8084,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
     let first = CooldisAppServer::new_local(config_for(AgentManifestPlacementBinding::default()))
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(first.clone());
+    let (connection, _outbound_rx) = test_connection(first.clone()).await;
     initialize_for_test(&connection).await;
 
     let absent = first
@@ -8030,7 +8152,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
     }))
     .await
     .unwrap();
-    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone());
+    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
     let loaded = restarted
         .dispatch_request(&restarted_connection, "thread/loaded/list", Some(json!({})))
@@ -8139,7 +8261,7 @@ streaming = false
     let first = CooldisAppServer::new_local(config_for(&first_workspace))
         .await
         .unwrap();
-    let (connection, _outbound_rx) = test_connection(first.clone());
+    let (connection, _outbound_rx) = test_connection(first.clone()).await;
     initialize_for_test(&connection).await;
     let absent = first
         .dispatch_request(
@@ -8288,7 +8410,7 @@ streaming = false
     let restarted = CooldisAppServer::new_local(config_for(&replacement_workspace))
         .await
         .unwrap();
-    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone());
+    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
     let loaded = restarted
         .dispatch_request(&restarted_connection, "thread/loaded/list", Some(json!({})))
@@ -8374,7 +8496,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
         CapsuleBindingsConfig::default(),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -8443,7 +8565,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
 #[tokio::test]
 async fn model_provider_capabilities_read_returns_local_capabilities() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let capabilities = app
@@ -8479,7 +8601,7 @@ async fn model_provider_capabilities_read_reports_bedrock_streaming() {
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let app = CooldisAppServer::new_local(config).await.unwrap();
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let capabilities = app
@@ -8509,7 +8631,7 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
             .with_global_operation_name("search"),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -8571,7 +8693,7 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
             .with_load_all_active_when_unbound(true),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -8678,7 +8800,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
             .with_load_all_active_when_unbound(true),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -8752,7 +8874,7 @@ async fn app_server_capsule_bindings_reject_thread_operation_scope_injection() {
             .with_global_operation_name("global"),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let err = app
@@ -8787,7 +8909,7 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
         CapsuleBindingsConfig::default().with_registry_root(&registry_root),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let set = app
@@ -8899,7 +9021,7 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
         CapsuleBindingsConfig::default().with_registry_root(&registry_root),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     app.dispatch_request(
@@ -8922,7 +9044,7 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
         CapsuleBindingsConfig::default().with_registry_root(&registry_root),
     )
     .await;
-    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone());
+    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
 
     let thread = restarted
@@ -8966,7 +9088,7 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
             CapsuleBindingsConfig::default(),
         )
         .await;
-        let (connection, _outbound_rx) = test_connection(app.clone());
+        let (connection, _outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread = app
@@ -9002,7 +9124,7 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
         CapsuleBindingsConfig::default(),
     )
     .await;
-    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone());
+    let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
 
     let loaded = restarted
@@ -9077,7 +9199,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
             CapsuleBindingsConfig::default(),
         )
         .await;
-        let (connection, mut outbound_rx) = test_connection(app.clone());
+        let (connection, mut outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread = app
@@ -9137,7 +9259,8 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
         CapsuleBindingsConfig::default(),
     )
     .await;
-    let (restarted_connection, mut restarted_outbound_rx) = test_connection(restarted.clone());
+    let (restarted_connection, mut restarted_outbound_rx) =
+        test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
 
     let listed = restarted
@@ -9212,7 +9335,7 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
         true,
     )
     .await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -9277,7 +9400,7 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
         true,
     )
     .await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -9353,7 +9476,7 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
 #[tokio::test(flavor = "current_thread")]
 async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
     let app = test_app().await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -9436,7 +9559,7 @@ async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
 #[tokio::test(flavor = "current_thread")]
 async fn lagged_idle_thread_resynchronizes_without_another_status_change() {
     let app = test_app().await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -9496,7 +9619,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
         true,
     )
     .await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -9597,7 +9720,7 @@ async fn fast_stream_after_thread_start_idle_completes_with_assistant_text() {
         true,
     )
     .await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -9653,7 +9776,7 @@ async fn provider_failure_turn_completed_carries_error() {
         true,
     )
     .await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -9707,7 +9830,7 @@ async fn restored_thread_provider_requests_end_with_current_input() {
             CapsuleBindingsConfig::default(),
         )
         .await;
-        let (connection, mut outbound_rx) = test_connection(app.clone());
+        let (connection, mut outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread = app
@@ -9749,7 +9872,8 @@ async fn restored_thread_provider_requests_end_with_current_input() {
         CapsuleBindingsConfig::default(),
     )
     .await;
-    let (restarted_connection, mut restarted_outbound_rx) = test_connection(restarted.clone());
+    let (restarted_connection, mut restarted_outbound_rx) =
+        test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
 
     restarted
@@ -9816,7 +9940,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
             true,
         )
         .await;
-        let (connection, mut outbound_rx) = test_connection(app.clone());
+        let (connection, mut outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread = app
@@ -9859,7 +9983,8 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         true,
     )
     .await;
-    let (restarted_connection, mut restarted_outbound_rx) = test_connection(restarted.clone());
+    let (restarted_connection, mut restarted_outbound_rx) =
+        test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
 
     restarted
@@ -9938,7 +10063,7 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
             true,
         )
         .await;
-        let (connection, mut outbound_rx) = test_connection(app.clone());
+        let (connection, mut outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread = app
@@ -9976,8 +10101,8 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
         true,
     )
     .await;
-    let (requesting_connection, mut requesting_rx) = test_connection(restarted.clone());
-    let (observer_connection, mut observer_rx) = test_connection(restarted.clone());
+    let (requesting_connection, mut requesting_rx) = test_connection(restarted.clone()).await;
+    let (observer_connection, mut observer_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&requesting_connection).await;
     initialize_for_test(&observer_connection).await;
 
@@ -10556,6 +10681,67 @@ async fn aborted_websocket_session_still_witnesses_its_close() {
     .await;
 }
 
+#[tokio::test]
+async fn local_dispatch_error_still_witnesses_its_session_close() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+
+    let error = app
+        .local_json_rpc_request("not/a-method", json!({}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unsupported method"));
+    assert_eq!(
+        identity_sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_session_close_rearms_the_drop_witness() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let (connection_state, _outbound_rx) = test_connection(app.clone()).await;
+    let mut close_witness = SessionCloseWitness::new(
+        Arc::clone(&app.inner.identity_authority),
+        Arc::clone(&app.inner.identity_clock),
+        connection_state.witnessed_session_id.clone(),
+    );
+    let store = SqliteSessionStore::open(&store_path).await.unwrap();
+    let database = store.sqlite_database();
+    let database_connection = database.connect().await.unwrap();
+    database_connection
+        .execute_batch(
+            "ALTER TABLE cooldis_identity_sessions RENAME TO cooldis_identity_sessions_offline",
+        )
+        .await
+        .unwrap();
+
+    assert!(close_witness.close().await.is_err());
+    assert!(
+        close_witness.armed,
+        "a completed close failure must retry on drop"
+    );
+
+    database_connection
+        .execute_batch(
+            "ALTER TABLE cooldis_identity_sessions_offline RENAME TO cooldis_identity_sessions",
+        )
+        .await
+        .unwrap();
+    drop(close_witness);
+    wait_for_identity_sql_count(
+        &store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
+        1,
+    )
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -10693,7 +10879,7 @@ async fn app_server_websocket_listen_rejects_non_loopback_without_auth() {
 #[tokio::test]
 async fn fs_methods_cover_basic_host_file_operations() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let root = std::env::temp_dir().join(format!("cooldis-vfs-test-{}", Uuid::now_v7()));
     let nested = root.join("nested");
@@ -10810,7 +10996,7 @@ async fn fs_methods_cover_basic_host_file_operations() {
 #[tokio::test]
 async fn command_exec_returns_buffered_output() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let root = std::env::temp_dir().join(format!("cooldis-command-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
@@ -10842,7 +11028,7 @@ async fn command_exec_returns_buffered_output() {
 #[tokio::test]
 async fn command_exec_streaming_session_can_poll_write_and_terminate() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
         .dispatch_request(&connection, "thread/start", Some(json!({})))
@@ -10951,7 +11137,7 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
 #[tokio::test]
 async fn command_exec_streaming_start_returns_running_process_id_then_poll_completes() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
         .dispatch_request(&connection, "thread/start", Some(json!({})))
@@ -11005,7 +11191,7 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
     };
 
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
         .dispatch_request(&connection, "thread/start", Some(json!({})))
@@ -11180,7 +11366,7 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
 #[tokio::test]
 async fn local_ui_affordance_methods_return_safe_shapes() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     assert_eq!(
@@ -11249,7 +11435,7 @@ async fn local_ui_affordance_methods_return_safe_shapes() {
 #[tokio::test]
 async fn thread_shell_command_emits_command_execution_item() {
     let app = test_app().await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -11317,7 +11503,7 @@ async fn thread_shell_command_emits_command_execution_item() {
 #[tokio::test]
 async fn bridge_flow_uses_local_offline_provider() {
     let app = test_app().await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -11407,7 +11593,7 @@ async fn thinking_precedence_flows_to_provider_requests() {
     let app = CooldisAppServer::with_runtime_factory(config, runtime_factory)
         .await
         .unwrap();
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let default_thread = app
@@ -11506,7 +11692,7 @@ async fn thinking_stream_projects_as_distinct_items() {
         true,
     )
     .await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -11579,7 +11765,7 @@ async fn non_stream_thinking_delta_precedes_text_when_content_does() {
         false,
     )
     .await;
-    let (connection, mut outbound_rx) = test_connection(app.clone());
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
@@ -11605,7 +11791,7 @@ async fn non_stream_thinking_delta_precedes_text_when_content_does() {
 #[tokio::test]
 async fn local_thread_read_echoes_thread_thinking_config() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -11693,7 +11879,7 @@ async fn local_thread_read_echoes_thread_thinking_config() {
 #[tokio::test]
 async fn unsupported_methods_return_method_not_found() {
     let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone());
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let err = app
         .dispatch_request(&connection, "not/a-method", None)
@@ -11717,7 +11903,7 @@ async fn test_app_at_root(root: &Path) -> CooldisAppServer {
     CooldisAppServer::new_local(config).await.unwrap()
 }
 
-fn test_connection(
+async fn test_connection(
     app: CooldisAppServer,
 ) -> (ConnectionState, mpsc::UnboundedReceiver<JsonRpcMessage>) {
     let (outbound, rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
@@ -11728,10 +11914,27 @@ fn test_connection(
             uid: current_effective_uid(),
         },
     };
+    let witnessed_session_id = format!("test-session-{}", Uuid::now_v7());
+    app.inner
+        .identity_authority
+        .witness_session_opened(&IdentitySessionV1 {
+            schema: IDENTITY_SESSION_SCHEMA_V1.to_string(),
+            session_id: witnessed_session_id.clone(),
+            principal_id: resolved_principal.principal_id.clone(),
+            kind: resolved_principal.kind,
+            surface: BoundarySurface::UnixSocket,
+            credential_ref: credential_ref(&resolved_principal.auth),
+            opened_at_ms: app.inner.identity_clock.now().timestamp_millis(),
+            closed_at_ms: None,
+        })
+        .await
+        .unwrap();
     (
         ConnectionState {
             app,
             resolved_principal,
+            witnessed_session_id,
+            boundary_surface: BoundarySurface::UnixSocket,
             outbound,
             handshake: Arc::new(Mutex::new(HandshakeState::default())),
             opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
