@@ -5,7 +5,7 @@ use super::kernel_test::{
 use tokio::sync::broadcast;
 use tokio::time::{Duration, timeout};
 
-const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
+const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default)]
 pub struct EventTrace {

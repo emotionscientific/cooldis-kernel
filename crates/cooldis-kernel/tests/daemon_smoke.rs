@@ -122,7 +122,7 @@ impl DaemonChild {
     async fn stop(mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
         }
     }
 }

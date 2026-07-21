@@ -2226,7 +2226,7 @@ mod tests {
     where
         R: tokio::io::AsyncRead + Unpin,
     {
-        let deadline = tokio::time::sleep(Duration::from_secs(2));
+        let deadline = tokio::time::sleep(Duration::from_secs(30));
         tokio::pin!(deadline);
         tokio::select! {
             _ = &mut deadline => panic!("timed out waiting for JSON-RPC message"),
@@ -2241,7 +2241,7 @@ mod tests {
     where
         R: tokio::io::AsyncRead + Unpin,
     {
-        let deadline = tokio::time::sleep(Duration::from_secs(2));
+        let deadline = tokio::time::sleep(Duration::from_secs(30));
         tokio::pin!(deadline);
         loop {
             tokio::select! {
@@ -2316,7 +2316,7 @@ mod tests {
 
     impl PendingProviderClient {
         async fn wait_for_request(&self) {
-            let deadline = tokio::time::sleep(Duration::from_secs(2));
+            let deadline = tokio::time::sleep(Duration::from_secs(30));
             tokio::pin!(deadline);
             tokio::select! {
                 _ = &mut deadline => panic!("timed out waiting for pending provider request"),

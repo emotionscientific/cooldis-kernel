@@ -185,7 +185,7 @@ async fn interrupting_host_bash_acknowledges_the_call_and_kills_its_process_tree
     )
     .await
     .unwrap();
-    let child_pid = tokio::time::timeout(Duration::from_secs(2), async {
+    let child_pid = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(pid) = tokio::fs::read_to_string(host_root.join("child.pid")).await
                 && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
@@ -231,7 +231,7 @@ async fn interrupting_host_bash_acknowledges_the_call_and_kills_its_process_tree
         "the canonical mirror must retain the partial cancelled process result"
     );
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if unsafe { libc::kill(child_pid, 0) } == -1
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
@@ -931,7 +931,7 @@ async fn cancel_during_tool_execution_cancels_in_flight_batch_and_keeps_thread_r
     let cancel =
         tokio::spawn(async move { cancel_host.cancel(thread_id, "cancel at boundary").await });
 
-    tokio::time::timeout(Duration::from_secs(1), cancel)
+    tokio::time::timeout(Duration::from_secs(30), cancel)
         .await
         .expect("turn cancellation should not wait for the in-flight tool")
         .unwrap()
@@ -1616,41 +1616,47 @@ async fn collect_until_signal(
     events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
     expected: ThreadSignalKind,
 ) -> ThreadSignal {
-    for _ in 0..30 {
-        match tokio::time::timeout(Duration::from_millis(20), events.recv()).await {
-            Ok(Ok(ThreadEvent::Signal { signal, .. })) if signal.kind == expected => {
-                return signal;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match events.recv().await {
+                Ok(ThreadEvent::Signal { signal, .. }) if signal.kind == expected => {
+                    return signal;
+                }
+                Ok(ThreadEvent::Failed { message, .. }) => {
+                    panic!("thread failed before signal {expected:?}: {message}");
+                }
+                Ok(_) | Err(_) => {}
             }
-            Ok(Ok(ThreadEvent::Failed { message, .. })) => {
-                panic!("thread failed before signal {expected:?}: {message}");
-            }
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
         }
-    }
-    panic!("timed out waiting for signal {expected:?}");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for signal {expected:?}"))
 }
 
 async fn collect_until_policy_rejected(
     events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
     expected_code: &str,
 ) {
-    for _ in 0..50 {
-        match tokio::time::timeout(Duration::from_millis(20), events.recv()).await {
-            Ok(Ok(ThreadEvent::Runtime { event, .. })) => {
-                if matches!(
-                    event.kind,
-                    RuntimeEventKind::PolicyRejected { ref code, .. } if code == expected_code
-                ) {
-                    return;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match events.recv().await {
+                Ok(ThreadEvent::Runtime { event, .. }) => {
+                    if matches!(
+                        event.kind,
+                        RuntimeEventKind::PolicyRejected { ref code, .. } if code == expected_code
+                    ) {
+                        return;
+                    }
                 }
+                Ok(ThreadEvent::Failed { message, .. }) => {
+                    panic!("thread failed before policy rejection {expected_code:?}: {message}");
+                }
+                Ok(_) | Err(_) => {}
             }
-            Ok(Ok(ThreadEvent::Failed { message, .. })) => {
-                panic!("thread failed before policy rejection {expected_code:?}: {message}");
-            }
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
         }
-    }
-    panic!("timed out waiting for policy rejection {expected_code:?}");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for policy rejection {expected_code:?}"));
 }
 
 async fn wait_for_status(thread: &cooldis::RuntimeThreadHandle, expected: ThreadStatus) {

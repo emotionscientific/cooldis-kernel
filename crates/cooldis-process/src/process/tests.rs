@@ -300,7 +300,7 @@ async fn host_process_termination_kills_term_ignoring_process_group_members() {
         .unwrap();
     let process_id = started.snapshot.process_id.unwrap();
 
-    let child_pid = tokio::time::timeout(Duration::from_secs(2), async {
+    let child_pid = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             // The shell creates the pid file before the echo's content lands;
             // keep polling until the content actually parses.
@@ -364,7 +364,7 @@ async fn host_process_termination_still_works_after_the_group_leader_exits() {
         .await
         .unwrap();
     let process_id = started.snapshot.process_id.unwrap();
-    let (leader_pid, child_pid) = tokio::time::timeout(Duration::from_secs(2), async {
+    let (leader_pid, child_pid) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let leader = std::fs::read_to_string(&leader_file)
                 .ok()

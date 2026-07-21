@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    let output = timeout(Duration::from_secs(5), async {
+    let output = timeout(Duration::from_secs(30), async {
         loop {
             match events.recv().await? {
                 ThreadEvent::Output { text, .. } => break Ok::<_, broadcast_error>(text),

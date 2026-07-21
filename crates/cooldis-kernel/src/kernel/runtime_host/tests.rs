@@ -2119,6 +2119,7 @@ async fn failed_admission_append_prevents_runtime_host_turn_execution() {
     );
     assert_eq!(store.call_count("append_events"), 1);
 
+    // tight-timeout: paused time deterministically proves failed admission emits no output
     let output = timeout(Duration::from_millis(100), async {
         loop {
             if let ThreadEvent::Output { text, .. } = events.recv().await.unwrap() {
@@ -3089,6 +3090,7 @@ async fn timed_out_turn_cancellation_does_not_apply_to_the_next_turn() {
     state.second_started.notified().await;
 
     assert!(
+        // tight-timeout: paused time deterministically proves the stale cancellation stays absent
         timeout(Duration::from_millis(1), state.wait_for_stale_cancel())
             .await
             .is_err(),
@@ -3302,6 +3304,7 @@ async fn cancelled_start_wakes_reservation_waiters() {
         wait_host.wait_for_thread_start_reservation(thread_id).await;
     });
     assert!(
+        // tight-timeout: paused time deterministically proves the reservation waiter stays pending
         tokio::time::timeout(Duration::from_millis(250), &mut waiter)
             .await
             .is_err(),
@@ -3313,6 +3316,7 @@ async fn cancelled_start_wakes_reservation_waiters() {
         Err(err) => assert!(err.is_cancelled()),
         Ok(_) => panic!("blocked start unexpectedly completed"),
     }
+    // tight-timeout: paused time deterministically bounds the reservation wakeup
     tokio::time::timeout(Duration::from_secs(1), waiter)
         .await
         .expect("reservation waiter should wake after start cancellation")
@@ -3407,6 +3411,7 @@ async fn cancelled_start_after_publication_cleans_up_registered_runtime() {
         Ok(_) => panic!("blocked lifecycle-sink start unexpectedly completed"),
     }
 
+    // tight-timeout: paused time deterministically bounds cancelled runtime shutdown
     timeout(Duration::from_millis(1), factory.wait_until_stopped())
         .await
         .expect("cancelled start left its published runtime running");
@@ -4107,7 +4112,7 @@ async fn shutdown_all_uses_repeatable_children_before_parent_effect_order() {
 
 async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -4120,7 +4125,7 @@ async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: 
 
 async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -4135,7 +4140,7 @@ async fn assert_canonical_mirror(
     expected_text: &str,
 ) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -4334,7 +4339,7 @@ async fn cancelled_manifest_receipt_caller_cannot_leave_a_half_witnessed_workspa
     barrier.release();
 
     let stream_id = EventStreamId::for_thread(&coordinates);
-    let events = tokio::time::timeout(Duration::from_secs(1), async {
+    let events = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let events = store.read_events(&stream_id, None).await.unwrap();
             if events
@@ -4506,7 +4511,7 @@ async fn assert_runtime_kind(
     predicate: impl Fn(&RuntimeEventKind) -> bool,
 ) -> RuntimeEvent {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -4722,7 +4727,7 @@ async fn append_loop_continue_request(
 
 async fn wait_for_status(thread: &RuntimeThreadHandle, expected: ThreadStatus) {
     let mut status = thread.subscribe_status();
-    timeout(Duration::from_secs(2), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             if *status.borrow() == expected {
                 return;

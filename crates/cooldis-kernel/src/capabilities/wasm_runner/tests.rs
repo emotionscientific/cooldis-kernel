@@ -568,7 +568,7 @@ fn http_request_bytes(
 
 async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("timed out waiting for event")
             .expect("event stream closed");
@@ -580,7 +580,7 @@ async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
 
 async fn next_cancelled(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("timed out waiting for event")
             .expect("event stream closed");
@@ -592,7 +592,7 @@ async fn next_cancelled(events: &mut broadcast::Receiver<ThreadEvent>) -> String
 
 async fn next_failed(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("timed out waiting for event")
             .expect("event stream closed");

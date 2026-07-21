@@ -3,6 +3,9 @@ use super::threads::*;
 use super::*;
 use crate::{EventKind, EventRecord, ToolCallCompletedPayload};
 
+const INITIAL_THREAD_STATUS_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const FAILED_THREAD_EVENT_GRACE: std::time::Duration = std::time::Duration::from_millis(20);
+
 #[derive(Default)]
 pub(super) struct AppServerSubscriptions {
     pub(super) next_subscriber_id: u64,
@@ -787,7 +790,7 @@ pub(super) async fn wait_for_initial_thread_status(handle: &RuntimeThreadHandle)
         return;
     }
     let mut status = handle.subscribe_status();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let _ = tokio::time::timeout(INITIAL_THREAD_STATUS_WAIT_TIMEOUT, async {
         loop {
             if *status.borrow() != ThreadStatus::Starting {
                 return;
@@ -865,9 +868,7 @@ pub(super) async fn handle_failed_thread_status(
     if !app.thread_has_active_turn(thread_id).await {
         return;
     }
-    if let Ok(Ok(event)) =
-        tokio::time::timeout(std::time::Duration::from_millis(20), events.recv()).await
-    {
+    if let Ok(Ok(event)) = tokio::time::timeout(FAILED_THREAD_EVENT_GRACE, events.recv()).await {
         handle_thread_event(app, thread_id, event).await;
     }
     while let Ok(event) = events.try_recv() {

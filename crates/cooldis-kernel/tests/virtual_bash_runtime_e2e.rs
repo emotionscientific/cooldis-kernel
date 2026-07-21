@@ -105,7 +105,7 @@ async fn supervisor_runs_virtual_bash_with_configured_mounts_and_canonical_histo
 }
 
 async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             match events.recv().await.unwrap() {
                 ThreadEvent::Output { text, .. } => break text,

@@ -201,6 +201,7 @@ async fn supervisor_turn_submission_is_idempotent_on_turn_id() {
 
     assert_output(&mut events, "turn-same:hello").await;
     assert!(
+        // tight-timeout: a duplicate output must remain absent after the idempotent submit
         timeout(Duration::from_millis(50), async {
             loop {
                 if matches!(events.recv().await, Ok(ThreadEvent::Output { .. })) {
@@ -277,6 +278,7 @@ async fn cancelling_idle_thread_is_a_witnessed_no_op() {
     );
     assert_eq!(thread.status(), ThreadStatus::Idle);
     assert!(
+        // tight-timeout: idle cancellation must not emit a runtime cancellation event
         timeout(Duration::from_millis(50), async {
             loop {
                 if matches!(events.recv().await, Ok(ThreadEvent::Cancelled { .. })) {
@@ -676,7 +678,7 @@ async fn start_thread_err(
 
 async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");

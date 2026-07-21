@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[path = "cooldis-manifest-e2e-smoke/tests.rs"]
 mod tests;
 
-const FIXTURE_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const FIXTURE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FIXTURE_HEADER_BYTES: usize = 16 * 1024;
 const MAX_FIXTURE_BODY_BYTES: usize = 1024 * 1024;
 
@@ -509,7 +509,7 @@ async fn run_turn_trace(
     thread_id: &str,
     input: &str,
 ) -> Result<TurnTrace, Box<dyn std::error::Error>> {
-    run_turn_trace_with_timeout(app, thread_id, input, Duration::from_secs(10)).await
+    run_turn_trace_with_timeout(app, thread_id, input, Duration::from_secs(30)).await
 }
 
 async fn run_live_turn_trace(

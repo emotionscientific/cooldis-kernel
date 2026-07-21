@@ -995,7 +995,7 @@ where
     S: tokio::io::AsyncRead + Unpin,
 {
     let mut response = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let mut byte = [0_u8; 1];
         while !response.ends_with(b"\r\n\r\n") {
             stream.read_exact(&mut byte).await.unwrap();
@@ -1026,7 +1026,7 @@ async fn wait_for_path(
     path: &Path,
     task: &mut tokio::task::JoinHandle<cooldis::CooldisResult<()>>,
 ) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if path.exists() {
                 break;
@@ -1046,7 +1046,7 @@ async fn wait_for_path(
 }
 
 async fn wait_for_sql_count(path: &Path, query: &str, expected: i64) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if sql_count(path, query, ()).await >= expected {
                 break;

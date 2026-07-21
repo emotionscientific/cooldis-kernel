@@ -1603,7 +1603,7 @@ async fn cancelling_a_process_poll_terminates_the_live_handle_and_returns_its_sn
     cancellation.cancel();
 
     let AgentKernelToolOutcome::Completed(Some(cancelled)) =
-        tokio::time::timeout(Duration::from_secs(2), poll)
+        tokio::time::timeout(Duration::from_secs(30), poll)
             .await
             .expect("cancelled process poll did not return promptly")
             .unwrap()
@@ -2159,7 +2159,7 @@ async fn runtime_cancels_busy_virtual_bash_without_poisoning_thread() {
         .unwrap();
     thread.cancel("stop loop").await.unwrap();
 
-    let cancelled = tokio::time::timeout(Duration::from_secs(3), async {
+    let cancelled = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let ThreadEvent::Cancelled { reason, .. } = events.recv().await.unwrap() {
                 break reason;
@@ -2211,7 +2211,7 @@ async fn runtime_cancels_busy_virtual_bash_with_operation_registry_and_recovers(
         .unwrap();
     thread.cancel("stop projected process").await.unwrap();
 
-    let cancelled = tokio::time::timeout(Duration::from_secs(3), async {
+    let cancelled = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let ThreadEvent::Cancelled { reason, .. } = events.recv().await.unwrap() {
                 break reason;

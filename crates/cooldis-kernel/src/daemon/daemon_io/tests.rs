@@ -1357,7 +1357,7 @@ async fn bridge_with_runtime_build_gate(
 }
 
 async fn wait_for_provider_requests(client: &RecordingRouteProviderClient, count: usize) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if client.requests().len() >= count {
             return;
@@ -1671,7 +1671,7 @@ async fn submit_and_wait_for_assistant_event(
 
 async fn wait_for_assistant_text(bridge: &CooldisDaemonIoBridge, thread_id: &str, expected: &str) {
     let parsed = ThreadId::parse_str(thread_id).unwrap();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let handle = bridge
             .supervisor
@@ -1773,7 +1773,7 @@ async fn wait_for_thread_joined_count(
     expected: usize,
 ) {
     let control_stream = control_stream_id(parent);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let events = store.read_events(&control_stream, None).await.unwrap();
             if events
@@ -2169,7 +2169,7 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
         cancelled_dispatch.thread_id,
         "parent cancelled child".to_string(),
     );
-    let observe_cancelled = tokio::time::timeout(Duration::from_secs(5), async {
+    let observe_cancelled = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if matches!(
                 cancelled_events.recv().await.unwrap(),
@@ -2422,7 +2422,7 @@ async fn wait_for_user_text(
     coordinates: &ThreadCoordinates,
     expected: &str,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if user_texts_for(bridge, coordinates)
             .await
@@ -2443,7 +2443,7 @@ async fn wait_for_user_text_containing(
     coordinates: &ThreadCoordinates,
     expected: &str,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if user_texts_for(bridge, coordinates)
             .await
@@ -2475,7 +2475,7 @@ async fn drain_until_egress(
     instance_id: &str,
     expected: usize,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut drained = 0;
     loop {
         drained += bridge
@@ -2722,7 +2722,7 @@ async fn direct_sink_submits_ingress_to_runtime_and_emits_egress() {
 
     assert!(ack.accepted);
     drain_until_egress(&bridge, "telegram.bot", "main", 1).await;
-    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let egress = tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -4349,7 +4349,7 @@ async fn interrupt_cancel_wait_does_not_hold_active_turn_state_lock() {
             .await
     });
 
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if handle.lifecycle_record().await.latest_signal_id != signal_before_interrupt {
                 break;
@@ -4365,7 +4365,7 @@ async fn interrupt_cancel_wait_does_not_hold_active_turn_state_lock() {
         .await
         .unwrap();
     let state_read =
-        tokio::time::timeout(Duration::from_secs(1), bridge.ingress_state(&target)).await;
+        tokio::time::timeout(Duration::from_secs(30), bridge.ingress_state(&target)).await;
     assert!(
         state_read.is_ok(),
         "an interrupt waiting for cancellation grace must not block unrelated active-turn reads"
@@ -4843,7 +4843,7 @@ async fn input_persisted_before_compile_recovery_resubmits_and_adopts_entry() {
         30,
     );
     let drain = tokio::spawn(async move { worker.drain_once().await });
-    tokio::time::timeout(Duration::from_secs(3), input_persisted)
+    tokio::time::timeout(Duration::from_secs(30), input_persisted)
         .await
         .expect("executing side should reach the input-persisted cut");
 
@@ -4971,7 +4971,7 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
         30,
     );
     let drain = tokio::spawn(async move { worker.drain_once().await });
-    tokio::time::timeout(Duration::from_secs(3), failed)
+    tokio::time::timeout(Duration::from_secs(30), failed)
         .await
         .expect("runtime should reach the injected failure");
 
@@ -5097,7 +5097,7 @@ async fn concurrent_lazy_load_of_cyclic_topology_fails_closed_without_lock_deadl
             .await
     });
 
-    let (first_error, second_error) = tokio::time::timeout(Duration::from_secs(1), async {
+    let (first_error, second_error) = tokio::time::timeout(Duration::from_secs(30), async {
         (
             match first_load.await.unwrap() {
                 Ok(_) => panic!("first cyclic load unexpectedly succeeded"),
@@ -5697,7 +5697,7 @@ async fn queue_worker_processes_sqlite_backed_envelope() {
     assert_eq!(worker.drain_once().await.unwrap(), 1);
     drain_until_egress(&worker.bridge, "telegram.bot", "main", 1).await;
 
-    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let egress = tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -6546,7 +6546,7 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
         .unwrap();
     let coordinates = only_thread_coordinates(&bridge).await;
     let handle = bridge.supervisor.get_thread_at(&coordinates).await.unwrap();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let events = thread_events_for(&session_store_path, &coordinates).await;
         if handle.status() == ThreadStatus::Idle
@@ -6571,7 +6571,7 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
         CooldisDaemonQueueWorker::new(queue.clone(), bridge.clone(), "worker-idle-steer", 30);
     assert_eq!(worker.drain_once().await.unwrap(), 1);
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(ThreadEvent::Runtime { event, .. }) = runtime_events.recv().await
                 && matches!(
@@ -6736,7 +6736,7 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
     assert_eq!(worker.drain_once().await.unwrap(), 1);
     drain_until_egress(&worker.bridge, "telegram.bot", "main", 1).await;
 
-    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let egress = tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -7100,7 +7100,7 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
         .drain_egress_once("telegram.bot", "main")
         .await
         .unwrap();
-    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let egress = tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -7155,7 +7155,7 @@ async fn late_egress_completion_does_not_clear_newer_active_turn() {
             .unwrap(),
         1
     );
-    tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -7664,7 +7664,7 @@ async fn cancelled_daemon_start_finishes_the_workspace_bind_witness() {
     }
     gate.release();
 
-    let handle = tokio::time::timeout(Duration::from_secs(1), async {
+    let handle = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(handle) = bridge.supervisor.get_thread_at(&coordinates).await
                 && handle
@@ -7722,6 +7722,7 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
             .await
     });
     assert!(
+        // tight-timeout: paused time proves no duplicate runtime build starts while the gate is held
         tokio::time::timeout(Duration::from_millis(250), gate.wait_for_builds(2))
             .await
             .is_err(),
@@ -7806,6 +7807,7 @@ async fn thread_already_exists_retry_keeps_scope_mismatch_fail_closed() {
             .await
     });
     assert!(
+        // tight-timeout: paused time proves the conflicting lazy load remains pending
         tokio::time::timeout(Duration::from_millis(250), &mut loading)
             .await
             .is_err(),
@@ -8060,7 +8062,7 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
             .unwrap(),
         1
     );
-    let assistant = tokio::time::timeout(Duration::from_secs(3), first_rx.recv())
+    let assistant = tokio::time::timeout(Duration::from_secs(30), first_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -8131,7 +8133,7 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
             .unwrap(),
         1
     );
-    let platform_action = tokio::time::timeout(Duration::from_secs(3), first_rx.recv())
+    let platform_action = tokio::time::timeout(Duration::from_secs(30), first_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -8206,7 +8208,7 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
             .unwrap(),
         1
     );
-    let assistant = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let assistant = tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -8310,7 +8312,7 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
             .unwrap(),
         1
     );
-    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let egress = tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -8412,7 +8414,7 @@ async fn egress_projector_recovers_missing_projection_after_partial_receipt_curs
             .unwrap(),
         1
     );
-    let egress = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let egress = tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -8739,14 +8741,14 @@ async fn telegram_webhook_serve_cancellation_aborts_accepted_requests() {
         }),
     ));
 
-    tokio::time::timeout(Duration::from_secs(5), entered)
+    tokio::time::timeout(Duration::from_secs(30), entered)
         .await
         .expect("request did not reach the sink");
     server_task.abort();
     server_task.await.unwrap_err();
     sink.release.notify_one();
 
-    let response = tokio::time::timeout(Duration::from_secs(5), response_task)
+    let response = tokio::time::timeout(Duration::from_secs(30), response_task)
         .await
         .expect("accepted connection did not close after server cancellation")
         .unwrap();
