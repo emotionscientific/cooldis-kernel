@@ -768,7 +768,7 @@ fn anthropic_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFact
 
 async fn next_output(events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>) -> String {
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -784,7 +784,7 @@ async fn next_assistant_message(
     events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
 ) -> CanonicalMessage {
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -810,7 +810,7 @@ async fn next_assistant_with_runtime_events(
 ) -> (CanonicalMessage, Vec<RuntimeEventKind>) {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(5), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -1075,7 +1075,7 @@ impl MockHttpServer {
     }
 
     async fn requests(&self, expected: usize) -> Vec<CapturedRequest> {
-        timeout(Duration::from_secs(5), async {
+        timeout(Duration::from_secs(30), async {
             loop {
                 let requests = self.requests.lock().unwrap().clone();
                 if requests.len() >= expected {

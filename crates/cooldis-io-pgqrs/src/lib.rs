@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const INGRESS_PAYLOAD_KIND: &str = "cooldis.ingress.v1";
 const DEFAULT_QUEUE_NAME: &str = "cooldis-ingress";
 const INGRESS_QUEUE_MAX_OBJECT_DEPTH: usize = 16;
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PgqrsQueueConfig {
@@ -166,7 +167,7 @@ impl PgqrsIngressQueue {
         let connection = rusqlite::Connection::open(path)
             .map_err(|err| IoError::Queue(format!("open sqlite dedupe store: {err}")))?;
         connection
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(|err| IoError::Queue(format!("configure sqlite dedupe store: {err}")))?;
         ensure_sqlite_dedupe_schema(&connection)?;
         let inserted = connection

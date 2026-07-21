@@ -62,6 +62,7 @@ const TELEGRAM_WEBHOOK_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const TELEGRAM_WEBHOOK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_RESPONSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_TYPING_SIMULATION_DELAY: Duration = Duration::from_secs(8);
+const EGRESS_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_EGRESS_PROJECTOR_DISCHARGED_BY: &str = "projector:io-egress";
 const IO_EGRESS_PROJECTOR_FUNCTION: &str = "delivery/v1";
 const ROUTE_AGENT_REF_METADATA: &str = "cooldis_route_agent_ref";
@@ -6901,7 +6902,7 @@ fn open_egress_state_connection(dsn: &str) -> IoResult<rusqlite::Connection> {
     }
     let connection = rusqlite::Connection::open(path).map_err(egress_state_error)?;
     connection
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(EGRESS_SQLITE_BUSY_TIMEOUT)
         .map_err(egress_state_error)?;
     Ok(connection)
 }

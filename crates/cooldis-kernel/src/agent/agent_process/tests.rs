@@ -177,7 +177,7 @@ async fn retried_thread_submit_dispatch_enqueues_one_turn() {
         .await
         .pop()
         .unwrap();
-    let submitted_count = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let submitted_count = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let session = child.session_context().await.unwrap();
             let count = session

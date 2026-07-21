@@ -671,7 +671,7 @@ async fn anthropic_bedrock_http_stream_decodes_events_and_signs_stream_endpoint(
     );
     let client = ProviderHttpClient::with_http(
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
             .build()
             .unwrap(),
         endpoint,
@@ -758,7 +758,7 @@ async fn anthropic_bedrock_mid_stream_disconnect_returns_terminal_error() {
     );
     let client = ProviderHttpClient::with_http(
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
             .build()
             .unwrap(),
         endpoint,

@@ -921,7 +921,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if outcome_count(&store, &consumer, &dispatch_id).await == 1 {
                     break;
@@ -993,7 +993,7 @@ mod tests {
         task.abort();
         let _ = task.await;
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if outcome_count(&store, &consumer, &dispatch_id).await == 1 {
                     break;

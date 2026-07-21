@@ -369,7 +369,7 @@ mod tests {
         });
 
         assert_eq!(
-            completed_rx.recv_timeout(Duration::from_secs(1)),
+            completed_rx.recv_timeout(Duration::from_secs(30)),
             Ok("completed"),
             "nested block_on consumed the outer future's wake"
         );

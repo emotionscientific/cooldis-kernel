@@ -625,7 +625,7 @@ where
 }
 
 async fn wait_for_socket(path: &std::path::Path) {
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if path.exists() {
             return;
         }

@@ -1341,6 +1341,7 @@ impl ScenarioHarness {
     }
 
     async fn remains_parked<T>(&self, task: &tokio::task::JoinHandle<T>) -> bool {
+        // tight-timeout: this is an absence window for a task that must remain parked
         for _ in 0..128 {
             if task.is_finished() {
                 return false;
@@ -3323,7 +3324,7 @@ mod tests {
 
         control.release_turn_input.notify_one();
         let started = std::time::Instant::now();
-        while !waiting.is_finished() && started.elapsed() < std::time::Duration::from_secs(5) {
+        while !waiting.is_finished() && started.elapsed() < std::time::Duration::from_secs(30) {
             tokio::time::sleep(SCENARIO_ASYNC_RECHECK_INTERVAL).await;
         }
         assert!(
@@ -3598,7 +3599,7 @@ mod tests {
             vec![Box::new(OverlapInvariant { rendezvous })];
         let first = no_fault_scenario(0x4050_0002, vec![ScenarioOp::StartThread]);
         let second = no_fault_scenario(0x4050_0002, vec![ScenarioOp::StartThread]);
-        let overlapping = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let overlapping = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             tokio::join!(
                 run_scenario_once(&first, &first_invariant),
                 run_scenario_once(&second, &second_invariant),

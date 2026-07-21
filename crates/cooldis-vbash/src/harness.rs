@@ -1089,7 +1089,7 @@ mod tests {
 
         root.first_flush_entered.notified().await;
         task.abort();
-        let guard = tokio::time::timeout(Duration::from_secs(1), harness.lock())
+        let guard = tokio::time::timeout(Duration::from_secs(30), harness.lock())
             .await
             .expect("cancelled spill must release the harness mutex");
         assert_eq!(

@@ -724,7 +724,7 @@ mod tests {
             let cancellation = cancellation.clone();
             async move { executor.exec_cancellable(request, cancellation).await }
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while !ready_path.exists() {
                 tokio::task::yield_now().await;
             }
@@ -733,7 +733,7 @@ mod tests {
         .expect("host bash did not signal readiness before cancellation");
         cancellation.cancel();
 
-        let result = tokio::time::timeout(Duration::from_secs(2), run)
+        let result = tokio::time::timeout(Duration::from_secs(30), run)
             .await
             .expect("host bash cancellation should return promptly")
             .unwrap()
@@ -783,7 +783,7 @@ mod tests {
             let cancellation = cancellation.clone();
             async move { executor.exec_cancellable(request, cancellation).await }
         });
-        let (leader, child) = tokio::time::timeout(Duration::from_secs(2), async {
+        let (leader, child) = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let leader = std::fs::read_to_string(&leader_path)
                     .ok()
@@ -804,7 +804,7 @@ mod tests {
         .expect("host bash leader was not reaped before cancellation");
 
         cancellation.cancel();
-        let result = match tokio::time::timeout(Duration::from_secs(2), &mut run).await {
+        let result = match tokio::time::timeout(Duration::from_secs(30), &mut run).await {
             Ok(joined) => joined.unwrap().unwrap(),
             Err(_) => {
                 run.abort();
@@ -848,7 +848,7 @@ mod tests {
             max_output_bytes: 4096,
         };
         let run = tokio::spawn(async move { executor.exec(request).await });
-        let child = tokio::time::timeout(Duration::from_secs(2), async {
+        let child = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let Ok(pid) = std::fs::read_to_string(&pid_path)
                     && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
@@ -863,7 +863,7 @@ mod tests {
 
         run.abort();
         let _ = run.await;
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if unsafe { libc::kill(child, 0) } == -1
                     && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)

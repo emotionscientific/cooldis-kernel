@@ -905,8 +905,9 @@ mod tests {
         assert_eq!(next_accept_retry(ACCEPT_RETRY_MAX), ACCEPT_RETRY_MAX);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn request_deadline_bounds_a_stalled_connection_task() {
+        // tight-timeout: paused time exercises the configured request deadline itself
         let result = request_with_timeout(
             Duration::from_millis(5),
             std::future::pending::<CooldisResult<()>>(),

@@ -971,7 +971,7 @@ mod tests {
         async fn run_to_cut(&mut self, seam: CrashCutSeam) {
             assert_eq!(seam, CrashCutSeam::ThreadTerminalJoinCommit);
             let fault_store = self.fault_store.as_ref().unwrap();
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     if fault_store.call_count("append_events_fenced") >= 3 {
                         break;

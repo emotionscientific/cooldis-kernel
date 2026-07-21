@@ -211,7 +211,7 @@ impl Fixture {
     }
 
     async fn wait_for_single_bound_thread(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let threads = self.bound_threads()?;
             if threads.len() == 1 {
@@ -310,7 +310,7 @@ impl TelegramApiFixture {
         &mut self,
         expected_text: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut observed = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -411,7 +411,7 @@ impl DaemonChild {
     async fn sigkill(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(mut child) = self.child.take() {
             child.start_kill()?;
-            tokio::time::timeout(Duration::from_secs(3), child.wait()).await??;
+            tokio::time::timeout(Duration::from_secs(30), child.wait()).await??;
         }
         Ok(())
     }

@@ -1266,7 +1266,7 @@ mod tests {
         assert!(caller.await.unwrap_err().is_cancelled());
         drop(spawn_guard);
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if !joined_payloads(&store, &request).await.is_empty() {
                     break;

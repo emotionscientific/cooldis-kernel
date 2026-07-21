@@ -3582,7 +3582,7 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(2), pause.wait_until_entered())
+    timeout(Duration::from_secs(30), pause.wait_until_entered())
         .await
         .expect("first completion append did not reach the pause");
 
@@ -3593,6 +3593,7 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
     .await
     .unwrap();
     assert!(
+        // tight-timeout: cancellation must remain absent until the buffered commit is released
         timeout(Duration::from_millis(100), async {
             loop {
                 if let ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
@@ -3660,7 +3661,7 @@ async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() 
     host.submit(thread.context().coordinates.thread_id, "turn-1", "wait")
         .await
         .unwrap();
-    timeout(Duration::from_secs(2), pause.wait_until_entered())
+    timeout(Duration::from_secs(30), pause.wait_until_entered())
         .await
         .expect("turn.waiting append did not reach the pause");
     host.cancel(
@@ -3670,6 +3671,7 @@ async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() 
     .await
     .unwrap();
     assert!(
+        // tight-timeout: cancellation must remain absent until the suspended commit is released
         timeout(Duration::from_millis(100), async {
             loop {
                 if let ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
@@ -3766,7 +3768,7 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(2), pause.wait_until_entered())
+    timeout(Duration::from_secs(30), pause.wait_until_entered())
         .await
         .expect("request batch append did not reach the pause");
     host.cancel(
@@ -3856,7 +3858,7 @@ async fn conflicting_thread_holds_serialize_in_model_call_order() {
     .await
     .unwrap();
     assert_eq!(
-        timeout(Duration::from_secs(2), started_rx.recv())
+        timeout(Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -3865,7 +3867,7 @@ async fn conflicting_thread_holds_serialize_in_model_call_order() {
     assert!(started_rx.try_recv().is_err());
     tool_provider.release_first.notify_one();
     assert_eq!(
-        timeout(Duration::from_secs(2), started_rx.recv())
+        timeout(Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -3924,7 +3926,7 @@ async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
     .await
     .unwrap();
     assert_eq!(
-        timeout(Duration::from_secs(2), started_rx.recv())
+        timeout(Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -3933,7 +3935,7 @@ async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
     assert!(started_rx.try_recv().is_err());
     tool_provider.release_first.notify_one();
     assert_eq!(
-        timeout(Duration::from_secs(2), started_rx.recv())
+        timeout(Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -4626,7 +4628,7 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(2), started_rx.recv())
+    timeout(Duration::from_secs(30), started_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -4637,7 +4639,7 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(2), acknowledged_rx.recv())
+    timeout(Duration::from_secs(30), acknowledged_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -6863,7 +6865,7 @@ async fn wait_for_thread_event(
     coordinates: &ThreadCoordinates,
     kind: EventKind,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let mut records = store
             .read_events(&EventStreamId::for_thread(coordinates), None)
@@ -6895,7 +6897,7 @@ async fn wait_for_tool_call_completion(
     turn_id: &str,
     call_id: &str,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let records = store
             .read_events(&EventStreamId::for_thread(coordinates), None)
@@ -6922,7 +6924,7 @@ async fn wait_for_control_event<S: EventStore + ?Sized>(
     kind: EventKind,
 ) -> crate::EventRecord {
     let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let records = store.read_events(&stream_id, None).await.unwrap();
         if let Some(record) = records.into_iter().find(|event| event.kind == kind) {
@@ -6940,7 +6942,7 @@ async fn wait_for_status(
     status: &mut tokio::sync::watch::Receiver<crate::ThreadStatus>,
     expected: crate::ThreadStatus,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if *status.borrow() == expected {
             return;
@@ -6949,7 +6951,7 @@ async fn wait_for_status(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for status {expected:?}"
         );
-        timeout(Duration::from_millis(50), status.changed())
+        timeout(Duration::from_secs(30), status.changed())
             .await
             .ok();
     }
@@ -7569,7 +7571,7 @@ fn temp_db_path(prefix: &str) -> PathBuf {
 
 async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7582,7 +7584,7 @@ async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: 
 
 async fn assert_stopped(events: &mut broadcast::Receiver<ThreadEvent>) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7600,7 +7602,7 @@ async fn assert_output_with_runtime_events(
 ) -> Vec<RuntimeEventKind> {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7618,7 +7620,7 @@ async fn assert_output_with_runtime_events(
 
 async fn assert_completed_terminal(events: &mut broadcast::Receiver<ThreadEvent>) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7665,7 +7667,7 @@ async fn assert_failed_with_runtime_events(
 ) -> Vec<RuntimeEventKind> {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7689,7 +7691,7 @@ async fn assert_compaction(
     expected_summary: &str,
 ) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7714,7 +7716,7 @@ async fn assert_compaction(
 
 async fn assert_user_mirror(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7740,7 +7742,7 @@ async fn assert_assistant_mirror(
     events: &mut broadcast::Receiver<ThreadEvent>,
 ) -> CanonicalMessage {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7759,7 +7761,7 @@ async fn assert_assistant_with_runtime_events(
 ) -> (CanonicalMessage, Vec<RuntimeEventKind>) {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7780,7 +7782,7 @@ async fn assert_assistant_with_runtime_events(
 
 async fn assert_cancelled(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
@@ -7825,7 +7827,7 @@ async fn assert_signal(
     expected: crate::ThreadSignalKind,
 ) -> crate::ThreadSignal {
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv())
+        let event = timeout(Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");

@@ -199,7 +199,7 @@ async fn read_json_message<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> Val
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let deadline = tokio::time::sleep(Duration::from_secs(5));
+    let deadline = tokio::time::sleep(Duration::from_secs(30));
     tokio::pin!(deadline);
     tokio::select! {
         _ = &mut deadline => panic!("timed out waiting for ACP JSON-RPC message"),
@@ -214,7 +214,7 @@ async fn read_json_response<R>(lines: &mut tokio::io::Lines<BufReader<R>>, id: u
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let deadline = tokio::time::sleep(Duration::from_secs(5));
+    let deadline = tokio::time::sleep(Duration::from_secs(30));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -231,7 +231,7 @@ where
 }
 
 async fn wait_for_socket(path: &Path) {
-    for _ in 0..500 {
+    for _ in 0..1_500 {
         if path.exists() {
             return;
         }
@@ -277,7 +277,7 @@ impl AcpAgentChild {
     async fn stop(mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
         }
     }
 }

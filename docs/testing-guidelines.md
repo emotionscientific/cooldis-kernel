@@ -74,6 +74,12 @@ Use the existing helpers before adding bespoke setup:
 - event collectors with bounded timeout waits, not blind sleeps;
 - receipt and grant assertion helpers with stable denial-code checks.
 
+Real-time test timeouts are hang detectors and use at least 30 seconds of
+headroom. A shorter absence assertion or paused-time bound must carry
+`// tight-timeout: <reason>` on the same or immediately preceding line;
+`scripts/test-timeout-lint.sh` enforces literal duration constructors in
+single-line and multi-line timeout calls.
+
 Timing-logic tests use Tokio's paused clock:
 
 ```rust

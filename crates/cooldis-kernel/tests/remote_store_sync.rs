@@ -838,7 +838,7 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     );
     let parked_stdout = parked.stdout.take().unwrap();
     let mut parked_lines = BufReader::new(parked_stdout).lines();
-    let ready = timeout(Duration::from_secs(5), parked_lines.next_line())
+    let ready = timeout(Duration::from_secs(30), parked_lines.next_line())
         .await
         .expect("child park readiness timed out")
         .unwrap()
@@ -950,7 +950,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
     let store_path = root.join("state/session_history.sqlite3");
     let child_stream = EventStreamId::new(format!("thread:{child_id}"));
 
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -1016,7 +1016,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
             .is_err(),
         "same dispatch with a different payload must be rejected"
     );
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -1046,7 +1046,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
         .join("state/remote-children")
         .join(child_thread_id.to_string())
         .join("state/session_history.sqlite3");
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             match SqliteSessionStore::open(&child_store_path).await {
                 Ok(store) => break store,
@@ -1120,7 +1120,7 @@ async fn remote_child_survives_sync_endpoint_outage_and_converges_after_restore(
         .await
         .unwrap();
     let child_id = spawned["threadId"].as_str().unwrap().to_string();
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -1154,7 +1154,7 @@ async fn remote_child_survives_sync_endpoint_outage_and_converges_after_restore(
     tokio::time::sleep(Duration::from_millis(250)).await;
     std::fs::rename(&parked_socket, &sync_socket).unwrap();
 
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -1265,7 +1265,7 @@ provider = "local"
             }
         }
     });
-    let url = timeout(Duration::from_secs(10), ready_rx)
+    let url = timeout(Duration::from_secs(30), ready_rx)
         .await
         .expect("daemon sync readiness timed out")
         .expect("daemon exited before sync readiness");
@@ -1293,12 +1293,12 @@ struct DaemonProcess {
 impl DaemonProcess {
     async fn stop(mut self) {
         self.child.start_kill().unwrap();
-        let status = timeout(Duration::from_secs(5), self.child.wait())
+        let status = timeout(Duration::from_secs(30), self.child.wait())
             .await
             .expect("daemon did not terminate")
             .unwrap();
         assert!(!status.success());
-        let _ = timeout(Duration::from_secs(2), &mut self.drain).await;
+        let _ = timeout(Duration::from_secs(30), &mut self.drain).await;
     }
 }
 
@@ -1330,7 +1330,7 @@ async fn connect_daemon_client(
     socket: &std::path::Path,
 ) -> CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
-    for _ in 0..250 {
+    for _ in 0..1_500 {
         if socket.exists() {
             match CodexTuiTestClient::connect_unix(
                 socket,
@@ -1430,7 +1430,7 @@ fn spawn_sync_child(
 
 async fn stop_process(child: &mut Child) {
     child.start_kill().unwrap();
-    let status = timeout(Duration::from_secs(5), child.wait())
+    let status = timeout(Duration::from_secs(30), child.wait())
         .await
         .expect("process did not terminate")
         .unwrap();

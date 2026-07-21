@@ -4864,7 +4864,7 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
     assert!(caller.await.unwrap_err().is_cancelled());
     release.notify_one();
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let has_receipt = observer
                 .read_thread_events(None)
@@ -4998,11 +4998,11 @@ streaming = false
             )
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(30), started.notified())
         .await
         .expect("workspace runtime did not start");
 
-    let coordinates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let coordinates = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let snapshot = app.inner.supervisor.lifecycle_snapshot().await;
             if let Some(record) = snapshot
@@ -5028,7 +5028,7 @@ streaming = false
         .get_thread_at(&coordinates)
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_millis(500), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if handle
                 .read_thread_events(None)
@@ -5054,7 +5054,7 @@ streaming = false
 
     caller.abort();
     assert!(caller.await.unwrap_err().is_cancelled());
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if app
                 .inner
@@ -9422,7 +9422,7 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
     let turn_id = turn["turn"]["id"].as_str().unwrap().to_string();
 
     let (saw_resync_started, resynced) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let mut saw_resync_started = false;
             loop {
                 let message = outbound_rx
@@ -9521,7 +9521,7 @@ async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
         "missing entry_id should degrade the lag resync instead of failing it",
     );
 
-    let resynced = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let resynced = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let message = outbound_rx
                 .recv()
@@ -9578,7 +9578,7 @@ async fn lagged_idle_thread_resynchronizes_without_another_status_change() {
     }
 
     let (saw_started, saw_resynced) =
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let mut saw_started = false;
             loop {
                 let message = outbound_rx
@@ -9639,9 +9639,12 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
     .await
     .unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(3), gate.wait_until_entered())
-        .await
-        .expect("watcher did not enter lag resynchronization");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        gate.wait_until_entered(),
+    )
+    .await
+    .expect("watcher did not enter lag resynchronization");
 
     let second = app
         .dispatch_request(
@@ -9656,7 +9659,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
         .unwrap();
     let second_turn_id = second["turn"]["id"].as_str().unwrap().to_string();
     tokio::time::timeout(
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(30),
         client.wait_for_second_request(),
     )
     .await
@@ -9667,7 +9670,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
     );
     gate.release();
 
-    let status_after_resync = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    let status_after_resync = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let mut saw_resynced = false;
         loop {
             let message = outbound_rx
@@ -10787,7 +10790,7 @@ async fn oversized_pre_upgrade_headers_fail_closed_with_one_witness() {
             .is_none()
     );
     let mut response = vec![0_u8; 256];
-    let len = tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
+    let len = tokio::time::timeout(Duration::from_secs(30), client.read(&mut response))
         .await
         .unwrap()
         .unwrap();
@@ -10811,7 +10814,7 @@ async fn identity_sql_count(path: &Path, query: &str) -> i64 {
 }
 
 async fn wait_for_identity_sql_count(path: &Path, query: &str, expected: i64) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if identity_sql_count(path, query).await >= expected {
                 return;
@@ -11091,7 +11094,7 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
         .runtime_store(&app.inner.tenant_id)
         .await
         .unwrap();
-    let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let context = store.build_context(&coordinates).await.unwrap();
             let text = context
@@ -11232,7 +11235,7 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
         .runtime_store(&app.inner.tenant_id)
         .await
         .unwrap();
-    let (events, thread_events) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    let (events, thread_events) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let events = store
                 .read_events(&crate::control_stream_id(&coordinates), None)
@@ -11459,7 +11462,7 @@ async fn thread_shell_command_emits_command_execution_item() {
     let mut saw_delta = false;
     let mut saw_completed = false;
     let mut observed = Vec::new();
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(2));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -11528,7 +11531,7 @@ async fn bridge_flow_uses_local_offline_provider() {
     let mut saw_delta = false;
     let mut saw_completed = false;
     let mut methods = Vec::new();
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(2));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -12549,7 +12552,7 @@ async fn wait_for_event_kind(
     thread_id: &str,
     kind: &str,
 ) -> Value {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let page = app
             .dispatch_request(
@@ -13419,7 +13422,7 @@ async fn wait_for_provider_requests<T>(client: &Arc<T>, count: usize)
 where
     T: ProviderRequestRecorder + ?Sized,
 {
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if client.recorded_request_count() >= count {
             return;
         }
@@ -13436,7 +13439,7 @@ async fn wait_for_lifecycle_status(
     thread_id: ThreadId,
     status: crate::ThreadLifecycleStatus,
 ) -> ThreadLifecycleRecord {
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if let Some(record) = store.get_thread_lifecycle(thread_id).await.unwrap()
             && record.status == status
         {
@@ -13449,7 +13452,7 @@ async fn wait_for_lifecycle_status(
 
 async fn wait_for_session_text(app: &CooldisAppServer, thread_id: &str, expected: &str) {
     let parsed = ThreadId::parse_str(thread_id).unwrap();
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
             .supervisor
@@ -13472,7 +13475,7 @@ async fn wait_for_turn_completed_notification(
     thread_id: &str,
     turn_id: &str,
 ) -> Value {
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
     loop {
@@ -13514,7 +13517,7 @@ async fn wait_for_failed_turn_and_closed_thread(
     thread_id: &str,
     turn_id: &str,
 ) -> Value {
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
     let mut completed = None;
@@ -13578,7 +13581,7 @@ async fn collect_agent_deltas_until_turn_completed(
     thread_id: &str,
     turn_id: &str,
 ) -> (String, Value) {
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
     let mut deltas = String::new();
@@ -13641,7 +13644,7 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
     thread_id: &str,
     turn_id: &str,
 ) -> (String, String, Value) {
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
     let mut message_deltas = String::new();
@@ -13723,7 +13726,7 @@ async fn collect_delta_methods_until_turn_completed(
     thread_id: &str,
     turn_id: &str,
 ) -> Vec<String> {
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
     loop {
@@ -13781,6 +13784,7 @@ async fn assert_no_extra_turn_delta_or_completed(
     thread_id: &str,
     turn_id: &str,
 ) {
+    // tight-timeout: this is an absence window for duplicate turn notifications
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -13820,7 +13824,7 @@ async fn wait_for_assistant_texts(
     expected_count: usize,
 ) -> Vec<String> {
     let parsed = ThreadId::parse_str(thread_id).unwrap();
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
             .supervisor
@@ -13925,7 +13929,7 @@ async fn connect_tui_test_client(
     client_name: &str,
 ) -> crate::CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match crate::CodexTuiTestClient::connect_unix(
             socket,
             crate::CodexTuiConnectConfig {
@@ -13954,7 +13958,7 @@ async fn connect_ws_tui_test_client(
     token: &str,
 ) -> crate::CodexTuiTestClient<tokio::net::TcpStream> {
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match crate::CodexTuiTestClient::connect_websocket(
             url,
             crate::CodexTuiConnectConfig {
@@ -14018,7 +14022,7 @@ async fn get_tcp_raw_response(addr: std::net::SocketAddr, request: &str) -> Stri
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match TcpStream::connect(addr).await {
             Ok(mut stream) => {
                 stream.write_all(request.as_bytes()).await.unwrap();

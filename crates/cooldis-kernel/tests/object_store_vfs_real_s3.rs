@@ -176,7 +176,7 @@ fn live_s3_config(default_prefix: &str) -> LiveS3Config {
 }
 
 async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             match events.recv().await.unwrap() {
                 ThreadEvent::Output { text, .. } => break text,
