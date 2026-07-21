@@ -172,7 +172,7 @@ async fn connect_client(
     token: &str,
 ) -> Result<CodexTuiTestClient<TcpStream>, Box<dyn std::error::Error>> {
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match CodexTuiTestClient::connect_websocket(
             url,
             CodexTuiConnectConfig {

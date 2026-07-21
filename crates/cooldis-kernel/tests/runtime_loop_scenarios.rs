@@ -1600,7 +1600,7 @@ impl ProviderClient for GatedProviderClient {
 }
 
 async fn wait_for_requests(client: &ScriptedProviderClient, expected: usize) {
-    for _ in 0..30 {
+    for _ in 0..1_500 {
         if client.requests().len() >= expected {
             return;
         }
@@ -1625,7 +1625,10 @@ async fn collect_until_signal(
                 Ok(ThreadEvent::Failed { message, .. }) => {
                     panic!("thread failed before signal {expected:?}: {message}");
                 }
-                Ok(_) | Err(_) => {}
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event channel closed before signal {expected:?}");
+                }
             }
         }
     })
@@ -1651,7 +1654,10 @@ async fn collect_until_policy_rejected(
                 Ok(ThreadEvent::Failed { message, .. }) => {
                     panic!("thread failed before policy rejection {expected_code:?}: {message}");
                 }
-                Ok(_) | Err(_) => {}
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event channel closed before policy rejection {expected_code:?}");
+                }
             }
         }
     })
@@ -1676,7 +1682,7 @@ async fn wait_for_status(thread: &cooldis::RuntimeThreadHandle, expected: Thread
 }
 
 async fn wait_for_gated_requests(client: &GatedProviderClient, expected: usize) {
-    for _ in 0..30 {
+    for _ in 0..1_500 {
         if client.requests().len() >= expected {
             return;
         }

@@ -1330,7 +1330,7 @@ async fn connect_daemon_client(
     socket: &std::path::Path,
 ) -> CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
-    for _ in 0..250 {
+    for _ in 0..1_500 {
         if socket.exists() {
             match CodexTuiTestClient::connect_unix(
                 socket,

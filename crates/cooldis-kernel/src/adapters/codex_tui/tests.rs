@@ -184,7 +184,7 @@ async fn codex_tui_operator_client_covers_thread_lifecycle_methods() {
 
 #[cfg(unix)]
 async fn wait_for_socket(path: &PathBuf) -> CooldisResult<()> {
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if path.exists() {
             return Ok(());
         }

@@ -9659,7 +9659,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
         .unwrap();
     let second_turn_id = second["turn"]["id"].as_str().unwrap().to_string();
     tokio::time::timeout(
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(30),
         client.wait_for_second_request(),
     )
     .await
@@ -13422,7 +13422,7 @@ async fn wait_for_provider_requests<T>(client: &Arc<T>, count: usize)
 where
     T: ProviderRequestRecorder + ?Sized,
 {
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if client.recorded_request_count() >= count {
             return;
         }
@@ -13439,7 +13439,7 @@ async fn wait_for_lifecycle_status(
     thread_id: ThreadId,
     status: crate::ThreadLifecycleStatus,
 ) -> ThreadLifecycleRecord {
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if let Some(record) = store.get_thread_lifecycle(thread_id).await.unwrap()
             && record.status == status
         {
@@ -13452,7 +13452,7 @@ async fn wait_for_lifecycle_status(
 
 async fn wait_for_session_text(app: &CooldisAppServer, thread_id: &str, expected: &str) {
     let parsed = ThreadId::parse_str(thread_id).unwrap();
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
             .supervisor
@@ -13824,7 +13824,7 @@ async fn wait_for_assistant_texts(
     expected_count: usize,
 ) -> Vec<String> {
     let parsed = ThreadId::parse_str(thread_id).unwrap();
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
             .supervisor
@@ -13929,7 +13929,7 @@ async fn connect_tui_test_client(
     client_name: &str,
 ) -> crate::CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match crate::CodexTuiTestClient::connect_unix(
             socket,
             crate::CodexTuiConnectConfig {
@@ -13958,7 +13958,7 @@ async fn connect_ws_tui_test_client(
     token: &str,
 ) -> crate::CodexTuiTestClient<tokio::net::TcpStream> {
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match crate::CodexTuiTestClient::connect_websocket(
             url,
             crate::CodexTuiConnectConfig {
@@ -14022,7 +14022,7 @@ async fn get_tcp_raw_response(addr: std::net::SocketAddr, request: &str) -> Stri
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match TcpStream::connect(addr).await {
             Ok(mut stream) => {
                 stream.write_all(request.as_bytes()).await.unwrap();

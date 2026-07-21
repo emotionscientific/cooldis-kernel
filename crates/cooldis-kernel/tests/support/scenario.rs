@@ -1341,6 +1341,7 @@ impl ScenarioHarness {
     }
 
     async fn remains_parked<T>(&self, task: &tokio::task::JoinHandle<T>) -> bool {
+        // tight-timeout: this is an absence window for a task that must remain parked
         for _ in 0..128 {
             if task.is_finished() {
                 return false;

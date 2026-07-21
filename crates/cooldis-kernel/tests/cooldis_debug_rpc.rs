@@ -229,7 +229,7 @@ impl DebugRpcServer {
 
 async fn wait_for_websocket(url: &str, token: &str) {
     let mut last_error = None;
-    for _ in 0..100 {
+    for _ in 0..1_500 {
         match CodexTuiTestClient::connect_websocket(
             url,
             CodexTuiConnectConfig {

@@ -2996,6 +2996,7 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
         .unwrap();
 
     tokio::time::advance(Duration::from_millis(50)).await;
+    // tight-timeout: paused time deterministically bounds the first turn watchdog event
     timeout(
         Duration::from_millis(1),
         assert_runtime_kind(&mut events, |kind| {
@@ -3009,6 +3010,7 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
     .expect("the active first turn watchdog did not fire at its deadline");
 
     assert!(
+        // tight-timeout: paused time proves the queued turn watchdog remains inactive
         timeout(
             Duration::from_millis(51),
             assert_runtime_kind(&mut events, |kind| {
@@ -3027,6 +3029,7 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
     state.second_started.notified().await;
 
     assert!(
+        // tight-timeout: paused time proves the second watchdog stays quiet before its deadline
         timeout(
             Duration::from_millis(99),
             assert_runtime_kind(&mut events, |kind| {
@@ -3040,6 +3043,7 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
         .is_err(),
         "the second turn watchdog fired before its execution deadline"
     );
+    // tight-timeout: paused time deterministically crosses the second turn watchdog deadline
     timeout(
         Duration::from_millis(2),
         assert_runtime_kind(&mut events, |kind| {

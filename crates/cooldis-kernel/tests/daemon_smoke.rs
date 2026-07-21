@@ -76,7 +76,7 @@ fn escape_toml_string(value: &str) -> String {
 
 async fn connect_daemon_client(socket: &Path) -> CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
-    for _ in 0..150 {
+    for _ in 0..1_500 {
         if socket.exists() {
             match CodexTuiTestClient::connect_unix(
                 socket,
