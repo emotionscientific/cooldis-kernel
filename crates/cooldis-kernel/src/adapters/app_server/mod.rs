@@ -592,9 +592,14 @@ impl SessionCloseWitness {
         // the first poll, so disarming here prevents a cancelled await from
         // scheduling a duplicate close witness.
         self.armed = false;
-        self.authority
+        let result = self
+            .authority
             .witness_session_closed(&self.session_id, self.clock.now().timestamp_millis())
-            .await
+            .await;
+        // A completed failure has no transaction left to finish in the
+        // background. Re-arm the idempotent Drop path for one best-effort retry.
+        self.armed = result.is_err();
+        result
     }
 }
 

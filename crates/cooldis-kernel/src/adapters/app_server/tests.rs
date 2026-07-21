@@ -10681,6 +10681,67 @@ async fn aborted_websocket_session_still_witnesses_its_close() {
     .await;
 }
 
+#[tokio::test]
+async fn local_dispatch_error_still_witnesses_its_session_close() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+
+    let error = app
+        .local_json_rpc_request("not/a-method", json!({}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unsupported method"));
+    assert_eq!(
+        identity_sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_session_close_rearms_the_drop_witness() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let (connection_state, _outbound_rx) = test_connection(app.clone()).await;
+    let mut close_witness = SessionCloseWitness::new(
+        Arc::clone(&app.inner.identity_authority),
+        Arc::clone(&app.inner.identity_clock),
+        connection_state.witnessed_session_id.clone(),
+    );
+    let store = SqliteSessionStore::open(&store_path).await.unwrap();
+    let database = store.sqlite_database();
+    let database_connection = database.connect().await.unwrap();
+    database_connection
+        .execute_batch(
+            "ALTER TABLE cooldis_identity_sessions RENAME TO cooldis_identity_sessions_offline",
+        )
+        .await
+        .unwrap();
+
+    assert!(close_witness.close().await.is_err());
+    assert!(
+        close_witness.armed,
+        "a completed close failure must retry on drop"
+    );
+
+    database_connection
+        .execute_batch(
+            "ALTER TABLE cooldis_identity_sessions_offline RENAME TO cooldis_identity_sessions",
+        )
+        .await
+        .unwrap();
+    drop(close_witness);
+    wait_for_identity_sql_count(
+        &store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
+        1,
+    )
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

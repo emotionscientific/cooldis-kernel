@@ -746,6 +746,7 @@ pub(super) struct GetConversationSummaryParams {
 const METHOD_NOT_AUTHORIZED_CODE: i64 = -32003;
 
 pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(&str, AuthorityClass)] = &[
+    // Compatibility reads and local registry projections.
     ("account/read", AuthorityClass::Interactive),
     ("account/rateLimits/read", AuthorityClass::Interactive),
     ("app/list", AuthorityClass::Interactive),
@@ -775,16 +776,23 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(&str, AuthorityClass)] = 
     ("modelProvider/auth/set", AuthorityClass::Host),
     ("modelProvider/auth/delete", AuthorityClass::Host),
     ("experimentalFeature/list", AuthorityClass::Interactive),
+    // This is currently an echo-only compatibility stub. Reclassify it before
+    // wiring the method to daemon configuration or other host state.
     (
         "experimentalFeature/enablement/set",
         AuthorityClass::Interactive,
     ),
     ("getAuthStatus", AuthorityClass::Interactive),
     ("getConversationSummary", AuthorityClass::Host),
+    // These construct or reconstruct runtime bindings and may resolve secrets.
     ("thread/start", AuthorityClass::Host),
     ("thread/spawn", AuthorityClass::Host),
     ("thread/submit", AuthorityClass::Interactive),
+    // A clone fork replays the source thread's witnessed standing grant. It
+    // cannot select a new manifest, placement, manifest workspace binding, or
+    // tool policy; its cwd/model fields are presentation/runtime controls.
     ("thread/fork", AuthorityClass::Interactive),
+    // A rebind fork can select all of those surfaces, so it remains Host.
     ("thread/rebindFork", AuthorityClass::Host),
     ("thread/resume", AuthorityClass::Host),
     ("thread/read", AuthorityClass::Interactive),
@@ -802,9 +810,13 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(&str, AuthorityClass)] = 
     ("thread/unsubscribe", AuthorityClass::Interactive),
     ("thread/name/set", AuthorityClass::Interactive),
     ("thread/metadata/update", AuthorityClass::Interactive),
+    // Compaction runs inside an existing bound thread and obtains no new grant.
     ("thread/compact/start", AuthorityClass::Interactive),
     ("thread/shellCommand", AuthorityClass::Host),
+    // Ingress may lazily reconstruct the thread from its witnessed standing
+    // grant. Ingress-only principals are separately barred from turn controls.
     ("turn/start", AuthorityClass::Ingress),
+    // Steering only adds input to an already-running, already-bound turn.
     ("turn/steer", AuthorityClass::Interactive),
     ("turn/interrupt", AuthorityClass::Interactive),
     ("skills/list", AuthorityClass::Interactive),
@@ -832,13 +844,16 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(&str, AuthorityClass)] = 
 ];
 
 pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
+    // Local registry mutations.
     "capsule/binding/set",    // lexicon-allow: capsule - existing RPC method.
     "capsule/binding/delete", // lexicon-allow: capsule - existing RPC method.
     "agent/publish",
+    // Processes and process-handle control.
     "command/exec",
     "command/exec/write",
     "command/exec/terminate",
     "command/exec/resize",
+    // Provider configuration and secret status/mutations.
     "modelProvider/list",
     "modelProvider/read",
     "modelProvider/upsert",
@@ -846,16 +861,21 @@ pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
     "modelProvider/auth/status",
     "modelProvider/auth/set",
     "modelProvider/auth/delete",
+    // Runtime construction, reconstruction, and standing-grant changes.
     "thread/start",
     "thread/spawn",
     "thread/rebindFork",
     "thread/resume",
+    // Effects that may release or directly invoke host tools.
     "approval/resolve",
     "thread/shellCommand",
+    // MCP secret/network effects. Plain list/read and manifestPatch are
+    // redacted registry projections and do not resolve secret material.
     "mcpSource/upsert",
     "mcpSource/discover",
     "mcpSource/delete",
     "mcpSource/testTool",
+    // Filesystem mutations; read/watch methods remain Host but are not effects.
     "fs/writeFile",
     "fs/createDirectory",
     "fs/remove",
@@ -927,7 +947,13 @@ impl CooldisAppServer {
             .map_err(jsonrpc_error_to_runtime_factory);
         let close_result = close_witness.close().await;
         match (dispatch_result, close_result) {
-            (Err(error), _) => Err(error),
+            (Err(error), Err(close_error)) => {
+                eprintln!(
+                    "failed to witness closing a failed local JSON-RPC session: {close_error}"
+                );
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
             (Ok(_), Err(error)) => Err(error),
             (Ok(value), Ok(())) => Ok(value),
         }
@@ -1084,6 +1110,34 @@ impl CooldisAppServer {
             return Err(jsonrpc_error(
                 METHOD_NOT_AUTHORIZED_CODE,
                 "request is not authorized for this principal",
+            ));
+        }
+        let ingress_only = connection
+            .resolved_principal
+            .kind
+            .permits(AuthorityClass::Ingress)
+            && !connection
+                .resolved_principal
+                .kind
+                .permits(AuthorityClass::Interactive)
+            && !connection
+                .resolved_principal
+                .kind
+                .permits(AuthorityClass::Host);
+        if method == "turn/start"
+            && ingress_only
+            && params
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(|params| {
+                    ["cwd", "model", "thinking"]
+                        .iter()
+                        .any(|name| params.contains_key(*name))
+                })
+        {
+            return Err(jsonrpc_error(
+                -32602,
+                "turn/start parameter overrides are not available to this principal",
             ));
         }
         if HOST_EFFECT_METHODS.contains(&method) {

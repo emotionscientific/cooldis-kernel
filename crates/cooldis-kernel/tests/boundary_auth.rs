@@ -86,6 +86,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
         json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "operator ingress", "text_elements": [] }],
+            "cwd": root.join("workspace"),
         }),
     )
     .await
@@ -124,9 +125,37 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     .unwrap_err();
     assert_eq!(denied_interactive.code, METHOD_NOT_AUTHORIZED_CODE);
 
+    for (id, method) in [
+        (5, "Command/exec"),
+        (6, "command/exec "),
+        (7, " command/exec"),
+    ] {
+        let denied_variant = rpc_call(&mut adapter_rpc, RequestId::Integer(id), method, json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(denied_variant.code, denied_command.code);
+        assert_eq!(denied_variant.message, denied_command.message);
+    }
+
+    let sensitive_cwd = root.join("adapter-secret-cwd");
+    let denied_override = rpc_call(
+        &mut adapter_rpc,
+        RequestId::Integer(8),
+        "turn/start",
+        json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": "adapter override", "text_elements": [] }],
+            "cwd": sensitive_cwd,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied_override.code, -32602);
+    assert!(!denied_override.message.contains("adapter-secret-cwd"));
+
     rpc_call(
         &mut adapter_rpc,
-        RequestId::Integer(5),
+        RequestId::Integer(9),
         "turn/start",
         json!({
             "threadId": thread_id,
@@ -174,7 +203,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
             params![ADAPTER_ID],
         )
         .await,
-        3
+        6
     );
     assert_eq!(
         sql_count(
