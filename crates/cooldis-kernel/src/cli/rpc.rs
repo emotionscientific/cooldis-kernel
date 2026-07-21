@@ -26,8 +26,18 @@ pub(super) async fn run_rpc(args: Vec<OsString>) -> CooldisResult<()> {
     if let Some(state_home) = options.state_home {
         config.state_home = state_home;
     }
+    let state_home = config.state_home.clone();
     let server = CooldisAppServer::new_local(config).await?;
     eprintln!("cooldis rpc listening on {}", options.listen.display());
+    eprintln!("cooldis rpc state home: {}", state_home.display());
+    match &options.listen {
+        AppServerListenAddr::WebSocket(_) => eprintln!(
+            "Before starting this server, mint a bearer token with `cooldis identity` against this state home; WebSocket clients pass that token in COOLDIS_APP_SERVER_TOKEN."
+        ),
+        AppServerListenAddr::Unix(_) => {
+            eprintln!("Same-uid Unix socket peers need no token.");
+        }
+    }
     server.serve(options.listen).await
 }
 
@@ -86,9 +96,10 @@ pub(super) fn print_rpc_help() {
         "cooldis rpc\n\
 \n\
 Usage:\n\
-  cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]\n\
+  cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--runtime-home <path>] [--state-home <path>] [--cwd <path>]\n\
 \n\
 Starts the Cooldis control-plane RPC endpoint. This is the public entrypoint for\n\
-remote operation when Cooldis is running in a sandbox, daemon, or managed host.\n"
+remote operation when Cooldis is running in a sandbox, daemon, or managed host.\n\
+Without --state-home, the server uses a fresh temporary state home for each process.\n"
     );
 }

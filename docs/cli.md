@@ -54,7 +54,7 @@ Both redact stored values in status and list output.
 ## Advanced Commands
 
 ```sh
-cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]
+cooldis rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--runtime-home <path>] [--state-home <path>] [--cwd <path>]
 cooldis debug bind <thread-id> [--json] [--url <ws-url> | --config <path> | --journal <db>]
 cooldis debug rpc call <method> [PARAMS_JSON]
 cooldis debug rpc turn (--thread <id> | --new) <text>
@@ -63,7 +63,11 @@ cooldis daemon run|config|service
 ```
 
 `cooldis rpc` is the app-server control plane for scripts, local hosts, MCP,
-ACP, and other clients. `cooldis debug bind` explains the effective model,
+ACP, and other clients. Without `--state-home`, it uses a fresh temporary state
+home. TCP WebSocket clients supply a token through
+`COOLDIS_APP_SERVER_TOKEN`; see the standalone quick start and Authentication
+section in [Cooldis RPC Control Plane](app-server.md). `cooldis debug bind`
+explains the effective model,
 placement, workspace, runtime, tool, coupling, grant, skill, and context
 envelope strictly from recorded compile and bind receipts. It reads a running
 daemon through `thread/events/list`, or a stopped daemon's SQLite journal with
