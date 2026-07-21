@@ -5,8 +5,9 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct ConnectionState {
     pub(super) app: CooldisAppServer,
-    #[allow(dead_code)]
     pub(super) resolved_principal: ResolvedPrincipal,
+    pub(super) witnessed_session_id: String,
+    pub(super) boundary_surface: BoundarySurface,
     pub(super) outbound: mpsc::UnboundedSender<JsonRpcMessage>,
     pub(super) handshake: Arc<Mutex<HandshakeState>>,
     pub(super) opt_out_notifications: Arc<RwLock<HashSet<String>>>,
@@ -742,6 +743,125 @@ pub(super) struct GetConversationSummaryParams {
     pub(super) rollout_path: Option<String>,
 }
 
+const METHOD_NOT_AUTHORIZED_CODE: i64 = -32003;
+
+pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(&str, AuthorityClass)] = &[
+    ("account/read", AuthorityClass::Interactive),
+    ("account/rateLimits/read", AuthorityClass::Interactive),
+    ("app/list", AuthorityClass::Interactive),
+    ("capsule/binding/set", AuthorityClass::Host), // lexicon-allow: capsule - existing RPC method.
+    ("capsule/binding/delete", AuthorityClass::Host), // lexicon-allow: capsule - existing RPC method.
+    ("capsule/binding/list", AuthorityClass::Host), // lexicon-allow: capsule - existing RPC method.
+    ("capsule/binding/resolve", AuthorityClass::Host), // lexicon-allow: capsule - existing RPC method.
+    ("agent/list", AuthorityClass::Interactive),
+    ("agent/read", AuthorityClass::Interactive),
+    ("agent/plan", AuthorityClass::Interactive),
+    ("agent/publish", AuthorityClass::Host),
+    ("operation/list", AuthorityClass::Interactive),
+    ("command/exec", AuthorityClass::Host),
+    ("command/exec/write", AuthorityClass::Host),
+    ("command/exec/terminate", AuthorityClass::Host),
+    ("command/exec/resize", AuthorityClass::Host),
+    ("model/list", AuthorityClass::Interactive),
+    (
+        "modelProvider/capabilities/read",
+        AuthorityClass::Interactive,
+    ),
+    ("modelProvider/list", AuthorityClass::Host),
+    ("modelProvider/read", AuthorityClass::Host),
+    ("modelProvider/upsert", AuthorityClass::Host),
+    ("modelProvider/delete", AuthorityClass::Host),
+    ("modelProvider/auth/status", AuthorityClass::Host),
+    ("modelProvider/auth/set", AuthorityClass::Host),
+    ("modelProvider/auth/delete", AuthorityClass::Host),
+    ("experimentalFeature/list", AuthorityClass::Interactive),
+    (
+        "experimentalFeature/enablement/set",
+        AuthorityClass::Interactive,
+    ),
+    ("getAuthStatus", AuthorityClass::Interactive),
+    ("getConversationSummary", AuthorityClass::Host),
+    ("thread/start", AuthorityClass::Host),
+    ("thread/spawn", AuthorityClass::Host),
+    ("thread/submit", AuthorityClass::Interactive),
+    ("thread/fork", AuthorityClass::Interactive),
+    ("thread/rebindFork", AuthorityClass::Host),
+    ("thread/resume", AuthorityClass::Host),
+    ("thread/read", AuthorityClass::Interactive),
+    ("thread/events/list", AuthorityClass::Interactive),
+    ("thread/couplings/list", AuthorityClass::Interactive),
+    ("thread/approvals/list", AuthorityClass::Interactive),
+    ("thread/waiting/list", AuthorityClass::Interactive),
+    ("approval/resolve", AuthorityClass::Host),
+    ("mandate/start", AuthorityClass::Interactive),
+    ("mandate/revoke", AuthorityClass::Interactive),
+    ("mandate/list", AuthorityClass::Interactive),
+    ("thread/debug/export", AuthorityClass::Host),
+    ("thread/list", AuthorityClass::Interactive),
+    ("thread/loaded/list", AuthorityClass::Interactive),
+    ("thread/unsubscribe", AuthorityClass::Interactive),
+    ("thread/name/set", AuthorityClass::Interactive),
+    ("thread/metadata/update", AuthorityClass::Interactive),
+    ("thread/compact/start", AuthorityClass::Interactive),
+    ("thread/shellCommand", AuthorityClass::Host),
+    ("turn/start", AuthorityClass::Ingress),
+    ("turn/steer", AuthorityClass::Interactive),
+    ("turn/interrupt", AuthorityClass::Interactive),
+    ("skills/list", AuthorityClass::Interactive),
+    ("plugin/list", AuthorityClass::Interactive),
+    ("hooks/list", AuthorityClass::Interactive),
+    ("mcpServerStatus/list", AuthorityClass::Host),
+    ("mcpSource/list", AuthorityClass::Host),
+    ("mcpSource/read", AuthorityClass::Host),
+    ("mcpSource/upsert", AuthorityClass::Host),
+    ("mcpSource/discover", AuthorityClass::Host),
+    ("mcpSource/delete", AuthorityClass::Host),
+    ("mcpSource/testTool", AuthorityClass::Host),
+    ("mcpSource/manifestPatch", AuthorityClass::Host),
+    ("fs/readFile", AuthorityClass::Host),
+    ("fs/writeFile", AuthorityClass::Host),
+    ("fs/createDirectory", AuthorityClass::Host),
+    ("fs/getMetadata", AuthorityClass::Host),
+    ("fs/readDirectory", AuthorityClass::Host),
+    ("fs/remove", AuthorityClass::Host),
+    ("fs/copy", AuthorityClass::Host),
+    ("fs/watch", AuthorityClass::Host),
+    ("fs/unwatch", AuthorityClass::Host),
+    ("config/read", AuthorityClass::Interactive),
+    ("configRequirements/read", AuthorityClass::Interactive),
+];
+
+pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
+    "capsule/binding/set",    // lexicon-allow: capsule - existing RPC method.
+    "capsule/binding/delete", // lexicon-allow: capsule - existing RPC method.
+    "agent/publish",
+    "command/exec",
+    "command/exec/write",
+    "command/exec/terminate",
+    "command/exec/resize",
+    "modelProvider/list",
+    "modelProvider/read",
+    "modelProvider/upsert",
+    "modelProvider/delete",
+    "modelProvider/auth/status",
+    "modelProvider/auth/set",
+    "modelProvider/auth/delete",
+    "thread/start",
+    "thread/spawn",
+    "thread/rebindFork",
+    "thread/resume",
+    "approval/resolve",
+    "thread/shellCommand",
+    "mcpSource/upsert",
+    "mcpSource/discover",
+    "mcpSource/delete",
+    "mcpSource/testTool",
+    "fs/writeFile",
+    "fs/createDirectory",
+    "fs/remove",
+    "fs/copy",
+];
+
 impl CooldisAppServer {
     pub async fn local_json_rpc_request(
         &self,
@@ -758,10 +878,32 @@ impl CooldisAppServer {
                     "local JSON-RPC requires the local-mode operator principal".to_string(),
                 )
             })?;
+        let session_id = format!("session_{}", Uuid::now_v7());
+        let surface = BoundarySurface::UnixSocket;
+        self.inner
+            .identity_authority
+            .witness_session_opened(&IdentitySessionV1 {
+                schema: IDENTITY_SESSION_SCHEMA_V1.to_string(),
+                session_id: session_id.clone(),
+                principal_id: resolved_principal.principal_id.clone(),
+                kind: resolved_principal.kind,
+                surface,
+                credential_ref: credential_ref(&resolved_principal.auth),
+                opened_at_ms: self.inner.identity_clock.now().timestamp_millis(),
+                closed_at_ms: None,
+            })
+            .await?;
+        let mut close_witness = SessionCloseWitness::new(
+            Arc::clone(&self.inner.identity_authority),
+            Arc::clone(&self.inner.identity_clock),
+            session_id.clone(),
+        );
         let (outbound, _rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
         let connection = ConnectionState {
             app: self.clone(),
             resolved_principal,
+            witnessed_session_id: session_id,
+            boundary_surface: surface,
             outbound,
             handshake: Arc::new(Mutex::new(HandshakeState::default())),
             opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
@@ -779,9 +921,16 @@ impl CooldisAppServer {
             })))
             .await
             .map_err(jsonrpc_error_to_runtime_factory)?;
-        self.dispatch_request(&connection, method, Some(params))
+        let dispatch_result = self
+            .dispatch_request(&connection, method, Some(params))
             .await
-            .map_err(jsonrpc_error_to_runtime_factory)
+            .map_err(jsonrpc_error_to_runtime_factory);
+        let close_result = close_witness.close().await;
+        match (dispatch_result, close_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
     }
 
     pub(super) async fn handle_websocket<S>(
@@ -810,7 +959,7 @@ impl CooldisAppServer {
         let mut close_witness = SessionCloseWitness::new(
             Arc::clone(&self.inner.identity_authority),
             Arc::clone(&self.inner.identity_clock),
-            session_id,
+            session_id.clone(),
         );
         let (mut sink, mut stream) = websocket.split();
         let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
@@ -833,6 +982,8 @@ impl CooldisAppServer {
         let connection = ConnectionState {
             app: self.clone(),
             resolved_principal,
+            witnessed_session_id: session_id,
+            boundary_surface: surface,
             outbound,
             handshake: Arc::new(Mutex::new(HandshakeState::default())),
             opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
@@ -904,6 +1055,50 @@ impl CooldisAppServer {
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, JsonRpcErrorError> {
+        let authority_class = authority_class_for_method(method);
+        debug_assert_eq!(
+            DISPATCH_METHOD_AUTHORITY_CLASSES
+                .iter()
+                .find_map(|(listed_method, class)| (*listed_method == method).then_some(*class)),
+            DISPATCH_METHOD_AUTHORITY_CLASSES
+                .iter()
+                .any(|(listed_method, _)| *listed_method == method)
+                .then_some(authority_class),
+            "dispatcher authority-class table drifted for {method}",
+        );
+        if !connection.resolved_principal.kind.permits(authority_class) {
+            self.inner
+                .identity_authority
+                .witness_auth_rejected(&IdentityAuthRejectionV1 {
+                    schema: IDENTITY_AUTH_REJECTION_SCHEMA_V1.to_string(),
+                    surface: connection.boundary_surface,
+                    reason: IdentityAuthRejectionReason::MethodNotAuthorized {
+                        method: method.to_string(),
+                        class: authority_class,
+                    },
+                    principal_id: Some(connection.resolved_principal.principal_id.clone()),
+                    rejected_at_ms: self.inner.identity_clock.now().timestamp_millis(),
+                })
+                .await
+                .map_err(internal_error)?;
+            return Err(jsonrpc_error(
+                METHOD_NOT_AUTHORIZED_CODE,
+                "request is not authorized for this principal",
+            ));
+        }
+        if HOST_EFFECT_METHODS.contains(&method) {
+            self.inner
+                .identity_authority
+                .witness_host_effect(&IdentityHostEffectV1 {
+                    schema: IDENTITY_HOST_EFFECT_SCHEMA_V1.to_string(),
+                    session_id: connection.witnessed_session_id.clone(),
+                    principal_id: connection.resolved_principal.principal_id.clone(),
+                    method: method.to_string(),
+                    witnessed_at_ms: self.inner.identity_clock.now().timestamp_millis(),
+                })
+                .await
+                .map_err(internal_error)?;
+        }
         match method {
             "account/read" => Ok(json!({
                 "account": null,
@@ -3304,15 +3499,22 @@ impl CooldisAppServer {
 
     async fn record_rpc_ingress_received(
         &self,
+        connection: &ConnectionState,
         handle: &RuntimeThreadHandle,
         method: &str,
         input: &[Value],
         surface: &str,
     ) -> Result<crate::EventRecord, JsonRpcErrorError> {
         let coordinates = handle.context().coordinates.clone();
+        let principal = cooldis_io_core::IoPrincipal::new(
+            self.inner.tenant_id.clone(),
+            connection.resolved_principal.principal_id.to_string(),
+            format!("caller:{}", connection.witnessed_session_id),
+        );
         let envelope_digest = crate::agent::manifest_bind::canonical_json_hash(&json!({
             "method": method,
             "input": input,
+            "principal": principal,
         }))
         .map_err(internal_error)?;
         let payload = crate::IoIngressReceivedPayload {
@@ -3329,6 +3531,10 @@ impl CooldisAppServer {
             object.insert(
                 "schema".to_string(),
                 json!(crate::EventKind::IoIngressReceived.payload_schema_id()),
+            );
+            object.insert(
+                "principal".to_string(),
+                serde_json::to_value(principal).map_err(json_codec_error)?,
             );
         }
         handle
@@ -3488,7 +3694,7 @@ impl CooldisAppServer {
         };
         let surface = connection.admission_surface().await;
         let ingress_event = self
-            .record_rpc_ingress_received(&handle, "turn/start", &params.input, surface)
+            .record_rpc_ingress_received(connection, &handle, "turn/start", &params.input, surface)
             .await?;
         let admission = crate::kernel::admission::AdmissionGateContext::surface_default(
             surface,

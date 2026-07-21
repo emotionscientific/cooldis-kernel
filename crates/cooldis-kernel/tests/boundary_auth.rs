@@ -4,21 +4,222 @@ use cooldis::daemon::identity::{
 };
 use cooldis::{
     AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, ConsoleAssetConfig,
-    CooldisAppServer, CooldisAppServerConfig, SqliteSessionStore, SystemDaemonClock,
+    CooldisAppServer, CooldisAppServerConfig, JsonRpcErrorError, JsonRpcMessage,
+    JsonRpcNotification, JsonRpcRequest, RequestId, SqliteSessionStore, SystemDaemonClock,
 };
 use cooldis_sqlite::params;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
+use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 
 const OPERATOR_ID: &str = "operator:root";
+const ADAPTER_ID: &str = "adapter:rpc";
+const METHOD_NOT_AUTHORIZED_CODE: i64 = -32003;
+
+#[tokio::test]
+async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() {
+    let root = test_root("dispatcher-authorization");
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let listen = AppServerListenAddr::WebSocket(addr);
+    let mut config = app_config(&root, listen);
+    let authority = identity_authority(&config).await;
+    let operator = PrincipalId::new(OPERATOR_ID);
+    let (_, _, operator_token) = authority
+        .bootstrap_operator(&operator, "Root operator")
+        .await
+        .unwrap();
+    let adapter = PrincipalId::new(ADAPTER_ID);
+    authority
+        .declare_principal(&operator, &adapter, PrincipalKind::Adapter, "RPC adapter")
+        .await
+        .unwrap();
+    let (_, adapter_token) = authority
+        .mint_credential(&operator, &adapter, None)
+        .await
+        .unwrap();
+    drop(authority);
+
+    config.apply_daemon_identity_config(&CooldisDaemonIdentityConfig {
+        mode: IdentityMode::Managed,
+        tenant_id: Some("test-tenant".to_string()),
+        console_principal: Some(operator),
+    });
+    let app = CooldisAppServer::new(config).await.unwrap();
+    let store_path = app.session_store_path().to_path_buf();
+    let server = app.clone();
+    let server_task = tokio::spawn(async move { server.serve_websocket_listener(listener).await });
+
+    let mut operator_rpc = connect_rpc(addr, &operator_token).await;
+    let thread = rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(2),
+        "thread/start",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let command = rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(3),
+        "command/exec",
+        json!({ "command": ["/bin/sh", "-c", "printf operator"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(command["stdout"], "operator");
+    rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(4),
+        "turn/start",
+        json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": "operator ingress", "text_elements": [] }],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut adapter_rpc = connect_rpc(addr, &adapter_token).await;
+    let denied_command = rpc_call(
+        &mut adapter_rpc,
+        RequestId::Integer(2),
+        "command/exec",
+        json!({ "command": ["/bin/sh", "-c", "printf adapter"] }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied_command.code, METHOD_NOT_AUTHORIZED_CODE);
+    assert!(!denied_command.message.contains("command/exec"));
+
+    let denied_unknown = rpc_call(
+        &mut adapter_rpc,
+        RequestId::Integer(3),
+        "future/host-method",
+        json!({}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied_unknown.code, denied_command.code);
+    assert_eq!(denied_unknown.message, denied_command.message);
+
+    let denied_interactive = rpc_call(
+        &mut adapter_rpc,
+        RequestId::Integer(4),
+        "thread/list",
+        json!({}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied_interactive.code, METHOD_NOT_AUTHORIZED_CODE);
+
+    rpc_call(
+        &mut adapter_rpc,
+        RequestId::Integer(5),
+        "turn/start",
+        json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": "adapter ingress", "text_elements": [] }],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let ingress_events = rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(5),
+        "thread/events/list",
+        json!({
+            "threadId": thread_id,
+            "stream": "control",
+            "kinds": ["io.ingress.received"],
+        }),
+    )
+    .await
+    .unwrap();
+    let adapter_ingress = ingress_events["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["payload"]["principal"]["principal_id"] == ADAPTER_ID)
+        .expect("adapter ingress principal witness");
+    let via = adapter_ingress["payload"]["principal"]["via"]
+        .as_str()
+        .unwrap();
+    let adapter_session_id = via.strip_prefix("caller:").expect("caller attribution");
+    assert_eq!(
+        sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE session_id = ?1 AND principal_id = ?2 AND closed_at_ms IS NULL",
+            params![adapter_session_id, ADAPTER_ID],
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_auth_rejections WHERE principal_id = ?1 AND reason_json LIKE '%method_not_authorized%'",
+            params![ADAPTER_ID],
+        )
+        .await,
+        3
+    );
+    assert_eq!(
+        sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_host_effects WHERE principal_id = ?1 AND method = 'command/exec' AND witnessed_at_ms > 0",
+            params![OPERATOR_ID],
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_host_effects WHERE principal_id = ?1",
+            params![ADAPTER_ID],
+        )
+        .await,
+        0
+    );
+
+    let marker = root.join("unwitnessed-command-ran");
+    execute_sql(&store_path, "DROP TABLE cooldis_identity_host_effects").await;
+    let witness_failure = rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(6),
+        "command/exec",
+        json!({
+            "command": ["/usr/bin/touch", marker.to_string_lossy()],
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(witness_failure.code, -32000);
+    assert!(
+        !marker.exists(),
+        "host effect ran without a durable witness"
+    );
+
+    operator_rpc.close(None).await.unwrap();
+    adapter_rpc.close(None).await.unwrap();
+    server_task.abort();
+    let _ = server_task.await;
+    drop(app);
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[tokio::test]
 async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
@@ -611,6 +812,83 @@ async fn identity_authority(config: &CooldisAppServerConfig) -> SqliteIdentityAu
         .unwrap()
 }
 
+async fn connect_rpc(addr: std::net::SocketAddr, token: &str) -> WebSocketStream<TcpStream> {
+    let mut request = format!("ws://{addr}/rpc").into_client_request().unwrap();
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (mut websocket, _) = tokio_tungstenite::client_async(request, stream)
+        .await
+        .unwrap();
+    rpc_call(
+        &mut websocket,
+        RequestId::String("initialize".to_string()),
+        "initialize",
+        json!({
+            "clientInfo": {
+                "name": "boundary-auth-test",
+                "title": null,
+                "version": "0",
+            },
+            "capabilities": {
+                "experimentalApi": false,
+                "requestAttestation": false,
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    websocket
+        .send(Message::Text(
+            serde_json::to_string(&JsonRpcMessage::Notification(JsonRpcNotification {
+                method: "initialized".to_string(),
+                params: None,
+            }))
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    websocket
+}
+
+async fn rpc_call(
+    websocket: &mut WebSocketStream<TcpStream>,
+    id: RequestId,
+    method: &str,
+    params: Value,
+) -> Result<Value, JsonRpcErrorError> {
+    websocket
+        .send(Message::Text(
+            serde_json::to_string(&JsonRpcMessage::Request(JsonRpcRequest {
+                id: id.clone(),
+                method: method.to_string(),
+                params: Some(params),
+                trace: None,
+            }))
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let message = websocket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<JsonRpcMessage>(&text).unwrap() {
+            JsonRpcMessage::Response(response) if response.id == id => return Ok(response.result),
+            JsonRpcMessage::Error(error) if error.id == id => return Err(error.error),
+            JsonRpcMessage::Request(_)
+            | JsonRpcMessage::Notification(_)
+            | JsonRpcMessage::Response(_)
+            | JsonRpcMessage::Error(_) => {}
+        }
+    }
+}
+
 fn websocket_request(addr: std::net::SocketAddr, path: &str, token: Option<&str>) -> String {
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
@@ -760,6 +1038,13 @@ where
     let connection = database.connect().await.unwrap();
     let mut rows = connection.query(query, params).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn execute_sql(path: &Path, statement: &str) {
+    let store = SqliteSessionStore::open(path).await.unwrap();
+    let database = store.sqlite_database();
+    let connection = database.connect().await.unwrap();
+    connection.execute_batch(statement).await.unwrap();
 }
 
 async fn active_credential_count(path: &Path, principal_id: &str) -> i64 {

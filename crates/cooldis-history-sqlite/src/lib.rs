@@ -101,8 +101,13 @@ impl SqliteSessionStore {
     /// concurrent RPC tasks into 200 competing WAL writers. Each mutation
     /// keeps its existing immediate transaction and commit boundary; this gate
     /// changes concurrency only, not durability or journal ordering.
-    async fn write_guard(&self) -> MutexGuard<'_, ()> {
+    #[doc(hidden)]
+    pub async fn daemon_write_guard(&self) -> MutexGuard<'_, ()> {
         self.writer.lock().await
+    }
+
+    async fn write_guard(&self) -> MutexGuard<'_, ()> {
+        self.daemon_write_guard().await
     }
 
     /// Clone the engine-owner handle for daemon-owned tables that must share

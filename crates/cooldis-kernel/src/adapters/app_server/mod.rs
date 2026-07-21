@@ -2,10 +2,11 @@ use crate::ProcessHandleIngressSink;
 use crate::daemon::daemon_config::synthesized_local_daemon_identity_config;
 use crate::daemon::daemon_io::CooldisDaemonIoBridge;
 use crate::daemon::identity::{
-    AuthenticationPath, BoundarySurface, CooldisDaemonIdentityConfig,
-    IDENTITY_AUTH_REJECTION_SCHEMA_V1, IDENTITY_SESSION_SCHEMA_V1, IdentityAuthRejectionReason,
-    IdentityAuthRejectionV1, IdentityAuthority, IdentityMode, IdentitySessionV1, PrincipalId,
-    PrincipalKind, ResolvedPrincipal, SqliteIdentityAuthority, identity_token_digest,
+    AuthenticationPath, AuthorityClass, BoundarySurface, CooldisDaemonIdentityConfig,
+    IDENTITY_AUTH_REJECTION_SCHEMA_V1, IDENTITY_HOST_EFFECT_SCHEMA_V1, IDENTITY_SESSION_SCHEMA_V1,
+    IdentityAuthRejectionReason, IdentityAuthRejectionV1, IdentityAuthority, IdentityHostEffectV1,
+    IdentityMode, IdentitySessionV1, PrincipalId, PrincipalKind, ResolvedPrincipal,
+    SqliteIdentityAuthority, authority_class_for_method, identity_token_digest,
 };
 use crate::daemon::recovery_sweep::StartupRecoverySweep;
 use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
@@ -845,14 +846,15 @@ impl CooldisAppServer {
         );
         let codex_home = tenant_context.codex_home();
         let session_store_path = tenant_context.session_history_path();
-        if let Some(decorate) = session_store_decorator {
-            let session_store = Arc::new(
-                SqliteSessionStore::open(&session_store_path)
-                    .await
-                    .map_err(|err| CooldisError::History(err.to_string()))?,
-            ) as Arc<dyn RuntimeStore>;
-            tenant_context = tenant_context.with_session_store(decorate(session_store));
-        }
+        let identity_store = SqliteSessionStore::open(&session_store_path)
+            .await
+            .map_err(|err| CooldisError::History(err.to_string()))?;
+        let runtime_store = Arc::new(identity_store.clone()) as Arc<dyn RuntimeStore>;
+        let runtime_store = match session_store_decorator {
+            Some(decorate) => decorate(runtime_store),
+            None => runtime_store,
+        };
+        tenant_context = tenant_context.with_session_store(runtime_store);
         supervisor
             .register_tenant(TenantRegistration {
                 context: tenant_context,
@@ -860,9 +862,6 @@ impl CooldisAppServer {
             })
             .await?;
         let identity_clock: Arc<dyn crate::DaemonClock> = Arc::new(SystemDaemonClock);
-        let identity_store = SqliteSessionStore::open(&session_store_path)
-            .await
-            .map_err(|err| CooldisError::History(err.to_string()))?;
         let console_credential_record_path = session_store_path
             .parent()
             .unwrap_or_else(|| Path::new("."))

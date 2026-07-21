@@ -33,6 +33,8 @@ pub const IDENTITY_CREDENTIAL_SCHEMA_V1: &str = "cooldis.identity.credential/1";
 pub const IDENTITY_SESSION_SCHEMA_V1: &str = "cooldis.identity.session/1";
 /// Schema id for a witnessed authentication/authorization rejection.
 pub const IDENTITY_AUTH_REJECTION_SCHEMA_V1: &str = "cooldis.identity.auth_rejection/1";
+/// Schema id for a witnessed host-authority effect.
+pub const IDENTITY_HOST_EFFECT_SCHEMA_V1: &str = "cooldis.identity.host_effect/1";
 
 /// A named identity within the tenant (ADR 0008 D1).
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -115,7 +117,15 @@ pub enum AuthorityClass {
 /// reconciliation with an exhaustive test: every dispatchable method appears
 /// here deliberately, or the test fails.
 pub fn authority_class_for_method(method: &str) -> AuthorityClass {
-    const HOST_METHODS: &[&str] = &["thread/shellCommand"];
+    const HOST_METHODS: &[&str] = &[
+        "agent/publish",
+        "thread/start",
+        "thread/spawn",
+        "thread/rebindFork",
+        "thread/resume",
+        "thread/debug/export",
+        "thread/shellCommand",
+    ];
     const HOST_PREFIXES: &[&str] = &[
         "command/",
         "fs/",
@@ -124,16 +134,35 @@ pub fn authority_class_for_method(method: &str) -> AuthorityClass {
         "mcpSource/",
         "debug/",
     ];
+    const INTERACTIVE_METHODS: &[&str] = &[
+        "account/read",
+        "account/rateLimits/read",
+        "app/list",
+        "operation/list",
+        "model/list",
+        "modelProvider/capabilities/read",
+        "experimentalFeature/list",
+        "experimentalFeature/enablement/set",
+        "getAuthStatus",
+        "skills/list",
+        "plugin/list",
+        "hooks/list",
+        "config/read",
+        "configRequirements/read",
+    ];
     const INTERACTIVE_PREFIXES: &[&str] = &["thread/", "turn/", "mandate/", "agent/", "session/"];
+    const INGRESS_METHODS: &[&str] = &["turn/start"];
     const INGRESS_PREFIXES: &[&str] = &["ingress/", "io/ingress/"];
 
     if HOST_METHODS.contains(&method) || HOST_PREFIXES.iter().any(|p| method.starts_with(p)) {
         return AuthorityClass::Host;
     }
-    if INGRESS_PREFIXES.iter().any(|p| method.starts_with(p)) {
+    if INGRESS_METHODS.contains(&method) || INGRESS_PREFIXES.iter().any(|p| method.starts_with(p)) {
         return AuthorityClass::Ingress;
     }
-    if INTERACTIVE_PREFIXES.iter().any(|p| method.starts_with(p)) {
+    if INTERACTIVE_METHODS.contains(&method)
+        || INTERACTIVE_PREFIXES.iter().any(|p| method.starts_with(p))
+    {
         return AuthorityClass::Interactive;
     }
     AuthorityClass::Host
@@ -267,6 +296,16 @@ pub struct IdentityAuthRejectionV1 {
     pub rejected_at_ms: i64,
 }
 
+/// A host-authority effect attributed to an authenticated boundary session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IdentityHostEffectV1 {
+    pub schema: String,
+    pub session_id: String,
+    pub principal_id: PrincipalId,
+    pub method: String,
+    pub witnessed_at_ms: i64,
+}
+
 /// The daemon's identity authority (ADR 0008 D1/D2/D6): the single owner of
 /// principal and credential records and of boundary witnessing.
 ///
@@ -340,6 +379,9 @@ pub trait IdentityAuthority: Send + Sync {
     /// Witness a rejected authentication or authorization attempt.
     async fn witness_auth_rejected(&self, rejection: &IdentityAuthRejectionV1)
     -> CooldisResult<()>;
+
+    /// Witness a host-authority effect before it is allowed to proceed.
+    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> CooldisResult<()>;
 }
 
 /// SQLite-backed durable authority for identity-plane records.
@@ -400,6 +442,7 @@ impl SqliteIdentityAuthority {
         let token = mint_identity_secret()?;
         let token_digest = identity_token_digest(&token);
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -477,6 +520,7 @@ impl SqliteIdentityAuthority {
     async fn init_schema(&self) -> CooldisResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -544,6 +588,18 @@ impl SqliteIdentityAuthority {
                         principal_id TEXT,
                         rejected_at_ms INTEGER NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS cooldis_identity_host_effects (
+                        effect_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        schema TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        principal_id TEXT NOT NULL,
+                        method TEXT NOT NULL,
+                        witnessed_at_ms INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_cooldis_identity_host_effects_session
+                        ON cooldis_identity_host_effects(session_id, witnessed_at_ms);
                     "#,
                 )
                 .await
@@ -575,6 +631,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         let principal_id = principal_id.clone();
         let display = display.to_string();
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -635,6 +692,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         let revoked_by = revoked_by.clone();
         let principal_id = principal_id.clone();
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -676,6 +734,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         let token = mint_identity_secret()?;
         let token_digest = identity_token_digest(&token);
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -735,6 +794,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         let revoked_by = revoked_by.clone();
         let credential_id = credential_id.to_string();
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -890,6 +950,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         let store = self.store.clone();
         let session = session.clone();
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -929,6 +990,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         let store = self.store.clone();
         let session_id = session_id.to_string();
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -978,6 +1040,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             authority_error(format!("failed to encode auth rejection: {error}"))
         })?;
         cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
@@ -1004,6 +1067,63 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 .await
                 .map_err(storage_error)?;
             transaction.commit().await.map_err(storage_error)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> CooldisResult<()> {
+        if effect.schema != IDENTITY_HOST_EFFECT_SCHEMA_V1 {
+            return Err(authority_error(
+                "identity host effect schema id is not supported",
+            ));
+        }
+        if effect.session_id.trim().is_empty() || effect.method.trim().is_empty() {
+            return Err(authority_error(
+                "identity host effect requires a session id and method",
+            ));
+        }
+        let store = self.store.clone();
+        let effect = effect.clone();
+        cancellation_safe(async move {
+            let _writer = store.daemon_write_guard().await;
+            let database = store.sqlite_database();
+            let connection = database.connect().await.map_err(storage_error)?;
+            let inserted = connection
+                .execute(
+                    "INSERT INTO cooldis_identity_host_effects (
+                        schema, session_id, principal_id, method, witnessed_at_ms
+                     )
+                     SELECT ?1, ?2, ?3, ?4, ?5
+                     WHERE EXISTS (
+                         SELECT 1
+                         FROM cooldis_identity_sessions
+                         WHERE session_id = ?2
+                           AND principal_id = ?3
+                           AND closed_at_ms IS NULL
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM cooldis_identity_sessions AS closed
+                               WHERE closed.session_id = ?2
+                                 AND closed.principal_id = ?3
+                                 AND closed.closed_at_ms IS NOT NULL
+                           )
+                     )",
+                    params![
+                        effect.schema,
+                        effect.session_id,
+                        effect.principal_id.as_str(),
+                        effect.method,
+                        effect.witnessed_at_ms,
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            if inserted != 1 {
+                return Err(authority_error(
+                    "identity host effect references an unwitnessed session or principal",
+                ));
+            }
             Ok(())
         })
         .await
@@ -1295,14 +1415,22 @@ mod tests {
     }
 
     #[test]
-    fn host_list_precedence_beats_interactive_prefix() {
+    fn explicit_overrides_beat_interactive_prefixes() {
         assert_eq!(
             authority_class_for_method("thread/shellCommand"),
             AuthorityClass::Host
         );
         assert_eq!(
             authority_class_for_method("thread/start"),
+            AuthorityClass::Host
+        );
+        assert_eq!(
+            authority_class_for_method("thread/submit"),
             AuthorityClass::Interactive
+        );
+        assert_eq!(
+            authority_class_for_method("turn/start"),
+            AuthorityClass::Ingress
         );
     }
 
@@ -1879,6 +2007,28 @@ mod tests {
         };
         authority.witness_session_opened(&session).await.unwrap();
         authority
+            .witness_host_effect(&IdentityHostEffectV1 {
+                schema: IDENTITY_HOST_EFFECT_SCHEMA_V1.to_string(),
+                session_id: "session-1".to_string(),
+                principal_id: operator.clone(),
+                method: "command/exec".to_string(),
+                witnessed_at_ms: 1_500,
+            })
+            .await
+            .unwrap();
+        assert!(
+            authority
+                .witness_host_effect(&IdentityHostEffectV1 {
+                    schema: IDENTITY_HOST_EFFECT_SCHEMA_V1.to_string(),
+                    session_id: "session-never-opened".to_string(),
+                    principal_id: operator.clone(),
+                    method: "fs/writeFile".to_string(),
+                    witnessed_at_ms: 1_600,
+                })
+                .await
+                .is_err()
+        );
+        authority
             .witness_session_closed("session-1", 2_000)
             .await
             .unwrap();
@@ -1907,6 +2057,17 @@ mod tests {
         assert_eq!(row.get::<i64>(1).unwrap(), 2_000);
         let mut rows = connection
             .query("SELECT COUNT(*) FROM cooldis_identity_auth_rejections", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM cooldis_identity_host_effects WHERE session_id = ?1 AND principal_id = ?2 AND method = ?3 AND witnessed_at_ms = ?4",
+                params!["session-1", operator.as_str(), "command/exec", 1_500],
+            )
             .await
             .unwrap();
         assert_eq!(
