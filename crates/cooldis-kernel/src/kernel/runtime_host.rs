@@ -109,6 +109,8 @@ pub enum CooldisError {
     ThreadClosed(ThreadId),
     #[error("runtime factory failed: {0}")]
     RuntimeFactory(String),
+    #[error("{0}")]
+    RpcClient(String),
     #[error("runtime execution failed: {0}")]
     RuntimeExecution(String),
     #[error("history store failed: {0}")]

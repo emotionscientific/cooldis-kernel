@@ -1,4 +1,6 @@
-use cooldis::daemon::identity::{IdentityAuthority, PrincipalId, SqliteIdentityAuthority};
+use cooldis::daemon::identity::{
+    IdentityAuthority, PrincipalId, PrincipalKind, SqliteIdentityAuthority,
+};
 use cooldis::{
     AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, CooldisAppServer,
     CooldisAppServerConfig, EventKind, EventStore, EventStreamId, SqliteSessionStore,
@@ -158,6 +160,71 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn debug_rpc_cli_renders_rpc_client_errors_without_internal_names() {
+    let closed_addr = unused_loopback_addr();
+    let closed_url = format!("ws://{closed_addr}/rpc");
+    let closed = run_cooldis(
+        [
+            "debug",
+            "rpc",
+            "call",
+            "thread/list",
+            "--url",
+            closed_url.as_str(),
+        ],
+        None,
+    )
+    .await;
+    assert!(!closed.status.success());
+    let closed_error = String::from_utf8(closed.stderr).unwrap();
+    assert!(
+        closed_error.starts_with(&format!(
+            "cooldis: failed to connect to the Cooldis RPC endpoint `{closed_url}`:"
+        )),
+        "unexpected closed-port error: {closed_error:?}"
+    );
+    assert!(!closed_error.contains("runtime factory failed"));
+    assert!(!closed_error.contains("Codex TUI"));
+
+    let root =
+        PathBuf::from("/tmp").join(format!("cdis-debug-rpc-errors-{}", Uuid::now_v7().simple()));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let addr = unused_loopback_addr();
+    let url = format!("ws://{addr}/rpc");
+    let server = DebugRpcServer::start(&root, &workspace, addr).await;
+
+    let unauthorized = run_cooldis(
+        ["debug", "rpc", "call", "thread/list", "--url", url.as_str()],
+        None,
+    )
+    .await;
+    assert!(!unauthorized.status.success());
+    let unauthorized_error = String::from_utf8(unauthorized.stderr).unwrap();
+    assert_eq!(
+        unauthorized_error,
+        format!(
+            "cooldis: failed to connect to the Cooldis RPC endpoint `{url}`: HTTP error: 401 Unauthorized\n"
+        )
+    );
+
+    let refused = run_cooldis(
+        ["debug", "rpc", "call", "thread/list", "--url", url.as_str()],
+        Some(&server.adapter_token),
+    )
+    .await;
+    assert!(!refused.status.success());
+    let refused_error = String::from_utf8(refused.stderr).unwrap();
+    assert_eq!(
+        refused_error,
+        "cooldis: request `thread/list` was refused: request is not authorized for this principal\n"
+    );
+
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn assert_admission_precedes_execution(
     control_events: &[cooldis::EventRecord],
     thread_events: &[cooldis::EventRecord],
@@ -194,6 +261,7 @@ fn assert_admission_precedes_execution(
 
 struct DebugRpcServer {
     token: String,
+    adapter_token: String,
     task: JoinHandle<cooldis::CooldisResult<()>>,
 }
 
@@ -216,9 +284,28 @@ impl DebugRpcServer {
             .await
             .unwrap()
             .1;
+        let adapter = PrincipalId::new("adapter:debug-rpc-error-test");
+        authority
+            .declare_principal(
+                &principal,
+                &adapter,
+                PrincipalKind::Adapter,
+                "Debug RPC error test adapter",
+            )
+            .await
+            .unwrap();
+        let adapter_token = authority
+            .mint_credential(&principal, &adapter, None)
+            .await
+            .unwrap()
+            .1;
         let task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_websocket(&format!("ws://{addr}/rpc"), &token).await;
-        Self { token, task }
+        Self {
+            token,
+            adapter_token,
+            task,
+        }
     }
 
     async fn stop(self) {
@@ -261,6 +348,8 @@ async fn run_cooldis<const N: usize>(args: [&str; N], token: Option<&str>) -> Ou
     command.args(args).stdin(Stdio::null());
     if let Some(token) = token {
         command.env("COOLDIS_APP_SERVER_TOKEN", token);
+    } else {
+        command.env_remove("COOLDIS_APP_SERVER_TOKEN");
     }
     command.output().await.unwrap()
 }
