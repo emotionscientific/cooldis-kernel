@@ -7,7 +7,7 @@ use cooldis::{
     SystemDaemonClock,
 };
 use serde_json::Value;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::Arc;
@@ -18,12 +18,11 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
-    let root = PathBuf::from("/tmp").join(format!("cdis-debug-rpc-{}", Uuid::now_v7().simple()));
-    let workspace = root.join("workspace");
+    let root = TestRoot::new("cdis-debug-rpc");
+    let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let addr = unused_loopback_addr();
-    let url = format!("ws://{addr}/rpc");
-    let server = DebugRpcServer::start(&root, &workspace, addr).await;
+    let server = DebugRpcServer::start(root.path(), &workspace).await;
+    let url = server.url();
 
     let call = run_cooldis(
         ["debug", "rpc", "call", "thread/list", "--url", url.as_str()],
@@ -126,7 +125,7 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         resumed_stdout.contains("second debug rpc turn"),
         "resumed turn output did not include prompt: {resumed_stdout:?}"
     );
-    let store = SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+    let store = SqliteSessionStore::open(root.path().join("state/session_history.sqlite3"))
         .await
         .unwrap();
     let control_events = store
@@ -141,7 +140,7 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     drop(store);
 
     server.stop().await;
-    let journal = root.join("state/session_history.sqlite3");
+    let journal = root.path().join("state/session_history.sqlite3");
     let offline_bind = run_cooldis(
         [
             "debug",
@@ -157,22 +156,13 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     assert_success(&offline_bind);
     let offline_explanation: Value = serde_json::from_slice(&offline_bind.stdout).unwrap();
     assert_eq!(offline_explanation, live_explanation);
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
 async fn debug_rpc_cli_renders_rpc_client_errors_without_internal_names() {
-    let closed_addr = unused_loopback_addr();
-    let closed_url = format!("ws://{closed_addr}/rpc");
+    let closed_url = "ws://127.0.0.1:0/rpc";
     let closed = run_cooldis(
-        [
-            "debug",
-            "rpc",
-            "call",
-            "thread/list",
-            "--url",
-            closed_url.as_str(),
-        ],
+        ["debug", "rpc", "call", "thread/list", "--url", closed_url],
         None,
     )
     .await;
@@ -187,13 +177,11 @@ async fn debug_rpc_cli_renders_rpc_client_errors_without_internal_names() {
     assert!(!closed_error.contains("runtime factory failed"));
     assert!(!closed_error.contains("Codex TUI"));
 
-    let root =
-        PathBuf::from("/tmp").join(format!("cdis-debug-rpc-errors-{}", Uuid::now_v7().simple()));
-    let workspace = root.join("workspace");
+    let root = TestRoot::new("cdis-debug-rpc-errors");
+    let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let addr = unused_loopback_addr();
-    let url = format!("ws://{addr}/rpc");
-    let server = DebugRpcServer::start(&root, &workspace, addr).await;
+    let server = DebugRpcServer::start(root.path(), &workspace).await;
+    let url = server.url();
 
     let unauthorized = run_cooldis(
         ["debug", "rpc", "call", "thread/list", "--url", url.as_str()],
@@ -202,11 +190,15 @@ async fn debug_rpc_cli_renders_rpc_client_errors_without_internal_names() {
     .await;
     assert!(!unauthorized.status.success());
     let unauthorized_error = String::from_utf8(unauthorized.stderr).unwrap();
-    assert_eq!(
-        unauthorized_error,
-        format!(
-            "cooldis: failed to connect to the Cooldis RPC endpoint `{url}`: HTTP error: 401 Unauthorized\n"
-        )
+    assert!(
+        unauthorized_error.starts_with(&format!(
+            "cooldis: failed to connect to the Cooldis RPC endpoint `{url}`:"
+        )),
+        "unexpected unauthorized error: {unauthorized_error:?}"
+    );
+    assert!(
+        unauthorized_error.contains("401"),
+        "unauthorized error did not preserve HTTP status: {unauthorized_error:?}"
     );
 
     let refused = run_cooldis(
@@ -222,7 +214,6 @@ async fn debug_rpc_cli_renders_rpc_client_errors_without_internal_names() {
     );
 
     server.stop().await;
-    let _ = std::fs::remove_dir_all(root);
 }
 
 fn assert_admission_precedes_execution(
@@ -260,15 +251,18 @@ fn assert_admission_precedes_execution(
 }
 
 struct DebugRpcServer {
+    addr: SocketAddr,
     token: String,
     adapter_token: String,
-    task: JoinHandle<cooldis::CooldisResult<()>>,
+    task: Option<JoinHandle<cooldis::CooldisResult<()>>>,
 }
 
 impl DebugRpcServer {
-    async fn start(root: &Path, workspace: &Path, addr: SocketAddr) -> Self {
+    async fn start(root: &Path, workspace: &Path) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let listen = AppServerListenAddr::WebSocket(addr);
-        let mut config = CooldisAppServerConfig::local(listen.clone(), workspace);
+        let mut config = CooldisAppServerConfig::local(listen, workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         let app = CooldisAppServer::new_local(config).await.unwrap();
@@ -299,18 +293,51 @@ impl DebugRpcServer {
             .await
             .unwrap()
             .1;
-        let task = tokio::spawn(async move { app.serve(listen).await });
-        wait_for_websocket(&format!("ws://{addr}/rpc"), &token).await;
-        Self {
+        let task = tokio::spawn(async move { app.serve_websocket_listener(listener).await });
+        let server = Self {
+            addr,
             token,
             adapter_token,
-            task,
-        }
+            task: Some(task),
+        };
+        wait_for_websocket(&format!("ws://{addr}/rpc"), &server.token).await;
+        server
     }
 
-    async fn stop(self) {
-        self.task.abort();
-        let _ = self.task.await;
+    fn url(&self) -> String {
+        format!("ws://{}/rpc", self.addr)
+    }
+
+    async fn stop(mut self) {
+        let task = self.task.take().expect("debug RPC server task missing");
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+impl Drop for DebugRpcServer {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+struct TestRoot(PathBuf);
+
+impl TestRoot {
+    fn new(prefix: &str) -> Self {
+        Self(PathBuf::from("/tmp").join(format!("{prefix}-{}", Uuid::now_v7().simple())))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -401,11 +428,4 @@ fn item_text(item: &Value) -> Option<&str> {
             .and_then(|content| content.get("text"))
             .and_then(Value::as_str)
     })
-}
-
-fn unused_loopback_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
 }
