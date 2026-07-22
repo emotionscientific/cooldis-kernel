@@ -427,7 +427,7 @@ REPO="$TMP_DIR/repo"
 FEATURE_A="$TMP_DIR/feature-a"
 FEATURE_B="$TMP_DIR/feature-b"
 INTEGRATION_WT="$TMP_DIR/integration-wt"
-mkdir -p "$REPO/.cargo" "$REPO/scripts"
+mkdir -p "$REPO/.cargo" "$REPO/apps" "$REPO/crates" "$REPO/docs" "$REPO/scripts"
 
 git -C "$REPO" init -b main >/dev/null
 git -C "$REPO" config user.email cargo-lane-test@example.invalid
@@ -441,8 +441,27 @@ cp "$SCRIPT_DIR/cargo-lane.sh" "$REPO/scripts/cargo-lane.sh"
 cp "$SCRIPT_DIR/check-pre-commit.sh" "$REPO/scripts/check-pre-commit.sh"
 cp "$SCRIPT_DIR/check-pre-push.sh" "$REPO/scripts/check-pre-push.sh"
 cp "$SCRIPT_DIR/guard-rails.sh" "$REPO/scripts/guard-rails.sh"
+cp "$SCRIPT_DIR/test-timeout-lint.pl" "$REPO/scripts/test-timeout-lint.pl"
+cp "$SCRIPT_DIR/test-timeout-lint.sh" "$REPO/scripts/test-timeout-lint.sh"
+cp "$SCRIPT_DIR/threat-model-lint.sh" "$REPO/scripts/threat-model-lint.sh"
 cp "$SCRIPT_DIR/verify.sh" "$REPO/scripts/verify.sh"
-git -C "$REPO" add README.md .cargo/config.toml scripts
+# Nested verify is under test for Cargo routing. Give its real non-Cargo checks
+# minimal valid inputs instead of stubbing them or copying the full source tree.
+cat >"$REPO/docs/threat-model.md" <<'THREAT_MODEL'
+# Threat model fixture
+
+## TM-FIXTURE-001: Exercise the real threat-model lint
+
+- Status: ACCEPTED
+- Severity: LOW
+- Threat: The cargo-lane fixture could skip the verifier prelude.
+- Affected surface: Nested verify fixture.
+- Mitigation: Run the real lint against this minimal valid entry.
+- Deterministic guard: scripts/cargo-lane-test.sh
+THREAT_MODEL
+printf '%s\n' '// Test-timeout lint fixture for the apps scan root.' >"$REPO/apps/fixture.rs"
+printf '%s\n' '// Test-timeout lint fixture for the crates scan root.' >"$REPO/crates/fixture.rs"
+git -C "$REPO" add README.md .cargo/config.toml apps crates docs scripts
 git -C "$REPO" commit -m fixture >/dev/null
 git -C "$REPO" worktree add -q -b feature/alpha "$FEATURE_A"
 git -C "$REPO" worktree add -q -b feature/beta "$FEATURE_B"
