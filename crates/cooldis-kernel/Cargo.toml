@@ -8,7 +8,7 @@ autobins = false
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
-bashkit = { version = "0.9.0", features = ["realfs"] }
+bashkit = { version = "0.14.3", features = ["realfs"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 cooldis-agent = { path = "../cooldis-agent" }
