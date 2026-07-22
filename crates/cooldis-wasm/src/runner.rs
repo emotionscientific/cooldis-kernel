@@ -1599,6 +1599,7 @@ fn vfs_error_status(err: BashkitError) -> i32 {
         BashkitError::ResourceLimit(_) => STATUS_TRANSPORT_ERROR,
         BashkitError::Parse { .. }
         | BashkitError::Execution(_)
+        | BashkitError::CommandFailure(_)
         | BashkitError::Network(_)
         | BashkitError::Regex(_)
         | BashkitError::Internal(_) => STATUS_TRANSPORT_ERROR,
