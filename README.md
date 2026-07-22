@@ -154,6 +154,31 @@ scripts/verify.sh
 cargo test --workspace --all-targets --locked
 ```
 
+### Local Linux verification
+
+Run the same full verification suite in a pinned Debian Linux container before
+shipping a change that may behave differently across operating systems:
+
+```sh
+scripts/verify-linux.sh
+```
+
+The default is native `linux/arm64` on Apple Silicon. It covers the Linux OS
+class of path, filesystem, glibc, epoll, signal, and timing bugs; CI's x86_64
+leg remains the architecture authority. Use `scripts/verify-linux.sh --amd64`
+only when reproducing an architecture-specific failure because emulation is
+substantially slower.
+
+The first run downloads the Rust 1.97.1 Bookworm image (the stable toolchain
+used by CI when this lane was added), installs its toolchain, and builds the
+full workspace. Later runs reuse Cargo, Rustup, and architecture-specific
+Cargo-lane state from the `cooldis-verify-linux` Docker volume, but still
+execute every verification step. Concurrent wrapper runs serialize access to
+that shared volume. Docker Desktop should have at least 12 GB of memory under
+Settings > Resources; the wrapper warns and reduces Cargo to two build jobs
+below that limit. If cache corruption is suspected, reset it with
+`docker volume rm cooldis-verify-linux`; the next run will be cold.
+
 For the first local path, see [docs/getting-started.md](docs/getting-started.md).
 For release packaging, tag checks, and async release publishing, see
 [RELEASE.md](RELEASE.md).
