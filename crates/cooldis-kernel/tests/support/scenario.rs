@@ -1351,6 +1351,8 @@ impl ScenarioHarness {
         !task.is_finished()
     }
 
+    /// Faulted harness-issued setup operations are receipts and failed retry
+    /// attempts, never runner panics.
     async fn fresh_active_root(&mut self, label: &str) -> ThreadCoordinates {
         for retry in 0..32 {
             let root_index = self.root_count;
@@ -1362,10 +1364,13 @@ impl ScenarioHarness {
                 "observe_only",
                 &format!("{label}-setup-{retry}"),
             );
-            self.queue
-                .submit(envelope)
-                .await
-                .expect("submit crash-cut setup envelope");
+            if let Err(error) = self.queue.submit(envelope).await {
+                self.transcript.push_receipt(
+                    "scenario.operation.error",
+                    &json!({"operation": "crash_cut_setup", "error": error.to_string()}),
+                );
+                continue;
+            }
             self.drain_queue().await;
             self.wait_for_idle(&coordinates).await;
             if self
@@ -1388,17 +1393,22 @@ impl ScenarioHarness {
         panic!("fault plan prevented a live crash-cut setup runtime after bounded retries");
     }
 
-    async fn queue_cut_envelope(&mut self, policy: &str, label: &str) -> ThreadCoordinates {
+    /// Faulted harness-issued cut operations are receipt-bearing no-ops for
+    /// the current scenario step, never runner panics.
+    async fn queue_cut_envelope(&mut self, policy: &str, label: &str) -> Option<ThreadCoordinates> {
         let root_index = self.root_count;
         self.root_count += 1;
         self.current_root = root_index;
         let coordinates = self.reserve_root(root_index);
         let envelope = self.envelope(root_index, policy, label);
-        self.queue
-            .submit(envelope)
-            .await
-            .expect("submit crash-cut envelope");
-        coordinates
+        if let Err(error) = self.queue.submit(envelope).await {
+            self.transcript.push_receipt(
+                "scenario.operation.error",
+                &json!({"operation": "crash_cut_submit", "error": error.to_string()}),
+            );
+            return None;
+        }
+        Some(coordinates)
     }
 
     async fn execute(&mut self, op: ScenarioOp) {
@@ -1575,6 +1585,14 @@ impl ScenarioHarness {
                 );
             }
         }
+    }
+
+    async fn finish_crash_cut(&mut self) {
+        for coordinates in self.coordinates.clone() {
+            self.append_placement(&coordinates, "terminal", Some("failed"))
+                .await;
+        }
+        self.collect_events().await;
     }
 }
 
@@ -1814,13 +1832,15 @@ impl CrashCutHost for ScenarioHarness {
     type StoreState = ScenarioStoreState;
 
     async fn run_to_cut(&mut self, seam: CrashCutSeam) {
-        self.transcript
-            .push_receipt("scenario.crash_cut", &json!({"seam": format!("{seam:?}")}));
         match seam {
             CrashCutSeam::PauseAfterIngressClaim => {
-                let coordinates = self
+                let Some(coordinates) = self
                     .queue_cut_envelope("queue_per_conversation", "claim-submit-cut")
-                    .await;
+                    .await
+                else {
+                    self.finish_crash_cut().await;
+                    return;
+                };
                 let (pause, paused) = super::scenario_pause_after_ingress_claim(&self.bridge);
                 loop {
                     pause.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1894,9 +1914,13 @@ impl CrashCutHost for ScenarioHarness {
                 );
             }
             CrashCutSeam::QueueCompleteBarrier => {
-                let coordinates = self
+                let Some(coordinates) = self
                     .queue_cut_envelope("observe_only", "queue-complete-cut")
-                    .await;
+                    .await
+                else {
+                    self.finish_crash_cut().await;
+                    return;
+                };
                 let wait_started = std::time::Instant::now();
                 'attempts: loop {
                     self.queue_inner
@@ -1957,10 +1981,19 @@ impl CrashCutHost for ScenarioHarness {
                 self.current_root = root_index;
                 let coordinates = self.root_coordinates(root_index);
                 let envelope = self.envelope(root_index, "observe_only", "ingress-binding-cut");
-                self.queue
-                    .submit(envelope)
-                    .await
-                    .expect("submit ingress-binding crash-cut envelope");
+                // A faulted harness-issued submit makes this cut a receipt-bearing
+                // no-op for the current scenario step.
+                if let Err(error) = self.queue.submit(envelope).await {
+                    self.transcript.push_receipt(
+                        "scenario.operation.error",
+                        &json!({
+                            "operation": "ingress_binding_crash_cut_submit",
+                            "error": error.to_string(),
+                        }),
+                    );
+                    self.finish_crash_cut().await;
+                    return;
+                }
                 let hook = super::scenario_ingress_binding_barrier(&self.bridge);
                 let mut reached = false;
                 for _ in 0..32 {
@@ -1987,16 +2020,38 @@ impl CrashCutHost for ScenarioHarness {
             }
             CrashCutSeam::ThreadLoadRootBarrier => {
                 let coordinates = self.fresh_active_root("thread-load-cut-setup").await;
-                self.server
+                // A faulted harness-issued shutdown makes this cut a receipt-bearing
+                // no-op for the current scenario step.
+                if let Err(error) = self
+                    .server
                     .supervisor()
                     .shutdown_thread_at(&coordinates)
                     .await
-                    .expect("remove resident runtime before real cold load");
+                {
+                    self.transcript.push_receipt(
+                        "scenario.operation.error",
+                        &json!({
+                            "operation": "cold_load_crash_cut_shutdown",
+                            "error": error.to_string(),
+                        }),
+                    );
+                    self.finish_crash_cut().await;
+                    return;
+                }
                 let envelope = self.envelope(self.current_root, "observe_only", "thread-load-cut");
-                self.queue
-                    .submit(envelope)
-                    .await
-                    .expect("submit cold-load crash-cut envelope");
+                // A faulted harness-issued submit makes this cut a receipt-bearing
+                // no-op for the current scenario step.
+                if let Err(error) = self.queue.submit(envelope).await {
+                    self.transcript.push_receipt(
+                        "scenario.operation.error",
+                        &json!({
+                            "operation": "cold_load_crash_cut_submit",
+                            "error": error.to_string(),
+                        }),
+                    );
+                    self.finish_crash_cut().await;
+                    return;
+                }
                 let hook = super::scenario_thread_load_root_barrier(&self.bridge);
                 loop {
                     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -2035,11 +2090,11 @@ impl CrashCutHost for ScenarioHarness {
                 );
             }
         }
-        for coordinates in self.coordinates.clone() {
-            self.append_placement(&coordinates, "terminal", Some("failed"))
-                .await;
-        }
-        self.collect_events().await;
+        // This receipt is seam-coverage evidence; the no-op returns above
+        // must not emit it when a harness-issued operation faults first.
+        self.transcript
+            .push_receipt("scenario.crash_cut", &json!({"seam": format!("{seam:?}")}));
+        self.finish_crash_cut().await;
     }
 
     fn tear_down(self) -> Self::StoreState {
@@ -3145,6 +3200,63 @@ mod tests {
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(|stream_id| !stream_id.starts_with('$'))
                 })
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn emo_514_pin_records_submit_fault_without_claiming_cut_reached() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let derive = || {
+            Scenario::derive(
+                13970258769908900442,
+                ScenarioBounds {
+                    max_ops: 8,
+                    intensity: Intensity::Moderate,
+                },
+            )
+        };
+        assert_eq!(
+            derive().ops,
+            vec![
+                ScenarioOp::StartThread,
+                ScenarioOp::Fork,
+                ScenarioOp::SubmitTurn,
+                ScenarioOp::Restart,
+                ScenarioOp::Steer,
+                ScenarioOp::Fork,
+                ScenarioOp::Fork,
+                ScenarioOp::StartThread,
+            ]
+        );
+        let first = run_scenario_once(&derive(), &[])
+            .await
+            .expect("EMO-514 pin should not panic or violate an invariant");
+        let second = run_scenario_once(&derive(), &[])
+            .await
+            .expect("EMO-514 pin should be repeatable");
+
+        assert_eq!(first, second);
+        assert!(first.items.iter().any(|item| {
+            item.label == "scenario.operation.error"
+                && item
+                    .value
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("crash_cut_submit")
+                && item
+                    .value
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|error| error.contains("submit occurrence 2"))
+        }));
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|item| item.label != "scenario.crash_cut"),
+            "a faulted setup submit must not claim that its registered seam was reached"
         );
     }
 
