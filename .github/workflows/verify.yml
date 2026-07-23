@@ -35,6 +35,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
+      # The debug --all-targets build no longer fits in the ~14G a hosted
+      # runner leaves free; drop preinstalled bloat first (EMO-515).
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
