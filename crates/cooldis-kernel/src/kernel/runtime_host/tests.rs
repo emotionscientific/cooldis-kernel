@@ -1600,6 +1600,23 @@ impl ThreadLifecycleSink for FailingAfterRuntimeStartsSink {
     }
 }
 
+struct HistoryFailingChildLifecycleSink {
+    child_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ThreadLifecycleSink for HistoryFailingChildLifecycleSink {
+    async fn thread_started(&self, handle: RuntimeThreadHandle) -> CooldisResult<()> {
+        if handle.context().parent_thread_id.is_some() {
+            self.child_calls.fetch_add(1, Ordering::SeqCst);
+            return Err(CooldisError::History(
+                "controlled child lifecycle history failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct ExitRuntimeFactory;
 
 #[async_trait]
@@ -3710,6 +3727,299 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
             .count(),
         1,
         "recovery must append one child start identity over the existing clone"
+    );
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn fork_checkpoint_reconciles_one_shot_append_failures() {
+    for fail_after_commit in [false, true] {
+        let inner = Arc::new(InMemorySessionStore::new());
+        let faulting = if fail_after_commit {
+            FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
+                "append",
+                2,
+                "fork checkpoint append committed before disconnect",
+            )
+        } else {
+            FaultingRuntimeStore::new(inner.clone()).fail_nth(
+                "append",
+                2,
+                "fork checkpoint append failed before commit",
+            )
+        };
+        let store = Arc::new(faulting);
+        let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+        let parent = host
+            .start_thread(
+                coords("tenant_a", "user_1", "fork-checkpoint-append-fault"),
+                ThreadTopology::root(),
+            )
+            .await
+            .unwrap();
+
+        let checkpoint = host
+            .create_checkpoint(
+                parent.context().coordinates.thread_id,
+                None,
+                Some("fork cut".to_string()),
+                BTreeMap::new(),
+            )
+            .await
+            .expect("a one-shot checkpoint append fault must be reconciled");
+
+        let events = inner
+            .read_events(
+                &EventStreamId::for_thread(&parent.context().coordinates),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::SessionEntryAppended
+                        && event.payload["runtime_kind"].as_str() == Some("thread_checkpoint")
+                        && event.payload["runtime_payload"]["checkpoint_id"].as_str()
+                            == Some(checkpoint.id.to_string().as_str())
+                })
+                .count(),
+            1,
+            "checkpoint reconciliation must not duplicate an after-fault commit"
+        );
+        host.shutdown_all().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn checkpoint_reconciliation_reads_authoritative_event_history() {
+    let inner = Arc::new(InMemorySessionStore::new());
+    let store = Arc::new(
+        FaultingRuntimeStore::new(inner)
+            .fail_nth_after(
+                "append",
+                2,
+                "fork checkpoint append committed before disconnect",
+            )
+            .fail_nth(
+                "build_context",
+                1,
+                "selected branch projection is temporarily unavailable",
+            ),
+    );
+    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let parent = host
+        .start_thread(
+            coords(
+                "tenant_a",
+                "user_1",
+                "checkpoint-authoritative-reconciliation",
+            ),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    host.create_checkpoint(
+        parent.context().coordinates.thread_id,
+        None,
+        Some("fork cut".to_string()),
+        BTreeMap::new(),
+    )
+    .await
+    .expect("reconciliation must use the durable event stream, not a branch projection");
+
+    assert_eq!(store.call_count("read_events"), 1);
+    assert_eq!(store.call_count("build_context"), 0);
+    host.shutdown_all().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn checkpoint_reconciliation_reports_append_and_read_failures() {
+    for fail_after_commit in [false, true] {
+        let inner = Arc::new(InMemorySessionStore::new());
+        let faulting = if fail_after_commit {
+            FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
+                "append",
+                2,
+                "checkpoint append committed before disconnect",
+            )
+        } else {
+            FaultingRuntimeStore::new(inner.clone()).fail_nth(
+                "append",
+                2,
+                "checkpoint append failed before commit",
+            )
+        };
+        let store =
+            Arc::new(faulting.fail_nth("read_events", 1, "checkpoint reconciliation read failed"));
+        let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store);
+        let parent = host
+            .start_thread(
+                coords(
+                    "tenant_a",
+                    "user_1",
+                    "checkpoint-reconciliation-read-failure",
+                ),
+                ThreadTopology::root(),
+            )
+            .await
+            .unwrap();
+
+        let error = host
+            .create_checkpoint(
+                parent.context().coordinates.thread_id,
+                None,
+                Some("fork cut".to_string()),
+                BTreeMap::new(),
+            )
+            .await
+            .expect_err("a failed reconciliation read cannot prove append success");
+        let message = error.to_string();
+        assert!(
+            message.contains(if fail_after_commit {
+                "checkpoint append committed before disconnect"
+            } else {
+                "checkpoint append failed before commit"
+            }),
+            "the primary append failure must remain visible: {message}"
+        );
+        assert!(
+            message.contains("checkpoint reconciliation read failed"),
+            "the reconciliation read failure must be included: {message}"
+        );
+
+        let events = inner
+            .read_events(
+                &EventStreamId::for_thread(&parent.context().coordinates),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::SessionEntryAppended
+                        && event.payload["runtime_kind"].as_str() == Some("thread_checkpoint")
+                })
+                .count(),
+            usize::from(fail_after_commit),
+            "a reconciliation read failure must not add a second durable effect"
+        );
+        host.shutdown_all().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn reserved_fork_child_start_reconciles_one_shot_append_failures() {
+    for fail_after_commit in [false, true] {
+        let inner = Arc::new(InMemorySessionStore::new());
+        let faulting = if fail_after_commit {
+            FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
+                "append",
+                3,
+                "fork child start append committed before disconnect",
+            )
+        } else {
+            FaultingRuntimeStore::new(inner.clone()).fail_nth(
+                "append",
+                3,
+                "fork child start append failed before commit",
+            )
+        };
+        let store = Arc::new(faulting);
+        let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+        let parent = host
+            .start_thread(
+                coords("tenant_a", "user_1", "fork-child-start-append-fault"),
+                ThreadTopology::root(),
+            )
+            .await
+            .unwrap();
+        let checkpoint = host
+            .create_checkpoint(
+                parent.context().coordinates.thread_id,
+                None,
+                Some("fork cut".to_string()),
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        let child_thread_id = ThreadId::new();
+
+        let child = host
+            .fork_thread_from_checkpoint_with_id(checkpoint, child_thread_id)
+            .await
+            .expect("a one-shot reserved child identity append fault must be reconciled");
+
+        assert_eq!(child.context().coordinates.thread_id, child_thread_id);
+        let events = inner
+            .read_events(
+                &EventStreamId::for_thread(&child.context().coordinates),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::SessionEntryAppended
+                        && event.payload["runtime_kind"].as_str() == Some("thread_started")
+                        && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
+                            .as_str()
+                            .is_some_and(|id| {
+                                id == parent.context().coordinates.thread_id.to_string()
+                            })
+                })
+                .count(),
+            1,
+            "reserved child recovery must keep one durable start identity"
+        );
+        host.shutdown_all().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn reserved_fork_child_does_not_retry_lifecycle_history_errors() {
+    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let child_calls = Arc::new(AtomicUsize::new(0));
+    host.set_lifecycle_sink(Some(Arc::new(HistoryFailingChildLifecycleSink {
+        child_calls: Arc::clone(&child_calls),
+    })))
+    .await;
+    let parent = host
+        .start_thread(
+            coords("tenant_a", "user_1", "fork-child-lifecycle-history-error"),
+            ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = host
+        .create_checkpoint(
+            parent.context().coordinates.thread_id,
+            None,
+            Some("fork cut".to_string()),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let error = match host.fork_thread_from_checkpoint(checkpoint).await {
+        Ok(_) => panic!("the controlled lifecycle sink failure must surface"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("controlled child lifecycle history failure")
+    );
+    assert_eq!(
+        child_calls.load(Ordering::SeqCst),
+        1,
+        "a lifecycle history error is not an identity-append retry signal"
     );
     host.shutdown_all().await.unwrap();
 }

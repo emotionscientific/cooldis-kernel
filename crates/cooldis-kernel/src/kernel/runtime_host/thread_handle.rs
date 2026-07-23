@@ -12,16 +12,18 @@ use crate::agent::manifest_bind::{
 use crate::kernel::control_decision::{PlacementDecisionPayload, PlacementSubject};
 use crate::kernel::history::{
     EventKind, EventProvenance, EventRecord, EventSequence, EventStreamId, NewEventRecord,
-    PolicyBoundPayload, PolicyKind, SessionContext, SessionEntry, SessionEntryKind, StreamCursorV1,
+    PolicyBoundPayload, PolicyKind, SessionContext, SessionEntry, SessionEntryId, SessionEntryKind,
+    StreamCursorV1,
 };
 use crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA;
 use cooldis_runtime_contracts::{
     ThreadCheckpointId, ThreadContext, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadSignal,
-    ThreadSignalKind, ThreadStatus,
+    ThreadSignalKind, ThreadStatus, ThreadTopology,
 };
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 impl RuntimeThreadHandle {
     pub fn context(&self) -> &ThreadContext {
@@ -251,6 +253,40 @@ impl RuntimeThreadHandle {
         .await
     }
 
+    /// Reconciles the reserved fork child's identity append before the host
+    /// publishes lifecycle side effects. Only the append is retried: an
+    /// unrelated history-shaped factory or lifecycle error must not re-enter
+    /// the whole child start.
+    pub(super) async fn record_thread_start_identity_with_reconciliation(
+        &self,
+    ) -> CooldisResult<()> {
+        let mut first_error = None;
+        for attempt in 0..2 {
+            match self.record_thread_start_identity().await {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    let events = self.read_thread_events(None).await.map_err(|read_error| {
+                        reconciliation_read_error(
+                            "thread start identity append",
+                            &error,
+                            read_error,
+                        )
+                    })?;
+                    if events.iter().any(|event| {
+                        thread_start_identity_matches_context(event, &self.thread.context)
+                    }) {
+                        return Ok(());
+                    }
+                    if attempt == 1 {
+                        return Err(first_error.unwrap_or(error));
+                    }
+                    first_error = Some(error);
+                }
+            }
+        }
+        unreachable!("thread start identity reconciliation has exactly two attempts")
+    }
+
     pub async fn record_tool_universe_discovery_receipts(
         &self,
         payloads: Vec<serde_json::Value>,
@@ -414,26 +450,21 @@ impl RuntimeThreadHandle {
             metadata,
             created_at_ms: unix_timestamp_ms(),
         };
-        let checkpoint_entry = self
-            .thread
-            .services
-            .append_session_entry(
-                &self.thread.context.coordinates,
-                None,
-                SessionEntryKind::Runtime {
-                    kind: "thread_checkpoint".to_string(),
-                    payload: serde_json::json!({
-                        "checkpoint_id": checkpoint.id.to_string(),
-                        "lineage": checkpoint.lineage,
-                        "parent_checkpoint_id": checkpoint.parent_checkpoint_id.map(|id| id.to_string()),
-                        "label": checkpoint.label.clone(),
-                        "metadata": checkpoint.metadata.clone(),
-                    }),
-                },
-            )
+        let checkpoint_kind = SessionEntryKind::Runtime {
+            kind: "thread_checkpoint".to_string(),
+            payload: serde_json::json!({
+                "checkpoint_id": checkpoint.id.to_string(),
+                "lineage": checkpoint.lineage,
+                "parent_checkpoint_id": checkpoint.parent_checkpoint_id.map(|id| id.to_string()),
+                "label": checkpoint.label.clone(),
+                "metadata": checkpoint.metadata.clone(),
+            }),
+        };
+        let checkpoint_entry_id = self
+            .append_checkpoint_entry_with_reconciliation(checkpoint.id, checkpoint_kind)
             .await?;
         let checkpoint = ThreadCheckpoint {
-            active_entry_id: Some(checkpoint_entry.entry_id),
+            active_entry_id: Some(checkpoint_entry_id),
             ..checkpoint
         };
         self.thread
@@ -456,6 +487,78 @@ impl RuntimeThreadHandle {
             label: checkpoint.label.clone(),
         });
         Ok(checkpoint)
+    }
+
+    /// Makes the checkpoint prerequisite of a claimed fork survive one planned
+    /// store append fault. An append error is ambiguous, so the exact
+    /// checkpoint id is folded from the authoritative event stream before one
+    /// bounded retry; this both advances a before-fault and adopts an
+    /// after-fault without a selected-branch projection hiding the commit.
+    async fn append_checkpoint_entry_with_reconciliation(
+        &self,
+        checkpoint_id: ThreadCheckpointId,
+        checkpoint_kind: SessionEntryKind,
+    ) -> CooldisResult<SessionEntryId> {
+        let checkpoint_id = checkpoint_id.to_string();
+        let mut first_error = None;
+        for attempt in 0..2 {
+            match self
+                .thread
+                .services
+                .append_session_entry(
+                    &self.thread.context.coordinates,
+                    None,
+                    checkpoint_kind.clone(),
+                )
+                .await
+            {
+                Ok(entry) => return Ok(entry.entry_id),
+                Err(error) => {
+                    let events = self.read_thread_events(None).await.map_err(|read_error| {
+                        reconciliation_read_error("checkpoint append", &error, read_error)
+                    })?;
+                    if let Some(event) = events.iter().rev().find(|event| {
+                        event.kind == EventKind::SessionEntryAppended
+                            && event
+                                .payload
+                                .get("runtime_kind")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("thread_checkpoint")
+                            && event
+                                .payload
+                                .get("runtime_payload")
+                                .and_then(|payload| payload.get("checkpoint_id"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some(checkpoint_id.as_str())
+                    }) {
+                        let entry_id = event
+                            .payload
+                            .get("entry_id")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                CooldisError::History(format!(
+                                    "checkpoint {checkpoint_id} reconciliation event is missing entry_id"
+                                ))
+                            })
+                            .and_then(|entry_id| {
+                                Uuid::parse_str(entry_id)
+                                    .map(SessionEntryId::from_uuid)
+                                    .map_err(|parse_error| {
+                                        CooldisError::History(format!(
+                                            "checkpoint {checkpoint_id} reconciliation entry_id is invalid: {parse_error}"
+                                        ))
+                                    })
+                            })?;
+                        return Ok(entry_id);
+                    }
+                    if attempt == 1 {
+                        return Err(first_error.unwrap_or(error));
+                    }
+                    first_error = Some(error);
+                }
+            }
+        }
+        unreachable!("checkpoint append reconciliation has exactly two attempts")
     }
 
     pub fn emit_runtime(&self, kind: RuntimeEventKind) {
@@ -503,4 +606,42 @@ impl RuntimeThreadHandle {
             let _ = join_handle.await;
         }
     }
+}
+
+fn thread_start_identity_matches_context(event: &EventRecord, context: &ThreadContext) -> bool {
+    if event.kind != EventKind::SessionEntryAppended
+        || event
+            .payload
+            .get("runtime_kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("thread_started")
+    {
+        return false;
+    }
+    let Some(payload) = event
+        .payload
+        .get("runtime_payload")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    let Ok(topology) = serde_json::from_value::<ThreadTopology>(payload["topology"].clone()) else {
+        return false;
+    };
+    let Ok(metadata) =
+        serde_json::from_value::<BTreeMap<String, String>>(payload["metadata"].clone())
+    else {
+        return false;
+    };
+    topology == context.topology && metadata == context.metadata
+}
+
+fn reconciliation_read_error(
+    operation: &str,
+    append_error: &CooldisError,
+    read_error: CooldisError,
+) -> CooldisError {
+    CooldisError::History(format!(
+        "{operation} failed ambiguously: {append_error}; reconciliation read failed: {read_error}"
+    ))
 }
