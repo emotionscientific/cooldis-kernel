@@ -11,5 +11,6 @@
   {"seed": 4286450925398396449, "vocabulary_version": 1, "max_ops": 8, "intensity": "sparse", "pins": "EMO-408: base 777 sweep index 0 (count 3, sparse rotation) completed-lease inv3 false positive"},
   {"seed": 3697674979352012850, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-405: base 40520260711 sweep index 2 exposed invalid fork settlement, orphaned child routing, false queue remainder, vacuous inv5, and a suppressed nightly receipt"},
   {"seed": 12756048029454721330, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-405: base 40520260711 sweep index 14 exposed nondeterministic context output hashes from an unpinned event timestamp"},
-  {"seed": 4861954629787943465, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-405: base 40520260711 sweep index 23 exposed nondeterministic context output hashes from an unpinned event timestamp"}
+  {"seed": 4861954629787943465, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-405: base 40520260711 sweep index 23 exposed nondeterministic context output hashes from an unpinned event timestamp"},
+  {"seed": 2427668802218700699, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-513: fork claim unsettled at quiescence under store append fault"}
 ]

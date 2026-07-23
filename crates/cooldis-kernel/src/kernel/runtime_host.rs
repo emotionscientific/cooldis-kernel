@@ -545,6 +545,7 @@ impl RuntimeHost {
             metadata,
             start_reservation,
             record_start_identity,
+            false,
             true,
         )
         .await
@@ -633,6 +634,7 @@ impl RuntimeHost {
         metadata: BTreeMap<String, String>,
         mut start_reservation: ThreadStartReservation<'_>,
         record_start_identity: bool,
+        reconcile_start_identity_append: bool,
         notify_lifecycle_sink: bool,
     ) -> CooldisResult<RuntimeThreadHandle> {
         let thread_id = context.coordinates.thread_id;
@@ -746,12 +748,21 @@ impl RuntimeHost {
         let handle = RuntimeThreadHandle {
             thread: Arc::clone(&thread),
         };
-        if record_start_identity && let Err(err) = handle.record_thread_start_identity().await {
-            thread.cancellation.cancel();
-            handle.abort().await;
-            self.remove_thread_if_current(&thread).await;
-            published_start.disarm();
-            return Err(err);
+        if record_start_identity {
+            let start_identity = if reconcile_start_identity_append {
+                handle
+                    .record_thread_start_identity_with_reconciliation()
+                    .await
+            } else {
+                handle.record_thread_start_identity().await.map(|_| ())
+            };
+            if let Err(err) = start_identity {
+                thread.cancellation.cancel();
+                handle.abort().await;
+                self.remove_thread_if_current(&thread).await;
+                published_start.disarm();
+                return Err(err);
+            }
         }
         let _ = runtime_start_tx.send(());
         if notify_lifecycle_sink
@@ -1528,7 +1539,7 @@ impl RuntimeHost {
             .lock()
             .await
             .insert(checkpoint.id, checkpoint);
-        self.start_reserved_thread(context, metadata, start_reservation, false, true)
+        self.start_reserved_thread(context, metadata, start_reservation, false, false, true)
             .await
     }
 
@@ -1611,7 +1622,6 @@ impl RuntimeHost {
             topology,
             metadata.clone(),
         );
-
         loop {
             match self.get_thread(child_thread_id).await {
                 Ok(handle) => {
@@ -1784,6 +1794,7 @@ impl RuntimeHost {
                     start_metadata,
                     start_reservation,
                     !has_start_identity,
+                    true,
                     notify_lifecycle_sink,
                 )
                 .await;
