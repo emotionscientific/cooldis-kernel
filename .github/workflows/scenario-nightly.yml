@@ -35,6 +35,11 @@ jobs:
         id: sweep
         continue-on-error: true
         env:
+          # Same heterogeneous-disk fleet as the Verify workspace job
+          # (EMO-515): line tables keep the debug test build inside the
+          # small-root runners' free space.
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
           RUST_MIN_STACK: "16777216"
           COOLDIS_SCENARIO_SWEEP_BASE_SEED: ${{ github.run_id }}
           COOLDIS_SCENARIO_SWEEP_COUNT: "24"
