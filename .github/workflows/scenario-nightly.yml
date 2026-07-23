@@ -20,12 +20,13 @@ jobs:
         id: sweep
         continue-on-error: true
         env:
+          RUST_MIN_STACK: "16777216"
           COOLDIS_SCENARIO_SWEEP_BASE_SEED: ${{ github.run_id }}
           COOLDIS_SCENARIO_SWEEP_COUNT: "24"
           COOLDIS_SCENARIO_SWEEP_MAX_OPS: "8"
           COOLDIS_SCENARIO_SWEEP_COMMIT_SHA: ${{ github.sha }}
           COOLDIS_SCENARIO_SWEEP_RECEIPT_PATH: ${{ runner.temp }}/scenario-nightly-receipt.json
-        run: cargo test -p cooldis --lib scenario_nightly_sweep -- --ignored
+        run: cargo test -p cooldis --lib scenario_nightly_sweep -- --ignored --nocapture
       - name: Witness scenario receipt
         if: always()
         env:

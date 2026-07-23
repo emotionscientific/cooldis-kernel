@@ -3001,6 +3001,7 @@ mod tests {
                 _ => ("hostile", Intensity::Hostile),
             };
             *tallies.get_mut(intensity_name).unwrap() += 1;
+            eprintln!("sweep progress: index {index} intensity {intensity_name} seed {seed}");
             let derive = || Scenario::derive(seed, ScenarioBounds { max_ops, intensity });
             let first = catch_scenario_once(&derive()).await;
             let second = catch_scenario_once(&derive()).await;
