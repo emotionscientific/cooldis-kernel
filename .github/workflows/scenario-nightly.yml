@@ -14,6 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
+      # Same headroom problem as the Verify workspace job (EMO-515): the
+      # debug test build no longer fits where the work folder lives, so free
+      # bloat and put the cargo target dir on the big root disk.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/lib/jvm /opt/microsoft /usr/lib/google-cloud-sdk \
+            /usr/local/share/powershell /usr/share/swift /opt/az
+          sudo docker image prune --all --force > /dev/null
+          sudo mkdir -p /opt/cargo-target
+          sudo chown "$(id -u):$(id -g)" /opt/cargo-target
+          ln -sfn /opt/cargo-target "${GITHUB_WORKSPACE%/*}/.cargo-target"
+          df -h
+          df -i /
+          findmnt -T "${GITHUB_WORKSPACE%/*}" || true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.1
       - name: Run rotating sweep
