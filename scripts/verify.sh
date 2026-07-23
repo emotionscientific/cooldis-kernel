@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# EMO-512: debug-build async poll frames are large, so deeply nested scenarios
+# need more test-thread stack headroom than libtest's default.
+export RUST_MIN_STACK=16777216
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 run() {
