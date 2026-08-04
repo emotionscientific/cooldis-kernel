@@ -837,6 +837,13 @@ pub fn discover_verlet_daemon_config_path() -> VerletResult<Option<PathBuf>> {
 }
 
 pub fn discover_verlet_project(start: &Path) -> VerletResult<VerletProjectDiscovery> {
+    discover_verlet_project_with_warning(start, |warning| eprintln!("{warning}"))
+}
+
+fn discover_verlet_project_with_warning(
+    start: &Path,
+    mut warn: impl FnMut(&str),
+) -> VerletResult<VerletProjectDiscovery> {
     let mut start = if start.is_absolute() {
         start.to_path_buf()
     } else {
@@ -863,16 +870,14 @@ pub fn discover_verlet_project(start: &Path) -> VerletResult<VerletProjectDiscov
                 config_path: Some(candidate),
             });
         }
-    }
-
-    for dir in start.ancestors() {
         let candidate = dir.join(concat!("cool", "dis.toml"));
         if candidate.is_file() {
-            eprintln!(
+            let warning = format!(
                 "warning: {} is deprecated; use {} (compatibility will be removed in v0.4.0)",
                 candidate.display(),
                 dir.join("verlet.toml").display()
             );
+            warn(&warning);
             return Ok(VerletProjectDiscovery {
                 root: dir.to_path_buf(),
                 config_path: Some(candidate),
@@ -887,16 +892,14 @@ pub fn discover_verlet_project(start: &Path) -> VerletResult<VerletProjectDiscov
                 config_path: None,
             });
         }
-    }
-
-    for dir in start.ancestors() {
         let legacy = dir.join(concat!(".", "cool", "dis"));
         if legacy.is_dir() {
-            eprintln!(
+            let warning = format!(
                 "warning: {} is deprecated; keep using it for v0.3.0 or create {} for new state",
                 legacy.display(),
                 dir.join(".verlet").display()
             );
+            warn(&warning);
             return Ok(VerletProjectDiscovery {
                 root: dir.to_path_buf(),
                 config_path: None,

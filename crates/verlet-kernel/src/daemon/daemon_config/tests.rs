@@ -626,12 +626,71 @@ fn project_discovery_prefers_new_config_then_falls_back_to_legacy_config() {
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(&legacy, "").unwrap();
 
-    let legacy_only = discover_verlet_project(&nested).unwrap();
+    let mut warnings = Vec::new();
+    let legacy_only =
+        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
+            .unwrap();
     assert_eq!(legacy_only.config_path.as_deref(), Some(legacy.as_path()));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(legacy.to_string_lossy().as_ref()));
 
     std::fs::write(&canonical, "").unwrap();
-    let both = discover_verlet_project(&nested).unwrap();
+    warnings.clear();
+    let both =
+        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
+            .unwrap();
     assert_eq!(both.config_path.as_deref(), Some(canonical.as_path()));
+    assert!(warnings.is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_discovery_nearest_legacy_config_beats_ancestor_canonical_config() {
+    let root = temp_root("project-config-nearest-legacy");
+    let project = root.join("work/karl");
+    let nested = project.join("src/nested");
+    let ancestor_config = root.join("verlet.toml");
+    let project_config = project.join(concat!("cool", "dis.toml"));
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(&ancestor_config, "").unwrap();
+    std::fs::write(&project_config, "").unwrap();
+
+    let mut warnings = Vec::new();
+    let discovered =
+        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
+            .unwrap();
+
+    assert_eq!(discovered.root, project);
+    assert_eq!(
+        discovered.config_path.as_deref(),
+        Some(project_config.as_path())
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(project_config.to_string_lossy().as_ref()));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_discovery_nearest_legacy_state_dir_beats_ancestor_canonical_state_dir() {
+    let root = temp_root("project-state-nearest-legacy");
+    let project = root.join("work/karl");
+    let nested = project.join("src/nested");
+    let project_state = project.join(concat!(".", "cool", "dis"));
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(root.join(".verlet")).unwrap();
+    std::fs::create_dir_all(&project_state).unwrap();
+
+    let mut warnings = Vec::new();
+    let discovered =
+        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
+            .unwrap();
+
+    assert_eq!(discovered.root, project);
+    assert_eq!(discovered.config_path, None);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(project_state.to_string_lossy().as_ref()));
 
     let _ = std::fs::remove_dir_all(root);
 }
