@@ -60,9 +60,9 @@ init_repo() {
   local name=$1
 
   REPO="$TMP_DIR/$name"
-  mkdir -p "$REPO/scripts" "$REPO/crates/cooldis-kernel/src"
+  mkdir -p "$REPO/scripts" "$REPO/crates/verlet-kernel/src"
   cp "$GUARD_SCRIPT" "$REPO/scripts/guard-rails.sh"
-  printf 'pub const runtime_value: &str = "base";\n' >"$REPO/crates/cooldis-kernel/src/lib.rs"
+  printf 'pub const runtime_value: &str = "base";\n' >"$REPO/crates/verlet-kernel/src/lib.rs"
   git -C "$REPO" init -q -b current
   git -C "$REPO" config user.name 'Guard Rails Test'
   git -C "$REPO" config user.email 'guard-rails-test@example.invalid'
@@ -74,8 +74,8 @@ run_guard() {
   local name=$1
   local allow_product_terms=${2:-0}
 
-  if COOLDIS_PII_TERMS="$PII_TERMS_FILE" \
-    COOLDIS_ALLOW_PRODUCT_TERMS="$allow_product_terms" \
+  if VERLET_PII_TERMS="$PII_TERMS_FILE" \
+    VERLET_ALLOW_PRODUCT_TERMS="$allow_product_terms" \
     "$REPO/scripts/guard-rails.sh" staged \
     >"$TMP_DIR/$name.out" 2>"$TMP_DIR/$name.err"; then
     RUN_STATUS=0
@@ -86,19 +86,19 @@ run_guard() {
 
 : >"$PII_TERMS_FILE"
 : >"$TMP_DIR/empty"
-printf 'Cooldis guard rails passed (staged).\n' >"$TMP_DIR/passed"
+printf 'Verlet guard rails passed (staged).\n' >"$TMP_DIR/passed"
 
 # A plain staged product term preserves the legacy failure bytes.
 init_repo non-merge-hit
 printf '// telegram adapter: intentional\n' \
-  >>"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+  >>"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 run_guard non-merge-hit
 assert_eq 1 "$RUN_STATUS" 'non-merge product term failed'
 assert_files_equal "$TMP_DIR/empty" "$TMP_DIR/non-merge-hit.out" 'non-merge failure stdout stayed empty'
 {
   printf 'Staged runtime code appears to add product-shaped terms.\n'
-  printf 'Keep product logic out of Cooldis, or set COOLDIS_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n'
+  printf 'Keep product logic out of Verlet, or set VERLET_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n'
   printf '+// telegram adapter: intentional\n'
 } >"$TMP_DIR/non-merge-hit.expected.err"
 assert_files_equal "$TMP_DIR/non-merge-hit.expected.err" "$TMP_DIR/non-merge-hit.err" \
@@ -106,7 +106,7 @@ assert_files_equal "$TMP_DIR/non-merge-hit.expected.err" "$TMP_DIR/non-merge-hit
 
 # Only the index is guarded; a clean worktree copy must not hide a staged hit.
 printf 'pub const runtime_value: &str = "worktree clean";\n' \
-  >"$REPO/crates/cooldis-kernel/src/lib.rs"
+  >"$REPO/crates/verlet-kernel/src/lib.rs"
 run_guard non-merge-index-only
 assert_eq 1 "$RUN_STATUS" 'staged product term survived a differing worktree'
 assert_files_equal "$TMP_DIR/non-merge-hit.expected.err" "$TMP_DIR/non-merge-index-only.err" \
@@ -119,8 +119,8 @@ assert_files_equal "$TMP_DIR/empty" "$TMP_DIR/non-merge-override.err" 'non-merge
 # A plain staged clean change preserves the legacy success bytes.
 init_repo non-merge-clean
 printf 'pub const kernel_adapter: &str = "clean";\n' \
-  >>"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+  >>"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 run_guard non-merge-clean
 assert_eq 0 "$RUN_STATUS" 'non-merge clean change passed'
 assert_files_equal "$TMP_DIR/passed" "$TMP_DIR/non-merge-clean.out" 'non-merge clean output stayed byte-identical'
@@ -130,8 +130,8 @@ assert_files_equal "$TMP_DIR/empty" "$TMP_DIR/non-merge-clean.err" 'non-merge cl
 init_repo merge-parent-only
 git -C "$REPO" switch -qc product-parent
 printf '// telegram adapter: parent\n' \
-  >>"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+  >>"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 git -C "$REPO" commit --no-gpg-sign -qm 'product parent'
 git -C "$REPO" switch -q current
 printf 'current branch\n' >"$REPO/current.txt"
@@ -160,8 +160,8 @@ git -C "$REPO" commit --no-gpg-sign -qm 'clean parent'
 git -C "$REPO" switch -q current
 git -C "$REPO" switch -qc product-parent
 printf '// telegram adapter: later parent\n' \
-  >>"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+  >>"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 git -C "$REPO" commit --no-gpg-sign -qm 'product parent'
 git -C "$REPO" switch -q current
 printf 'current branch\n' >"$REPO/current.txt"
@@ -177,13 +177,13 @@ assert_files_equal "$TMP_DIR/empty" "$TMP_DIR/merge-octopus.err" 'octopus merge 
 # occurrence in another guarded file.
 init_repo merge-identical-lines
 printf 'pub const second_value: &str = "base";\n' \
-  >"$REPO/crates/cooldis-kernel/src/second.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/second.rs
+  >"$REPO/crates/verlet-kernel/src/second.rs"
+git -C "$REPO" add crates/verlet-kernel/src/second.rs
 git -C "$REPO" commit --no-gpg-sign -qm 'second base file'
 git -C "$REPO" switch -qc product-parent
 printf '// telegram adapter: collision\n' \
-  >>"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+  >>"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 git -C "$REPO" commit --no-gpg-sign -qm 'product parent'
 git -C "$REPO" switch -q current
 printf 'current branch\n' >"$REPO/current.txt"
@@ -191,13 +191,13 @@ git -C "$REPO" add current.txt
 git -C "$REPO" commit --no-gpg-sign -qm 'diverge current'
 git -C "$REPO" merge -q --no-commit product-parent >/dev/null 2>&1
 printf '// telegram adapter: collision\n' \
-  >>"$REPO/crates/cooldis-kernel/src/second.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/second.rs
+  >>"$REPO/crates/verlet-kernel/src/second.rs"
+git -C "$REPO" add crates/verlet-kernel/src/second.rs
 run_guard merge-identical-lines
 assert_eq 1 "$RUN_STATUS" 'identical carried content did not hide a new line'
 {
   printf 'Staged runtime code appears to add product-shaped terms.\n'
-  printf 'Keep product logic out of Cooldis, or set COOLDIS_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n'
+  printf 'Keep product logic out of Verlet, or set VERLET_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n'
   printf '+// telegram adapter: collision\n'
   printf '+// telegram adapter: collision\n'
 } >"$TMP_DIR/merge-identical-lines.expected.err"
@@ -208,12 +208,12 @@ assert_files_equal "$TMP_DIR/merge-identical-lines.expected.err" \
 # A product term absent from both parents remains new after conflict resolution.
 init_repo merge-resolution
 git -C "$REPO" switch -qc product-parent
-printf 'pub const runtime_value: &str = "parent";\n' >"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+printf 'pub const runtime_value: &str = "parent";\n' >"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 git -C "$REPO" commit --no-gpg-sign -qm 'parent edit'
 git -C "$REPO" switch -q current
-printf 'pub const runtime_value: &str = "current";\n' >"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+printf 'pub const runtime_value: &str = "current";\n' >"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 git -C "$REPO" commit --no-gpg-sign -qm 'current edit'
 if git -C "$REPO" merge -q --no-commit product-parent >/dev/null 2>&1; then
   merge_status=0
@@ -222,14 +222,14 @@ else
 fi
 assert_eq 1 "$merge_status" 'merge fixture produced a conflict'
 printf '// telegram adapter: resolution\n' \
-  >"$REPO/crates/cooldis-kernel/src/lib.rs"
-git -C "$REPO" add crates/cooldis-kernel/src/lib.rs
+  >"$REPO/crates/verlet-kernel/src/lib.rs"
+git -C "$REPO" add crates/verlet-kernel/src/lib.rs
 run_guard merge-resolution
 assert_eq 1 "$RUN_STATUS" 'resolution-authored product term failed'
 assert_files_equal "$TMP_DIR/empty" "$TMP_DIR/merge-resolution.out" 'merge failure stdout stayed empty'
 {
   printf 'Staged runtime code appears to add product-shaped terms.\n'
-  printf 'Keep product logic out of Cooldis, or set COOLDIS_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n'
+  printf 'Keep product logic out of Verlet, or set VERLET_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n'
   printf '+// telegram adapter: resolution\n'
 } >"$TMP_DIR/merge-resolution.expected.err"
 assert_files_equal "$TMP_DIR/merge-resolution.expected.err" "$TMP_DIR/merge-resolution.err" \

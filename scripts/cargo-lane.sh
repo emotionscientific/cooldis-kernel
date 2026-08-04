@@ -4,10 +4,22 @@
 # Implementation contract: workspace ticket 0071 and
 # plans/bounded-cargo-build-lanes-2026-07.md.
 #
-# Set COOLDIS_CARGO_LANE_INCREMENTAL=1 for an incremental, sccache-free edit
+# Set VERLET_CARGO_LANE_INCREMENTAL=1 for an incremental, sccache-free edit
 # loop backed by a separate target directory, lock, and owner record.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+. "$SCRIPT_DIR/env-compat.sh"
+for env_name in \
+  VERLET_REAL_CARGO \
+  VERLET_CARGO_LANE_SCRIPT \
+  VERLET_CARGO_SHIM_DIR \
+  VERLET_CARGO_LANE_ROOT \
+  VERLET_CARGO_LANE_INCREMENTAL
+do
+  verlet_env_promote "$env_name"
+done
 
 REAL_CARGO=
 ACTIVE_CARGO_SHIM_DIR=
@@ -77,14 +89,14 @@ remove_path_entry() {
 }
 
 resolve_real_cargo() {
-  local candidate=${COOLDIS_REAL_CARGO:-}
+  local candidate=${VERLET_REAL_CARGO:-}
   local path_cargo
   local candidate_dir
   local candidate_name
   local script_path
 
-  if [[ -n "${COOLDIS_CARGO_LANE_SCRIPT:-}" && -z "$candidate" ]]; then
-    die 'Cargo shim contract is missing COOLDIS_REAL_CARGO'
+  if [[ -n "${VERLET_CARGO_LANE_SCRIPT:-}" && -z "$candidate" ]]; then
+    die 'Cargo shim contract is missing VERLET_REAL_CARGO'
   fi
 
   path_cargo=$(type -P cargo || true)
@@ -121,9 +133,9 @@ resolve_real_cargo() {
 
   REAL_CARGO=$candidate
 
-  if [[ -n "${COOLDIS_CARGO_SHIM_DIR:-}" ]]; then
-    ACTIVE_CARGO_SHIM_DIR=$COOLDIS_CARGO_SHIM_DIR
-  elif [[ -n "${COOLDIS_CARGO_LANE_SCRIPT:-}" \
+  if [[ -n "${VERLET_CARGO_SHIM_DIR:-}" ]]; then
+    ACTIVE_CARGO_SHIM_DIR=$VERLET_CARGO_SHIM_DIR
+  elif [[ -n "${VERLET_CARGO_LANE_SCRIPT:-}" \
     && -n "$path_cargo" \
     && ! "$path_cargo" -ef "$REAL_CARGO" ]]; then
     ACTIVE_CARGO_SHIM_DIR=$(cd "$(dirname "$path_cargo")" && pwd -P)
@@ -161,10 +173,10 @@ resolve_git_context() {
     GIT_BRANCH=HEAD
   fi
 
-  if [[ -n "${COOLDIS_CARGO_LANE_ROOT:-}" ]]; then
-    lane_root=$COOLDIS_CARGO_LANE_ROOT
+  if [[ -n "${VERLET_CARGO_LANE_ROOT:-}" ]]; then
+    lane_root=$VERLET_CARGO_LANE_ROOT
     if [[ "$lane_root" != /* ]]; then
-      die 'COOLDIS_CARGO_LANE_ROOT must be an absolute path'
+      die 'VERLET_CARGO_LANE_ROOT must be an absolute path'
     fi
   else
     lane_root="$GIT_COMMON_DIR/cargo-lanes"
@@ -174,7 +186,7 @@ resolve_git_context() {
   if ! LANE_ROOT=$(cd "$lane_root" 2>/dev/null && pwd -P); then
     die "could not resolve Cargo lane root: $lane_root"
   fi
-  if [[ -z "${COOLDIS_CARGO_LANE_ROOT:-}" \
+  if [[ -z "${VERLET_CARGO_LANE_ROOT:-}" \
     && "$LANE_ROOT" != "$GIT_COMMON_DIR/cargo-lanes" ]]; then
     die 'default Cargo lane root resolves outside the Git common directory'
   fi
@@ -204,7 +216,7 @@ select_lane() {
   esac
 
   LANE_INSTANCE=$LANE
-  if [[ "${COOLDIS_CARGO_LANE_INCREMENTAL:-}" == 1 ]]; then
+  if [[ "${VERLET_CARGO_LANE_INCREMENTAL:-}" == 1 ]]; then
     LANE_INSTANCE="$LANE-incremental"
   fi
 
@@ -545,7 +557,7 @@ run_cargo() {
     export CARGO_BUILD_JOBS=8
   fi
 
-  if [[ "${COOLDIS_CARGO_LANE_INCREMENTAL:-}" == 1 ]]; then
+  if [[ "${VERLET_CARGO_LANE_INCREMENTAL:-}" == 1 ]]; then
     export CARGO_INCREMENTAL=1
     unset RUSTC_WRAPPER
     unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE
@@ -566,7 +578,7 @@ run_cargo() {
   if [[ -n "$ACTIVE_CARGO_SHIM_DIR" ]]; then
     remove_path_entry "$ACTIVE_CARGO_SHIM_DIR"
   fi
-  unset COOLDIS_CARGO_LANE_SCRIPT COOLDIS_CARGO_SHIM_DIR COOLDIS_REAL_CARGO
+  unset VERLET_CARGO_LANE_SCRIPT VERLET_CARGO_SHIM_DIR VERLET_REAL_CARGO
 
   start_lock_monitor
   exec "$REAL_CARGO" "$@"

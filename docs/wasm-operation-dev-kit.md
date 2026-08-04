@@ -2,7 +2,7 @@
 
 Status: local-first design sketch.
 
-Cooldis needs an authoring lane where an agent can turn an idea into a
+Verlet needs an authoring lane where an agent can turn an idea into a
 deterministic operation without mutating the runtime that will execute it.
 
 The dev kit is that lane:
@@ -12,7 +12,7 @@ agent idea
 -> scaffold Rust operation
 -> declare tool package manifest, schemas, fixtures, projections, and grants
 -> build wasm32-unknown-unknown
--> validate Cooldis ABI
+-> validate Verlet ABI
 -> run fixtures against the actual artifact
 -> publish to registry
 -> bind/grant to thread, tenant, or global scope
@@ -20,7 +20,7 @@ agent idea
 ```
 
 The important boundary: the dev kit is not the runtime. It produces an immutable
-Wasm artifact plus a manifest. Cooldis validates, publishes, binds, grants, and
+Wasm artifact plus a manifest. Verlet validates, publishes, binds, grants, and
 runs the artifact under the normal operation contract.
 
 ## SpacetimeDB Reference
@@ -44,10 +44,10 @@ I tested this against the local SpacetimeDB checkout and installed CLI 2.2.0:
 
 ```text
 spacetime start --listen-addr 127.0.0.1:3011 --data-dir /tmp/... --in-memory
-spacetime publish --server http://127.0.0.1:3011 --module-path templates/basic-rs/spacetimedb cooldis-auth-publish-probe
-spacetime describe --server http://127.0.0.1:3011 --json cooldis-auth-publish-probe
-spacetime call --server http://127.0.0.1:3011 cooldis-auth-publish-probe add '"Ada"'
-spacetime sql --server http://127.0.0.1:3011 cooldis-auth-publish-probe 'select * from person'
+spacetime publish --server http://127.0.0.1:3011 --module-path templates/basic-rs/spacetimedb verlet-auth-publish-probe
+spacetime describe --server http://127.0.0.1:3011 --json verlet-auth-publish-probe
+spacetime call --server http://127.0.0.1:3011 verlet-auth-publish-probe add '"Ada"'
+spacetime sql --server http://127.0.0.1:3011 verlet-auth-publish-probe 'select * from person'
 ```
 
 The important felt shape:
@@ -83,7 +83,7 @@ ControlStateDelegate::publish_database
   create new database or update according to module lifecycle conventions
 ```
 
-For Cooldis, the lesson is not "be a database." The lesson is: one publish
+For Verlet, the lesson is not "be a database." The lesson is: one publish
 command should take source or an artifact, validate the contract, store immutable
 bytes, update a durable record, and make the new callable surface visible without
 restarting the whole host.
@@ -91,15 +91,15 @@ restarting the whole host.
 ## Product Shape
 
 ```text
-@cooldis/wasm-kit       npm/npx CLI wrapper
-cooldis-guest-sdk       Rust guest crate and ABI helpers
-cooldis-wasm-operation  agent skill / authoring instructions
-cooldis tool publish      canonical runtime publish path
+@verlet/wasm-kit       npm/npx CLI wrapper
+verlet-guest-sdk       Rust guest crate and ABI helpers
+verlet-wasm-operation  agent skill / authoring instructions
+verlet tool publish      canonical runtime publish path
 ```
 
 The npm package exists for reach. It should be pleasant for TypeScript-heavy
 agent builders, but it must not become the authority layer. All runtime authority
-stays in Cooldis.
+stays in Verlet.
 
 ## Local V0
 
@@ -109,38 +109,38 @@ or signature system exists.
 The repo-native path today is:
 
 ```bash
-cargo run --locked --bin cooldis -- tool build --package cooldis.tool.toml
-cargo run --locked --bin cooldis -- tool publish --package cooldis.tool.toml
+cargo run --locked --bin verlet -- tool build --package verlet.tool.toml
+cargo run --locked --bin verlet -- tool publish --package verlet.tool.toml
 ```
 
 Once the wrapper exists, the same flow can become:
 
 ```bash
-npx @cooldis/wasm-kit init data-csv-profile
+npx @verlet/wasm-kit init data-csv-profile
 cd data-csv-profile
 
-npx @cooldis/wasm-kit plan
+npx @verlet/wasm-kit plan
 
-npx @cooldis/wasm-kit publish --name data --scope thread
+npx @verlet/wasm-kit publish --name data --scope thread
 ```
 
 The CLI can initially be a thin wrapper around checked-in Rust templates and the
-existing Cooldis commands:
+existing Verlet commands:
 
 ```text
 init      copy template, patch package/name/operation ids
-plan      cooldis tool build --package cooldis.tool.toml
+plan      verlet tool build --package verlet.tool.toml
 build     cargo build --message-format=json --release --target wasm32-unknown-unknown
 validate  WasmRuntimeFactory::validate_operation_artifact
-publish   cooldis tool publish --package cooldis.tool.toml
-run       cooldis tool run ...
+publish   verlet tool publish --package verlet.tool.toml
+run       verlet tool run ...
 ```
 
-The repo-native package manifest is `cooldis.tool.toml`. It is the V0 version of
+The repo-native package manifest is `verlet.tool.toml`. It is the V0 version of
 the future marketplace package declaration:
 
 ```text
-ToolPackageManifest   reads cooldis.tool.toml
+ToolPackageManifest   reads verlet.tool.toml
 ToolInterfaceContract accepted black-box interface after validation
 ToolBuildReceipt       dry-run receipt with source, runtime, operations, schemas,
                       fixtures, capabilities, and projections
@@ -158,9 +158,9 @@ When the desired tool is an existing REST API mirror, use a witnessed OpenAPI
 package instead of authoring a Rust guest:
 
 ```bash
-cooldis import build --package cooldis.import.toml
-cooldis import publish --package cooldis.import.toml \
-  --registry-root .cooldis/operations
+verlet import build --package verlet.import.toml
+verlet import publish --package verlet.import.toml \
+  --registry-root .verlet/operations
 ```
 
 The import package pins a vendored JSON spec by sha256 and selects its operations
@@ -172,9 +172,9 @@ for the supported subset, auth mapping, and response contract.
 The first checked-in templates are test fixtures rather than a generated
 scaffold:
 
-- `crates/cooldis-kernel/tests/fixtures/wasm-csv-profile/` for a pure JSON
+- `crates/verlet-kernel/tests/fixtures/wasm-csv-profile/` for a pure JSON
   operation with no capabilities;
-- `crates/cooldis-kernel/tests/fixtures/wasm-employee-lookup/` for a host-import
+- `crates/verlet-kernel/tests/fixtures/wasm-employee-lookup/` for a host-import
   HTTP operation with exact local network grants.
 
 V0 stores JSON schemas in the accepted interface contract and uses fixtures as
@@ -191,16 +191,16 @@ computer safely:
 2. Declare all required capabilities in the manifest.
 3. Prefer JSON input/output for structured tools.
 4. Do not import WASI or ambient host APIs.
-5. Use cooldis-guest-sdk host wrappers only.
+5. Use verlet-guest-sdk host wrappers only.
 6. Build and validate before publishing.
 7. Publish, bind/grant narrowly, then prove the new projection by invoking it.
 ```
 
 The skill can call the npm wrapper, but the wrapper must still end at
-`cooldis tool publish` or the app-server equivalent.
+`verlet tool publish` or the app-server equivalent.
 
 The canonical publishable skill source lives under
-`skills/cooldis-tool-maker/`. The `.agents/skills/cooldis-tool-maker` path is a
+`skills/verlet-tool-maker/`. The `.agents/skills/verlet-tool-maker` path is a
 repo-dev projection so coding agents working inside this checkout can use the
 same instructions. End-user distribution should come later through the npx
 wrapper, the release binary, or a quick-start/template init helper that installs
@@ -208,7 +208,7 @@ the skill into the user's dev environment.
 
 ## Custom Coupling Guests
 
-Custom coupling guests are normal Cooldis Wasm operations with a narrower
+Custom coupling guests are normal Verlet Wasm operations with a narrower
 contract:
 
 ```text
@@ -244,7 +244,7 @@ write a plain typed function and let the macro own exports, operation dispatch,
 JSON envelope encoding, and ABI status mapping.
 
 ```rust
-use cooldis_guest_sdk::prelude::*;
+use verlet_guest_sdk::prelude::*;
 use serde_json::json;
 
 #[derive(Deserialize)]
@@ -287,22 +287,22 @@ Native tests should exercise the plain Rust function before building Wasm:
 #[test]
 fn fixture_runs_natively() {
     let invocation =
-        cooldis_guest_sdk::testkit::invocation_from_fixture_file("fixtures/invocation.json")?;
-    let discharge = cooldis_guest_sdk::testkit::invoke_coupling(fold_counter, invocation)?;
+        verlet_guest_sdk::testkit::invocation_from_fixture_file("fixtures/invocation.json")?;
+    let discharge = verlet_guest_sdk::testkit::invoke_coupling(fold_counter, invocation)?;
     assert_eq!(discharge.events.len(), 1);
 }
 ```
 
-`cooldis coupling init <name>` scaffolds the macro-authored crate,
-`cooldis.tool.toml`, schemas, fixture JSON, and one native testkit test. The
+`verlet coupling init <name>` scaffolds the macro-authored crate,
+`verlet.tool.toml`, schemas, fixture JSON, and one native testkit test. The
 same package then validates through the existing publish oracle:
 
 ```bash
-cooldis coupling init counter-coupling
+verlet coupling init counter-coupling
 cd counter-coupling
 cargo test --locked
 cargo build --locked --release --target wasm32-unknown-unknown
-cooldis tool build --package cooldis.tool.toml
+verlet tool build --package verlet.tool.toml
 ```
 
 The minimal checked-in Rust example is `examples/wasm-counter-coupling`. It
@@ -321,11 +321,11 @@ cargo build --release \
   --target wasm32-unknown-unknown \
   --manifest-path examples/wasm-counter-coupling/Cargo.toml
 
-cargo run --locked --bin cooldis -- coupling run --replay \
-  --artifact examples/wasm-counter-coupling/target/wasm32-unknown-unknown/release/cooldis_example_wasm_counter_coupling.wasm \
+cargo run --locked --bin verlet -- coupling run --replay \
+  --artifact examples/wasm-counter-coupling/target/wasm32-unknown-unknown/release/verlet_example_wasm_counter_coupling.wasm \
   --coupling-file ./counter.bound-coupling.json \
   --thread-id 018f9fe0-35a7-7a80-8f65-12e7e0b20b52 \
-  --journal .cooldis/state/session_history.sqlite3 \
+  --journal .verlet/state/session_history.sqlite3 \
   --json
 ```
 
@@ -334,12 +334,12 @@ The coupling file is the bound kernel contract (`BoundCoupling` or
 the pinned operation ref instead:
 
 ```bash
-cargo run --locked --bin cooldis -- coupling run --replay \
+cargo run --locked --bin verlet -- coupling run --replay \
   --artifact op://counter/fold_counter@sha256:<hash> \
-  --registry-root .cooldis/operations \
+  --registry-root .verlet/operations \
   --coupling-file ./counter.bound-coupling.json \
   --thread-id <thread-id> \
-  --journal .cooldis/state/session_history.sqlite3
+  --journal .verlet/state/session_history.sqlite3
 ```
 
 Replay output is marked dry-run. JSON output uses `proposalEvents` for proposed
@@ -425,7 +425,7 @@ spawn authoring subagent
 The npm package can grow without changing the runtime contract:
 
 ```text
-@cooldis/wasm-kit
+@verlet/wasm-kit
   init <template>
   build
   validate
@@ -442,7 +442,7 @@ Templates should be boring and auditable:
 - `json-shape-diff`
 - `vfs-file-helper`
 
-The package should print the exact `cooldis tool ...` command it ran so humans and
+The package should print the exact `verlet tool ...` command it ran so humans and
 agents can inspect the authority transition.
 
 ## Later Push-Triggered Publish
@@ -450,11 +450,11 @@ agents can inspect the authority transition.
 Manual publish is the canonical V0 path:
 
 ```sh
-cooldis tool publish --package cooldis.tool.toml
+verlet tool publish --package verlet.tool.toml
 ```
 
 Teams can automate that today by running the same command from CI after their
-own tests pass. A push-triggered Cooldis update lane is a later automation layer
+own tests pass. A push-triggered Verlet update lane is a later automation layer
 on top of the same package contract, not a different publish primitive.
 
 That later lane needs trusted builder identity, source provenance, compatibility
@@ -464,7 +464,7 @@ human approval before flipping active bindings.
 ## Encoding Trajectory
 
 The dev kit authors against the SDK contract (typed functions plus
-`cooldis-guest-sdk`), never against the raw JSON-over-linear-memory encoding.
+`verlet-guest-sdk`), never against the raw JSON-over-linear-memory encoding.
 The WebAssembly component model (WIT) is the planned successor encoding;
 because the SDK macro layer owns the wire format, that migration is a
 recompile for guest authors, not a rewrite. Decision, rationale, and

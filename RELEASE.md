@@ -12,7 +12,7 @@ v0.1.0
 v0.1.0-rc.1
 ```
 
-The tag must match `crates/cooldis-kernel/Cargo.toml`. The release workflow runs
+The tag must match `crates/verlet-kernel/Cargo.toml`. The release workflow runs
 `scripts/check-release-tag.sh` before packaging tagged releases.
 
 ## Binary Targets
@@ -20,18 +20,18 @@ The tag must match `crates/cooldis-kernel/Cargo.toml`. The release workflow runs
 GitHub Releases publish one archive per target:
 
 ```text
-cooldis-<version>-x86_64-unknown-linux-gnu.tar.gz
-cooldis-<version>-aarch64-unknown-linux-gnu.tar.gz
-cooldis-<version>-x86_64-apple-darwin.tar.gz
-cooldis-<version>-aarch64-apple-darwin.tar.gz
+verlet-<version>-x86_64-unknown-linux-gnu.tar.gz
+verlet-<version>-aarch64-unknown-linux-gnu.tar.gz
+verlet-<version>-x86_64-apple-darwin.tar.gz
+verlet-<version>-aarch64-apple-darwin.tar.gz
 ```
 
 Each archive contains the public process entrypoints:
 
 ```text
-cooldis
-cooldis-acp-agent
-cooldis-mcp-server
+verlet
+verlet-acp-agent
+verlet-mcp-server
 ```
 
 The release also includes `latest.json` and `install.sh`. The installer selects
@@ -54,7 +54,7 @@ curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/download
 After installation, the normal local entrypoint is:
 
 ```sh
-cooldis console
+verlet console
 ```
 
 ## Local Packaging
@@ -66,7 +66,7 @@ scripts/package-release-binary.sh --out-dir dist
 ```
 
 Packaging builds the bundled Svelte console with Bun and includes
-`share/cooldis/console/*` in the release archive. Use
+`share/verlet/console/*` in the release archive. Use
 `scripts/build-console-assets.sh` to rebuild only the UI assets during local
 iteration.
 
@@ -81,14 +81,14 @@ scripts/package-release-binary.sh \
 Smoke a package:
 
 ```sh
-archive="$(find dist -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
+archive="$(find dist -maxdepth 1 -name 'verlet-*.tar.gz' | head -n 1)"
 scripts/smoke-release-archive.sh "$archive"
 scripts/smoke-install.sh "$archive"
 ```
 
 The package smoke verifies the canonical CLI help surface, including
-`cooldis commands`, `cooldis chat --help`, `cooldis auth --help`,
-`cooldis tool manual --help`, and `cooldis debug rpc --help`.
+`verlet commands`, `verlet chat --help`, `verlet auth --help`,
+`verlet tool manual --help`, and `verlet debug rpc --help`.
 
 ## Async Publishing
 

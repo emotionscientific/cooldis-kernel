@@ -1,6 +1,6 @@
 # Roadmap
 
-Cooldis V1 is the runtime-primitives release. V2 is the serverless agent
+Verlet V1 is the runtime-primitives release. V2 is the serverless agent
 platform direction.
 
 ## V1 Direction

@@ -1,0 +1,115 @@
+[package]
+name = "verlet"
+version = "0.2.0"
+edition = "2024"
+publish = false
+autobins = false
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+bashkit = { version = "0.14.3", features = ["realfs"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
+verlet-agent = { path = "../verlet-agent" }
+verlet-abi = { path = "../verlet-abi" }
+verlet-history = { path = "../verlet-history" }
+verlet-history-sqlite = { path = "../verlet-history-sqlite" }
+verlet-io-core = { path = "../verlet-io-core" }
+verlet-io-pgqrs = { path = "../verlet-io-pgqrs" }
+verlet-io-telegram = { path = "../verlet-io-telegram" }
+verlet-metadata = { path = "../verlet-metadata" }
+verlet-operations = { path = "../verlet-operations" }
+verlet-process = { path = "../verlet-process" }
+verlet-provider = { path = "../verlet-provider" }
+verlet-runtime-contracts = { path = "../verlet-runtime-contracts" }
+verlet-sqlite = { path = "../verlet-sqlite" }
+verlet-vfs = { path = "../verlet-vfs" }
+verlet-vbash = { path = "../verlet-vbash" }
+verlet-wasm = { path = "../verlet-wasm" }
+croner = "3.0.1"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+futures-util = "0.3.32"
+getrandom = "0.3"
+libc = "0.2"
+object_store = { version = "0.13.2", features = ["aws"] }
+ratatui = "=0.30.2"
+regex = "1.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# ADR 0005 decision 8: retained for the ingress IO-state enclave until EMO-409.
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "0.28"
+tokio-util = "0.7"
+toml = "0.9"
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
+
+[dev-dependencies]
+futures-executor = "0.3"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time", "test-util"] }
+wat = "1"
+
+[[bin]]
+name = "verlet"
+path = "src/bin/verlet.rs"
+
+[[bin]]
+name = "cooldis"
+path = "src/bin/cooldis.rs"
+
+[[bin]]
+name = "verlet-mcp-server"
+path = "src/bin/verlet-mcp-server.rs"
+
+[[bin]]
+name = "verlet-acp-agent"
+path = "src/bin/verlet-acp-agent.rs"
+
+[[bin]]
+name = "verlet-app-server-smoke"
+path = "tests/smokes/verlet-app-server-smoke.rs"
+
+[[bin]]
+name = "verlet-bifrost-smoke"
+path = "tests/smokes/verlet-bifrost-smoke.rs"
+
+[[bin]]
+name = "verlet-restart-smoke"
+path = "tests/smokes/verlet-restart-smoke.rs"
+
+[[bin]]
+name = "verlet-manifest-e2e-smoke"
+path = "tests/smokes/verlet-manifest-e2e-smoke.rs"
+
+[[bin]]
+name = "verlet-mcp-echo-server"
+path = "tests/support_bins/verlet-mcp-echo-server.rs"
+
+[[bin]]
+name = "verlet-sync-test-peer"
+path = "tests/support_bins/verlet-sync-test-peer.rs"
+
+[[bin]]
+name = "verlet-plugin-live-smoke"
+path = "tests/smokes/verlet-plugin-live-smoke.rs"
+
+[[bin]]
+name = "verlet-sandbox-probe"
+path = "tests/smokes/verlet-sandbox-probe.rs"
+
+[[bin]]
+name = "verlet-vbash-smoke"
+path = "tests/smokes/verlet-vbash-smoke.rs"
+
+[[bin]]
+name = "verlet-wasm-smoke"
+path = "tests/smokes/verlet-wasm-smoke.rs"
+
+[[bin]]
+name = "verlet-workbench-smoke"
+path = "tests/smokes/verlet-workbench-smoke.rs"

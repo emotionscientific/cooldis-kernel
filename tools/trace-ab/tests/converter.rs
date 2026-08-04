@@ -1,10 +1,10 @@
-use cooldis_trace_ab::{RecordKind, convert_cooldis_export, convert_pi, render_diff, summarize};
 use serde_json::Value;
 use std::io::Cursor;
+use verlet_trace_ab::{RecordKind, convert_pi, convert_verlet_export, render_diff, summarize};
 
 const PI_FIXTURE: &str = include_str!("fixtures/pi-session.jsonl");
 const PI_EDGE_FIXTURE: &str = include_str!("fixtures/pi-session-edge.jsonl");
-const COOLDIS_FIXTURE: &str = include_str!("fixtures/cooldis-export.json");
+const VERLET_FIXTURE: &str = include_str!("fixtures/verlet-export.json");
 
 #[test]
 fn pi_session_normalizes_rounds_tokens_and_edit_retry_signal() {
@@ -27,9 +27,9 @@ fn pi_session_normalizes_rounds_tokens_and_edit_retry_signal() {
 }
 
 #[test]
-fn cooldis_export_preserves_context_receipts_and_edit_retry_signal() {
-    let fixture: Value = serde_json::from_str(COOLDIS_FIXTURE).unwrap();
-    let records = convert_cooldis_export(&fixture).unwrap();
+fn verlet_export_preserves_context_receipts_and_edit_retry_signal() {
+    let fixture: Value = serde_json::from_str(VERLET_FIXTURE).unwrap();
+    let records = convert_verlet_export(&fixture).unwrap();
     let stats = summarize(&records);
 
     assert_eq!(stats.turns, 1);
@@ -45,12 +45,12 @@ fn cooldis_export_preserves_context_receipts_and_edit_retry_signal() {
     assert!(
         records
             .iter()
-            .all(|record| record.details.contains_key("cooldis"))
+            .all(|record| record.details.contains_key("verlet"))
     );
     assert!(records.iter().any(|record| {
         record
             .details
-            .get("cooldis")
+            .get("verlet")
             .and_then(|value| value.get("export_receipts"))
             .is_some()
     }));
@@ -59,12 +59,12 @@ fn cooldis_export_preserves_context_receipts_and_edit_retry_signal() {
 #[test]
 fn terminal_diff_aligns_rounds_and_prints_decision_stats() {
     let pi = convert_pi(Cursor::new(PI_FIXTURE)).unwrap();
-    let fixture: Value = serde_json::from_str(COOLDIS_FIXTURE).unwrap();
-    let cooldis = convert_cooldis_export(&fixture).unwrap();
-    let rendered = render_diff(&pi, &cooldis);
+    let fixture: Value = serde_json::from_str(VERLET_FIXTURE).unwrap();
+    let verlet = convert_verlet_export(&fixture).unwrap();
+    let rendered = render_diff(&pi, &verlet);
 
     assert!(rendered.contains("PI"));
-    assert!(rendered.contains("COOLDIS"));
+    assert!(rendered.contains("VERLET"));
     assert!(rendered.contains("T1 R1"));
     assert!(rendered.contains("edit failures: 1"));
     assert!(rendered.contains("edit retries: 1"));
@@ -121,8 +121,8 @@ fn pi_session_surfaces_unmapped_shapes_and_preserves_turn_outcomes() {
 }
 
 #[test]
-fn cooldis_export_surfaces_unmapped_events_compaction_and_all_assistant_text() {
-    let mut fixture: Value = serde_json::from_str(COOLDIS_FIXTURE).unwrap();
+fn verlet_export_surfaces_unmapped_events_compaction_and_all_assistant_text() {
+    let mut fixture: Value = serde_json::from_str(VERLET_FIXTURE).unwrap();
     let items = fixture
         .pointer_mut("/thread/turns/0/items")
         .and_then(Value::as_array_mut)
@@ -150,7 +150,7 @@ fn cooldis_export_surfaces_unmapped_events_compaction_and_all_assistant_text() {
         "payload":{"turn_id":"turn-a","summary":"compacted context"}
     }));
 
-    let records = convert_cooldis_export(&fixture).unwrap();
+    let records = convert_verlet_export(&fixture).unwrap();
     let stats = summarize(&records);
     let assistant_text = records
         .iter()
@@ -169,7 +169,7 @@ fn cooldis_export_surfaces_unmapped_events_compaction_and_all_assistant_text() {
         record.kind == RecordKind::SourceMetadata
             && record
                 .details
-                .get("cooldis")
+                .get("verlet")
                 .and_then(|value| value.get("thread"))
                 .is_some()
     }));
@@ -191,10 +191,10 @@ fn missing_timestamps_remain_unknown_in_stats_and_diff() {
 #[test]
 fn terminal_diff_is_deterministic_and_keeps_unilateral_turns_aligned() {
     let pi = convert_pi(Cursor::new(PI_EDGE_FIXTURE)).unwrap();
-    let fixture: Value = serde_json::from_str(COOLDIS_FIXTURE).unwrap();
-    let cooldis = convert_cooldis_export(&fixture).unwrap();
-    let first = render_diff(&pi, &cooldis);
-    let second = render_diff(&pi, &cooldis);
+    let fixture: Value = serde_json::from_str(VERLET_FIXTURE).unwrap();
+    let verlet = convert_verlet_export(&fixture).unwrap();
+    let first = render_diff(&pi, &verlet);
+    let second = render_diff(&pi, &verlet);
 
     assert_eq!(first, second);
     assert!(first.contains("T2 R0"));

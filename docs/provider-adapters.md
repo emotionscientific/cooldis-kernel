@@ -1,6 +1,6 @@
 # Provider Adapter Surface
 
-Cooldis provider support is split into three layers:
+Verlet provider support is split into three layers:
 
 ```text
 canonical history
@@ -134,7 +134,7 @@ string metadata for host dashboards or audit sinks.
 
 ## Compaction
 
-Agent loop supports manual Cooldis compaction through
+Agent loop supports manual Verlet compaction through
 `RuntimeHost::compact_thread`. Manual compaction runs `PreCompact` and
 `PostCompact` hooks, optionally asks the configured provider client for a
 summary, and appends a `SessionEntryKind::Compaction` record. Compaction records
@@ -153,26 +153,26 @@ Responses, OpenAI Chat Completions, and Anthropic Messages. They should verify
 complete and text-streaming calls by checking expected marker text in the model
 output, not only HTTP status or parseability.
 
-`cooldis-bifrost-smoke` is the release-gated provider-protocol smoke for OpenAI
+`verlet-bifrost-smoke` is the release-gated provider-protocol smoke for OpenAI
 Responses and Anthropic Messages. Despite the historical binary name, it accepts
 separate official credentials:
 
 - OpenAI Responses: `OPENAI_API_KEY`, optionally
-  `COOLDIS_OPENAI_RESPONSES_BASE_URL` and `COOLDIS_OPENAI_RESPONSES_MODEL`;
+  `VERLET_OPENAI_RESPONSES_BASE_URL` and `VERLET_OPENAI_RESPONSES_MODEL`;
 - Anthropic Messages: `ANTHROPIC_API_KEY`, optionally
-  `COOLDIS_ANTHROPIC_MESSAGES_BASE_URL` and
-  `COOLDIS_ANTHROPIC_MESSAGES_MODEL`.
+  `VERLET_ANTHROPIC_MESSAGES_BASE_URL` and
+  `VERLET_ANTHROPIC_MESSAGES_MODEL`.
 
-It still accepts the older `COOLDIS_BIFROST_URL` / `COOLDIS_BIFROST_KEY` pair as
+It still accepts the older `VERLET_BIFROST_URL` / `VERLET_BIFROST_KEY` pair as
 a gateway compatibility path. OpenAI Compatible/OpenAI-compatible MODEL smokes remain a
 separate Chat Completions-compatible lane and do not count as OpenAI Responses
 or Anthropic Messages protocol evidence.
 
-`cooldis chat` can route its private Codex-shaped app-server through any
+`verlet chat` can route its private Codex-shaped app-server through any
 wire-compatible provider endpoint. These paths use the same provider adapter
-boundary: gateways remain wire-compatible endpoints, and Cooldis still stores
+boundary: gateways remain wire-compatible endpoints, and Verlet still stores
 canonical provider-neutral history rather than provider-native JSON. See
-[Cooldis RPC Control Plane](app-server.md) for the local config shape and
+[Verlet RPC Control Plane](app-server.md) for the local config shape and
 command-line flags.
 
 `LocalOfflineProviderClient` is the deterministic local provider shape for tests

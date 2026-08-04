@@ -2,19 +2,34 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/env-compat.sh"
+for env_name in \
+  VERLET_RELEASE_LIVE_OPENAI_COMPATIBLE \
+  VERLET_RELEASE_LIVE_PROVIDER \
+  VERLET_RELEASE_LIVE_PROVIDER_PROTOCOLS \
+  VERLET_RELEASE_LIVE_SEARCH \
+  VERLET_RELEASE_LIVE_TELEGRAM \
+  VERLET_RELEASE_DOCS \
+  VERLET_RELEASE_MANIFEST \
+  VERLET_RELEASE_WORKBENCH \
+  VERLET_RELEASE_AX_BLIND_RUN \
+  VERLET_RELEASE_OUT_DIR
+do
+  verlet_env_promote "$env_name"
+done
 
-LIVE_OPENAI_COMPATIBLE="${COOLDIS_RELEASE_LIVE_OPENAI_COMPATIBLE:-${COOLDIS_RELEASE_LIVE_PROVIDER:-0}}"
-LIVE_PROVIDER_PROTOCOLS="${COOLDIS_RELEASE_LIVE_PROVIDER_PROTOCOLS:-0}"
-LIVE_PRIVATE_SEARCH="${COOLDIS_RELEASE_LIVE_SEARCH:-0}"
-LIVE_TELEGRAM="${COOLDIS_RELEASE_LIVE_TELEGRAM:-0}"
-DOCS="${COOLDIS_RELEASE_DOCS:-0}"
-MANIFEST="${COOLDIS_RELEASE_MANIFEST:-1}"
-WORKBENCH="${COOLDIS_RELEASE_WORKBENCH:-0}"
-AX_BLIND_RUN="${COOLDIS_RELEASE_AX_BLIND_RUN:-0}"
+LIVE_OPENAI_COMPATIBLE="${VERLET_RELEASE_LIVE_OPENAI_COMPATIBLE:-${VERLET_RELEASE_LIVE_PROVIDER:-0}}"
+LIVE_PROVIDER_PROTOCOLS="${VERLET_RELEASE_LIVE_PROVIDER_PROTOCOLS:-0}"
+LIVE_PRIVATE_SEARCH="${VERLET_RELEASE_LIVE_SEARCH:-0}"
+LIVE_TELEGRAM="${VERLET_RELEASE_LIVE_TELEGRAM:-0}"
+DOCS="${VERLET_RELEASE_DOCS:-0}"
+MANIFEST="${VERLET_RELEASE_MANIFEST:-1}"
+WORKBENCH="${VERLET_RELEASE_WORKBENCH:-0}"
+AX_BLIND_RUN="${VERLET_RELEASE_AX_BLIND_RUN:-0}"
 
 usage() {
   cat <<'USAGE'
-release-v1-candidate.sh - run the Cooldis V1 release-candidate gate.
+release-v1-candidate.sh - run the Verlet V1 release-candidate gate.
 
 Usage:
   scripts/release-v1-candidate.sh [--live] [--live-provider-protocols] [--docs] [--skip-manifest] [--workbench] [--ax-blind-run]
@@ -47,15 +62,15 @@ Optional lanes:
   --ax-blind-run            spawn the configured blind-test agent and write answers.md
 
 Environment:
-  COOLDIS_RELEASE_LIVE_PROVIDER=1          legacy private provider lane; unavailable here
-  COOLDIS_RELEASE_LIVE_OPENAI_COMPATIBLE=1 legacy private provider lane; unavailable here
-  COOLDIS_RELEASE_LIVE_PROVIDER_PROTOCOLS=1
-  COOLDIS_RELEASE_LIVE_SEARCH=1            legacy private search lane; unavailable here
-  COOLDIS_RELEASE_LIVE_TELEGRAM=1
-  COOLDIS_RELEASE_DOCS=1
-  COOLDIS_RELEASE_MANIFEST=0|1
-  COOLDIS_RELEASE_WORKBENCH=1
-  COOLDIS_RELEASE_AX_BLIND_RUN=1
+  VERLET_RELEASE_LIVE_PROVIDER=1          legacy private provider lane; unavailable here
+  VERLET_RELEASE_LIVE_OPENAI_COMPATIBLE=1 legacy private provider lane; unavailable here
+  VERLET_RELEASE_LIVE_PROVIDER_PROTOCOLS=1
+  VERLET_RELEASE_LIVE_SEARCH=1            legacy private search lane; unavailable here
+  VERLET_RELEASE_LIVE_TELEGRAM=1
+  VERLET_RELEASE_DOCS=1
+  VERLET_RELEASE_MANIFEST=0|1
+  VERLET_RELEASE_WORKBENCH=1
+  VERLET_RELEASE_AX_BLIND_RUN=1
 USAGE
 }
 
@@ -198,12 +213,12 @@ CLIPPY_GATE=(
 run "$ROOT/scripts/guard-rails.sh" tracked
 run cargo clippy --workspace --all-targets --locked -- "${CLIPPY_GATE[@]}"
 run "$ROOT/scripts/verify.sh"
-run cargo run --locked --bin cooldis-app-server-smoke
+run cargo run --locked --bin verlet-app-server-smoke
 run cargo test --locked mcp_server
 
-RELEASE_OUT="${COOLDIS_RELEASE_OUT_DIR:-$ROOT/dist/release-candidate}"
+RELEASE_OUT="${VERLET_RELEASE_OUT_DIR:-$ROOT/dist/release-candidate}"
 run "$ROOT/scripts/package-release-binary.sh" --out-dir "$RELEASE_OUT"
-RELEASE_ARCHIVE="$(find "$RELEASE_OUT" -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
+RELEASE_ARCHIVE="$(find "$RELEASE_OUT" -maxdepth 1 -name 'verlet-*.tar.gz' | head -n 1)"
 if [[ -z "$RELEASE_ARCHIVE" ]]; then
   echo "release archive was not created under $RELEASE_OUT" >&2
   exit 1
@@ -226,7 +241,7 @@ if [[ -z "$TARGET_DIR" ]]; then
   echo "could not determine Cargo target directory" >&2
   exit 1
 fi
-RELEASE_BIN="$TARGET_DIR/release/cooldis"
+RELEASE_BIN="$TARGET_DIR/release/verlet"
 run "$RELEASE_BIN"
 run "$RELEASE_BIN" --help
 run "$RELEASE_BIN" commands
@@ -258,10 +273,10 @@ run "$RELEASE_BIN" debug --help
 run "$RELEASE_BIN" debug rpc --help
 run_fails "$RELEASE_BIN" hello
 
-AGENT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cooldis-agent-release.XXXXXX")"
+AGENT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/verlet-agent-release.XXXXXX")"
 trap 'rm -rf "$AGENT_TMP"' EXIT
 AGENT_PROJECT="$AGENT_TMP/release-verifier"
-AGENT_MANIFEST="$AGENT_PROJECT/cooldis.agent.toml"
+AGENT_MANIFEST="$AGENT_PROJECT/verlet.agent.toml"
 AGENT_COMPONENTS="$AGENT_PROJECT/components/operations.toml"
 AGENT_REGISTRY="$AGENT_TMP/registry"
 AGENT_OPERATION_REGISTRY="$AGENT_TMP/operations"
@@ -270,8 +285,8 @@ SECRET_STATE="$AGENT_TMP/secret-state"
 SECRET_VALUE="fixture-secret-release-gate-should-not-print"
 printf '\n==> packaged secret import/set/list/status/delete smoke\n'
 SECRET_IMPORT_OUTPUT="$(
-  COOLDIS_RELEASE_SECRET_VALUE="$SECRET_VALUE" "$RELEASE_BIN" secret import EXAMPLE_API_KEY \
-    --from-env COOLDIS_RELEASE_SECRET_VALUE \
+  VERLET_RELEASE_SECRET_VALUE="$SECRET_VALUE" "$RELEASE_BIN" secret import EXAMPLE_API_KEY \
+    --from-env VERLET_RELEASE_SECRET_VALUE \
     --state-home "$SECRET_STATE"
 )"
 assert_contains "$SECRET_IMPORT_OUTPUT" "imported secret EXAMPLE_API_KEY" "secret import output"
@@ -307,9 +322,9 @@ require_file "$AGENT_PROJECT/operations/README.md"
 run "$RELEASE_BIN" agent plan "$AGENT_MANIFEST" \
   --registry-root "$AGENT_REGISTRY" \
   --operations-registry-root "$AGENT_TMP/missing-operations"
-printf '\n==> %s\n' "$RELEASE_BIN tool publish --package $ROOT/tools/json-query/cooldis.tool.toml --registry-root $AGENT_OPERATION_REGISTRY"
+printf '\n==> %s\n' "$RELEASE_BIN tool publish --package $ROOT/tools/json-query/verlet.tool.toml --registry-root $AGENT_OPERATION_REGISTRY"
 TOOL_PUBLISH_OUTPUT="$("$RELEASE_BIN" tool publish \
-  --package "$ROOT/tools/json-query/cooldis.tool.toml" \
+  --package "$ROOT/tools/json-query/verlet.tool.toml" \
   --registry-root "$AGENT_OPERATION_REGISTRY")"
 printf '%s\n' "$TOOL_PUBLISH_OUTPUT"
 TOOL_HASH="$(
@@ -337,13 +352,13 @@ run "$RELEASE_BIN" agent list --registry-root "$AGENT_REGISTRY"
 run "$RELEASE_BIN" agent show agent://release-verifier@0.1.0 --registry-root "$AGENT_REGISTRY"
 
 if [[ "$MANIFEST" == "1" ]]; then
-  run cargo run --locked --bin cooldis-manifest-e2e-smoke
+  run cargo run --locked --bin verlet-manifest-e2e-smoke
 else
   printf '\n==> skipping manifest lane; default is enabled, use --skip-manifest only for quick local iteration\n'
 fi
 
 if [[ "$WORKBENCH" == "1" ]]; then
-  run cargo run --locked --bin cooldis-workbench-smoke
+  run cargo run --locked --bin verlet-workbench-smoke
 else
   printf '\n==> skipping workbench lane; pass --workbench to run it\n'
 fi
@@ -353,7 +368,7 @@ if [[ "$DOCS" == "1" ]]; then
 fi
 
 if [[ "$LIVE_PROVIDER_PROTOCOLS" == "1" ]]; then
-  run cargo run --locked --bin cooldis-bifrost-smoke
+  run cargo run --locked --bin verlet-bifrost-smoke
 else
   printf '\n==> skipping OpenAI Responses + Anthropic Messages live lane; pass --live-provider-protocols to run it\n'
 fi
@@ -362,4 +377,4 @@ printf '\n==> legacy provider-specific live lanes are not shipped in this public
 
 printf '\n==> skipping paused Telegram bot IO live lane; pass --live-telegram only after the lane is implemented\n'
 
-printf '\nCooldis V1 release-candidate gate passed.\n'
+printf '\nVerlet V1 release-candidate gate passed.\n'

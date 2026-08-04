@@ -1,7 +1,7 @@
-# Cooldis Console
+# Verlet Console
 
-Bundled Svelte console for the Cooldis kernel. This is a local browser UI served
-by `cooldis console`, not a desktop app or public DMG release path.
+Bundled Svelte console for the Verlet kernel. This is a local browser UI served
+by `verlet console`, not a desktop app or public DMG release path.
 
 ## Development
 
@@ -16,7 +16,7 @@ bun run build
 Run the kernel command against the built assets:
 
 ```sh
-cargo run --bin cooldis -- console --no-open --port 0
+cargo run --bin verlet -- console --no-open --port 0
 ```
 
 For Vite-only UI work:

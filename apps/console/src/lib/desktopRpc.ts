@@ -44,7 +44,7 @@ export interface RuntimeStatus {
   log?: string;
 }
 
-/** State of the local Cooldis runtime daemon (`cooldis rpc`) the host supervises. */
+/** State of the local Verlet runtime daemon (`verlet rpc`) the host supervises. */
 export interface DaemonStatus {
   running: boolean;
   /** true when this host process started it (vs. attached to an external one). */
@@ -94,7 +94,7 @@ export type DesktopRequestApi = {
   requestAppQuit(params: { quitPolicy: QuitPolicy; remember?: boolean }): Promise<{ ok: boolean }>;
 };
 
-export type CooldisDesktopRPC = {
+export type VerletDesktopRPC = {
   bun: RPCSchema<{
     requests: {
       getHostInfo: { params: {}; response: HostInfo };

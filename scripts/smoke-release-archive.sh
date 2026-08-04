@@ -5,10 +5,10 @@ ARCHIVE="${1:-}"
 
 usage() {
   cat <<'USAGE'
-smoke-release-archive.sh - smoke-test a packaged Cooldis release archive.
+smoke-release-archive.sh - smoke-test a packaged Verlet release archive.
 
 Usage:
-  scripts/smoke-release-archive.sh path/to/cooldis-<version>-<target>.tar.gz
+  scripts/smoke-release-archive.sh path/to/verlet-<version>-<target>.tar.gz
 USAGE
 }
 
@@ -40,7 +40,7 @@ run_fails() {
   fi
 }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/cooldis-release-smoke.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/verlet-release-smoke.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 run tar -xzf "$ARCHIVE" -C "$TMP"
@@ -52,13 +52,13 @@ if [[ "${#entries[@]}" -ne 1 || ! -d "${entries[0]}" ]]; then
 fi
 
 PACKAGE_DIR="${entries[0]}"
-COOLDIS="$PACKAGE_DIR/cooldis"
-ACP_AGENT="$PACKAGE_DIR/cooldis-acp-agent"
-MCP_SERVER="$PACKAGE_DIR/cooldis-mcp-server"
-CONSOLE_DIR="$PACKAGE_DIR/share/cooldis/console"
-MANUAL="$PACKAGE_DIR/share/man/man1/cooldis.1"
+VERLET="$PACKAGE_DIR/verlet"
+ACP_AGENT="$PACKAGE_DIR/verlet-acp-agent"
+MCP_SERVER="$PACKAGE_DIR/verlet-mcp-server"
+CONSOLE_DIR="$PACKAGE_DIR/share/verlet/console"
+MANUAL="$PACKAGE_DIR/share/man/man1/verlet.1"
 
-for bin in "$COOLDIS" "$ACP_AGENT" "$MCP_SERVER"; do
+for bin in "$VERLET" "$ACP_AGENT" "$MCP_SERVER"; do
   if [[ ! -x "$bin" ]]; then
     echo "missing executable binary in archive: $bin" >&2
     exit 1
@@ -80,38 +80,38 @@ if command -v man >/dev/null 2>&1; then
   MANPAGER=cat PAGER=cat GROFF_NO_SGR=1 man "$MANUAL" >/dev/null
 fi
 
-run_quiet "$COOLDIS" --version
-run_quiet "$COOLDIS" --help
-run_quiet "$COOLDIS" commands
-run_quiet "$COOLDIS" help chat
-run_quiet "$COOLDIS" console --help
-run_quiet "$COOLDIS" chat --help
-run_quiet "$COOLDIS" agent --help
-run_quiet "$COOLDIS" agent init --help
-run_quiet "$COOLDIS" agent plan --help
-run_quiet "$COOLDIS" agent publish --help
-run_quiet "$COOLDIS" agent list --help
-run_quiet "$COOLDIS" agent show --help
-run_quiet "$COOLDIS" agent run --help
-run_quiet "$COOLDIS" tool --help
-run_quiet "$COOLDIS" tool build --help
-run_quiet "$COOLDIS" tool publish --help
-run_quiet "$COOLDIS" tool run --help
-run_quiet "$COOLDIS" tool manual --help
-run_quiet "$COOLDIS" auth --help
-run_quiet "$COOLDIS" rpc --help
-run_quiet "$COOLDIS" debug --help
-run_quiet "$COOLDIS" debug rpc --help
+run_quiet "$VERLET" --version
+run_quiet "$VERLET" --help
+run_quiet "$VERLET" commands
+run_quiet "$VERLET" help chat
+run_quiet "$VERLET" console --help
+run_quiet "$VERLET" chat --help
+run_quiet "$VERLET" agent --help
+run_quiet "$VERLET" agent init --help
+run_quiet "$VERLET" agent plan --help
+run_quiet "$VERLET" agent publish --help
+run_quiet "$VERLET" agent list --help
+run_quiet "$VERLET" agent show --help
+run_quiet "$VERLET" agent run --help
+run_quiet "$VERLET" tool --help
+run_quiet "$VERLET" tool build --help
+run_quiet "$VERLET" tool publish --help
+run_quiet "$VERLET" tool run --help
+run_quiet "$VERLET" tool manual --help
+run_quiet "$VERLET" auth --help
+run_quiet "$VERLET" rpc --help
+run_quiet "$VERLET" debug --help
+run_quiet "$VERLET" debug rpc --help
 
-run_fails "$COOLDIS" hello
+run_fails "$VERLET" hello
 
 run_quiet "$ACP_AGENT" --version
 run_quiet "$ACP_AGENT" --help
 run_quiet "$MCP_SERVER" --help
 
-AGENT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cooldis-agent-release.XXXXXX")"
+AGENT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/verlet-agent-release.XXXXXX")"
 trap 'rm -rf "$TMP" "$AGENT_TMP"' EXIT
-AGENT_MANIFEST="$AGENT_TMP/release-verifier.cooldis.agent.toml"
+AGENT_MANIFEST="$AGENT_TMP/release-verifier.verlet.agent.toml"
 AGENT_REGISTRY="$AGENT_TMP/registry"
 cat >"$AGENT_MANIFEST" <<'EOF'
 [agent]
@@ -125,9 +125,9 @@ provider_ref = "provider://local_offline"
 model_ref = "model://local_offline/echo"
 EOF
 
-run "$COOLDIS" agent plan "$AGENT_MANIFEST" --registry-root "$AGENT_REGISTRY"
-run "$COOLDIS" agent publish "$AGENT_MANIFEST" --registry-root "$AGENT_REGISTRY"
-run "$COOLDIS" agent list --registry-root "$AGENT_REGISTRY"
-run "$COOLDIS" agent show agent://release-verifier@0.1.0 --registry-root "$AGENT_REGISTRY"
+run "$VERLET" agent plan "$AGENT_MANIFEST" --registry-root "$AGENT_REGISTRY"
+run "$VERLET" agent publish "$AGENT_MANIFEST" --registry-root "$AGENT_REGISTRY"
+run "$VERLET" agent list --registry-root "$AGENT_REGISTRY"
+run "$VERLET" agent show agent://release-verifier@0.1.0 --registry-root "$AGENT_REGISTRY"
 
-printf '\nCooldis release archive smoke passed: %s\n' "$ARCHIVE"
+printf '\nVerlet release archive smoke passed: %s\n' "$ARCHIVE"

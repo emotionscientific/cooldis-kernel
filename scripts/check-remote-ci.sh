@@ -19,4 +19,4 @@ run "$ROOT/scripts/guard-rails.sh" tracked
 run cargo fmt --all -- --check
 run_quiet cargo metadata --locked --format-version 1 --no-deps
 
-printf '\nCooldis remote CI sentinel passed.\n'
+printf '\nVerlet remote CI sentinel passed.\n'

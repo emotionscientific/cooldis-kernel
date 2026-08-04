@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/env-compat.sh"
+verlet_env_promote VERLET_ALLOW_PRODUCT_TERMS
+verlet_env_promote VERLET_PII_TERMS
 MODE="${1:-staged}"
 
 cd "$ROOT"
@@ -56,17 +59,17 @@ product_term_hits() {
   local base_rev="${1:-}"
 
   if [[ -n "$base_rev" ]]; then
-    git diff --cached "$base_rev" --unified=0 -- crates/cooldis-kernel/src crates/cooldis-guest-sdk 2>/dev/null \
+    git diff --cached "$base_rev" --unified=0 -- crates/verlet-kernel/src crates/verlet-guest-sdk 2>/dev/null \
       | grep -E '^\+[^+].*([^[:alnum:]_]|^)(billing|dashboard|dashboards|invite|invites|telegram|railway)([^[:alnum:]_]|$)' \
       || true
   else
-    git diff --cached --unified=0 -- crates/cooldis-kernel/src crates/cooldis-guest-sdk 2>/dev/null \
+    git diff --cached --unified=0 -- crates/verlet-kernel/src crates/verlet-guest-sdk 2>/dev/null \
       | grep -E '^\+[^+].*([^[:alnum:]_]|^)(billing|dashboard|dashboards|invite|invites|telegram|railway)([^[:alnum:]_]|$)' \
       || true
   fi
 }
 
-if [[ "$MODE" == "staged" && "${COOLDIS_ALLOW_PRODUCT_TERMS:-0}" != "1" ]]; then
+if [[ "$MODE" == "staged" && "${VERLET_ALLOW_PRODUCT_TERMS:-0}" != "1" ]]; then
   product_hits="$(product_term_hits)"
 
   # During a merge, only lines added relative to HEAD and every MERGE_HEAD
@@ -120,7 +123,7 @@ if [[ "$MODE" == "staged" && "${COOLDIS_ALLOW_PRODUCT_TERMS:-0}" != "1" ]]; then
 
   if [[ -n "$product_hits" ]]; then
     printf 'Staged runtime code appears to add product-shaped terms.\n' >&2
-    printf 'Keep product logic out of Cooldis, or set COOLDIS_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n' >&2
+    printf 'Keep product logic out of Verlet, or set VERLET_ALLOW_PRODUCT_TERMS=1 for an intentional exception.\n' >&2
     printf '%s\n' "$product_hits" >&2
     exit 1
   fi
@@ -169,16 +172,16 @@ if [[ -n "$lexicon_hits" ]]; then
 fi
 
 # PII guard: committed content must not carry local identity anchors. Patterns
-# live outside the repo at ${COOLDIS_PII_TERMS:-$HOME/.config/cooldis/pii-terms}
+# live outside the repo at ${VERLET_PII_TERMS:-$HOME/.config/verlet/pii-terms}
 # as POSIX extended regexes, one per line. Blank lines and lines beginning
 # with a hash are ignored. The list is deliberately untracked so committing
 # the guard mechanism does not itself commit private identity data.
 default_pii_terms_file=""
 if [[ -n "${HOME:-}" ]]; then
-  default_pii_terms_file="$HOME/.config/cooldis/pii-terms"
+  default_pii_terms_file="$HOME/.config/verlet/pii-terms"
 fi
 
-pii_terms_file="${COOLDIS_PII_TERMS:-$default_pii_terms_file}"
+pii_terms_file="${VERLET_PII_TERMS:-$default_pii_terms_file}"
 pii_patterns=()
 
 valid_pii_pattern() {
@@ -276,4 +279,4 @@ if ((${#pii_hits[@]} > 0)); then
   exit 1
 fi
 
-printf 'Cooldis guard rails passed (%s).\n' "$MODE"
+printf 'Verlet guard rails passed (%s).\n' "$MODE"

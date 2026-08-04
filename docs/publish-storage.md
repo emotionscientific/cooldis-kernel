@@ -1,24 +1,24 @@
 # Tool Publish Storage
 
-Cooldis steals the publish invariant from SpacetimeDB without stealing the
+Verlet steals the publish invariant from SpacetimeDB without stealing the
 database coupling.
 
 SpacetimeDB stores module bytes as content-addressed program blobs, validates a
 module before it becomes visible, and treats the active module pointer as the
-commit point. That is the useful part for Cooldis. The database-shaped parts,
+commit point. That is the useful part for Verlet. The database-shaped parts,
 such as reducers, schema tables, and embedding current program bytes in DB
 state, stay out of the runtime core.
 
 ## Local V1 Shape
 
-The local operation registry lives at `.cooldis/operations` under the daemon or
+The local operation registry lives at `.verlet/operations` under the daemon or
 app-server runtime `cwd` by default. Daemon TOML may override that root with
 `daemon.registries.operations`; if the conventional default root is absent, the
 runtime treats it as an empty registry until records are published. The registry
 has these durable shapes:
 
 ```text
-.cooldis/operations/
+.verlet/operations/
   blobs/
     ab/
       abcd...1234.wasm
@@ -36,7 +36,7 @@ has these durable shapes:
       tailcat.json
 ```
 
-`cooldis tool list --registry-root <path>` lists the active published operation
+`verlet tool list --registry-root <path>` lists the active published operation
 records in that registry. The `ACTIVE HASH` column is the full
 `active_artifact_hash` value used in `op://...@sha256:<hash>` manifest refs.
 
@@ -74,7 +74,7 @@ and atomic rename:
 
 ```mermaid
 sequenceDiagram
-    participant CLI as cooldis tool publish
+    participant CLI as verlet tool publish
     participant Build as Rust build / prebuilt Wasm
     participant Validator as Wasm validator
     participant Blob as Blob store
@@ -117,7 +117,7 @@ Registry-backed run resolves the active record every time:
 
 ```mermaid
 flowchart LR
-    Run[cooldis tool run tailcat tail]
+    Run[verlet tool run tailcat tail]
     Record[records/tailcat.json]
     Blob[blobs/xx/hash.wasm]
     Verify[hash + manifest verification]
@@ -140,9 +140,9 @@ service or durable attachment engine without changing the operation ABI.
 ## Agent Publish Verification
 
 Agent manifests pin operations with `op://<record>@sha256:<hash>` or
-`op://<record>/<operation>@sha256:<hash>`. `cooldis agent publish` verifies
+`op://<record>/<operation>@sha256:<hash>`. `verlet agent publish` verifies
 those rows against the local operation registry before writing the agent record.
-The operations registry root defaults to `.cooldis/operations`; pass
+The operations registry root defaults to `.verlet/operations`; pass
 `--operations-registry-root <path>` when publishing against another registry.
 
 Publish rejects an `op://` tool row when:
@@ -155,7 +155,7 @@ Publish rejects an `op://` tool row when:
   `required_capabilities`.
 
 Whole-record refs must cover every operation in the version record. Two-segment
-refs only need to cover the selected operation. `cooldis agent plan` remains an
+refs only need to cover the selected operation. `verlet agent plan` remains an
 offline dry run: when an operations registry is present it performs the same
 verification and prints `[verified]`; when the registry is absent it succeeds
 and prints `[unverified-offline]` for `op://` rows.
@@ -175,7 +175,7 @@ runtime authority comes from the manifest bind receipt.
 The path-3 development loop is:
 
 ```text
-Rust source -> cooldis tool publish -> LocalPluginCatalog
+Rust source -> verlet tool publish -> LocalPluginCatalog
   -> AgentLoopFactory::with_operation_registry(...)
   -> agent-visible LLM tool -> Wasm operation with shared plugin VFS
 ```
@@ -195,4 +195,4 @@ V1 publish storage does not:
 - implement durable resume/fork for operation state.
 
 Those belong to product ledgers, orchestration layers, or later attachment
-engines around Cooldis.
+engines around Verlet.

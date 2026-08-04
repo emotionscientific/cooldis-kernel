@@ -1,6 +1,6 @@
 # Code of Conduct
 
-Cooldis is a technical project, but the work is done by people. Keep discussion
+Verlet is a technical project, but the work is done by people. Keep discussion
 direct, generous, and useful.
 
 ## Expected Behavior

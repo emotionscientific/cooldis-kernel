@@ -22,7 +22,7 @@
     {#if !tab}
       <div class="empty">
         <span class="ic"><Icon name="MessagesSquare" size={20} /></span>
-        <h3>Cooldis Console</h3>
+        <h3>Verlet Console</h3>
         {#if app.connected}
           <p>Pick a thread on the left, start a new one, or hit <span class="kbd">⌘K</span>.</p>
           <div style="display:flex;gap:8px;margin-top:6px">
@@ -31,7 +31,7 @@
         {:else}
           <p>
             Not connected. Start a daemon with
-            <span class="mono">cooldis daemon run --config &lt;cooldis.toml&gt;</span>
+            <span class="mono">verlet daemon run --config &lt;verlet.toml&gt;</span>
             and it will be picked up automatically.
           </p>
         {/if}

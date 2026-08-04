@@ -1,5 +1,5 @@
 import {
-  CooldisRpcClient,
+  VerletRpcClient,
   getArray,
   getObject,
   getString,
@@ -8,7 +8,7 @@ import {
   type JsonValue,
   type RpcEvent,
   type RpcNotification,
-} from "./cooldisRpc";
+} from "./verletRpc";
 import { agentRecordRef } from "./agentManifestDraft";
 import { mergeTranscriptMessages } from "./chatTranscript";
 import { mapThreadStatus, normalizeProvider, reboundThreadFromResponse } from "./threadProjection";
@@ -189,7 +189,7 @@ export class AppState {
   );
   startPolicy = $state<StartPolicy>(initialPrefs.connectionProfile?.startPolicy ?? "ask");
   quitPolicy = $state<QuitPolicy>(initialPrefs.connectionProfile?.quitPolicy ?? "ask");
-  client: CooldisRpcClient | null = $state(null);
+  client: VerletRpcClient | null = $state(null);
   connected = $state(false);
   status = $state<"offline" | "connecting" | "ready">("offline");
   error = $state("");
@@ -274,7 +274,7 @@ export class AppState {
   private reconnectAttempts = 0;
   private manualDisconnect = false;
   private connectGeneration = 0;
-  private connectingClient: CooldisRpcClient | null = null;
+  private connectingClient: VerletRpcClient | null = null;
 
   // ---------- derived ----------
   get activeTab(): Tab | undefined {
@@ -399,7 +399,7 @@ export class AppState {
     const generation = ++this.connectGeneration;
     this.activeEndpoint = this.endpoint;
     const sessionToken = this.endpoint === DEFAULT_ENDPOINT ? injectedConsoleConfig()?.sessionToken : undefined;
-    const client = new CooldisRpcClient(this.endpoint, sessionToken);
+    const client = new VerletRpcClient(this.endpoint, sessionToken);
     this.connectingClient = client;
     const unNotif = client.onNotification(this.handleNotification);
     const unEvt = client.onEvent((e) => {
@@ -1032,7 +1032,7 @@ export class AppState {
     }
   };
 
-  private async fetchThreadEnvelope(client: CooldisRpcClient, threadId: string) {
+  private async fetchThreadEnvelope(client: VerletRpcClient, threadId: string) {
     try {
       let receipt: unknown;
       let cursor: string | undefined;
@@ -1088,7 +1088,7 @@ export class AppState {
   };
 
   publishAgentDraft = async (draft: AgentDraftRequest): Promise<AgentPublishResponse> => {
-    if (!this.client) throw new Error("Connect to a Cooldis app-server before publishing an agent.");
+    if (!this.client) throw new Error("Connect to a Verlet app-server before publishing an agent.");
     const published = await this.client.publishAgentDraft(draft);
     const ref = agentRecordRef(published.record);
     this.agentRecords = { ...this.agentRecords, [ref]: published.record };
@@ -1101,7 +1101,7 @@ export class AppState {
     draft: AgentDraftRequest,
     threadId: string,
   ): Promise<{ published: AgentPublishResponse; rebind: ThreadRebindForkResponse }> => {
-    if (!this.client) throw new Error("Connect to a Cooldis app-server before continuing a thread.");
+    if (!this.client) throw new Error("Connect to a Verlet app-server before continuing a thread.");
     const published = await this.publishAgentDraft(draft);
     const agentRef = agentRecordRef(published.record);
     const rebind = await this.client.rebindThread({ threadId, agentRef, reason: "manifest_update" });
@@ -1217,7 +1217,7 @@ export class AppState {
     this.mode = m;
     this.settingsOpen = false;
     this.sidebarOpen = true;
-    // The registry view reflects out-of-band publishes (CLI `cooldis tool|agent
+    // The registry view reflects out-of-band publishes (CLI `verlet tool|agent
     // publish`) on entry rather than only on turn completion.
     if (entering && m === "registry" && this.connected) void this.refresh();
   };
@@ -1308,7 +1308,7 @@ export class AppState {
    */
   newThread = async (agentRef?: string, options: { preserveError?: boolean; cwd?: string } = {}) => {
     if (!this.connected || !this.client) {
-      this.error = "Connect to a Cooldis app-server before creating a thread.";
+      this.error = "Connect to a Verlet app-server before creating a thread.";
       return;
     }
     const startKey = agentRef ?? "";
@@ -1400,7 +1400,7 @@ export class AppState {
     this.titleFromFirstMessage(tab, text);
 
     if (!this.connected || !this.client || !tab.threadId) {
-      this.error = "Connect to a Cooldis app-server before sending a turn.";
+      this.error = "Connect to a Verlet app-server before sending a turn.";
       tab.busy = false;
       const live = tab.messages.find((m) => m.id === liveId);
       if (live) live.live = false;

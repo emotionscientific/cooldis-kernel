@@ -1,36 +1,36 @@
-# Cooldis Agent CLI
+# Verlet Agent CLI
 
 Status: V1 publish and local run slice.
 
-`cooldis agent` is the declaration and publication lane for agent manifests. It
+`verlet agent` is the declaration and publication lane for agent manifests. It
 is distinct from:
 
-- `cooldis tool`, which builds and publishes capability artifacts;
-- `cooldis rpc`, which exposes the control plane to clients and sandboxes.
+- `verlet tool`, which builds and publishes capability artifacts;
+- `verlet rpc`, which exposes the control plane to clients and sandboxes.
 
 ## Commands
 
 ```sh
-cooldis init release-verifier
-cooldis agent plan release-verifier/cooldis.agent.toml \
-  --operations-registry-root .cooldis/operations
-cooldis agent publish release-verifier/cooldis.agent.toml \
-  --resolve-ops --operations-registry-root .cooldis/operations
-cooldis blob publish release-verifier/prompts/system.md --name identity
-cooldis skill publish release-verifier/skills
-cooldis skill import ~/.agents/skills/release-checker --dry-run
-cooldis agent list
-cooldis agent versions release-verifier
-cooldis agent diff release-verifier --from 0.1.0:authored --to 0.1.0:resolved
-cooldis agent show agent://release-verifier@0.1.0
-cooldis agent run agent://release-verifier@latest --input "check the branch"
+verlet init release-verifier
+verlet agent plan release-verifier/verlet.agent.toml \
+  --operations-registry-root .verlet/operations
+verlet agent publish release-verifier/verlet.agent.toml \
+  --resolve-ops --operations-registry-root .verlet/operations
+verlet blob publish release-verifier/prompts/system.md --name identity
+verlet skill publish release-verifier/skills
+verlet skill import ~/.agents/skills/release-checker --dry-run
+verlet agent list
+verlet agent versions release-verifier
+verlet agent diff release-verifier --from 0.1.0:authored --to 0.1.0:resolved
+verlet agent show agent://release-verifier@0.1.0
+verlet agent run agent://release-verifier@latest --input "check the branch"
 ```
 
-`cooldis init <name>` is the V1 folder-first entrypoint. It creates:
+`verlet init <name>` is the V1 folder-first entrypoint. It creates:
 
 ```text
 <name>/
-  cooldis.agent.toml
+  verlet.agent.toml
   prompts/system.md
   components/operations.toml
   components/couplings.toml
@@ -52,9 +52,9 @@ queue, completion callback, context spill/truncate/summarize, memory preview,
 schedule/retry/deadletter, permission/control, prompt steering, and channel
 ingress/egress. Custom operation packages live under `operations/` and should
 be published first; then add pinned `op://...@sha256:<hash>` refs to
-`cooldis.agent.toml`, or use `cooldis agent publish --resolve-ops` to rewrite
+`verlet.agent.toml`, or use `verlet agent publish --resolve-ops` to rewrite
 `op://name` and `op://name@latest` authoring refs to the active pinned hash
-before publishing the agent. `cooldis agent init --out path.toml` keeps the old
+before publishing the agent. `verlet agent init --out path.toml` keeps the old
 single-manifest file form for compatibility.
 
 `plan` is the dry-run boundary for agent records. It parses the source manifest,
@@ -69,7 +69,7 @@ an operations registry, it still succeeds and reports those refs as
 `[unverified-offline]`.
 
 `publish` reruns the same resolution path and writes a durable local record under
-`.cooldis/agents`. The active record lives in `records/<name>.json`; immutable
+`.verlet/agents`. The active record lives in `records/<name>.json`; immutable
 version records live in `versions/<name>/<version>.json`. Republish of the same
 name and version is allowed only when the manifest hash is identical. When a
 folder-first prompt is lowered, the publish receipt pins the blob hash through
@@ -82,7 +82,7 @@ readable but do not gain an authored form retroactively.
 name a local operation record, pin a published version hash, select either the
 whole record or a declared operation, and declare grants that cover the selected
 operation requirements. Use `--operations-registry-root <dir>` when the
-operations registry is not the conventional `.cooldis/operations` root. Missing
+operations registry is not the conventional `.verlet/operations` root. Missing
 or fabricated operation refs reject before the agent record is written. Passing
 `--resolve-ops` is an authoring convenience only: unpinned `op://name` and
 `op://name@latest` rows are resolved against the local operations registry's
@@ -91,14 +91,14 @@ active published record, the manifest file is rewritten to
 rewrite is printed. Published agent records and stored manifests always carry
 pinned operation refs; runtime never looks up `@latest` for operation tools.
 
-`cooldis blob publish <file> [--registry-root .cooldis/blobs] [--name <name>]`
+`verlet blob publish <file> [--registry-root .verlet/blobs] [--name <name>]`
 publishes an arbitrary file as an immutable blob artifact and prints the
 `resource://artifact/sha256:<hash>` ref. Re-publishing the same content returns
 the same digest and is a no-op. Agent manifests consume blob artifacts through
 `[[resources]] kind = "blob"` rows and static context sources whose `input`
 names the resource.
 
-`cooldis skill publish <dir> [--registry-root .cooldis/skills] [--name <package>]`
+`verlet skill publish <dir> [--registry-root .verlet/skills] [--name <package>]`
 publishes the directory's `<skill>/SKILL.md` entries into the local skill
 registry and prints both `skill://<package>@sha256:<hash>` and
 `skill://<package>`. Identical content reuses the same immutable version;
@@ -109,8 +109,8 @@ the pinned ref. Pinned refs never follow the active name.
 
 ### Importing external skill directories
 
-`cooldis skill import <dir> [--registry-root .cooldis/skills]
-[--blob-registry-root .cooldis/blobs] [--name <package>] [--dry-run]` is the
+`verlet skill import <dir> [--registry-root .verlet/skills]
+[--blob-registry-root .verlet/blobs] [--name <package>] [--dry-run]` is the
 publisher-side converter for one conventional skill directory whose
 `SKILL.md` is at its root. It produces only existing registry records:
 
@@ -163,8 +163,8 @@ non-default local agent registry.
 
 The blob registry root derives from the agent registry root everywhere agents
 are resolved: `<registry-root>/blobs`, or the sibling `blobs` directory when
-the agent root's basename is `agents` (so the conventional `.cooldis/agents`
-pairs with `.cooldis/blobs`). `agent plan`, `agent publish`, and `agent run`
+the agent root's basename is `agents` (so the conventional `.verlet/agents`
+pairs with `.verlet/blobs`). `agent plan`, `agent publish`, and `agent run`
 all share this derivation; an explicit app-server `blob_registry_root` override
 still wins.
 

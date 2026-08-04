@@ -7,8 +7,8 @@ IMAGE=rust:1.97.1-bookworm
 RUST_TOOLCHAIN=1.97.1
 PLATFORM=linux/arm64
 HOST_TRIPLE=aarch64-unknown-linux-gnu
-VOLUME=cooldis-verify-linux
-CACHE_ROOT=/cooldis-cache
+VOLUME=verlet-verify-linux
+CACHE_ROOT=/verlet-cache
 CONTAINER_WORKSPACE=/workspace
 DRY_RUN=0
 LOW_MEMORY=0
@@ -175,8 +175,8 @@ docker_run=(
   --env "CARGO_HOME=$CACHE_ROOT/cargo"
   --env "RUSTUP_HOME=$CACHE_ROOT/rustup"
   --env "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
-  --env "COOLDIS_CARGO_LANE_ROOT=$CARGO_LANE_ROOT"
-  --env COOLDIS_VERIFY_MANAGED_CARGO=1
+  --env "VERLET_CARGO_LANE_ROOT=$CARGO_LANE_ROOT"
+  --env VERLET_VERIFY_MANAGED_CARGO=1
 )
 if ((LOW_MEMORY)); then
   docker_run+=(--env CARGO_BUILD_JOBS=2)

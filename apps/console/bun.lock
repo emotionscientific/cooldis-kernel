@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "cooldis-console",
+      "name": "verlet-console",
       "dependencies": {
         "bits-ui": "^2.18.1",
         "dompurify": "^3.4.9",

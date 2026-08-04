@@ -1,5 +1,5 @@
 [package]
-name = "cooldis-trace-ab"
+name = "verlet-trace-ab"
 version = "0.1.0"
 edition = "2024"
 publish = false

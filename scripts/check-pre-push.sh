@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/env-compat.sh"
+verlet_env_promote VERLET_PREPUSH_DOCS
 
 run() {
   printf '\n==> %s\n' "$*"
@@ -17,7 +19,7 @@ run_cargo() {
 
 run_verify() {
   printf '\n==> %s\n' "$ROOT/scripts/verify.sh"
-  COOLDIS_VERIFY_MANAGED_CARGO=1 "$ROOT/scripts/verify.sh"
+  VERLET_VERIFY_MANAGED_CARGO=1 "$ROOT/scripts/verify.sh"
 }
 
 cd "$ROOT"
@@ -33,8 +35,8 @@ run "$ROOT/scripts/guard-rails.sh" tracked
 run_cargo clippy --workspace --all-targets --locked -- "${CLIPPY_GATE[@]}"
 run_verify
 
-if [[ "${COOLDIS_PREPUSH_DOCS:-0}" == "1" ]]; then
+if [[ "${VERLET_PREPUSH_DOCS:-0}" == "1" ]]; then
   RUSTDOCFLAGS="-D warnings" run_cargo doc --workspace --no-deps --locked
 fi
 
-printf '\nCooldis pre-push checks passed.\n'
+printf '\nVerlet pre-push checks passed.\n'

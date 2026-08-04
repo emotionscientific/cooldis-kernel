@@ -1,6 +1,6 @@
 # Declarative Agents And Imperative Agent Apps
 
-Cooldis is built around declarative agents.
+Verlet is built around declarative agents.
 
 An imperative agent is usually a program: instantiate a model, call tools,
 thread state through application code, add retries, add secrets, add logs, add
@@ -15,7 +15,7 @@ Define the agent, not the app around it.
 
 ## What A Declaration Contains
 
-A Cooldis agent declaration can include:
+A Verlet agent declaration can include:
 
 - identity and instructions;
 - model profiles;
@@ -28,7 +28,7 @@ A Cooldis agent declaration can include:
 - external connections and secrets;
 - events, receipts, versioning, rollback, and audit records.
 
-This declared shape becomes the runtime object: the thing Cooldis can install,
+This declared shape becomes the runtime object: the thing Verlet can install,
 inspect, grant, run, resume, publish, revoke, and audit.
 
 ## Why Declaration Matters
@@ -40,7 +40,7 @@ managed placement.
 Without a declaration, each serious agent becomes a bespoke backend. With a
 declaration, the agent itself becomes the deployable unit.
 
-That is the core Cooldis product bet:
+That is the core Verlet product bet:
 
 ```text
 declarative agents

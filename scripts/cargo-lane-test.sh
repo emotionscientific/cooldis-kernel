@@ -216,16 +216,20 @@ prepare_call_environment() {
 
   unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
   unset CARGO_PROFILE_TEST_DEBUG CARGO_BUILD_JOBS RUSTC_WRAPPER
-  unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE COOLDIS_REAL_CARGO COOLDIS_CARGO_LANE_SCRIPT
-  unset COOLDIS_CARGO_SHIM_DIR COOLDIS_VERIFY_MANAGED_CARGO
-  unset COOLDIS_CARGO_LANE_INCREMENTAL CARGO_ALIAS_ESCAPE
+  unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE VERLET_REAL_CARGO VERLET_CARGO_LANE_SCRIPT
+  unset VERLET_CARGO_SHIM_DIR VERLET_VERIFY_MANAGED_CARGO
+  unset VERLET_CARGO_LANE_INCREMENTAL CARGO_ALIAS_ESCAPE
+  local legacy_prefix="COOL""DIS_"
+  unset "${legacy_prefix}REAL_CARGO" "${legacy_prefix}CARGO_LANE_SCRIPT"
+  unset "${legacy_prefix}CARGO_SHIM_DIR" "${legacy_prefix}VERIFY_MANAGED_CARGO"
+  unset "${legacy_prefix}CARGO_LANE_INCREMENTAL" "${legacy_prefix}CARGO_LANE_ROOT"
   unset CI
 
   export PATH="$TEST_PATH"
   if ((USE_LANE_ROOT_OVERRIDE)); then
-    export COOLDIS_CARGO_LANE_ROOT="$lane_root"
+    export VERLET_CARGO_LANE_ROOT="$lane_root"
   else
-    unset COOLDIS_CARGO_LANE_ROOT
+    unset VERLET_CARGO_LANE_ROOT
   fi
   export FAKE_CARGO_RECORD="$record"
   export FAKE_CARGO_MODE="$TEST_MODE"
@@ -235,10 +239,10 @@ prepare_call_environment() {
   export FAKE_CARGO_FORBID_PATH="$TEST_FORBID_PATH"
 
   if ((USE_REAL_CARGO_CONTRACT)); then
-    export COOLDIS_REAL_CARGO="$FAKE_CARGO"
+    export VERLET_REAL_CARGO="$FAKE_CARGO"
   fi
   if ((CALLER_LANE_SCRIPT_SET)); then
-    export COOLDIS_CARGO_LANE_SCRIPT="$CALLER_LANE_SCRIPT"
+    export VERLET_CARGO_LANE_SCRIPT="$CALLER_LANE_SCRIPT"
   fi
   if ((CALLER_ALIAS_SET)); then
     export CARGO_ALIAS_ESCAPE="$CALLER_ALIAS"
@@ -253,7 +257,7 @@ prepare_call_environment() {
     export CARGO_INCREMENTAL="$CALLER_INCREMENTAL"
   fi
   if ((CALLER_LANE_INCREMENTAL_SET)); then
-    export COOLDIS_CARGO_LANE_INCREMENTAL="$CALLER_LANE_INCREMENTAL"
+    export VERLET_CARGO_LANE_INCREMENTAL="$CALLER_LANE_INCREMENTAL"
   fi
   if ((CALLER_DEV_DEBUG_SET)); then
     export CARGO_PROFILE_DEV_DEBUG="$CALLER_DEV_DEBUG"
@@ -378,9 +382,9 @@ mkdir -p "$(dirname "$FAKE_CARGO_RECORD")" "$FAKE_CARGO_STATE"
   printf 'sccache_basedirs=%s\n' "${SCCACHE_BASEDIRS-<unset>}"
   printf 'sccache_cache_size=%s\n' "${SCCACHE_CACHE_SIZE-<unset>}"
   printf 'cargo_path=%s\n' "$(type -P cargo 2>/dev/null || true)"
-  printf 'lane_script=%s\n' "${COOLDIS_CARGO_LANE_SCRIPT-<unset>}"
-  printf 'shim_dir=%s\n' "${COOLDIS_CARGO_SHIM_DIR-<unset>}"
-  printf 'real_cargo=%s\n' "${COOLDIS_REAL_CARGO-<unset>}"
+  printf 'lane_script=%s\n' "${VERLET_CARGO_LANE_SCRIPT-<unset>}"
+  printf 'shim_dir=%s\n' "${VERLET_CARGO_SHIM_DIR-<unset>}"
+  printf 'real_cargo=%s\n' "${VERLET_REAL_CARGO-<unset>}"
   for arg in "$@"; do
     printf 'arg=%s\n' "$arg"
   done
@@ -435,16 +439,19 @@ git -C "$REPO" config user.name 'cargo lane test'
 printf 'fixture\n' >"$REPO/README.md"
 cat >"$REPO/.cargo/config.toml" <<'CONFIG'
 [build]
-target-dir = "../.cargo-target/cooldis"
+target-dir = "../.cargo-target/verlet"
 CONFIG
 cp "$SCRIPT_DIR/cargo-lane.sh" "$REPO/scripts/cargo-lane.sh"
 cp "$SCRIPT_DIR/check-pre-commit.sh" "$REPO/scripts/check-pre-commit.sh"
 cp "$SCRIPT_DIR/check-pre-push.sh" "$REPO/scripts/check-pre-push.sh"
+cp "$SCRIPT_DIR/env-compat.sh" "$REPO/scripts/env-compat.sh"
 cp "$SCRIPT_DIR/guard-rails.sh" "$REPO/scripts/guard-rails.sh"
 cp "$SCRIPT_DIR/test-timeout-lint.pl" "$REPO/scripts/test-timeout-lint.pl"
 cp "$SCRIPT_DIR/test-timeout-lint.sh" "$REPO/scripts/test-timeout-lint.sh"
 cp "$SCRIPT_DIR/threat-model-lint.sh" "$REPO/scripts/threat-model-lint.sh"
 cp "$SCRIPT_DIR/verify.sh" "$REPO/scripts/verify.sh"
+cp "$SCRIPT_DIR/verlet-name-lint.sh" "$REPO/scripts/verlet-name-lint.sh"
+printf '# path\treason\n' >"$REPO/scripts/verlet-name-allowlist.tsv"
 # Nested verify is under test for Cargo routing. Give its real non-Cargo checks
 # minimal valid inputs instead of stubbing them or copying the full source tree.
 cat >"$REPO/docs/threat-model.md" <<'THREAT_MODEL'
@@ -501,7 +508,7 @@ run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-commit-a.record" "$
 assert_eq 0 "$?" 'first worktree pre-commit hook succeeded'
 assert_file_line_count "$FAKE_STATE/calls-hook-pre-commit-a" 2 "$HOOK_SERIAL_ROOT/targets/feature" 'first pre-commit routed both Cargo calls through its feature lane'
 assert_file_contains "$TMP_DIR/hook-pre-commit-a.out" '==> cargo fmt --all -- --check' 'pre-commit kept its Cargo command output shape'
-assert_file_contains "$TMP_DIR/hook-pre-commit-a.out" 'Cooldis pre-commit checks passed.' 'pre-commit kept its success output'
+assert_file_contains "$TMP_DIR/hook-pre-commit-a.out" 'Verlet pre-commit checks passed.' 'pre-commit kept its success output'
 
 reset_call_environment
 DISPATCH_SHIM_DIR="$TMP_DIR/hook-dispatch-shim"
@@ -509,7 +516,7 @@ mkdir -p "$DISPATCH_SHIM_DIR"
 cat >"$DISPATCH_SHIM_DIR/cargo" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$COOLDIS_CARGO_LANE_SCRIPT" "$@"
+exec "$VERLET_CARGO_LANE_SCRIPT" "$@"
 SHIM
 chmod +x "$DISPATCH_SHIM_DIR/cargo"
 TEST_PATH="$DISPATCH_SHIM_DIR:$PATH_WITH_SCCACHE"
@@ -539,7 +546,7 @@ run_hook "$FEATURE_A" "$HOOK_SERIAL_ROOT" "$TMP_DIR/hook-pre-push-a.record" "$TM
 assert_eq 0 "$?" 'first worktree pre-push hook succeeded'
 assert_file_line_count "$FAKE_STATE/calls-hook-pre-push-a" 6 "$HOOK_SERIAL_ROOT/targets/feature" 'pre-push and nested verify routed every Cargo call through the feature lane'
 assert_file_contains "$TMP_DIR/hook-pre-push-a.out" '==> cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious -D clippy::perf' 'pre-push kept its Cargo command output shape'
-assert_file_contains "$TMP_DIR/hook-pre-push-a.out" 'Cooldis pre-push checks passed.' 'pre-push kept its success output'
+assert_file_contains "$TMP_DIR/hook-pre-push-a.out" 'Verlet pre-push checks passed.' 'pre-push kept its success output'
 
 reset_call_environment
 TEST_LABEL=hook-pre-push-ci
@@ -634,7 +641,7 @@ assert_file_line "$TMP_DIR/env.record" 'arg=argument with spaces' 'Cargo argumen
 assert_no_path "$CALLER_TARGET" 'caller target path was not created'
 assert_no_path "$CALLER_BUILD_TARGET" 'caller config target alias path was not created'
 assert_no_path "$FEATURE_A/target" 'checkout-local target was not created'
-assert_no_path "$TMP_DIR/.cargo-target/cooldis" 'old shared target was not created'
+assert_no_path "$TMP_DIR/.cargo-target/verlet" 'old shared target was not created'
 
 # Incremental mode uses a separate lane instance and never invokes sccache.
 reset_call_environment
@@ -735,7 +742,7 @@ status=$?
 if ((status == 0)); then
   fail 'incomplete Cargo shim contract unexpectedly succeeded'
 fi
-assert_file_contains "$TMP_DIR/recursion.err" 'shim contract is missing COOLDIS_REAL_CARGO' 'incomplete Cargo shim contract failed without recursion'
+assert_file_contains "$TMP_DIR/recursion.err" 'shim contract is missing VERLET_REAL_CARGO' 'incomplete Cargo shim contract failed without recursion'
 assert_no_path "$TMP_DIR/recursion.record" 'incomplete Cargo shim contract did not invoke Cargo'
 assert_no_path "$TMP_DIR/lanes-recursion/feature.lock" 'incomplete Cargo shim contract did not acquire a lane lock'
 

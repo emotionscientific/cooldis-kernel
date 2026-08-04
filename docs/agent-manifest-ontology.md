@@ -6,13 +6,13 @@ An agent manifest is a declarative composition of versioned, publishable
 artifacts. It should describe what an agent is allowed to be and do, while the
 thread records what actually happened.
 
-Typed V1 schema note: `crates/cooldis-agent/src/manifest_schema.rs` is
+Typed V1 schema note: `crates/verlet-agent/src/manifest_schema.rs` is
 the source of truth for the shipped V1 manifest shape. The registry layer reads
 that typed form and stores publish records; future design notes should map back
 to the Rust schema before changing accepted keys.
 
 Lexicon note: the default manifest is the kernel-synthesized
-`agent://cooldis/default` record published at app-server startup. A thread that
+`agent://verlet/default` record published at app-server startup. A thread that
 starts without an agent ref and without explicit envelope params binds that
 manifest, so thread lineage always has a manifest ref even for the plain local
 start path.
@@ -41,7 +41,7 @@ Examples:
 op://data/csv_profile@sha256:...
 skill://release-review@sha256:...
 resource://artifact/sha256:...
-assembler://cooldis/naive-assembly@0
+assembler://verlet/naive-assembly@0
 agent://release-verifier@0.3.1
 ```
 
@@ -130,7 +130,7 @@ persistence
 runtime defaults
 ```
 
-Cooldis may export, diff, or inspect a resolved "portable harness" as a useful
+Verlet may export, diff, or inspect a resolved "portable harness" as a useful
 read model, but an agent author should not declare `harness = ...` as a separate
 primitive. Things like an external agent CLI (Codex, Claude), Pi, a local
 app-server, or a sandbox are runtime adapters or placements, not harnesses.
@@ -256,7 +256,7 @@ path and, for every entry, its name, description, workspace-relative path, and
 content SHA-256. Resume and fork rehydrate that witness and its deterministic
 index without traversing the directory again. A later workspace read may see
 edited content; this drift is allowed and provable by comparing the bind
-witness with later read receipts. Cooldis witnesses workspace state at bind; it
+witness with later read receipts. Verlet witnesses workspace state at bind; it
 does not police subsequent edits.
 
 The published-package lane is declared as a `[[resources]]` row with
@@ -264,8 +264,8 @@ The published-package lane is declared as a `[[resources]]` row with
 `skill://<package>@sha256:<hash>`.
 
 ```text
-publish lane: cooldis skill publish <dir>
-registry: .cooldis/skills
+publish lane: verlet skill publish <dir>
+registry: .verlet/skills
 package shape: <name>/SKILL.md files
 metadata: optional frontmatter name, description, trigger_hint
 fallbacks: name from dirname, description from first non-heading line
@@ -273,10 +273,10 @@ output: pinned skill://<package>@sha256:<hash> and floating skill://<package>
 ```
 
 Conventional external `SKILL.md` directories can be compiled into this same
-published-package lane with `cooldis skill import`. The importer appends direct
+published-package lane with `verlet skill import`. The importer appends direct
 markdown references, publishes assets as blob resources, makes omitted scripts
 visible as deterministic degradation text, and leaves hook/MCP configuration
-inert. See [Cooldis Agent CLI — Importing external skill
+inert. See [Verlet Agent CLI — Importing external skill
 directories](agent-cli.md#importing-external-skill-directories) for the conversion
 and dry-run contract.
 

@@ -1,4 +1,4 @@
-use crate::{convert_cooldis_export, convert_pi, render_diff, write_common_jsonl};
+use crate::{convert_pi, convert_verlet_export, render_diff, write_common_jsonl};
 use serde_json::{Value, json};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -17,9 +17,9 @@ pub struct RunOptions {
     pub output_dir: PathBuf,
     pub provider: String,
     pub model: String,
-    pub cooldis_agent_ref: String,
-    pub cooldis_url: String,
-    pub cooldis_bin: PathBuf,
+    pub verlet_agent_ref: String,
+    pub verlet_url: String,
+    pub verlet_bin: PathBuf,
     pub npx_bin: PathBuf,
     pub max_tool_rounds: String,
     pub timeout: Duration,
@@ -28,11 +28,11 @@ pub struct RunOptions {
 #[derive(Clone, Debug)]
 pub struct RunArtifacts {
     pub pi_trace: PathBuf,
-    pub cooldis_trace: PathBuf,
+    pub verlet_trace: PathBuf,
     pub diff: PathBuf,
     pub pi_workspace: PathBuf,
-    pub cooldis_workspace: PathBuf,
-    pub cooldis_thread_id: String,
+    pub verlet_workspace: PathBuf,
+    pub verlet_thread_id: String,
 }
 
 pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
@@ -51,9 +51,9 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
         )
     })?;
     let pi_workspace = output_dir.join("pi-workspace");
-    let cooldis_workspace = output_dir.join("cooldis-workspace");
+    let verlet_workspace = output_dir.join("verlet-workspace");
     clone_workspace(&source, &pi_workspace)?;
-    clone_workspace(&source, &cooldis_workspace)?;
+    clone_workspace(&source, &verlet_workspace)?;
 
     let mut errors = Vec::new();
     let pi_session = match run_pi(options, &pi_workspace, &output_dir) {
@@ -84,12 +84,12 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
             .map_err(|err| format!("failed to create {}: {err}", pi_trace.display()))?,
     )?;
 
-    let cooldis_run = run_cooldis(options, &cooldis_workspace, &output_dir);
-    let (cooldis_export, cooldis_thread_id) = match cooldis_run {
+    let verlet_run = run_verlet(options, &verlet_workspace, &output_dir);
+    let (verlet_export, verlet_thread_id) = match verlet_run {
         Ok((export, thread_id)) => (Some(export), Some(thread_id)),
         Err(err) => {
-            errors.push(format!("cooldis: {err}"));
-            let export_path = output_dir.join("cooldis.export.json");
+            errors.push(format!("verlet: {err}"));
+            let export_path = output_dir.join("verlet.export.json");
             let export = fs::read(&export_path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
@@ -100,25 +100,25 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
             (export, thread_id)
         }
     };
-    let cooldis_records = match cooldis_export {
-        Some(export) => match convert_cooldis_export(&export) {
+    let verlet_records = match verlet_export {
+        Some(export) => match convert_verlet_export(&export) {
             Ok(records) => records,
             Err(err) => {
-                errors.push(format!("cooldis conversion: {err}"));
+                errors.push(format!("verlet conversion: {err}"));
                 Vec::new()
             }
         },
         None => Vec::new(),
     };
-    let cooldis_trace = output_dir.join("cooldis.common.jsonl");
+    let verlet_trace = output_dir.join("verlet.common.jsonl");
     write_common_jsonl(
-        &cooldis_records,
-        File::create(&cooldis_trace)
-            .map_err(|err| format!("failed to create {}: {err}", cooldis_trace.display()))?,
+        &verlet_records,
+        File::create(&verlet_trace)
+            .map_err(|err| format!("failed to create {}: {err}", verlet_trace.display()))?,
     )?;
 
     let diff = output_dir.join("diff.txt");
-    fs::write(&diff, render_diff(&pi_records, &cooldis_records))
+    fs::write(&diff, render_diff(&pi_records, &verlet_records))
         .map_err(|err| format!("failed to write {}: {err}", diff.display()))?;
     if !errors.is_empty() {
         return Err(format!(
@@ -129,12 +129,12 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
     }
     Ok(RunArtifacts {
         pi_trace,
-        cooldis_trace,
+        verlet_trace,
         diff,
         pi_workspace,
-        cooldis_workspace,
-        cooldis_thread_id: cooldis_thread_id
-            .ok_or_else(|| "Cooldis completed without a thread id".to_string())?,
+        verlet_workspace,
+        verlet_thread_id: verlet_thread_id
+            .ok_or_else(|| "Verlet completed without a thread id".to_string())?,
     })
 }
 
@@ -145,8 +145,8 @@ fn validate_options(options: &RunOptions) -> Result<(), String> {
     if options.provider.trim().is_empty() || options.model.trim().is_empty() {
         return Err("provider and model must not be empty".to_string());
     }
-    if options.cooldis_agent_ref.trim().is_empty() {
-        return Err("cooldis agent ref must not be empty".to_string());
+    if options.verlet_agent_ref.trim().is_empty() {
+        return Err("verlet agent ref must not be empty".to_string());
     }
     if options.timeout.is_zero() {
         return Err("timeout must be greater than zero".to_string());
@@ -553,7 +553,7 @@ fn newest_jsonl_file(root: &Path) -> Option<PathBuf> {
     candidates.pop().map(|(_, path)| path)
 }
 
-fn run_cooldis(
+fn run_verlet(
     options: &RunOptions,
     workspace: &Path,
     output: &Path,
@@ -564,20 +564,20 @@ fn run_cooldis(
         .map(Value::from)
         .unwrap_or_else(|_| Value::String("unlimited".to_string()));
     let start_params = json!({
-        "agentRef": options.cooldis_agent_ref,
+        "agentRef": options.verlet_agent_ref,
         "modelProvider": options.provider,
         "model": options.model,
         "cwd": workspace,
         "workspace": {"hostPath": workspace, "mode": "rw"},
         "runtimeOverrides": {"maxToolRounds": max_tool_rounds},
     });
-    let start = cooldis_call_capture(
+    let start = verlet_call_capture(
         options,
         "thread/start",
         &start_params,
         Duration::from_secs(60),
     )?;
-    write_captured(output, "cooldis.start", &start)?;
+    write_captured(output, "verlet.start", &start)?;
     ensure_success("thread/start", &start)?;
     let start_value: Value = serde_json::from_slice(&start.stdout)
         .map_err(|err| format!("thread/start returned invalid JSON: {err}"))?;
@@ -587,9 +587,9 @@ fn run_cooldis(
         .map(str::to_string)
         .ok_or_else(|| "thread/start response has no thread.id".to_string())?;
     fs::write(output.join("cooldis.thread-id"), format!("{thread_id}\n"))
-        .map_err(|err| format!("failed to write Cooldis thread id: {err}"))?;
+        .map_err(|err| format!("failed to write Verlet thread id: {err}"))?;
 
-    let mut turn_command = Command::new(&options.cooldis_bin);
+    let mut turn_command = Command::new(&options.verlet_bin);
     turn_command
         .arg("debug")
         .arg("rpc")
@@ -599,14 +599,14 @@ fn run_cooldis(
         .arg("--json")
         .arg(&options.prompt)
         .arg("--url")
-        .arg(&options.cooldis_url);
+        .arg(&options.verlet_url);
     let turn_error = match run_captured(&mut turn_command, options.timeout) {
         Ok(turn) => {
-            fs::write(output.join("cooldis.rpc.jsonl"), &turn.stdout)
-                .map_err(|err| format!("failed to write Cooldis RPC transcript: {err}"))?;
-            fs::write(output.join("cooldis.stderr.log"), &turn.stderr)
-                .map_err(|err| format!("failed to write Cooldis stderr log: {err}"))?;
-            ensure_success("cooldis turn", &turn).err()
+            fs::write(output.join("verlet.rpc.jsonl"), &turn.stdout)
+                .map_err(|err| format!("failed to write Verlet RPC transcript: {err}"))?;
+            fs::write(output.join("verlet.stderr.log"), &turn.stderr)
+                .map_err(|err| format!("failed to write Verlet stderr log: {err}"))?;
+            ensure_success("verlet turn", &turn).err()
         }
         Err(err) => Some(err),
     };
@@ -618,7 +618,7 @@ fn run_cooldis(
         "maxEventsPerStream": 10000,
         "redact": true,
     });
-    let export = cooldis_call_capture(
+    let export = verlet_call_capture(
         options,
         "thread/debug/export",
         &export_params,
@@ -635,7 +635,7 @@ fn run_cooldis(
             });
         }
     };
-    write_captured(output, "cooldis.export", &export)?;
+    write_captured(output, "verlet.export", &export)?;
     if let Err(export_error) = ensure_success("thread/debug/export", &export) {
         return Err(match turn_error {
             Some(turn_error) => format!("{turn_error}; {export_error}"),
@@ -644,28 +644,28 @@ fn run_cooldis(
     }
     let export_value: Value = serde_json::from_slice(&export.stdout)
         .map_err(|err| format!("thread/debug/export returned invalid JSON: {err}"))?;
-    let export_path = output.join("cooldis.export.json");
+    let export_path = output.join("verlet.export.json");
     fs::write(
         &export_path,
         serde_json::to_vec_pretty(&export_value)
-            .map_err(|err| format!("failed to encode Cooldis export: {err}"))?,
+            .map_err(|err| format!("failed to encode Verlet export: {err}"))?,
     )
     .map_err(|err| format!("failed to write {}: {err}", export_path.display()))?;
     if let Some(turn_error) = turn_error {
         return Err(format!(
-            "{turn_error}; Cooldis export was preserved after the failed turn"
+            "{turn_error}; Verlet export was preserved after the failed turn"
         ));
     }
     Ok((export_value, thread_id))
 }
 
-fn cooldis_call_capture(
+fn verlet_call_capture(
     options: &RunOptions,
     method: &str,
     params: &Value,
     timeout: Duration,
 ) -> Result<Captured, String> {
-    let mut command = Command::new(&options.cooldis_bin);
+    let mut command = Command::new(&options.verlet_bin);
     command
         .arg("debug")
         .arg("rpc")
@@ -673,7 +673,7 @@ fn cooldis_call_capture(
         .arg(method)
         .arg(params.to_string())
         .arg("--url")
-        .arg(&options.cooldis_url);
+        .arg(&options.verlet_url);
     run_captured(&mut command, timeout)
 }
 
@@ -860,7 +860,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "cooldis-trace-ab-copy-{}-{nonce}",
+            "verlet-trace-ab-copy-{}-{nonce}",
             std::process::id()
         ));
         let source = root.join("source");
@@ -926,13 +926,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_cooldis_turn_still_preserves_both_trace_artifacts() {
+    fn failed_verlet_turn_still_preserves_both_trace_artifacts() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "cooldis-trace-ab-failure-{}-{nonce}",
+            "verlet-trace-ab-failure-{}-{nonce}",
             std::process::id()
         ));
         let workspace = root.join("seed");
@@ -966,9 +966,9 @@ while IFS= read -r line; do
 done
 "#,
         );
-        let fake_cooldis = root.join("fake-cooldis");
+        let fake_verlet = root.join("fake-verlet");
         write_script(
-            &fake_cooldis,
+            &fake_verlet,
             r#"#!/bin/sh
 if [ "$1 $2 $3" = "debug rpc call" ] && [ "$4" = "thread/start" ]; then
   printf '%s\n' '{"thread":{"id":"thread-fixture"}}'
@@ -992,21 +992,21 @@ exit 1
             output_dir: output.clone(),
             provider: "fixture".to_string(),
             model: "fixture".to_string(),
-            cooldis_agent_ref: "agent://fixture@1".to_string(),
-            cooldis_url: "ws://fixture".to_string(),
-            cooldis_bin: fake_cooldis,
+            verlet_agent_ref: "agent://fixture@1".to_string(),
+            verlet_url: "ws://fixture".to_string(),
+            verlet_bin: fake_verlet,
             npx_bin: fake_npx,
             max_tool_rounds: "8".to_string(),
             timeout: Duration::from_secs(5),
         })
         .unwrap_err();
 
-        assert!(error.contains("cooldis turn failed"));
+        assert!(error.contains("verlet turn failed"));
         for artifact in [
             "pi.session.jsonl",
             "pi.common.jsonl",
-            "cooldis.export.json",
-            "cooldis.common.jsonl",
+            "verlet.export.json",
+            "verlet.common.jsonl",
             "diff.txt",
         ] {
             assert!(output.join(artifact).is_file(), "missing {artifact}");

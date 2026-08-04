@@ -1,6 +1,6 @@
-# Cooldis Testing Guidelines
+# Verlet Testing Guidelines
 
-Cooldis runtime work should be test-first by default.
+Verlet runtime work should be test-first by default.
 
 Before implementing a runtime change, write or update the test that defines the
 kernel contract. If the test cannot be written first because the harness is
@@ -45,7 +45,7 @@ that contract.
 ## Harness Patterns
 
 The canonical kernel harness lives in
-`crates/cooldis-kernel/tests/support/`. Integration tests declare
+`crates/verlet-kernel/tests/support/`. Integration tests declare
 `mod support;`; inline module tests import the same helpers through the crate's
 `#[cfg(test)]` `test_support` module. Keep additions in this module family as
 plain builders and wrappers rather than introducing a test-framework crate or
@@ -115,7 +115,7 @@ for an older receipt. To inspect or deliberately regenerate the pinned v1
 fixtures, run:
 
 ```bash
-COOLDIS_UPDATE_FIXTURES=1 scripts/cargo-lane.sh test -p cooldis derivation_is_fixture_pinned
+VERLET_UPDATE_FIXTURES=1 scripts/cargo-lane.sh test -p verlet derivation_is_fixture_pinned
 ```
 
 Review the fixture diff before keeping it. A normal test run compares the
@@ -148,12 +148,12 @@ Process smoke should prove wiring, not exhaust every edge case:
 - shut down cleanly;
 - keep the smoke cheap enough to run before claiming runtime work is done.
 
-For Cooldis runtime changes, use:
+For Verlet runtime changes, use:
 
 ```bash
 scripts/cargo-lane.sh test
-scripts/cargo-lane.sh run --bin cooldis-vbash-smoke
-scripts/cargo-lane.sh run --bin cooldis-wasm-smoke
+scripts/cargo-lane.sh run --bin verlet-vbash-smoke
+scripts/cargo-lane.sh run --bin verlet-wasm-smoke
 ```
 
 Run app-server and MCP smokes when touching their projections.
@@ -165,8 +165,8 @@ checks formatting, runs the locked workspace test suite for all targets, and
 runs the virtual-bash and Wasm smoke binaries.
 
 Two provider-backed lanes remain opt-in and are disabled in regular CI. Set
-`COOLDIS_VERIFY_LIVE_PLUGIN=1` to run the live plugin smoke, or set
-`COOLDIS_VERIFY_LIVE_S3=1` to run the ignored real-S3 object-store test.
+`VERLET_VERIFY_LIVE_PLUGIN=1` to run the live plugin smoke, or set
+`VERLET_VERIFY_LIVE_S3=1` to run the ignored real-S3 object-store test.
 
 ## Cargo Build Lanes
 
@@ -209,16 +209,16 @@ normal library test and must enumerate every seed it runs; missing, empty,
 malformed, stale-vocabulary, or unknown-intensity entries fail closed:
 
 ```bash
-scripts/cargo-lane.sh test -p cooldis --lib scenario_corpus_holds -- --nocapture
+scripts/cargo-lane.sh test -p verlet --lib scenario_corpus_holds -- --nocapture
 ```
 
 Run a fresh rotating sweep by supplying a base seed and count without mutating
 process environment from inside the test:
 
 ```bash
-COOLDIS_SCENARIO_SWEEP_BASE_SEED=40520260711 \
-COOLDIS_SCENARIO_SWEEP_COUNT=24 \
-scripts/cargo-lane.sh test -p cooldis --lib scenario_nightly_sweep -- --ignored --nocapture
+VERLET_SCENARIO_SWEEP_BASE_SEED=40520260711 \
+VERLET_SCENARIO_SWEEP_COUNT=24 \
+scripts/cargo-lane.sh test -p verlet --lib scenario_nightly_sweep -- --ignored --nocapture
 ```
 
 The receipt reports the attempted count, per-intensity tallies, corpus size,
@@ -233,7 +233,7 @@ a sweep seed exposes one, its corpus provenance points to that regression.
 ### Nightly Failure Promotion
 
 A minimized nightly scenario failure joins
-`crates/cooldis-kernel/tests/fixtures/scenarios/corpus.json` in the same pull
+`crates/verlet-kernel/tests/fixtures/scenarios/corpus.json` in the same pull
 request as its fix. Its `pins` line names the issue that owns the failure, so
 the regression remains attributable and reproducible.
 
@@ -250,11 +250,11 @@ scripts/cargo-lane.sh test --workspace --all-targets --locked
 
 ## Terminology Lint
 
-`crates/cooldis-kernel/tests/lexicon_lint.rs` keeps selected public kernel
+`crates/verlet-kernel/tests/lexicon_lint.rs` keeps selected public kernel
 terminology from drifting. It scans Rust source under
-`crates/cooldis-kernel/src/` for deprecated vocabulary in identifiers,
+`crates/verlet-kernel/src/` for deprecated vocabulary in identifiers,
 serde-visible names, and event-kind constants, then compares existing debt to
-`crates/cooldis-kernel/tests/lexicon_lint_baseline.txt`. Baseline entries use
+`crates/verlet-kernel/tests/lexicon_lint_baseline.txt`. Baseline entries use
 `<relative path> <word> <count>` so unrelated line edits do not churn the file.
 
 Use `// lexicon-allow: <word> - <reason>` on the offending line or the line
@@ -266,11 +266,11 @@ terminology orientation.
 
 ## Threat-Model Lint
 
-`crates/cooldis-kernel/tests/threat_model_lint.rs` parses
+`crates/verlet-kernel/tests/threat_model_lint.rs` parses
 `docs/threat-model.md` as a strict registry. It enforces unique IDs, contiguous
 per-area numbering, the status and severity vocabularies, required entry fields,
 and affected-surface paths that resolve inside the repository. The companion
-`crates/cooldis-kernel/tests/threat_model_ids.txt` is append-only and must match
+`crates/verlet-kernel/tests/threat_model_ids.txt` is append-only and must match
 the document order.
 
 Do not delete or renumber an entry. Append new IDs to both files. When a threat

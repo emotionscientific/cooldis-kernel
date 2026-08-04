@@ -1,0 +1,17 @@
+[package]
+name = "verlet-history-sqlite"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+verlet-history = { path = "../verlet-history" }
+verlet-runtime-contracts = { path = "../verlet-runtime-contracts" }
+verlet-sqlite = { path = "../verlet-sqlite" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+base64 = "0.22"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

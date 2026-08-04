@@ -1,6 +1,6 @@
 # Permissions And Governance
 
-Cooldis gives agents power through explicit grants.
+Verlet gives agents power through explicit grants.
 
 An agent can see a tool without being allowed to use it. An agent can be
 published without being trusted in every workspace. A secret can be bound to one
@@ -10,13 +10,13 @@ That separation is the governance model: visibility, publication, permission,
 secret access, resource access, and execution placement are different decisions.
 Privileged actions produce events and receipts.
 
-This is how Cooldis aims to provide managed-agent convenience without vendor
+This is how Verlet aims to provide managed-agent convenience without vendor
 lock-in: the managed runtime can operate agents, while the agent definition,
 tool contracts, grants, and receipts stay inspectable and portable.
 
 ## Permission Surfaces
 
-Cooldis permissioning centers on:
+Verlet permissioning centers on:
 
 - capability grants;
 - secret bindings;

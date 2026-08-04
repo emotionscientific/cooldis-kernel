@@ -27,7 +27,7 @@
     <button class="btn" disabled={!app.connected} title="Reload published tools and agents" onclick={() => void app.refresh()}>
       <Icon name="RefreshCw" size={14} /> Refresh
     </button>
-    <button class="btn primary" disabled title="Publishing is CLI-only today — `cooldis tool publish` / `cooldis agent publish`">
+    <button class="btn primary" disabled title="Publishing is CLI-only today — `verlet tool publish` / `verlet agent publish`">
       <Icon name="Plus" size={14} /> New tool
     </button>
   </header>
@@ -59,7 +59,7 @@
         {:else}
           <div class="empty small">
             <span class="ic"><Icon name="Wrench" size={18} /></span>
-            <p>{app.connected ? "No tools published in this workspace yet — publish one with `cooldis tool publish`." : "Connect to a runtime to load published tools."}</p>
+            <p>{app.connected ? "No tools published in this workspace yet — publish one with `verlet tool publish`." : "Connect to a runtime to load published tools."}</p>
           </div>
         {/each}
       </div>
@@ -104,7 +104,7 @@
         {:else}
           <div class="empty small">
             <span class="ic"><Icon name="Bot" size={18} /></span>
-            <p>{app.connected ? "No agents declared in this workspace yet — publish one with `cooldis agent publish`." : "Connect to a runtime to load declared agents."}</p>
+            <p>{app.connected ? "No agents declared in this workspace yet — publish one with `verlet agent publish`." : "Connect to a runtime to load declared agents."}</p>
           </div>
         {/each}
       </div>

@@ -737,304 +737,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cooldis"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "base64",
- "bashkit",
- "chrono",
- "chrono-tz",
- "cooldis-abi",
- "cooldis-agent",
- "cooldis-history",
- "cooldis-history-sqlite",
- "cooldis-io-core",
- "cooldis-io-pgqrs",
- "cooldis-io-telegram",
- "cooldis-metadata",
- "cooldis-operations",
- "cooldis-process",
- "cooldis-provider",
- "cooldis-runtime-contracts",
- "cooldis-sqlite",
- "cooldis-vbash",
- "cooldis-vfs",
- "cooldis-wasm",
- "croner",
- "crossterm 0.28.1",
- "futures-executor",
- "futures-util",
- "getrandom 0.3.4",
- "libc",
- "object_store",
- "ratatui",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "toml",
- "uuid",
- "wat",
-]
-
-[[package]]
-name = "cooldis-abi"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cooldis-agent"
-version = "0.1.0"
-dependencies = [
- "cooldis-abi",
- "cooldis-operations",
- "cooldis-runtime-contracts",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "toml",
-]
-
-[[package]]
-name = "cooldis-guest-sdk"
-version = "0.1.0"
-dependencies = [
- "cooldis-guest-sdk-macros",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cooldis-guest-sdk-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "cooldis-history"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cooldis-runtime-contracts",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "cooldis-history-sqlite"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "cooldis-history",
- "cooldis-runtime-contracts",
- "cooldis-sqlite",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "cooldis-io-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "cooldis-io-pgqrs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "cooldis-io-core",
- "pgqrs",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "cooldis-io-telegram"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cooldis-io-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "cooldis-metadata"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cooldis-abi",
- "cooldis-history",
- "cooldis-runtime-contracts",
- "cooldis-sqlite",
- "futures-executor",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "cooldis-operations"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cooldis-abi",
- "cooldis-process",
- "cooldis-runtime-contracts",
- "cooldis-wasm",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "uuid",
-]
-
-[[package]]
-name = "cooldis-process"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cooldis-abi",
- "cooldis-runtime-contracts",
- "futures-util",
- "libc",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "cooldis-provider"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "cooldis-history",
- "crc32fast",
- "hex",
- "hmac 0.13.0",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "cooldis-runtime-contracts"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "cooldis-sqlite"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "turso",
- "turso_core",
-]
-
-[[package]]
-name = "cooldis-trace-ab"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cooldis-vbash"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bashkit",
- "cooldis-abi",
- "cooldis-operations",
- "cooldis-process",
- "cooldis-vfs",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "cooldis-vfs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bashkit",
- "futures-util",
- "object_store",
- "tokio",
-]
-
-[[package]]
-name = "cooldis-wasm"
-version = "0.1.0"
-dependencies = [
- "bashkit",
- "cooldis-abi",
- "cooldis-process",
- "cooldis-runtime-contracts",
- "cooldis-vfs",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "wasmtime",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6083,6 +5785,304 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "verlet"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bashkit",
+ "chrono",
+ "chrono-tz",
+ "croner",
+ "crossterm 0.28.1",
+ "futures-executor",
+ "futures-util",
+ "getrandom 0.3.4",
+ "libc",
+ "object_store",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml",
+ "uuid",
+ "verlet-abi",
+ "verlet-agent",
+ "verlet-history",
+ "verlet-history-sqlite",
+ "verlet-io-core",
+ "verlet-io-pgqrs",
+ "verlet-io-telegram",
+ "verlet-metadata",
+ "verlet-operations",
+ "verlet-process",
+ "verlet-provider",
+ "verlet-runtime-contracts",
+ "verlet-sqlite",
+ "verlet-vbash",
+ "verlet-vfs",
+ "verlet-wasm",
+ "wat",
+]
+
+[[package]]
+name = "verlet-abi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "verlet-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml",
+ "verlet-abi",
+ "verlet-operations",
+ "verlet-runtime-contracts",
+]
+
+[[package]]
+name = "verlet-guest-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-guest-sdk-macros",
+]
+
+[[package]]
+name = "verlet-guest-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "verlet-history"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "verlet-runtime-contracts",
+]
+
+[[package]]
+name = "verlet-history-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "serde_json",
+ "tokio",
+ "verlet-history",
+ "verlet-runtime-contracts",
+ "verlet-sqlite",
+]
+
+[[package]]
+name = "verlet-io-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "verlet-io-pgqrs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "pgqrs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "verlet-io-core",
+]
+
+[[package]]
+name = "verlet-io-telegram"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "verlet-io-core",
+]
+
+[[package]]
+name = "verlet-metadata"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-executor",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "verlet-abi",
+ "verlet-history",
+ "verlet-runtime-contracts",
+ "verlet-sqlite",
+]
+
+[[package]]
+name = "verlet-operations"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "uuid",
+ "verlet-abi",
+ "verlet-process",
+ "verlet-runtime-contracts",
+ "verlet-wasm",
+]
+
+[[package]]
+name = "verlet-process"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "verlet-abi",
+ "verlet-runtime-contracts",
+]
+
+[[package]]
+name = "verlet-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "crc32fast",
+ "hex",
+ "hmac 0.13.0",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "verlet-history",
+]
+
+[[package]]
+name = "verlet-runtime-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "verlet-sqlite"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "turso",
+ "turso_core",
+]
+
+[[package]]
+name = "verlet-trace-ab"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "verlet-vbash"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bashkit",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "verlet-abi",
+ "verlet-operations",
+ "verlet-process",
+ "verlet-vfs",
+]
+
+[[package]]
+name = "verlet-vfs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bashkit",
+ "futures-util",
+ "object_store",
+ "tokio",
+]
+
+[[package]]
+name = "verlet-wasm"
+version = "0.1.0"
+dependencies = [
+ "bashkit",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "verlet-abi",
+ "verlet-process",
+ "verlet-runtime-contracts",
+ "verlet-vfs",
+ "wasmtime",
+]
 
 [[package]]
 name = "version_check"

@@ -49,24 +49,24 @@ jobs:
       - name: Smoke release archive
         shell: bash
         run: |
-          archive="$(find dist -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
+          archive="$(find dist -maxdepth 1 -name 'verlet-*.tar.gz' | head -n 1)"
           test -n "$archive"
           scripts/smoke-release-archive.sh "$archive"
 
       - name: Smoke installer
         shell: bash
         run: |
-          archive="$(find dist -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
+          archive="$(find dist -maxdepth 1 -name 'verlet-*.tar.gz' | head -n 1)"
           test -n "$archive"
           scripts/smoke-install.sh "$archive"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
         with:
-          name: cooldis-${{ matrix.target }}
+          name: verlet-${{ matrix.target }}
           path: |
-            dist/cooldis-*.tar.gz
-            dist/cooldis-*.tar.gz.sha256
+            dist/verlet-*.tar.gz
+            dist/verlet-*.tar.gz.sha256
           if-no-files-found: error
 
   github-release:
@@ -98,7 +98,7 @@ jobs:
       - name: Smoke installer against Linux release artifact
         shell: bash
         run: |
-          archive="$(find dist -maxdepth 1 -name 'cooldis-*-x86_64-unknown-linux-gnu.tar.gz' | head -n 1)"
+          archive="$(find dist -maxdepth 1 -name 'verlet-*-x86_64-unknown-linux-gnu.tar.gz' | head -n 1)"
           test -n "$archive"
           scripts/smoke-install.sh "$archive"
 
@@ -126,4 +126,4 @@ jobs:
             echo "TAP_DISPATCH_TOKEN not configured; skipping tap dispatch"
             exit 0
           fi
-          gh workflow run update-cooldis.yml --repo emotionscientific/homebrew-tap
+          gh workflow run update-EMO520LEGACYDOTyml --repo emotionscientific/homebrew-tap

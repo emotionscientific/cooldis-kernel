@@ -1,11 +1,11 @@
-# ABI: Cooldis Operation Boundary
+# ABI: Verlet Operation Boundary
 
-ABI is the unified Cooldis operation boundary. It names both the portable
+ABI is the unified Verlet operation boundary. It names both the portable
 operation contract and the concrete host/guest mechanics that make the contract
 runnable.
 
 Guest programs import explicit host powers through system ABI calls, export
-explicit operations through a versioned operation ABI, and Cooldis re-presents
+explicit operations through a versioned operation ABI, and Verlet re-presents
 those operations as CLI, HTTP, LLM-tool, harness, frontend, process, or
 MCP-shaped surfaces. The surface changes; the operation contract and
 authority model do not.
@@ -16,16 +16,16 @@ flowchart LR
     Contract[ABI operation contract]
     SystemABI[System ABI imports]
     OperationABI[Operation ABI exports]
-    Cooldis[Cooldis host]
+    Verlet[Verlet host]
     Surface[Caller surface]
 
     Contract --> SystemABI
     Contract --> OperationABI
     Guest -->|uses| SystemABI
     Guest -->|describes + handles| OperationABI
-    SystemABI --> Cooldis
-    OperationABI --> Cooldis
-    Cooldis --> Surface
+    SystemABI --> Verlet
+    OperationABI --> Verlet
+    Verlet --> Surface
 
     Surface --> CLI[CLI command]
     Surface --> Tool[LLM tool]
@@ -88,7 +88,7 @@ event port    -> invocation JSONL events, when declared
 effect ports  -> declared durable writes, empty for pure operations
 ```
 
-The Rust types live in `crates/cooldis-kernel/src/capabilities/abi.rs`:
+The Rust types live in `crates/verlet-kernel/src/capabilities/abi.rs`:
 
 ```text
 AbiOperationContract
@@ -132,14 +132,14 @@ not Unix-complete.
 
 The operation ABI is what the guest exposes to the host.
 
-Current Cooldis Wasm operation shape:
+Current Verlet Wasm operation shape:
 
 ```text
 registration:
-  __cooldis_describe_module__(manifest_sink) -> status
+  __verlet_describe_module__(manifest_sink) -> status
 
 runtime:
-  __cooldis_call_operation__(
+  __verlet_call_operation__(
     operation_id,
     invocation_handle,
     input_source,
@@ -188,8 +188,8 @@ The manifest should grow from value kinds toward typed schemas:
 
 A surface is how a caller sees an operation. The same operation can become:
 
-- `cooldis tool run search --json ...`;
-- `cooldis run search invoke` with stdin/stdout/stderr/exit semantics;
+- `verlet tool run search --json ...`;
+- `verlet run search invoke` with stdin/stdout/stderr/exit semantics;
 - an LLM tool schema;
 - an HTTP route;
 - a harness fixture;
@@ -215,8 +215,8 @@ registration leaves the previous operation installed.
 
 Current surfaces are:
 
-- CLI: `cooldis tool run <registered> <operation>`;
-- Process: `cooldis run <registered> <operation>`;
+- CLI: `verlet tool run <registered> <operation>`;
+- Process: `verlet run <registered> <operation>`;
 - HTTP: `POST /operations/<registered>/<operation>`;
 - LLM tool: a normalized tool name with the same input/output value kinds;
 - MCP: a normalized MCP tool name with the same input/output value kinds.
@@ -229,7 +229,7 @@ independent contracts.
 Registered operations also expose a process-shaped surface:
 
 ```text
-cooldis run <registered> <operation>
+verlet run <registered> <operation>
 ```
 
 Inside `VirtualBashRuntime`, this is a shell builtin, not a native binary. It
@@ -245,8 +245,8 @@ status -> shell exit code
 That means ordinary shell composition works while still using the ABI contract:
 
 ```sh
-echo '{"query":"cooldis"}' | cooldis run search search
-cooldis run formatter format < /workspace/in.json > /workspace/out.json 2> /workspace/events.jsonl
+echo '{"query":"verlet"}' | verlet run search search
+verlet run formatter format < /workspace/in.json > /workspace/out.json 2> /workspace/events.jsonl
 ```
 
 The process surface does not add new filesystem powers. File reads and
@@ -337,7 +337,7 @@ grants. A chmod-style provisioner can run as a provisioner principal even when
 triggered by an agent.
 
 Wasm guests receive only the opaque `invocation_handle` passed to
-`__cooldis_call_operation__`. They do not receive raw tenant, user, session, or
+`__verlet_call_operation__`. They do not receive raw tenant, user, session, or
 caller identity. Host imports resolve the handle to grants, attachment bindings,
 audit metadata, and cancellation state. If a future import exposes identity, it
 must be explicit and capability-gated; the default ABI has no `caller_identity`

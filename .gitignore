@@ -4,6 +4,8 @@ target/
 .tmp/
 .site/
 # Local daemon runtime state (publish records embed absolute home paths).
+**/.verlet/
+# v0.3.0 compatibility: existing state remains live in the legacy directory.
 **/.cooldis/
 _site/
 dist/
@@ -24,7 +26,7 @@ CLAUDE.local.md
 scripts/with-wafer-env.sh
 scripts/mcp-wafer-backwards-smoke.sh
 scripts/wafer-glm-host-author-smoke.sh
-crates/cooldis-kernel/src/bin/cooldis-wafer-glm-host-author-smoke.rs
+crates/verlet-kernel/src/bin/verlet-wafer-glm-host-author-smoke.rs
 
 # Upstream Codex test fixtures can be too large for this repo's commit hooks.
 vendor/codex/codex-rs/tui/tests/fixtures/oss-story.jsonl

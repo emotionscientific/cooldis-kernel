@@ -51,8 +51,8 @@
   ondblclick={onTopbarDoubleClick}
 >
   <div class="brand">
-    <span class="logo"><img src={brandUrl} alt="Cooldis" /></span>
-    <b>Cooldis</b>
+    <span class="logo"><img src={brandUrl} alt="Verlet" /></span>
+    <b>Verlet</b>
   </div>
 
   <div class="topbar-spacer"></div>
@@ -112,7 +112,7 @@
         <dt>Daemon</dt><dd>{app.daemon.running ? (app.daemon.managed ? "running · app-started" : "running · external") : "stopped"}</dd>
       {/if}
       {#if app.native && app.runtime}
-        <dt>Runtime</dt><dd class="mono">{app.runtime.installed ? (app.runtime.path ?? "cooldis") : "not installed"}</dd>
+        <dt>Runtime</dt><dd class="mono">{app.runtime.installed ? (app.runtime.path ?? "verlet") : "not installed"}</dd>
       {/if}
       {#if app.connected}
         <dt>Models</dt><dd>{app.modelInventoryLabel}</dd>

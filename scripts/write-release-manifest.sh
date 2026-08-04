@@ -2,15 +2,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${COOLDIS_RELEASE_OUT_DIR:-$ROOT/dist}"
+. "$ROOT/scripts/env-compat.sh"
+verlet_env_promote VERLET_RELEASE_OUT_DIR
+verlet_env_promote VERLET_RELEASE_CHANNEL
+OUT_DIR="${VERLET_RELEASE_OUT_DIR:-$ROOT/dist}"
 REPO="${GITHUB_REPOSITORY:-emotionscientific/cooldis-kernel}"
 TAG="${GITHUB_REF_NAME:-}"
-CHANNEL="${COOLDIS_RELEASE_CHANNEL:-stable}"
+CHANNEL="${VERLET_RELEASE_CHANNEL:-stable}"
 BASE_URL=""
 
 usage() {
   cat <<'USAGE'
-write-release-manifest.sh - write latest.json for Cooldis release assets.
+write-release-manifest.sh - write latest.json for Verlet release assets.
 
 Usage:
   scripts/write-release-manifest.sh [--out-dir DIR] [--repo OWNER/REPO] [--tag TAG] [--channel NAME] [--base-url URL]
@@ -62,10 +65,10 @@ sha256_from_file() {
 }
 
 VERSION="$(
-  sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/cooldis-kernel/Cargo.toml" | head -n 1
+  sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/verlet-kernel/Cargo.toml" | head -n 1
 )"
 if [[ -z "$VERSION" ]]; then
-  echo "could not read cooldis version from crates/cooldis-kernel/Cargo.toml" >&2
+  echo "could not read verlet version from crates/verlet-kernel/Cargo.toml" >&2
   exit 1
 fi
 
@@ -89,16 +92,16 @@ GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 ARCHIVES=()
 while IFS= read -r archive; do
   ARCHIVES+=("$archive")
-done < <(find "$OUT_DIR" -maxdepth 1 -name "cooldis-*.tar.gz" -type f | sort)
+done < <(find "$OUT_DIR" -maxdepth 1 -name "verlet-*.tar.gz" -type f | sort)
 if [[ "${#ARCHIVES[@]}" -eq 0 ]]; then
-  echo "no cooldis release archives found under $OUT_DIR" >&2
+  echo "no verlet release archives found under $OUT_DIR" >&2
   exit 1
 fi
 
 {
   printf '{\n'
   printf '  "schema": 1,\n'
-  printf '  "name": "cooldis",\n'
+  printf '  "name": "verlet",\n'
   printf '  "version": "%s",\n' "$(json_escape "$RELEASE_VERSION")"
   printf '  "channel": "%s",\n' "$(json_escape "$CHANNEL")"
   printf '  "repository": "%s",\n' "$(json_escape "$REPO")"
@@ -114,10 +117,10 @@ fi
       echo "missing checksum for $archive" >&2
       exit 1
     fi
-    target="${name#cooldis-$RELEASE_VERSION-}"
+    target="${name#verlet-$RELEASE_VERSION-}"
     target="${target%.tar.gz}"
     if [[ "$target" == "$name" || -z "$target" ]]; then
-      echo "archive name does not match cooldis-$RELEASE_VERSION-<target>.tar.gz: $name" >&2
+      echo "archive name does not match verlet-$RELEASE_VERSION-<target>.tar.gz: $name" >&2
       exit 1
     fi
     sha256="$(sha256_from_file "$checksum")"

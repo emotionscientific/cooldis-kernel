@@ -4,20 +4,20 @@
 # 1. Seeds the standard operation set into the operation registry
 #    (scripts/seed-ops.sh) if any of the three packages is missing.
 # 2. Reads each operation's active artifact hash from the registry records.
-# 3. Substitutes the hashes into researcher.cooldis.agent.toml.in.
+# 3. Substitutes the hashes into researcher.verlet.agent.toml.in.
 # 4. Publishes the rendered manifest into the agent registry.
 #
 # Usage: examples/agents/researcher/publish.sh [op-registry-root] [agent-registry-root]
-#        (defaults: .cooldis/operations and .cooldis/agents, repo-relative)
+#        (defaults: .verlet/operations and .verlet/agents, repo-relative)
 #
 # Idempotent: re-running against unchanged registries republishes the same
-# content; `cooldis agent publish` keeps the version history.
+# content; `verlet agent publish` keeps the version history.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-OP_REGISTRY_ROOT="${1:-.cooldis/operations}"
-AGENT_REGISTRY_ROOT="${2:-.cooldis/agents}"
-TEMPLATE="examples/agents/researcher/researcher.cooldis.agent.toml.in"
+OP_REGISTRY_ROOT="${1:-.verlet/operations}"
+AGENT_REGISTRY_ROOT="${2:-.verlet/agents}"
+TEMPLATE="examples/agents/researcher/researcher.verlet.agent.toml.in"
 
 cd "$ROOT"
 
@@ -70,7 +70,7 @@ for placeholder in HTTP_FETCH_SHA256 FILE_READ_SHA256 JSON_QUERY_SHA256; do
   fi
 done
 
-rendered="$(mktemp "${TMPDIR:-/tmp}/researcher.cooldis.agent.XXXXXX")"
+rendered="$(mktemp "${TMPDIR:-/tmp}/researcher.verlet.agent.XXXXXX")"
 trap 'rm -f "$rendered"' EXIT
 
 sed \
@@ -84,6 +84,6 @@ if grep -nE '\{[A-Z0-9_]+_SHA256\}' "$rendered" >&2; then
   exit 1
 fi
 
-cargo run --locked --bin cooldis -- agent publish "$rendered" \
+cargo run --locked --bin verlet -- agent publish "$rendered" \
   --registry-root "$AGENT_REGISTRY_ROOT" \
   --operations-registry-root "$OP_REGISTRY_ROOT"

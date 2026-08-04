@@ -24,7 +24,7 @@ Options:
   -h, --help          Show this help.
 
 Default flow:
-  1. Validate the release tag against crates/cooldis-kernel/Cargo.toml.
+  1. Validate the release tag against crates/verlet-kernel/Cargo.toml.
   2. Build the host-target release archive locally.
   3. Smoke the archive and local installer.
   4. Create an annotated tag at HEAD if it does not already exist.
@@ -190,14 +190,14 @@ fi
 
 if [[ "$SKIP_LOCAL_GATE" != "1" ]]; then
   if [[ "$FULL_GATE" == "1" ]]; then
-    run env COOLDIS_RELEASE_VERSION="${TAG#v}" "$ROOT/scripts/release-v1-candidate.sh"
+    run env VERLET_RELEASE_VERSION="${TAG#v}" "$ROOT/scripts/release-v1-candidate.sh"
   else
     OUT_DIR="$ROOT/dist/release-async/$TAG"
     run rm -rf "$OUT_DIR"
-    run env COOLDIS_RELEASE_VERSION="${TAG#v}" \
+    run env VERLET_RELEASE_VERSION="${TAG#v}" \
       "$ROOT/scripts/package-release-binary.sh" \
       --out-dir "$OUT_DIR"
-    ARCHIVE="$(find "$OUT_DIR" -maxdepth 1 -name 'cooldis-*.tar.gz' | head -n 1)"
+    ARCHIVE="$(find "$OUT_DIR" -maxdepth 1 -name 'verlet-*.tar.gz' | head -n 1)"
     if [[ -z "$ARCHIVE" ]]; then
       die "release archive was not created under $OUT_DIR"
     fi
