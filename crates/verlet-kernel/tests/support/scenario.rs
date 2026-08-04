@@ -1886,24 +1886,13 @@ impl CrashCutHost for ScenarioHarness {
                         coordinates = self.fresh_active_root("provider-cut-retry").await;
                         continue;
                     }
-                    for _ in 0..512 {
-                        if !self
-                            .provider
-                            .pause_next_complete
-                            .load(std::sync::atomic::Ordering::SeqCst)
-                        {
-                            break;
-                        }
-                        tokio::task::yield_now().await;
+                    let complete_started = self.provider.complete_started.notified();
+                    tokio::pin!(complete_started);
+                    tokio::select! {
+                        biased;
+                        _ = &mut complete_started => break,
+                        _ = self.wait_for_idle(&coordinates) => {}
                     }
-                    if !self
-                        .provider
-                        .pause_next_complete
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                    {
-                        break;
-                    }
-                    self.wait_for_idle(&coordinates).await;
                 }
                 assert!(
                     !self
@@ -3261,6 +3250,48 @@ mod tests {
                 .all(|item| item.label != "scenario.crash_cut"),
             "a faulted setup submit must not claim that its registered seam was reached"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_cut_delay_does_not_hide_cut_notification_emo_524() {
+        if !super::super::scenario_unit_harness() {
+            return;
+        }
+        let seed = 0x5240_0001;
+        let scenario = Scenario {
+            seed,
+            ops: vec![ScenarioOp::Restart],
+            plan: FaultPlan {
+                seed,
+                vocabulary_version: FAULT_VOCABULARY_VERSION,
+                intensity: Intensity::Sparse,
+                directives: vec![
+                    FaultDirective {
+                        component: FaultComponent::Provider,
+                        operation: "complete",
+                        nth: 1,
+                        timing: FaultTiming::Before,
+                        action: PlannedAction::Delay(std::time::Duration::from_millis(1)),
+                    },
+                    FaultDirective {
+                        component: FaultComponent::Process,
+                        operation: "queue-input-compile",
+                        nth: 1,
+                        timing: FaultTiming::Before,
+                        action: PlannedAction::Fail,
+                    },
+                ],
+            },
+        };
+
+        let transcript = run_scenario_once(&scenario, &[])
+            .await
+            .expect("a delayed provider cut must still be observed before quiescence");
+        assert!(transcript.items.iter().any(|item| {
+            item.label == "scenario.crash_cut"
+                && item.value.get("seam").and_then(serde_json::Value::as_str)
+                    == Some("PersistedInputRuntimeNotify")
+        }));
     }
 
     #[tokio::test(start_paused = true)]
