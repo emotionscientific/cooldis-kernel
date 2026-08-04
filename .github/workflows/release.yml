@@ -126,4 +126,4 @@ jobs:
             echo "TAP_DISPATCH_TOKEN not configured; skipping tap dispatch"
             exit 0
           fi
-          gh workflow run update-EMO520LEGACYDOTyml --repo emotionscientific/homebrew-tap
+          gh workflow run update-verlet.yml --repo emotionscientific/homebrew-tap
