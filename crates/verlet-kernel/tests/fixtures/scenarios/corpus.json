@@ -13,5 +13,6 @@
   {"seed": 12756048029454721330, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-405: base 40520260711 sweep index 14 exposed nondeterministic context output hashes from an unpinned event timestamp"},
   {"seed": 4861954629787943465, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-405: base 40520260711 sweep index 23 exposed nondeterministic context output hashes from an unpinned event timestamp"},
   {"seed": 2427668802218700699, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-513: fork claim unsettled at quiescence under store append fault"},
-  {"seed": 13970258769908900442, "vocabulary_version": 1, "max_ops": 8, "intensity": "moderate", "pins": "EMO-514: crash-cut setup submit faulted by plan must not panic the runner"}
+  {"seed": 13970258769908900442, "vocabulary_version": 1, "max_ops": 8, "intensity": "moderate", "pins": "EMO-514: crash-cut setup submit faulted by plan must not panic the runner"},
+  {"seed": 2695179588511443457, "vocabulary_version": 1, "max_ops": 8, "intensity": "hostile", "pins": "EMO-524: delayed provider crash cut notification must not be mistaken for a quiescence hang"}
 ]
