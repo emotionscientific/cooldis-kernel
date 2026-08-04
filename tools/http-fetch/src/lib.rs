@@ -1,4 +1,4 @@
-use cooldis_guest_sdk::{
+use verlet_guest_sdk::{
     EventSink, HttpRequest, HttpResponse, Invocation, OperationDefinition, OperationEventKind,
     OperationManifest, OperationMode, OperationValueKind, STATUS_INVALID_ARGUMENT,
     STATUS_NOT_FOUND, STATUS_OK, Sink, Source, StatusCode, http_request, read_source, write_sink,
@@ -10,7 +10,7 @@ const HTTP_FETCH_ID: u32 = 1;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __cooldis_describe_module__(sink: u32) -> i32 {
+pub extern "C" fn __verlet_describe_module__(sink: u32) -> i32 {
     let manifest = OperationManifest::new(vec![OperationDefinition {
         id: HTTP_FETCH_ID,
         name: "http_fetch".to_string(),
@@ -28,7 +28,7 @@ pub extern "C" fn __cooldis_describe_module__(sink: u32) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __cooldis_call_operation__(
+pub extern "C" fn __verlet_call_operation__(
     operation: u32,
     invocation: u32,
     source: u32,

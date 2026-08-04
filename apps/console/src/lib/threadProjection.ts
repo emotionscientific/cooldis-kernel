@@ -1,4 +1,4 @@
-import { getString, type JsonValue } from "./cooldisRpc";
+import { getString, type JsonValue } from "./verletRpc";
 import type { ManifestDef, Thread, ThreadRebindForkResponse } from "./schema";
 
 export function normalizeProvider(provider: string | undefined, model: string | undefined, fallback: string) {

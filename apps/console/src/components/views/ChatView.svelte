@@ -138,7 +138,7 @@
             <span class="ic"><Icon name="MessagesSquare" size={20} /></span>
             {#if app.offlineModelOnly}
               <h3>Echo runtime</h3>
-              <p>This daemon has no chat provider configured — turns echo back. Configure a provider in the daemon's cooldis.toml.</p>
+              <p>This daemon has no chat provider configured — turns echo back. Configure a provider in the daemon's verlet.toml.</p>
             {:else}
               <h3>Start the conversation</h3>
               <p>Send a prompt to open a turn on this thread.</p>

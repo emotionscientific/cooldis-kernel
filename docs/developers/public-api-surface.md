@@ -14,7 +14,7 @@ Public surfaces include:
 - ABI operation contracts;
 - model-visible tools;
 - virtual-bash commands;
-- imported MCP tools once adopted into Cooldis.
+- imported MCP tools once adopted into Verlet.
 
 ## Coverage Rule
 
@@ -24,7 +24,7 @@ Each public surface needs:
 2. a help or man-page projection;
 3. a coverage entry that names current gaps.
 
-The canonical CLI reference is [Cooldis CLI](../cli.md). The internal coverage
+The canonical CLI reference is [Verlet CLI](../cli.md). The internal coverage
 ledger is `docs/public-api-coverage.md`. This public docs site will graduate
 stable entries from that ledger into user-facing reference pages.
 

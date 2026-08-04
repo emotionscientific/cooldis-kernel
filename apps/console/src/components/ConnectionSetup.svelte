@@ -14,7 +14,7 @@
   const runtimeInstalled = $derived(Boolean(app.runtime?.installed));
   const runtimeLabel = $derived(
     app.runtime?.installed
-      ? `${app.runtime.version ?? "installed"} · ${app.runtime.path ?? "cooldis"}`
+      ? `${app.runtime.version ?? "installed"} · ${app.runtime.path ?? "verlet"}`
       : "Not installed",
   );
   const providerAuthTitle = $derived(app.providerAuth?.displayName ?? app.providerAuth?.providerId ?? "Provider");
@@ -80,7 +80,7 @@
   <div class="setup-dialog" role="dialog" aria-label="Connection setup" tabindex="-1">
     <div class="setup-head">
       <div>
-        <h2>Connect Cooldis</h2>
+        <h2>Connect Verlet</h2>
         <p>{app.startPromptOpen ? "Start the saved local runtime or choose another endpoint." : "Choose where this console should connect."}</p>
       </div>
       {#if app.connectionProfile}

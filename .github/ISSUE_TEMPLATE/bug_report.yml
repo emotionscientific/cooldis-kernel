@@ -42,7 +42,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS, Rust version, Cooldis commit or version, relevant feature flags.
+      description: OS, Rust version, Verlet commit or version, relevant feature flags.
     validations:
       required: true
   - type: textarea

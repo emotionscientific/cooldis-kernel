@@ -1,0 +1,18 @@
+[package]
+name = "verlet-wasm-employee-lookup"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+verlet-guest-sdk = { path = "../../../../verlet-guest-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"

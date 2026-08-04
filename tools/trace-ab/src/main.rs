@@ -1,7 +1,3 @@
-use cooldis_trace_ab::{
-    RunOptions, convert_cooldis_export, convert_pi, read_common_jsonl, render_diff, run_ab,
-    write_common_jsonl,
-};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
@@ -9,6 +5,10 @@ use std::fs::{self, File};
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::time::Duration;
+use verlet_trace_ab::{
+    RunOptions, convert_pi, convert_verlet_export, read_common_jsonl, render_diff, run_ab,
+    write_common_jsonl,
+};
 
 fn main() {
     if let Err(err) = run() {
@@ -42,7 +42,7 @@ fn run() -> Result<(), String> {
                     .map_err(|err| format!("failed to create {}: {err}", output.display()))?,
             )
         }
-        "convert-cooldis" => {
+        "convert-verlet" => {
             let input = required_path(&options, "input")?;
             let output = required_path(&options, "output")?;
             let value: Value = serde_json::from_reader(
@@ -50,7 +50,7 @@ fn run() -> Result<(), String> {
                     .map_err(|err| format!("failed to open {}: {err}", input.display()))?,
             )
             .map_err(|err| format!("failed to parse {}: {err}", input.display()))?;
-            let records = convert_cooldis_export(&value)?;
+            let records = convert_verlet_export(&value)?;
             write_common_jsonl(
                 &records,
                 File::create(&output)
@@ -59,15 +59,15 @@ fn run() -> Result<(), String> {
         }
         "diff" => {
             let pi = required_path(&options, "pi")?;
-            let cooldis = required_path(&options, "cooldis")?;
+            let verlet = required_path(&options, "verlet")?;
             let pi = read_common_jsonl(BufReader::new(
                 File::open(&pi).map_err(|err| format!("failed to open {}: {err}", pi.display()))?,
             ))?;
-            let cooldis = read_common_jsonl(BufReader::new(
-                File::open(&cooldis)
-                    .map_err(|err| format!("failed to open {}: {err}", cooldis.display()))?,
+            let verlet = read_common_jsonl(BufReader::new(
+                File::open(&verlet)
+                    .map_err(|err| format!("failed to open {}: {err}", verlet.display()))?,
             ))?;
-            let rendered = render_diff(&pi, &cooldis);
+            let rendered = render_diff(&pi, &verlet);
             if let Some(output) = options.get("output") {
                 fs::write(output, rendered)
                     .map_err(|err| format!("failed to write {output}: {err}"))?;
@@ -101,16 +101,16 @@ fn run() -> Result<(), String> {
                 output_dir: required_path(&options, "output")?,
                 provider: required(&options, "provider")?.to_string(),
                 model: required(&options, "model")?.to_string(),
-                cooldis_agent_ref: required(&options, "cooldis-agent-ref")?.to_string(),
-                cooldis_url: options
-                    .get("cooldis-url")
+                verlet_agent_ref: required(&options, "verlet-agent-ref")?.to_string(),
+                verlet_url: options
+                    .get("verlet-url")
                     .cloned()
                     .unwrap_or_else(|| "ws://127.0.0.1:49200/rpc".to_string()),
-                cooldis_bin: PathBuf::from(
+                verlet_bin: PathBuf::from(
                     options
-                        .get("cooldis-bin")
+                        .get("verlet-bin")
                         .map(String::as_str)
-                        .unwrap_or("cooldis"),
+                        .unwrap_or("verlet"),
                 ),
                 npx_bin: PathBuf::from(options.get("npx-bin").map(String::as_str).unwrap_or("npx")),
                 max_tool_rounds: options
@@ -121,9 +121,9 @@ fn run() -> Result<(), String> {
             };
             let artifacts = run_ab(&run_options)?;
             println!("pi trace: {}", artifacts.pi_trace.display());
-            println!("cooldis trace: {}", artifacts.cooldis_trace.display());
+            println!("verlet trace: {}", artifacts.verlet_trace.display());
             println!("diff: {}", artifacts.diff.display());
-            println!("cooldis thread: {}", artifacts.cooldis_thread_id);
+            println!("verlet thread: {}", artifacts.verlet_thread_id);
             Ok(())
         }
         other => Err(format!("unknown command {other:?}; use --help")),
@@ -165,17 +165,17 @@ fn required_path(options: &BTreeMap<String, String>, name: &str) -> Result<PathB
 
 fn print_help() {
     println!(
-        r#"cooldis-trace-ab
+        r#"verlet-trace-ab
 
 Offline commands:
-  cooldis-trace-ab convert-pi --input SESSION.jsonl --output TRACE.jsonl
-  cooldis-trace-ab convert-cooldis --input EXPORT.json --output TRACE.jsonl
-  cooldis-trace-ab diff --pi PI.jsonl --cooldis COOLDIS.jsonl [--output DIFF.txt]
+  verlet-trace-ab convert-pi --input SESSION.jsonl --output TRACE.jsonl
+  verlet-trace-ab convert-verlet --input EXPORT.json --output TRACE.jsonl
+  verlet-trace-ab diff --pi PI.jsonl --verlet VERLET.jsonl [--output DIFF.txt]
 
 Live A/B:
-  cooldis-trace-ab run --prompt TEXT --workspace DIR --output NEW_DIR \
-    --provider PROVIDER --model MODEL --cooldis-agent-ref AGENT_REF \
-    [--cooldis-url URL] [--cooldis-bin PATH] [--npx-bin PATH] \
+  verlet-trace-ab run --prompt TEXT --workspace DIR --output NEW_DIR \
+    --provider PROVIDER --model MODEL --verlet-agent-ref AGENT_REF \
+    [--verlet-url URL] [--verlet-bin PATH] [--npx-bin PATH] \
     [--max-tool-rounds 64|unlimited] [--timeout-secs 900]
 
 Use --prompt-file FILE instead of --prompt TEXT for long tasks."#

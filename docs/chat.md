@@ -1,14 +1,14 @@
-# Cooldis Chat
+# Verlet Chat
 
-`cooldis chat` is the bundled local terminal console for operating a Cooldis
+`verlet chat` is the bundled local terminal console for operating a Verlet
 app-server session. It is intentionally an RPC client over the app-server
 boundary, not a privileged runtime path. By default it launches a private local
 app-server; with `--attach` it connects to an existing endpoint.
 
 ```text
-cooldis chat [PROMPT] [--config <file>] [--cwd <path>]
-cooldis chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>
-cooldis chat [PROMPT] --provider <provider> [--model <model>] ...
+verlet chat [PROMPT] [--config <file>] [--cwd <path>]
+verlet chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>
+verlet chat [PROMPT] --provider <provider> [--model <model>] ...
 ```
 
 ## Included Surface

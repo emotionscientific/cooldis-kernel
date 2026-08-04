@@ -1,6 +1,6 @@
 # Documentation System
 
-Cooldis keeps public docs in this repository and internal planning notes
+Verlet keeps public docs in this repository and internal planning notes
 outside the public release tree until they are ready to become stable contracts
 or design records.
 

@@ -2,7 +2,7 @@
 
 Status: V1 implemented.
 
-This adapter turns ordinary REST API descriptions into Cooldis operations. The
+This adapter turns ordinary REST API descriptions into Verlet operations. The
 goal is not to make OpenAPI the kernel contract. OpenAPI is an ingress format;
 ABI remains the runtime contract.
 
@@ -36,12 +36,12 @@ flowchart LR
 ```
 
 V1 emits operation artifacts that call `cooldis_0.1.http_request`. Later
-implementations can generate Rust guests that use `cooldis-guest-sdk`, but the
+implementations can generate Rust guests that use `verlet-guest-sdk`, but the
 adapter contract does not depend on Rust.
 
 ## Authoring Package
 
-`cooldis import build|publish --package <path>` accepts `cooldis.import.toml`
+`verlet import build|publish --package <path>` accepts `verlet.import.toml`
 from a directory or an explicit `<name>.import.toml` file. The package names a
 vendored local JSON document and its sha256, optional API-key or bearer secret
 wiring, and the selected operations:

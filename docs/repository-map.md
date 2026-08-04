@@ -1,6 +1,6 @@
 # Repository Map
 
-Cooldis is a standalone Rust runtime workspace. The repository root is for
+Verlet is a standalone Rust runtime workspace. The repository root is for
 workspace-wide contracts, docs, scripts, proto sketches, and shared artifacts.
 Rust packages live under `crates/`.
 
@@ -9,11 +9,11 @@ Rust packages live under `crates/`.
 ├── Cargo.toml                  # workspace manifest
 ├── Cargo.lock                  # workspace lockfile
 ├── crates/
-│   ├── cooldis-kernel/         # package name: cooldis
-│   ├── cooldis-guest-sdk/      # Wasm guest SDK
-│   ├── cooldis-io-core/        # protocol-neutral IO contracts
-│   ├── cooldis-io-pgqrs/       # durable ingress queue spike
-│   └── cooldis-io-telegram/    # Telegram protocol adapter crate
+│   ├── verlet-kernel/         # package name: verlet
+│   ├── verlet-guest-sdk/      # Wasm guest SDK
+│   ├── verlet-io-core/        # protocol-neutral IO contracts
+│   ├── verlet-io-pgqrs/       # durable ingress queue spike
+│   └── verlet-io-telegram/    # Telegram protocol adapter crate
 ├── docs/                       # hostable public docs
 ├── proto/                      # bridge wire-contract sketches
 ├── scripts/                    # repo-native verification and hooks
@@ -22,16 +22,16 @@ Rust packages live under `crates/`.
 
 ## Kernel Package
 
-The main crate remains named `cooldis`, but its package source lives in
-`crates/cooldis-kernel/`.
+The main crate remains named `verlet`, but its package source lives in
+`crates/verlet-kernel/`.
 
 ```text
-crates/cooldis-kernel/
+crates/verlet-kernel/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs                  # public module map and flat exports
 │   ├── bin/                    # thin user-facing binary entrypoints
-│   ├── cli/                    # Cooldis CLI implementation and unit tests
+│   ├── cli/                    # Verlet CLI implementation and unit tests
 │   ├── kernel/                 # lifecycle, history, metadata stores, supervisor, context, compaction
 │   ├── agent/                  # agent tools, hooks, permissions, tool routing
 │   ├── adapters/               # provider, TUI, app-server, MCP, and ACP surfaces
@@ -42,14 +42,14 @@ crates/cooldis-kernel/
 ```
 
 External callers can use either the domain namespaces, such as
-`cooldis::kernel::runtime_host::RuntimeHost`, or the existing flat re-exports,
-such as `cooldis::RuntimeHost`.
+`verlet::kernel::runtime_host::RuntimeHost`, or the existing flat re-exports,
+such as `verlet::RuntimeHost`.
 
 ## Boundary Rule
 
-Cooldis owns runtime primitives: tenants, thread lifecycle, events, history,
+Verlet owns runtime primitives: tenants, thread lifecycle, events, history,
 runtime adapters, ABI contracts, virtual bash, VFS, provider adapters,
-tool publishing, daemon IO, and the Cooldis app-server.
+tool publishing, daemon IO, and the Verlet app-server.
 
 Product logic belongs elsewhere: auth, billing, invites, dashboards, Railway
 deployment, product ledgers, and user-facing policy are outside this runtime

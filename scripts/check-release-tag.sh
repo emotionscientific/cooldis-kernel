@@ -6,13 +6,13 @@ TAG="${1:-${GITHUB_REF_NAME:-}}"
 
 usage() {
   cat <<'USAGE'
-check-release-tag.sh - validate a Cooldis release tag against the kernel version.
+check-release-tag.sh - validate a Verlet release tag against the kernel version.
 
 Usage:
   scripts/check-release-tag.sh v0.1.0
   scripts/check-release-tag.sh v0.1.0-rc.1
 
-The tag must be v<crates/cooldis-kernel version>, optionally followed by a
+The tag must be v<crates/verlet-kernel version>, optionally followed by a
 SemVer prerelease suffix such as -rc.1.
 USAGE
 }
@@ -29,10 +29,10 @@ if [[ -z "$TAG" ]]; then
 fi
 
 VERSION="$(
-  sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/cooldis-kernel/Cargo.toml" | head -n 1
+  sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/verlet-kernel/Cargo.toml" | head -n 1
 )"
 if [[ -z "$VERSION" ]]; then
-  echo "could not read cooldis version from crates/cooldis-kernel/Cargo.toml" >&2
+  echo "could not read verlet version from crates/verlet-kernel/Cargo.toml" >&2
   exit 1
 fi
 

@@ -1,4 +1,4 @@
-# Cooldis
+# Verlet
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/emotionscientific/cooldis-kernel)
 [![Verify](https://github.com/emotionscientific/cooldis-kernel/actions/workflows/verify.yml/badge.svg)](https://github.com/emotionscientific/cooldis-kernel/actions/workflows/verify.yml)
@@ -6,13 +6,13 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-yellow.svg)](README.md)
 
-> Status: Cooldis Kernel is experimental. APIs, behavior, and release
+> Status: Verlet Kernel is experimental. APIs, behavior, and release
 > packaging may change before a stable public release. It is the open-source
-> engine under Cooldis Cloud, the managed agents service.
+> engine under Verlet Cloud, the managed agents service.
 
-## What Is Cooldis
+## What Is Verlet
 
-Cooldis Kernel is a declarative harness that grew into a complete runtime for
+Verlet Kernel is a declarative harness that grew into a complete runtime for
 agent workloads, written in Rust.
 
 You declare an agent before anything runs. A manifest names the model profile,
@@ -39,8 +39,8 @@ stream, and state is a fold over the stream. Durability, replay, resume,
 audit, and observability are properties of the storage model, not features
 added on top.
 
-Cooldis is not an agent, a graph framework, a provider SDK, or a product app.
-Product systems configure and call Cooldis. The kernel owns the runtime
+Verlet is not an agent, a graph framework, a provider SDK, or a product app.
+Product systems configure and call Verlet. The kernel owns the runtime
 contracts those systems depend on.
 
 ## What We Mean By Kernel, Runtime, Harness
@@ -63,7 +63,7 @@ declarations and grants, exportable and diffable like a lockfile.
 
 ## Repository Scope
 
-This repository contains the standalone Cooldis kernel workspace:
+This repository contains the standalone Verlet kernel workspace:
 
 - Runtime primitives: tenant hosts, thread lifecycle, history, events,
   cancellation, resume, and supervisor routing.
@@ -83,7 +83,7 @@ For the detailed repository map, see [docs/repository-map.md](docs/repository-ma
 ## The Console
 
 The web console lives in this repository at [apps/console](apps/console) and
-ships inside the kernel release: `cooldis console`.
+ships inside the kernel release: `verlet console`.
 
 ## Current Status
 
@@ -108,10 +108,10 @@ The V1 work is focused on runtime primitives:
 - daemon-hosted remote child placement: store-backed ingress, separate local
   child processes, and local-first stream propagation fenced by durable scoped
   credentials and leases;
-- release packaging for `cooldis`, `cooldis-acp-agent`, and
-  `cooldis-mcp-server`.
+- release packaging for `verlet`, `verlet-acp-agent`, and
+  `verlet-mcp-server`.
 
-A managed service, Cooldis Cloud, runs on top of this kernel and is concierge
+A managed service, Verlet Cloud, runs on top of this kernel and is concierge
 today. Self-serve cloud placement, a public package registry, marketplace
 flows, and stateful product harnesses are future direction. See
 [docs/roadmap.md](docs/roadmap.md).
@@ -172,12 +172,12 @@ substantially slower.
 The first run downloads the Rust 1.97.1 Bookworm image (the stable toolchain
 used by CI when this lane was added), installs its toolchain, and builds the
 full workspace. Later runs reuse Cargo, Rustup, and architecture-specific
-Cargo-lane state from the `cooldis-verify-linux` Docker volume, but still
+Cargo-lane state from the `verlet-verify-linux` Docker volume, but still
 execute every verification step. Concurrent wrapper runs serialize access to
 that shared volume. Docker Desktop should have at least 12 GB of memory under
 Settings > Resources; the wrapper warns and reduces Cargo to two build jobs
 below that limit. If cache corruption is suspected, reset it with
-`docker volume rm cooldis-verify-linux`; the next run will be cold.
+`docker volume rm verlet-verify-linux`; the next run will be cold.
 
 For the first local path, see [docs/getting-started.md](docs/getting-started.md).
 For release packaging, tag checks, and async release publishing, see
@@ -185,11 +185,11 @@ For release packaging, tag checks, and async release publishing, see
 
 ## Contributing
 
-Cooldis is not accepting public contributions yet. Please read
+Verlet is not accepting public contributions yet. Please read
 [CONTRIBUTING.md](CONTRIBUTING.md) before opening issues, and do not open
 unsolicited pull requests. Report suspected vulnerabilities through the private
 process in [SECURITY.md](SECURITY.md).
 
 ## License
 
-Cooldis is licensed under the [Apache License, Version 2.0](LICENSE).
+Verlet is licensed under the [Apache License, Version 2.0](LICENSE).

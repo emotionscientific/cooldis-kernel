@@ -1,4 +1,4 @@
-> Cooldis is not accepting public contributions yet. Unsolicited pull requests
+> Verlet is not accepting public contributions yet. Unsolicited pull requests
 > may be closed without review until a public contribution process opens.
 
 ## Maintainer Summary

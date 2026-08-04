@@ -1,6 +1,6 @@
 # Runtime Primitives
 
-Cooldis is a standalone Rust runtime workspace. Product logic belongs outside the
+Verlet is a standalone Rust runtime workspace. Product logic belongs outside the
 runtime.
 
 ## Core Primitives
@@ -20,7 +20,7 @@ The runtime owns:
 
 ## Boundary Rule
 
-Product systems configure and call Cooldis. They should not become part of the
+Product systems configure and call Verlet. They should not become part of the
 runtime workspace.
 
 Auth products, billing, dashboards, invite flows, Railway deployment, and

@@ -45,7 +45,7 @@
                 <span class="ic"><Icon name="FolderTree" size={18} /></span>
                 <p>
                   {#if !app.connected}
-                    Connect to a Cooldis app-server to browse its workspace files.
+                    Connect to a Verlet app-server to browse its workspace files.
                   {:else if app.loadErrors.resources}
                     {app.loadErrors.resources}
                   {:else if !app.resourceRoot}

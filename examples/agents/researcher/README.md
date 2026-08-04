@@ -38,11 +38,11 @@ examples/agents/researcher/publish.sh
 The manifest source is a template: operation refs are content-addressed, so
 the script resolves each operation's active artifact hash from the local
 operation registry (seeding the standard ops first if needed), renders
-`researcher.cooldis.agent.toml.in`, and publishes the result:
+`researcher.verlet.agent.toml.in`, and publishes the result:
 
 ```sh
-cooldis agent list --registry-root .cooldis/agents
-cooldis agent show researcher --registry-root .cooldis/agents
+verlet agent list --registry-root .verlet/agents
+verlet agent show researcher --registry-root .verlet/agents
 ```
 
 ## Start a thread from it
@@ -50,7 +50,7 @@ cooldis agent show researcher --registry-root .cooldis/agents
 From the CLI:
 
 ```sh
-cooldis agent run agent://researcher@latest
+verlet agent run agent://researcher@latest
 ```
 
 From the console: the agent appears in Settings → Chat ("Default agent") and

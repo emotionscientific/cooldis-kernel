@@ -1,6 +1,6 @@
 # Local To Managed Deployment
 
-Cooldis is designed for one deployment story: define locally, run locally,
+Verlet is designed for one deployment story: define locally, run locally,
 publish to managed infrastructure when the agent is ready.
 
 The product promise is:

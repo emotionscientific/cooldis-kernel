@@ -7,10 +7,10 @@
 
 {#if app.quitPromptOpen}
   <div class="setup-scrim" role="presentation"></div>
-  <div class="quit-dialog" role="dialog" aria-label="Quit Cooldis Console" tabindex="-1">
+  <div class="quit-dialog" role="dialog" aria-label="Quit Verlet Console" tabindex="-1">
     <div class="setup-head">
       <div>
-        <h2>Quit Cooldis?</h2>
+        <h2>Quit Verlet?</h2>
         <p>The local daemon was started by this app.</p>
       </div>
       <button class="icon-btn" title="Cancel" aria-label="Cancel" onclick={() => (app.quitPromptOpen = false)}>

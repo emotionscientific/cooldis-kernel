@@ -292,14 +292,14 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
     Ok(records)
 }
 
-pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String> {
+pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String> {
     if value.get("schema").and_then(Value::as_str) != Some("cooldis.debug.thread_export/1") {
-        return Err("cooldis input is not a cooldis.debug.thread_export/1 bundle".to_string());
+        return Err("verlet input is not a cooldis.debug.thread_export/1 bundle".to_string());
     }
     let mut events = value
         .get("streams")
         .and_then(Value::as_array)
-        .ok_or_else(|| "cooldis export has no streams array".to_string())?
+        .ok_or_else(|| "verlet export has no streams array".to_string())?
         .iter()
         .flat_map(|stream| {
             stream
@@ -312,11 +312,11 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
         .collect::<Vec<_>>();
     events.sort_by_key(event_sort_key);
 
-    let turn_views = cooldis_turn_views(value);
+    let turn_views = verlet_turn_views(value);
     let mut records = Vec::new();
     push_record(
         &mut records,
-        record("cooldis", RecordKind::SourceMetadata, 0, 0).details(cooldis_source_details(value)),
+        record("verlet", RecordKind::SourceMetadata, 0, 0).details(verlet_source_details(value)),
     );
     let mut turn_ordinals = BTreeMap::<String, u32>::new();
     let mut round_by_turn = BTreeMap::<String, u32>::new();
@@ -337,7 +337,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
         let turn = ordinal_for_turn(&mut turn_ordinals, &event_turn_id);
         let round = round_by_turn.entry(event_turn_id.clone()).or_insert(0);
         let timestamp_ms = event_timestamp(&event);
-        let details = cooldis_event_details(&event);
+        let details = verlet_event_details(&event);
 
         match event_kind {
             "turn.submitted" => {
@@ -346,7 +346,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
                 }
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::TurnBoundary, turn, *round)
+                    record("verlet", RecordKind::TurnBoundary, turn, *round)
                         .timestamp(timestamp_ms)
                         .content(
                             payload
@@ -364,7 +364,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
                 }
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::TurnBoundary, turn, *round)
+                    record("verlet", RecordKind::TurnBoundary, turn, *round)
                         .timestamp(timestamp_ms)
                         .boundary("context_compile")
                         .details(details),
@@ -373,7 +373,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
             "context.summary.completed" => {
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::Compaction, turn, *round)
+                    record("verlet", RecordKind::Compaction, turn, *round)
                         .timestamp(timestamp_ms)
                         .content(
                             payload
@@ -391,7 +391,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
             {
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::Compaction, turn, *round)
+                    record("verlet", RecordKind::Compaction, turn, *round)
                         .timestamp(timestamp_ms)
                         .content(
                             payload
@@ -403,18 +403,18 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
                 );
             }
             "session.entry.appended"
-                if is_cooldis_assistant_entry(payload, &event_turn_id, &turn_views) =>
+                if is_verlet_assistant_entry(payload, &event_turn_id, &turn_views) =>
             {
                 *round += 1;
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::AssistantMessage, turn, *round)
+                    record("verlet", RecordKind::AssistantMessage, turn, *round)
                         .timestamp(timestamp_ms)
                         .latency(elapsed_ms(
                             context_compile_by_turn.remove(&event_turn_id),
                             timestamp_ms,
                         ))
-                        .tokens(cooldis_token_usage(payload.get("usage")))
+                        .tokens(verlet_token_usage(payload.get("usage")))
                         .details(details),
                 );
             }
@@ -438,7 +438,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
                     .to_string();
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::ToolCall, turn, *round)
+                    record("verlet", RecordKind::ToolCall, turn, *round)
                         .timestamp(timestamp_ms)
                         .tool(ToolRecord {
                             call_id,
@@ -476,7 +476,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
                     .or_else(|| item.and_then(|item| item.success));
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::ToolResult, turn, *round)
+                    record("verlet", RecordKind::ToolResult, turn, *round)
                         .timestamp(timestamp_ms)
                         .latency(
                             payload
@@ -497,7 +497,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
             "turn.completed" => {
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::TurnBoundary, turn, *round)
+                    record("verlet", RecordKind::TurnBoundary, turn, *round)
                         .timestamp(timestamp_ms)
                         .latency(elapsed_ms(
                             start_by_turn.get(&event_turn_id).copied(),
@@ -510,7 +510,7 @@ pub fn convert_cooldis_export(value: &Value) -> Result<Vec<CommonRecord>, String
             _ => {
                 push_record(
                     &mut records,
-                    record("cooldis", RecordKind::Unmapped, turn, *round)
+                    record("verlet", RecordKind::Unmapped, turn, *round)
                         .timestamp(timestamp_ms)
                         .boundary(event_kind)
                         .details(details),
@@ -624,31 +624,31 @@ pub fn summarize(records: &[CommonRecord]) -> TraceStats {
     stats
 }
 
-pub fn render_diff(pi: &[CommonRecord], cooldis: &[CommonRecord]) -> String {
+pub fn render_diff(pi: &[CommonRecord], verlet: &[CommonRecord]) -> String {
     let pi_stats = summarize(pi);
-    let cooldis_stats = summarize(cooldis);
+    let verlet_stats = summarize(verlet);
     let mut output = String::new();
     output.push_str("TRACE A/B\n");
     output.push_str(&format_stats("PI", &pi_stats));
     output.push('\n');
-    output.push_str(&format_stats("COOLDIS", &cooldis_stats));
+    output.push_str(&format_stats("VERLET", &verlet_stats));
     output.push_str("\n\n");
 
     const WIDTH: usize = 72;
-    output.push_str(&format!("{:<WIDTH$} | {:<WIDTH$}\n", "PI", "COOLDIS"));
+    output.push_str(&format!("{:<WIDTH$} | {:<WIDTH$}\n", "PI", "VERLET"));
     output.push_str(&format!("{:-<WIDTH$}-+-{:-<WIDTH$}\n", "", ""));
     let pi_grouped = group_for_diff(pi);
-    let cooldis_grouped = group_for_diff(cooldis);
+    let verlet_grouped = group_for_diff(verlet);
     let keys = pi_grouped
         .keys()
-        .chain(cooldis_grouped.keys())
+        .chain(verlet_grouped.keys())
         .copied()
         .collect::<BTreeSet<_>>();
     for (turn, round) in keys {
         let label = format!("T{turn} R{round}");
         output.push_str(&format!("{label}\n"));
         let left = pi_grouped.get(&(turn, round)).cloned().unwrap_or_default();
-        let right = cooldis_grouped
+        let right = verlet_grouped
             .get(&(turn, round))
             .cloned()
             .unwrap_or_default();
@@ -897,7 +897,7 @@ fn pi_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
     })
 }
 
-fn cooldis_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
+fn verlet_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
     let value = value?;
     if !value.is_object() {
         return None;
@@ -918,7 +918,7 @@ fn cooldis_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
     })
 }
 
-fn cooldis_source_details(bundle: &Value) -> BTreeMap<String, Value> {
+fn verlet_source_details(bundle: &Value) -> BTreeMap<String, Value> {
     let streams = bundle
         .get("streams")
         .and_then(Value::as_array)
@@ -933,7 +933,7 @@ fn cooldis_source_details(bundle: &Value) -> BTreeMap<String, Value> {
         })
         .collect::<Vec<_>>();
     BTreeMap::from([(
-        "cooldis".to_string(),
+        "verlet".to_string(),
         json!({
             "thread_id": bundle.get("threadId"),
             "generated_at_ms": bundle.get("generatedAtMs"),
@@ -947,8 +947,8 @@ fn cooldis_source_details(bundle: &Value) -> BTreeMap<String, Value> {
     )])
 }
 
-fn cooldis_event_details(event: &Value) -> BTreeMap<String, Value> {
-    BTreeMap::from([("cooldis".to_string(), json!({"event": event}))])
+fn verlet_event_details(event: &Value) -> BTreeMap<String, Value> {
+    BTreeMap::from([("verlet".to_string(), json!({"event": event}))])
 }
 
 #[derive(Default)]
@@ -967,7 +967,7 @@ struct ToolView {
     content: Option<String>,
 }
 
-fn cooldis_turn_views(bundle: &Value) -> BTreeMap<String, TurnView> {
+fn verlet_turn_views(bundle: &Value) -> BTreeMap<String, TurnView> {
     let mut views = BTreeMap::new();
     let Some(turns) = bundle.pointer("/thread/turns").and_then(Value::as_array) else {
         return views;
@@ -1020,7 +1020,7 @@ fn cooldis_turn_views(bundle: &Value) -> BTreeMap<String, TurnView> {
     views
 }
 
-fn is_cooldis_assistant_entry(
+fn is_verlet_assistant_entry(
     payload: &Value,
     turn_id: &str,
     turn_views: &BTreeMap<String, TurnView>,

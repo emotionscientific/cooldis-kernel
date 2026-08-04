@@ -1,4 +1,4 @@
-import type { TranscriptItem } from "./cooldisRpc";
+import type { TranscriptItem } from "./verletRpc";
 import type { ChatMessage } from "./schema";
 
 export function mergeTranscriptMessages(items: TranscriptItem[], streamed: ChatMessage[]): ChatMessage[] {

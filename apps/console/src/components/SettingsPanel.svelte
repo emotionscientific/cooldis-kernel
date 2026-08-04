@@ -86,7 +86,7 @@
           <dt>Policy</dt><dd>{app.startPolicy} / {app.quitPolicy}</dd>
           {#if app.native && app.runtime}
             <dt>Runtime</dt>
-            <dd class="mono">{app.runtime.installed ? (app.runtime.path ?? "cooldis") : "not installed"}</dd>
+            <dd class="mono">{app.runtime.installed ? (app.runtime.path ?? "verlet") : "not installed"}</dd>
           {/if}
           {#if app.providerAuth}
             <dt>Provider auth</dt>
@@ -248,7 +248,7 @@
         <p class="hint">Shortcuts are also available from the application menu when running as a desktop app.</p>
 
       {:else}
-        <h3>Cooldis Console</h3>
+        <h3>Verlet Console</h3>
         <p class="hint">
           Operator control plane for local and remote agents.
           {app.native ? "Running as a native desktop app." : "Running in the browser."}

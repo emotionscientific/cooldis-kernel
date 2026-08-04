@@ -1,4 +1,4 @@
-use cooldis_guest_sdk::{
+use verlet_guest_sdk::{
     OperationDefinition, OperationEventKind, OperationManifest, OperationMode, OperationValueKind,
     STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_OK, Sink, Source, StatusCode, close_file,
     open_file_read, read_file, read_source, write_sink,
@@ -9,7 +9,7 @@ const FILE_READ_ID: u32 = 1;
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __cooldis_describe_module__(sink: u32) -> i32 {
+pub extern "C" fn __verlet_describe_module__(sink: u32) -> i32 {
     let manifest = OperationManifest::new(vec![OperationDefinition {
         id: FILE_READ_ID,
         name: "file_read".to_string(),
@@ -27,7 +27,7 @@ pub extern "C" fn __cooldis_describe_module__(sink: u32) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __cooldis_call_operation__(
+pub extern "C" fn __verlet_call_operation__(
     operation: u32,
     _invocation: u32,
     source: u32,
@@ -100,7 +100,7 @@ fn file_read(source: Source, output: Sink) -> Result<(), StatusCode> {
     )
 }
 
-fn read_file_to_vec(handle: cooldis_guest_sdk::FileHandle) -> Result<Vec<u8>, StatusCode> {
+fn read_file_to_vec(handle: verlet_guest_sdk::FileHandle) -> Result<Vec<u8>, StatusCode> {
     let mut output = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {

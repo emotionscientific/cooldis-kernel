@@ -1,4 +1,4 @@
-# Keep local build artifacts out of the Cooldis checkout. This sibling cache can
-# be deleted at any time with `rm -rf ../.cargo-target/cooldis`.
+# Keep local build artifacts out of the Verlet checkout. This sibling cache can
+# be deleted at any time with `rm -rf ../.cargo-target/verlet`.
 [build]
-target-dir = "../.cargo-target/cooldis"
+target-dir = "../.cargo-target/verlet"

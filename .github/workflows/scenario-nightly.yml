@@ -41,12 +41,12 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
           CARGO_PROFILE_TEST_DEBUG: line-tables-only
           RUST_MIN_STACK: "16777216"
-          COOLDIS_SCENARIO_SWEEP_BASE_SEED: ${{ github.run_id }}
-          COOLDIS_SCENARIO_SWEEP_COUNT: "24"
-          COOLDIS_SCENARIO_SWEEP_MAX_OPS: "8"
-          COOLDIS_SCENARIO_SWEEP_COMMIT_SHA: ${{ github.sha }}
-          COOLDIS_SCENARIO_SWEEP_RECEIPT_PATH: ${{ runner.temp }}/scenario-nightly-receipt.json
-        run: cargo test -p cooldis --lib scenario_nightly_sweep -- --ignored --nocapture
+          VERLET_SCENARIO_SWEEP_BASE_SEED: ${{ github.run_id }}
+          VERLET_SCENARIO_SWEEP_COUNT: "24"
+          VERLET_SCENARIO_SWEEP_MAX_OPS: "8"
+          VERLET_SCENARIO_SWEEP_COMMIT_SHA: ${{ github.sha }}
+          VERLET_SCENARIO_SWEEP_RECEIPT_PATH: ${{ runner.temp }}/scenario-nightly-receipt.json
+        run: cargo test -p verlet --lib scenario_nightly_sweep -- --ignored --nocapture
       - name: Witness scenario receipt
         if: always()
         env:
@@ -61,7 +61,7 @@ jobs:
               --argjson base_seed "$BASE_SEED" \
               --arg commit_sha "$COMMIT_SHA" \
               --arg outcome "$SWEEP_OUTCOME" \
-              --argjson corpus_size "$(jq length crates/cooldis-kernel/tests/fixtures/scenarios/corpus.json)" \
+              --argjson corpus_size "$(jq length crates/verlet-kernel/tests/fixtures/scenarios/corpus.json)" \
               '{base_seed: $base_seed, count: 24, max_ops: 8, per_intensity_tallies: {sparse: 0, moderate: 0, hostile: 0}, failures: [{seed: null, kind: "sweep-process-failure", detail: $outcome}], corpus_size: $corpus_size, commit_sha: $commit_sha, status: "failed"}' \
               > "$RECEIPT"
           fi

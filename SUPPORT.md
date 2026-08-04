@@ -1,6 +1,6 @@
 # Support
 
-Cooldis is experimental and does not have a public support commitment yet. If
+Verlet is experimental and does not have a public support commitment yet. If
 public issues are enabled, use them for concise bug reports with a minimal
 reproduction, expected behavior, actual behavior, and relevant logs.
 

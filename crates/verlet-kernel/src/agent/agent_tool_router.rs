@@ -1,0 +1,717 @@
+use crate::{
+    AgentManifestGrantExpiry, CanonicalMessage, OPERATION_METADATA_RUNTIME_KIND,
+    OperationProjection, OperationRegistry, ToolDefinition, TurnContext, TurnContextSnapshot,
+    VerletError, VerletResult, WasmOperationValueKind,
+};
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use verlet_process::{VerletProcessBackend, VerletProcessId};
+
+#[derive(Clone)]
+pub struct AgentToolRouter {
+    operation_registry: Arc<OperationRegistry>,
+    kernel_tool_providers: Vec<Arc<dyn AgentKernelToolProvider>>,
+    capability_grants: BTreeSet<String>,
+    capability_grant_expiries: Vec<AgentManifestGrantExpiry>,
+    tool_aliases: BTreeMap<String, OperationToolAlias>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutedAgentToolCall {
+    pub call_id: String,
+    pub tool_name: String,
+    pub registered_name: String,
+    pub operation_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentKernelToolCall {
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: Value,
+    pub turn_context: Option<TurnContextSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentKernelPendingToolCall {
+    pub process_id: VerletProcessId,
+    pub backend: VerletProcessBackend,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AgentKernelToolOutcome {
+    Completed(Option<CanonicalMessage>),
+    Pending(AgentKernelPendingToolCall),
+}
+
+/// Grace applied when the manifest binds no `runtime.cancellation_grace_ms`.
+pub const DEFAULT_TOOL_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
+
+/// Cancellation contract handed to every tool invocation.
+///
+/// `token` is a child of the turn cancellation token (the same family the
+/// provider request race uses); an interrupt fires it. `grace` is the bound
+/// manifest cancellation grace: it starts counting when the token fires, not
+/// when the call starts. An invocation that has not settled within grace of
+/// the token firing is abandoned via the spawn-shield discipline — the
+/// detached invocation settles its own terminal record.
+#[derive(Clone, Debug)]
+pub struct ToolInvocationCancellation {
+    token: CancellationToken,
+    grace: Duration,
+}
+
+impl ToolInvocationCancellation {
+    pub fn new(token: CancellationToken, grace: Duration) -> Self {
+        Self { token, grace }
+    }
+
+    /// A contract whose token never fires, for paths that must run a call to
+    /// settlement regardless of turn state (e.g. resumed witnessed calls).
+    pub fn never() -> Self {
+        Self::new(CancellationToken::new(), DEFAULT_TOOL_CANCELLATION_GRACE)
+    }
+
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    pub fn grace(&self) -> Duration {
+        self.grace
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// Resolves with the witnessed outcome the executor must record if the
+    /// invocation itself never observes the token: waits for the token, then
+    /// for grace. Callers select this against the running invocation.
+    pub async fn cancelled_then_grace_elapsed(&self) {
+        self.token.cancelled().await;
+        tokio::time::sleep(self.grace).await;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperationToolAlias {
+    pub tool_name: String,
+    pub registered_name: String,
+    pub operation_name: String,
+    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
+}
+
+#[async_trait]
+pub trait AgentKernelToolProvider: Send + Sync + 'static {
+    async fn tool_definitions(&self) -> Vec<ToolDefinition>;
+
+    async fn invoke_tool_call(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> VerletResult<Option<CanonicalMessage>>;
+
+    async fn invoke_tool_call_at(
+        &self,
+        call: AgentKernelToolCall,
+        _now_ms: i64,
+    ) -> VerletResult<Option<CanonicalMessage>> {
+        self.invoke_tool_call(call).await
+    }
+
+    async fn invoke_tool_call_outcome(
+        &self,
+        call: AgentKernelToolCall,
+    ) -> VerletResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call(call)
+            .await
+            .map(AgentKernelToolOutcome::Completed)
+    }
+
+    async fn invoke_tool_call_outcome_at(
+        &self,
+        call: AgentKernelToolCall,
+        now_ms: i64,
+    ) -> VerletResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call_at(call, now_ms)
+            .await
+            .map(AgentKernelToolOutcome::Completed)
+    }
+
+    /// Cancellation-aware invocation. The default delegates to
+    /// `invoke_tool_call_outcome` and never observes the token: the executor
+    /// enforces grace and abandonment outside this call, so a provider that
+    /// cannot stop early stays correct — it is merely abandoned at grace
+    /// instead of acknowledging. Providers that can stop work early (process-
+    /// backed tools) override this, kill whatever they spawned when the token
+    /// fires, and return promptly with the partial result.
+    async fn invoke_tool_call_cancellable(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+    ) -> VerletResult<AgentKernelToolOutcome> {
+        let _ = cancellation;
+        self.invoke_tool_call_outcome(call).await
+    }
+
+    async fn invoke_tool_call_cancellable_at(
+        &self,
+        call: AgentKernelToolCall,
+        cancellation: ToolInvocationCancellation,
+        _now_ms: i64,
+    ) -> VerletResult<AgentKernelToolOutcome> {
+        self.invoke_tool_call_cancellable(call, cancellation).await
+    }
+}
+
+impl AgentToolRouter {
+    pub fn new(operation_registry: Arc<OperationRegistry>) -> Self {
+        Self {
+            operation_registry,
+            kernel_tool_providers: Vec::new(),
+            capability_grants: BTreeSet::new(),
+            capability_grant_expiries: Vec::new(),
+            tool_aliases: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_kernel_tool_provider(
+        mut self,
+        kernel_tool_provider: Arc<dyn AgentKernelToolProvider>,
+    ) -> Self {
+        self.kernel_tool_providers.push(kernel_tool_provider);
+        self
+    }
+
+    pub fn with_capability_grant(mut self, grant: impl Into<String>) -> Self {
+        self.capability_grants.insert(grant.into());
+        self
+    }
+
+    pub fn with_capability_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
+        self.capability_grants.extend(grants);
+        self
+    }
+
+    pub fn with_capability_grant_expiry(mut self, expiry: AgentManifestGrantExpiry) -> Self {
+        self.capability_grant_expiries.push(expiry);
+        self
+    }
+
+    pub fn with_capability_grant_expiries(
+        mut self,
+        expiries: impl IntoIterator<Item = AgentManifestGrantExpiry>,
+    ) -> Self {
+        self.capability_grant_expiries.extend(expiries);
+        self
+    }
+
+    pub fn with_tool_aliases(
+        mut self,
+        aliases: impl IntoIterator<Item = OperationToolAlias>,
+    ) -> Self {
+        for alias in aliases {
+            self.tool_aliases.insert(alias.tool_name.clone(), alias);
+        }
+        self
+    }
+
+    pub fn operation_registry(&self) -> Arc<OperationRegistry> {
+        Arc::clone(&self.operation_registry)
+    }
+
+    pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = Vec::new();
+        let mut names = BTreeSet::new();
+        for alias in self.tool_aliases.values() {
+            if names.insert(alias.tool_name.clone())
+                && let Some(projection) = self
+                    .projection_for_registered_operation(
+                        &alias.registered_name,
+                        &alias.operation_name,
+                    )
+                    .await
+            {
+                definitions.push(ToolDefinition::new(
+                    alias.tool_name.clone(),
+                    format!(
+                        "Run Verlet operation {}/{}.",
+                        projection.registered_name, projection.operation_name
+                    ),
+                    input_schema_for_value_kind(&projection.input),
+                ));
+            }
+        }
+        for record in self.operation_registry.list().await {
+            if is_kernel_record(&record) {
+                continue;
+            }
+            for projection in record.projections().operations {
+                if names.insert(projection.llm_tool.name.clone()) {
+                    definitions.push(ToolDefinition::new(
+                        projection.llm_tool.name,
+                        format!(
+                            "Run Verlet operation {}/{}.",
+                            projection.registered_name, projection.operation_name
+                        ),
+                        input_schema_for_value_kind(&projection.input),
+                    ));
+                }
+            }
+        }
+        for kernel_tool_provider in &self.kernel_tool_providers {
+            for tool in kernel_tool_provider.tool_definitions().await {
+                if names.insert(tool.name.clone()) {
+                    definitions.push(tool);
+                }
+            }
+        }
+        definitions
+    }
+
+    pub async fn invoke_tool_call(
+        &self,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+    ) -> CanonicalMessage {
+        self.invoke_tool_call_at(
+            call_id,
+            tool_name,
+            arguments,
+            crate::kernel::history::now_ms(),
+        )
+        .await
+    }
+
+    pub async fn invoke_tool_call_at(
+        &self,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+        now_ms: i64,
+    ) -> CanonicalMessage {
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        match self
+            .invoke_tool_call_message(None, &call_id, &tool_name, arguments, now_ms)
+            .await
+        {
+            Ok(message) => message,
+            Err(err) => CanonicalMessage::tool_result(call_id, tool_name, err.to_string(), true),
+        }
+    }
+
+    pub async fn invoke_tool_call_for_turn(
+        &self,
+        turn_context: &TurnContext,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+    ) -> CanonicalMessage {
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        match self
+            .invoke_tool_call_message(
+                Some(turn_context),
+                &call_id,
+                &tool_name,
+                arguments,
+                crate::kernel::history::now_ms(),
+            )
+            .await
+        {
+            Ok(message) => message,
+            Err(err) => CanonicalMessage::tool_result(call_id, tool_name, err.to_string(), true),
+        }
+    }
+
+    pub async fn invoke_tool_call_cancellable_for_turn(
+        &self,
+        turn_context: &TurnContext,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+        cancellation: ToolInvocationCancellation,
+    ) -> CanonicalMessage {
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        match self
+            .invoke_tool_call_outcome_message(
+                Some(turn_context),
+                &call_id,
+                &tool_name,
+                arguments,
+                Some(cancellation),
+                crate::kernel::history::now_ms(),
+            )
+            .await
+        {
+            Ok(AgentKernelToolOutcome::Completed(Some(message))) => message,
+            Ok(AgentKernelToolOutcome::Completed(None)) => CanonicalMessage::tool_result(
+                call_id,
+                tool_name.clone(),
+                format!("unknown tool {tool_name:?}"),
+                true,
+            ),
+            Ok(AgentKernelToolOutcome::Pending(pending)) => CanonicalMessage::tool_result(
+                call_id,
+                tool_name.clone(),
+                format!(
+                    "tool {tool_name:?} returned pending process {} from {:?}, but this caller expects a completed tool result",
+                    pending.process_id, pending.backend
+                ),
+                true,
+            ),
+            Err(err) => CanonicalMessage::tool_result(call_id, tool_name, err.to_string(), true),
+        }
+    }
+
+    pub async fn invoke_tool_call_outcome(
+        &self,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+    ) -> VerletResult<AgentKernelToolOutcome> {
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        self.invoke_tool_call_outcome_message(
+            None,
+            &call_id,
+            &tool_name,
+            arguments,
+            None,
+            crate::kernel::history::now_ms(),
+        )
+        .await
+    }
+
+    pub async fn invoke_tool_call_outcome_for_turn(
+        &self,
+        turn_context: &TurnContext,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+    ) -> VerletResult<AgentKernelToolOutcome> {
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        self.invoke_tool_call_outcome_message(
+            Some(turn_context),
+            &call_id,
+            &tool_name,
+            arguments,
+            None,
+            crate::kernel::history::now_ms(),
+        )
+        .await
+    }
+
+    pub async fn route_tool_call(
+        &self,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+    ) -> VerletResult<RoutedAgentToolCall> {
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        let projection = self
+            .projection_for_tool_name(&tool_name)
+            .await?
+            .ok_or_else(|| VerletError::RuntimeExecution(format!("unknown tool {tool_name:?}")))?;
+        Ok(RoutedAgentToolCall {
+            call_id,
+            tool_name,
+            registered_name: projection.registered_name,
+            operation_name: projection.operation_name,
+        })
+    }
+
+    async fn invoke_tool_call_message(
+        &self,
+        turn_context: Option<&TurnContext>,
+        call_id: &str,
+        tool_name: &str,
+        arguments: Value,
+        now_ms: i64,
+    ) -> VerletResult<CanonicalMessage> {
+        match self
+            .invoke_tool_call_outcome_message(
+                turn_context,
+                call_id,
+                tool_name,
+                arguments,
+                None,
+                now_ms,
+            )
+            .await?
+        {
+            AgentKernelToolOutcome::Completed(Some(message)) => Ok(message),
+            AgentKernelToolOutcome::Completed(None) => Err(VerletError::RuntimeExecution(format!(
+                "unknown tool {tool_name:?}"
+            ))),
+            AgentKernelToolOutcome::Pending(pending) => {
+                Err(VerletError::RuntimeExecution(format!(
+                    "tool {tool_name:?} returned pending process {} from {:?}, but this caller expects a completed tool result",
+                    pending.process_id, pending.backend
+                )))
+            }
+        }
+    }
+
+    async fn invoke_tool_call_outcome_message(
+        &self,
+        turn_context: Option<&TurnContext>,
+        call_id: &str,
+        tool_name: &str,
+        arguments: Value,
+        cancellation: Option<ToolInvocationCancellation>,
+        now_ms: i64,
+    ) -> VerletResult<AgentKernelToolOutcome> {
+        if let Some(projection) = self.projection_for_tool_name(tool_name).await? {
+            if projection.abi.has_hidden_durable_sink() {
+                return Err(VerletError::RuntimeExecution(format!(
+                    "tool {tool_name:?} has a hidden durable sink"
+                )));
+            }
+            self.validate_capability_grants(tool_name, &projection)?;
+            crate::agent::manifest_bind::ensure_grant_expiries_live(
+                self.tool_aliases
+                    .get(tool_name)
+                    .map(|alias| alias.grant_expiries.as_slice())
+                    .unwrap_or(&self.capability_grant_expiries),
+                now_ms,
+            )?;
+            let input = encode_tool_input(call_id, tool_name, &projection, arguments)?;
+            let process = self
+                .operation_registry
+                .invoke_process_with_kernel_metadata(
+                    &projection.registered_name,
+                    &projection.operation_name,
+                    input,
+                    BTreeMap::from([
+                        (
+                            "cooldis.tool_call_id".to_string(),
+                            Value::String(call_id.to_string()),
+                        ),
+                        (
+                            "cooldis.tool_name".to_string(),
+                            Value::String(tool_name.to_string()),
+                        ),
+                    ]),
+                )
+                .await?;
+            let output = process.output();
+            return Ok(AgentKernelToolOutcome::Completed(Some(
+                CanonicalMessage::tool_result(
+                    call_id,
+                    tool_name,
+                    decode_tool_output(&projection.output, &output.stdout),
+                    false,
+                ),
+            )));
+        }
+
+        if let Some(kernel_tool_provider) = self.kernel_tool_provider_for_name(tool_name).await {
+            let call = AgentKernelToolCall {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments,
+                turn_context: turn_context.map(TurnContext::snapshot),
+            };
+            let outcome = match cancellation {
+                Some(cancellation) => {
+                    kernel_tool_provider
+                        .invoke_tool_call_cancellable_at(call, cancellation, now_ms)
+                        .await?
+                }
+                None => {
+                    kernel_tool_provider
+                        .invoke_tool_call_outcome_at(call, now_ms)
+                        .await?
+                }
+            };
+            match outcome {
+                AgentKernelToolOutcome::Completed(Some(_)) | AgentKernelToolOutcome::Pending(_) => {
+                    return Ok(outcome);
+                }
+                AgentKernelToolOutcome::Completed(None) => {}
+            }
+        }
+
+        Err(VerletError::RuntimeExecution(format!(
+            "unknown tool {tool_name:?}"
+        )))
+    }
+
+    fn validate_capability_grants(
+        &self,
+        tool_name: &str,
+        projection: &OperationProjection,
+    ) -> VerletResult<()> {
+        let missing = projection
+            .abi
+            .required_capabilities
+            .iter()
+            .filter(|capability| !self.capability_grants.contains(capability.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(VerletError::RuntimeExecution(format!(
+                "tool {tool_name:?} missing capability grants: {}",
+                missing.join(", ")
+            )))
+        }
+    }
+
+    async fn kernel_tool_provider_for_name(
+        &self,
+        tool_name: &str,
+    ) -> Option<Arc<dyn AgentKernelToolProvider>> {
+        for kernel_tool_provider in &self.kernel_tool_providers {
+            if kernel_tool_provider
+                .tool_definitions()
+                .await
+                .into_iter()
+                .any(|tool| tool.name == tool_name)
+            {
+                return Some(Arc::clone(kernel_tool_provider));
+            }
+        }
+        None
+    }
+
+    async fn projection_for_tool_name(
+        &self,
+        tool_name: &str,
+    ) -> VerletResult<Option<OperationProjection>> {
+        if let Some(alias) = self.tool_aliases.get(tool_name) {
+            return Ok(self
+                .projection_for_registered_operation(&alias.registered_name, &alias.operation_name)
+                .await);
+        }
+        for record in self.operation_registry.list().await {
+            if is_kernel_record(&record) {
+                continue;
+            }
+            for projection in record.projections().operations {
+                if projection.llm_tool.name == tool_name {
+                    return Ok(Some(projection));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn projection_for_registered_operation(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+    ) -> Option<OperationProjection> {
+        for record in self.operation_registry.list().await {
+            if record.name != registered_name {
+                continue;
+            }
+            for projection in record.projections().operations {
+                if projection.operation_name == operation_name {
+                    return Some(projection);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn is_kernel_record(record: &crate::RegisteredOperation) -> bool {
+    record
+        .metadata
+        .get(OPERATION_METADATA_RUNTIME_KIND)
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == crate::KERNEL_RUNTIME_KIND)
+}
+
+fn input_schema_for_value_kind(kind: &WasmOperationValueKind) -> Value {
+    match kind {
+        WasmOperationValueKind::Json => json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+        WasmOperationValueKind::Text => text_input_schema("UTF-8 text input for the operation."),
+        WasmOperationValueKind::Bytes => {
+            text_input_schema("UTF-8 text that Verlet passes as operation input bytes.")
+        }
+    }
+}
+
+fn text_input_schema(description: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": description
+            }
+        },
+        "required": ["input"],
+        "additionalProperties": false
+    })
+}
+
+fn encode_tool_input(
+    call_id: &str,
+    tool_name: &str,
+    projection: &OperationProjection,
+    arguments: Value,
+) -> VerletResult<Vec<u8>> {
+    match projection.input {
+        WasmOperationValueKind::Json => {
+            if !arguments.is_object() {
+                return Err(VerletError::RuntimeExecution(format!(
+                    "tool {tool_name:?} call {call_id} requires object arguments"
+                )));
+            }
+            serde_json::to_vec(&arguments).map_err(|err| {
+                VerletError::RuntimeExecution(format!(
+                    "tool {tool_name:?} call {call_id} has invalid JSON input: {err}"
+                ))
+            })
+        }
+        WasmOperationValueKind::Text | WasmOperationValueKind::Bytes => {
+            let input = match arguments {
+                Value::String(value) => value,
+                Value::Object(mut object) => object
+                    .remove("input")
+                    .and_then(|value| value.as_str().map(ToString::to_string))
+                    .ok_or_else(|| {
+                        VerletError::RuntimeExecution(format!(
+                            "tool {tool_name:?} call {call_id} requires a string input field"
+                        ))
+                    })?,
+                _ => {
+                    return Err(VerletError::RuntimeExecution(format!(
+                        "tool {tool_name:?} call {call_id} requires object arguments"
+                    )));
+                }
+            };
+            Ok(input.into_bytes())
+        }
+    }
+}
+
+fn decode_tool_output(kind: &WasmOperationValueKind, bytes: &[u8]) -> String {
+    match kind {
+        WasmOperationValueKind::Json => serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .unwrap_or_else(|| String::from_utf8_lossy(bytes).to_string()),
+        WasmOperationValueKind::Text | WasmOperationValueKind::Bytes => {
+            String::from_utf8_lossy(bytes).to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

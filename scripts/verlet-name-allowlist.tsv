@@ -1,0 +1,163 @@
+# path	reason
+.github/CODEOWNERS	Repository remote site or external workflow identity is out of scope for EMO-520.
+.github/ISSUE_TEMPLATE/config.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
+.gitignore	Legacy state directory remains ignored during the compatibility window.
+CHANGELOG.md	Rename and deprecation-window receipt for v0.3.0.
+README.md	Repository remote site or external workflow identity is out of scope for EMO-520.
+RELEASE.md	Repository remote site or external workflow identity is out of scope for EMO-520.
+apps/console/src/App.svelte	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+apps/console/src/lib/app.svelte.ts	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+apps/console/src/lib/schema.ts	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-abi/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-agent/src/contracts.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-agent/src/manifest_schema.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-agent/src/manifest_schema/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-guest-sdk-macros/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-guest-sdk/src/contract.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-guest-sdk/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-guest-sdk/src/testkit.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-history-sqlite/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-history-sqlite/src/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-history-sqlite/tests/fixtures/rusqlite-history-stream-v0.sqlite3	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-history/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-history/src/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-io-pgqrs/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/Cargo.toml	Deprecated main binary target remains explicitly packaged through v0.3.0.
+crates/verlet-kernel/src/adapters/agent_loop.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/agent_loop/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/adapters/app_server/default_manifest.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/app_server/connection.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/app_server/mod.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/app_server/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/adapters/app_server/threads.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/mcp_client.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/mcp_server/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/agent/agent_process.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/agent/agent_process/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/agent/agent_tool_router.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/agent/agent_tool_router/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/agent/coupling_templates.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/agent/manifest.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/agent/manifest/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/agent/manifest_bind.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/agent/manifest_bind/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/agent/tool_universe.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/capabilities/execution/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/capabilities/wasm_runner/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/cli/agent.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/cli/coupling.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/cli/daemon/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/daemon/clock_route.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/daemon_config.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/daemon_io.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/daemon_io/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/daemon/handle_ingress.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/identity.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/remote_store/endpoint.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/remote_store/lease.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/remote_store/mod.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/remote_store/process_executor.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/remote_store/propagator.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/remote_store/queue.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/kernel/admission.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/kernel/process_handle_dispatch.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/kernel/runtime_host.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/kernel/runtime_host/kernel_control.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/kernel/runtime_host/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/kernel/stdlib_couplings.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/kernel/thread_spawn_projector.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/kernel/wasm_couplings.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/operations/kernel_packages.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/operations/kernel_packages/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/operations/openapi_import.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/operations/operation_registry/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/src/operations/plugins/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/abi_search_fixture.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/boundary_auth.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/canonical_runtime_e2e.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/contract_fixtures.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/fixtures/contracts/README.md	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/abi_process.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/coupling_template_catalog_v1.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/debug_thread_export_v1.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/ingress_outcome_protocol_v1.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/runtime_event_kinds.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_context_spill_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_context_summarize_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_context_truncate_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_failure_deadletter_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_memory_extract_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_memory_recall_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_permission_approval_gate_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_permission_tool_gate_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_prompt_dynamic_instructions_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_prompt_steer_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_queue_couplings.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_retry_with_budget_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_schedule_cron_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stdlib_supervisor_child_completion_coupling.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/contracts/stream_schema_v1.json	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/search_operation.wat.tpl	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/wasm-counter-coupling-handrolled/src/lib.rs	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/fixtures/wasm_vfs_probe_operation.wat.tpl	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/remote_store_lease.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/remote_store_queue_tail.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/remote_store_sync.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/runtime_loop_scenarios.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/smokes/verlet-manifest-e2e-smoke.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/smokes/verlet-restart-smoke.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/smokes/verlet-workbench-smoke.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/support/scenario.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/verlet_cli_publish.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-kernel/tests/wasm_operation_devkit.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-metadata/src/secret_store.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-metadata/src/secret_store/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-metadata/tests/fixtures/rusqlite-metadata-v1.sqlite3	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-operations/src/blob_store.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-operations/src/import_package.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-operations/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-operations/src/operation_store.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-operations/src/operation_store/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+crates/verlet-operations/src/tool_package.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-runtime-contracts/src/handle.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-vbash/src/harness.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-wasm/src/runner.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+docs/abi.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/acp-agent.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/acp-thread-projection.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/adr/0001-stream-schema-v1.md	Shipped ADR body is a historical receipt.
+docs/adr/0002-guest-encoding-v1-component-model-later.md	Shipped ADR body is a historical receipt.
+docs/adr/0004-seeded-fault-plans-and-scenario-engine.md	Shipped ADR body is a historical receipt.
+docs/adr/0005-turso-storage-engine.md	Shipped ADR body is a historical receipt.
+docs/adr/0006-unified-orchestration-semantics.md	Shipped ADR body is a historical receipt.
+docs/adr/0007-adapter-envelope-contract-v0.md	Shipped ADR body is a historical receipt.
+docs/adr/0008-identity-plane-v0.md	Shipped ADR body is a historical receipt.
+docs/agent-cli.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/agent-manifest-ontology.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/app-server.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/daemon.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/io.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/man/verlet.1	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/openapi-adapter.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/public-api-coverage.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/standard-operations.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/wasm-operation-dev-kit.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+examples/agents/researcher/researcher.verlet.agent.toml.in	Example or package contract preserves a stable ABI manifest or receipt identifier.
+examples/wasm-counter-coupling/README.md	Example or package contract preserves a stable ABI manifest or receipt identifier.
+examples/wasm-counter-coupling/src/lib.rs	Example or package contract preserves a stable ABI manifest or receipt identifier.
+mkdocs.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
+proto/verlet.bridge.v1.proto	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+scripts/ci-receipts.sh	Shipped release receipt filenames remain historical.
+scripts/install.sh	Repository identity and one-release compatibility documentation remain load-bearing.
+scripts/release-async.sh	Repository remote site or external workflow identity is out of scope for EMO-520.
+scripts/write-release-manifest.sh	Repository remote site or external workflow identity is out of scope for EMO-520.
+skills/verlet-agent-maker/SKILL.md	Example or package contract preserves a stable ABI manifest or receipt identifier.
+skills/verlet-tool-maker/SKILL.md	Example or package contract preserves a stable ABI manifest or receipt identifier.
+tools/file-read/verlet.tool.toml	Example or package contract preserves a stable ABI manifest or receipt identifier.
+tools/http-fetch/verlet.tool.toml	Example or package contract preserves a stable ABI manifest or receipt identifier.
+tools/json-query/verlet.tool.toml	Example or package contract preserves a stable ABI manifest or receipt identifier.
+tools/trace-ab/README.md	Example or package contract preserves a stable ABI manifest or receipt identifier.
+tools/trace-ab/src/lib.rs	Example or package contract preserves a stable ABI manifest or receipt identifier.
+tools/trace-ab/src/runner.rs	Example or package contract preserves a stable ABI manifest or receipt identifier.
+tools/trace-ab/tests/converter.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
+tools/trace-ab/tests/fixtures/verlet-export.json	Frozen golden or persisted-record fixture must replay byte-for-byte.

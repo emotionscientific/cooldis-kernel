@@ -12,4 +12,4 @@ if [[ "${1:-}" == "--unset" ]]; then
 fi
 
 git config core.hooksPath .githooks
-printf 'Installed Cooldis git hooks via core.hooksPath=.githooks\n'
+printf 'Installed Verlet git hooks via core.hooksPath=.githooks\n'

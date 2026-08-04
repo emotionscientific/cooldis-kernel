@@ -1,17 +1,17 @@
-# Cooldis Docs
+# Verlet Docs
 
-This directory is the public documentation surface for the Cooldis kernel repo.
+This directory is the public documentation surface for the Verlet kernel repo.
 It is organized around the contracts a user, client, or coding agent can depend
 on: manifests, operation boundaries, daemon/RPC surfaces, protocol adapters,
 provider adapters, and release gates.
 
 ## Start Here
 
-- [Cooldis overview](index.md): product category, current status, and next
+- [Verlet overview](index.md): product category, current status, and next
   reading path.
 - [Getting Started](getting-started.md): install, run, and inspect the local
   runtime.
-- [Cooldis CLI](cli.md): canonical command surface and help model.
+- [Verlet CLI](cli.md): canonical command surface and help model.
 - [Repository Map](repository-map.md): where code, tests, docs, scripts, and
   runtime contracts live.
 - [Kernel Invariants](kernel-invariants.md): public vocabulary for the runtime
@@ -26,20 +26,20 @@ provider adapters, and release gates.
 
 ## Runtime Surfaces
 
-- [ABI: Cooldis Operation Boundary](abi.md)
-- [Cooldis CLI](cli.md)
+- [ABI: Verlet Operation Boundary](abi.md)
+- [Verlet CLI](cli.md)
 - [Command Contracts](command-contracts.md)
-- [Cooldis Daemon](daemon.md)
-- [Cooldis IO](io.md)
+- [Verlet Daemon](daemon.md)
+- [Verlet IO](io.md)
 - [Chat Console](chat.md)
 - [RPC Control Plane](app-server.md)
-- [Cooldis MCP Server](mcp-server.md)
+- [Verlet MCP Server](mcp-server.md)
 - [Provider Adapter Surface](provider-adapters.md)
 - [Metadata And Provider Auth Storage](provider-storage.md)
 
 ## Agent And Operation Authoring
 
-- [Cooldis Agent CLI](agent-cli.md)
+- [Verlet Agent CLI](agent-cli.md)
 - [Agent Manifest Ontology](agent-manifest-ontology.md)
 - [ACP Agent](acp-agent.md)
 - [ACP Thread Projection](acp-thread-projection.md)
@@ -48,8 +48,8 @@ provider adapters, and release gates.
 - [Rust Wasm Operation Dev Kit](wasm-operation-dev-kit.md)
 - [OpenAPI To ABI Operation Adapter](openapi-adapter.md)
 - [Researcher Example Agent](../examples/agents/researcher/)
-- [Cooldis Agent Maker Skill](../skills/cooldis-agent-maker/SKILL.md)
-- [Cooldis Tool Maker Skill](../skills/cooldis-tool-maker/SKILL.md)
+- [Verlet Agent Maker Skill](../skills/verlet-agent-maker/SKILL.md)
+- [Verlet Tool Maker Skill](../skills/verlet-tool-maker/SKILL.md)
 
 ## Maintainer References
 
@@ -61,7 +61,7 @@ provider adapters, and release gates.
 - [Threat Model](threat-model.md)
 - [Testing Guidelines](testing-guidelines.md)
 - [V1 Release Candidate Gate](v1-release-candidate.md)
-- [ADR 0001: Cooldis Stream Schema V1](adr/0001-stream-schema-v1.md)
+- [ADR 0001: Verlet Stream Schema V1](adr/0001-stream-schema-v1.md)
 
 Planning notes that are not ready for a public OSS tree should stay outside this
 repository until they are rewritten as stable contracts or published design

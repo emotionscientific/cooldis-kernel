@@ -3,33 +3,6 @@
 version = 4
 
 [[package]]
-name = "cooldis-example-wasm-counter-coupling"
-version = "0.1.0"
-dependencies = [
- "cooldis-guest-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cooldis-guest-sdk"
-version = "0.1.0"
-dependencies = [
- "cooldis-guest-sdk-macros",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cooldis-guest-sdk-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -118,6 +91,33 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "verlet-example-wasm-counter-coupling"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-guest-sdk",
+]
+
+[[package]]
+name = "verlet-guest-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-guest-sdk-macros",
+]
+
+[[package]]
+name = "verlet-guest-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zmij"

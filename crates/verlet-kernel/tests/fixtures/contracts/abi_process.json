@@ -1,0 +1,194 @@
+{
+  "bridge_backend_kind": "in_process",
+  "manifest": {
+    "abi": "cooldis_0.1",
+    "operations": [
+      {
+        "events": "jsonl",
+        "id": 7,
+        "input": "json",
+        "mode": "sync",
+        "name": "search",
+        "output": "json",
+        "required_capabilities": [
+          "net:https://api.example.test"
+        ]
+      }
+    ]
+  },
+  "operation_events": [
+    {
+      "operation_id": "018f0000-0000-7000-8000-000000000001",
+      "type": "started"
+    },
+    {
+      "level": "info",
+      "message": "operation ready",
+      "operation_id": "018f0000-0000-7000-8000-000000000001",
+      "type": "log"
+    },
+    {
+      "kind": "write",
+      "operation_id": "018f0000-0000-7000-8000-000000000001",
+      "path": "/workspace/out.json",
+      "target": null,
+      "type": "file_delta"
+    },
+    {
+      "operation_id": "018f0000-0000-7000-8000-000000000001",
+      "status": {
+        "code": 0,
+        "success": true
+      },
+      "type": "completed"
+    }
+  ],
+  "process_output": {
+    "artifacts": [
+      {
+        "artifact_id": "artifact_1",
+        "mime_type": "application/json",
+        "path": "/workspace/out.json"
+      }
+    ],
+    "file_deltas": [
+      {
+        "kind": "write",
+        "path": "/workspace/out.json",
+        "target": null
+      }
+    ],
+    "stderr": [
+      123,
+      34,
+      108,
+      101,
+      118,
+      101,
+      108,
+      34,
+      58,
+      34,
+      105,
+      110,
+      102,
+      111,
+      34,
+      125,
+      10
+    ],
+    "stderr_truncated": false,
+    "stdout": [
+      123,
+      34,
+      111,
+      107,
+      34,
+      58,
+      116,
+      114,
+      117,
+      101,
+      125,
+      10
+    ],
+    "stdout_truncated": false,
+    "terminal": {
+      "status": {
+        "code": 0,
+        "success": true
+      },
+      "type": "completed"
+    }
+  },
+  "projection": {
+    "operations": [
+      {
+        "abi": {
+          "effect_ports": [],
+          "event_ports": [
+            {
+              "binding": {
+                "kind": "invocation_events"
+              },
+              "name": "events",
+              "value": "jsonl"
+            }
+          ],
+          "operation_name": "search",
+          "registered_name": "search",
+          "required_capabilities": [
+            "net:https://api.example.test"
+          ],
+          "sink_ports": [
+            {
+              "binding": {
+                "kind": "invocation_output"
+              },
+              "name": "output",
+              "required": true,
+              "value": {
+                "kind": "json"
+              }
+            }
+          ],
+          "source_ports": [
+            {
+              "binding": {
+                "kind": "invocation_input"
+              },
+              "name": "input",
+              "required": true,
+              "value": {
+                "kind": "json"
+              }
+            }
+          ]
+        },
+        "cli": {
+          "command": "verlet tool run search search",
+          "stdin": "json",
+          "stdout": "json"
+        },
+        "events": "jsonl",
+        "http": {
+          "event_stream": "jsonl",
+          "method": "POST",
+          "path": "/operations/search/search",
+          "request_body": "json",
+          "response_body": "json"
+        },
+        "input": "json",
+        "llm_tool": {
+          "input": "json",
+          "name": "search",
+          "output": "json"
+        },
+        "mcp": {
+          "input": "json",
+          "output": "json",
+          "tool_name": "search"
+        },
+        "mode": "sync",
+        "operation_id": 7,
+        "operation_name": "search",
+        "output": "json",
+        "process": {
+          "command": "verlet run search search",
+          "stderr": "jsonl",
+          "stdin": "json",
+          "stdout": "json"
+        },
+        "registered_name": "search"
+      }
+    ],
+    "registered_name": "search"
+  },
+  "unix_exec_payload": {
+    "command": "verlet run search search",
+    "cwd": "/workspace",
+    "env": {},
+    "mode": "virtual_only",
+    "stdin": null
+  }
+}

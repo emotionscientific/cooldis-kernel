@@ -1,6 +1,6 @@
 # Standard Operations
 
-Cooldis V1 treats the standard library as published records, not application
+Verlet V1 treats the standard library as published records, not application
 imports. Agent manifests should point at operation refs and grants; the runtime
 then decides whether a record runs as Wasm, a kernel-native package, a process
 placement, or a future remote placement.
@@ -15,7 +15,7 @@ The currently implemented release-gated slice is:
   that records channel intent without delivering to external channels;
 - source/search building blocks: `http-fetch`, `file-read`, and `json-query`
   as first-party Wasm packages;
-- local operation secrets: `cooldis secret` plus manifest secret resolution for
+- local operation secrets: `verlet secret` plus manifest secret resolution for
   operation packages that declare `secret:<name>`;
 - coupling templates: the V1 catalog plus runtime-executable reference
   implementations for async queue, completion callback, context spill,
@@ -31,8 +31,8 @@ not an additional V1 coupling template id.
 
 Kernel-native records live in the same operation registry as Wasm packages, but
 their `runtime.kind` is `kernel` and their artifact hash is computed from the
-canonical serialized tool contract. User-facing `cooldis tool build` and
-`cooldis tool publish` reject `runtime.kind = "kernel"`; only startup synthesis
+canonical serialized tool contract. User-facing `verlet tool build` and
+`verlet tool publish` reject `runtime.kind = "kernel"`; only startup synthesis
 may publish those records. The kernel package contracts are validated with the
 same shared schema engine used by tool packages and stream fixtures.
 
@@ -59,12 +59,12 @@ registry root is configured. It publishes five thread-control operations:
 {
   "task_name": "worker",
   "message": "inspect this file",
-  "agent_ref": "agent://cooldis/default@latest"
+  "agent_ref": "agent://verlet/default@latest"
 }
 ```
 
 `agent_ref` is optional. Without it, the app-server resolves the synthesized
-`agent://cooldis/default@latest` alias and records the ordinary alias-resolution,
+`agent://verlet/default@latest` alias and records the ordinary alias-resolution,
 compile, and bind receipts on the child. Placement comes from daemon config, so
 the two-field `{task_name, message}` form is complete. Every spawned child is a
 first-class thread: the app-server registers its lifecycle/topology record
@@ -303,11 +303,11 @@ scripts/seed-ops.sh
 The optional first argument selects a registry root:
 
 ```bash
-scripts/seed-ops.sh /tmp/cooldis-operations
+scripts/seed-ops.sh /tmp/verlet-operations
 ```
 
 The script builds and publishes `http-fetch`, `file-read`, and `json-query`
-with `cooldis tool publish --package`. Re-running it against the same
+with `verlet tool publish --package`. Re-running it against the same
 registry root is idempotent.
 
 ## Coupling Templates
@@ -319,7 +319,7 @@ the implementation surface. The frozen catalog lives in
 `cooldis.coupling.template_catalog/1` and is release-gated by
 `contracts/coupling_template_catalog_v1.json`.
 
-`cooldis init <name>` writes the same catalog to
+`verlet init <name>` writes the same catalog to
 `components/couplings.toml` so a fresh folder shows the intended stdlib shape
 without requiring a TS/Python DSL binding.
 

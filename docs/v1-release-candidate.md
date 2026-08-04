@@ -1,6 +1,6 @@
 # V1 Release Candidate Gate
 
-This document describes the public V1 release-candidate gate for the Cooldis
+This document describes the public V1 release-candidate gate for the Verlet
 kernel repo. Historical private live-provider runs and internal planning notes
 are intentionally not part of this OSS tree.
 
@@ -66,7 +66,7 @@ Release tags must match the kernel crate version:
 
 ```sh
 scripts/check-release-tag.sh v$(cargo metadata --format-version 1 --no-deps \
-  | jq -r '.packages[] | select(.name == "cooldis-kernel") | .version')
+  | jq -r '.packages[] | select(.name == "verlet-kernel") | .version')
 ```
 
 GitHub Actions runs the tag check before publishing artifacts.
@@ -91,7 +91,7 @@ scripts/package-release-binary.sh --target x86_64-unknown-linux-gnu
 ```
 
 Each archive includes the public binaries and the bundled browser console under
-`share/cooldis/console`; the installed user-facing command is `cooldis console`.
+`share/verlet/console`; the installed user-facing command is `verlet console`.
 
 See [Release Process](../RELEASE.md) for the supported target matrix and publish
 flow.
@@ -101,4 +101,4 @@ flow.
 A V1 candidate is releasable only when the deterministic default gate passes,
 the tag matches the crate version, and every included public surface has either
 canonical docs or an explicit gap in [Public API Coverage](public-api-coverage.md).
-The public command surface starts at [Cooldis CLI](cli.md).
+The public command surface starts at [Verlet CLI](cli.md).

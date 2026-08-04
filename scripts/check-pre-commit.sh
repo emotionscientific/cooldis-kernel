@@ -21,4 +21,4 @@ run "$ROOT/scripts/guard-rails.sh" staged
 run_cargo fmt --all -- --check
 run_cargo check --workspace --all-targets --locked
 
-printf '\nCooldis pre-commit checks passed.\n'
+printf '\nVerlet pre-commit checks passed.\n'

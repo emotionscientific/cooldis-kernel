@@ -1,0 +1,23 @@
+[package]
+name = "verlet-process"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+verlet-abi = { path = "../verlet-abi" }
+verlet-runtime-contracts = { path = "../verlet-runtime-contracts" }
+futures-util = "0.3.32"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["serde", "v7"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -1,0 +1,178 @@
+{
+  "anthropic_messages": {
+    "max_tokens": 64,
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "hello",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "thinking done",
+            "type": "text"
+          },
+          {
+            "id": "call_1_fc_1",
+            "input": {
+              "query": "verlet"
+            },
+            "name": "search",
+            "type": "tool_use"
+          }
+        ],
+        "role": "assistant"
+      },
+      {
+        "content": [
+          {
+            "content": "result",
+            "tool_use_id": "call_1_fc_1",
+            "type": "tool_result"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "claude-fixture",
+    "system": [
+      {
+        "text": "Be precise.",
+        "type": "text"
+      }
+    ],
+    "tools": [
+      {
+        "description": "Search docs.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search"
+      }
+    ]
+  },
+  "openai_chat_completions": {
+    "max_tokens": 64,
+    "messages": [
+      {
+        "content": "Be precise.",
+        "role": "system"
+      },
+      {
+        "content": "hello",
+        "role": "user"
+      },
+      {
+        "content": "thinking done",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"query\":\"verlet\"}",
+              "name": "search"
+            },
+            "id": "call_1|fc_1",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "result",
+        "role": "tool",
+        "tool_call_id": "call_1|fc_1"
+      }
+    ],
+    "model": "gpt-chat-fixture",
+    "stream": false,
+    "tool_choice": "auto",
+    "tools": [
+      {
+        "function": {
+          "description": "Search docs.",
+          "name": "search",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "openai_responses": {
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "input": [
+      {
+        "content": "hello",
+        "role": "user"
+      },
+      {
+        "content": "thinking done",
+        "role": "assistant"
+      },
+      {
+        "arguments": "{\"query\":\"verlet\"}",
+        "call_id": "call_1",
+        "id": "fc_1",
+        "name": "search",
+        "type": "function_call"
+      },
+      {
+        "call_id": "call_1",
+        "output": "result",
+        "type": "function_call_output"
+      }
+    ],
+    "instructions": "Be precise.",
+    "max_output_tokens": 64,
+    "model": "gpt-fixture",
+    "parallel_tool_calls": true,
+    "store": false,
+    "stream": false,
+    "tool_choice": "auto",
+    "tools": [
+      {
+        "description": "Search docs.",
+        "name": "search",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "strict": null,
+        "type": "function"
+      }
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-use cooldis_guest_sdk::prelude::*;
+use verlet_guest_sdk::prelude::*;
 use serde_json::json;
 
 #[derive(Deserialize)]

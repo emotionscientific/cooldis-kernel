@@ -1,12 +1,12 @@
-# Cooldis IO
+# Verlet IO
 
-Cooldis IO is the boundary where external protocols enter and leave the
+Verlet IO is the boundary where external protocols enter and leave the
 runtime. It is broader than a messaging gateway: Telegram, local CLI input,
 websocket TUI sessions, webhooks, cron ticks, GitHub events, email, product
 queues, and future event buses should all pass through the same conceptual
 surface.
 
-The V1 implementation lives inside `cooldis daemon run`. The important split is
+The V1 implementation lives inside `verlet daemon run`. The important split is
 architectural:
 
 ```text
@@ -20,10 +20,10 @@ protocol adapter
 -> protocol delivery
 ```
 
-The protocol-neutral contracts live in `crates/cooldis-io-core`.
-The durable ingress queue wrapper lives in `crates/cooldis-io-pgqrs`.
-The daemon-owned runtime bridge lives in `crates/cooldis-kernel` so it can call
-`CooldisSupervisor` without making adapter crates depend on the kernel.
+The protocol-neutral contracts live in `crates/verlet-io-core`.
+The durable ingress queue wrapper lives in `crates/verlet-io-pgqrs`.
+The daemon-owned runtime bridge lives in `crates/verlet-kernel` so it can call
+`VerletSupervisor` without making adapter crates depend on the kernel.
 
 ## Adapter Envelope Contract
 
@@ -70,7 +70,7 @@ terminally rejected. New producers must always set `delivery` directly.
   `ThreadAddress` and optional provider policy.
 - **Admission policy**: chooses whether the event should queue, steer,
   interrupt, fork, observe, or reject.
-- **Kernel bridge**: maps IO decisions onto the runtime app-server and Cooldis
+- **Kernel bridge**: maps IO decisions onto the runtime app-server and Verlet
   kernel calls.
 - **Egress projector**: maps runtime events into protocol-neutral outbound
   envelopes.
@@ -82,7 +82,7 @@ terminally rejected. New producers must always set `delivery` directly.
 For V1, IO and the runtime app-server should be one daemon process:
 
 ```text
-cooldisd
+verletd
   IO layer
     protocols
     queue / dedupe
@@ -96,7 +96,7 @@ cooldisd
     interrupt
     events
   kernel
-    CooldisSupervisor
+    VerletSupervisor
     RuntimeHost
     provider/tool/runtime adapters
 ```
@@ -111,14 +111,14 @@ Protocol packages should be separately testable and compiled into the daemon by
 feature or by the product binary:
 
 ```text
-crates/cooldis-io-core
-crates/cooldis-io-cli
-crates/cooldis-io-websocket
-crates/cooldis-io-webhook
-crates/cooldis-io-telegram
+crates/verlet-io-core
+crates/verlet-io-cli
+crates/verlet-io-websocket
+crates/verlet-io-webhook
+crates/verlet-io-telegram
 ```
 
-`crates/cooldis-io-telegram` is the first concrete adapter crate. It parses
+`crates/verlet-io-telegram` is the first concrete adapter crate. It parses
 Telegram Bot API updates into IO envelopes and builds `sendMessage` requests
 from visible egress messages. The daemon owns webhook HTTP routing, durable
 queue storage, tenant resolution, and admission policy.
@@ -134,7 +134,7 @@ and whether the fire was a recovery `catch_up`.
 the continuation turn input; the only supported substitution is
 `{scheduled_for}`.
 
-`crates/cooldis-io-pgqrs` wraps `pgqrs` behind the core queue traits. The spike
+`crates/verlet-io-pgqrs` wraps `pgqrs` behind the core queue traits. The spike
 uses a local SQLite DSN for restart/resume proof. Managed deployments can enable
 the crate's `postgres` feature and point the same wrapper at a Postgres DSN
 later.
@@ -147,7 +147,7 @@ decision. The default should be durable queue mode:
 ```toml
 [daemon.io.ingress.persistence]
 mode = "durable_queue"
-queue_name = "cooldis-ingress"
+queue_name = "verlet-ingress"
 visibility_timeout_secs = 30
 ```
 
@@ -361,7 +361,7 @@ A Telegram adapter should own Telegram-specific parsing and delivery only:
 
 ```text
 Telegram Update
--> cooldis-io-telegram
+-> verlet-io-telegram
 -> IngressEnvelope {
      source.protocol = "telegram.bot",
      source.instance_id = "main",
@@ -442,7 +442,7 @@ EgressEnvelope {
   target.conversation.external_conversation_id = "telegram:chat:<chat_id>",
   kind = AssistantMessage(...)
 }
--> cooldis-io-telegram
+-> verlet-io-telegram
 -> sendMessage / editMessage / sendDocument / sendChatAction
 ```
 

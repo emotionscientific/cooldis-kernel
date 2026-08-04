@@ -1,6 +1,6 @@
 # Secret Management
 
-Cooldis does not commit provider keys or generated env files. Provider
+Verlet does not commit provider keys or generated env files. Provider
 credentials should come from the process environment or a local ignored env
 file, and provider examples should use generic OpenAI-compatible or
 Anthropic-compatible API formats.
@@ -26,7 +26,7 @@ env vars are one source for secrets
 stored local records are one source for secrets
 external secret managers can be later sources for secrets
 
-Cooldis-owned secret refs are the runtime model
+Verlet-owned secret refs are the runtime model
 ```
 
 The POC shape:
@@ -48,15 +48,15 @@ host import
 For local development, V1 supports:
 
 ```sh
-cooldis secret import EXAMPLE_API_KEY --from-env EXAMPLE_API_KEY
-cooldis secret set EXAMPLE_API_KEY --value-stdin
-cooldis secret list
-cooldis secret status EXAMPLE_API_KEY
-cooldis secret delete EXAMPLE_API_KEY
+verlet secret import EXAMPLE_API_KEY --from-env EXAMPLE_API_KEY
+verlet secret set EXAMPLE_API_KEY --value-stdin
+verlet secret list
+verlet secret status EXAMPLE_API_KEY
+verlet secret delete EXAMPLE_API_KEY
 ```
 
 When a published operation declares `secret:<name>` in its required
-capabilities, `cooldis tool run <published-name> <operation>` and manifest-backed
+capabilities, `verlet tool run <published-name> <operation>` and manifest-backed
 runtime catalog mounts check the local secret store before loading or invoking
 the runtime artifact. Missing secret refs fail with the ref name and an
 import/set hint. Raw values are never printed.
@@ -69,7 +69,7 @@ The concrete proof target is a provider-neutral HTTP operation:
 ```text
 published HTTP Wasm operation
 -> operation declares secret:EXAMPLE_API_KEY and net.http grant
--> EXAMPLE_API_KEY exists as a Cooldis secret ref
+-> EXAMPLE_API_KEY exists as a Verlet secret ref
 -> model provider sees the operation as a normal tool
 -> model provider calls the tool
 -> host import injects the key only inside the outbound HTTP request

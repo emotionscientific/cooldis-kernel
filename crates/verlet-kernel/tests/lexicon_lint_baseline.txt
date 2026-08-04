@@ -1,0 +1,20 @@
+# Existing terminology debt. Entries are counted per file and word so unrelated
+# line edits do not churn the baseline. This file only shrinks.
+crates/verlet-kernel/src/adapters/app_server/connection.rs capsule 45
+crates/verlet-kernel/src/adapters/app_server/mod.rs capsule 27
+crates/verlet-kernel/src/adapters/app_server/tests.rs capsule 118
+crates/verlet-kernel/src/adapters/app_server/threads.rs capsule 10
+crates/verlet-kernel/src/adapters/mcp_server.rs capsule 28
+crates/verlet-kernel/src/adapters/mcp_server/tests.rs capsule 33
+crates/verlet-kernel/src/adapters/agent_loop.rs hook 1
+crates/verlet-kernel/src/adapters/agent_loop/tests.rs observation_store 1
+crates/verlet-kernel/src/agent/hooks.rs hook 24
+crates/verlet-kernel/src/agent/tool_interceptor.rs hook 1
+crates/verlet-kernel/src/capabilities/execution/tests.rs capsule 1
+crates/verlet-kernel/src/cli/console.rs capsule 18
+crates/verlet-kernel/src/cli/console/tests.rs capsule 3
+crates/verlet-kernel/src/cli/daemon/tests.rs capsule 1
+crates/verlet-kernel/src/cli/mod.rs capsule 1
+crates/verlet-kernel/src/kernel/context_compiler.rs hook 1
+crates/verlet-kernel/src/lib.rs capsule 6
+crates/verlet-kernel/src/lib.rs observation_store 1

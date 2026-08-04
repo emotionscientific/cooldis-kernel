@@ -2,28 +2,38 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${COOLDIS_RELEASE_OUT_DIR:-$ROOT/dist}"
+. "$ROOT/scripts/env-compat.sh"
+for env_name in \
+  VERLET_RELEASE_OUT_DIR \
+  VERLET_SKIP_CONSOLE_BUILD \
+  VERLET_RELEASE_TARGET \
+  VERLET_RELEASE_VERSION
+do
+  verlet_env_promote "$env_name"
+done
+OUT_DIR="${VERLET_RELEASE_OUT_DIR:-$ROOT/dist}"
 SKIP_BUILD=0
-SKIP_CONSOLE_BUILD="${COOLDIS_SKIP_CONSOLE_BUILD:-0}"
-TARGET="${COOLDIS_RELEASE_TARGET:-}"
+SKIP_CONSOLE_BUILD="${VERLET_SKIP_CONSOLE_BUILD:-0}"
+TARGET="${VERLET_RELEASE_TARGET:-}"
 
 usage() {
   cat <<'USAGE'
-package-release-binary.sh - build and package Cooldis release binaries.
+package-release-binary.sh - build and package Verlet release binaries.
 
 Usage:
   scripts/package-release-binary.sh [--out-dir DIR] [--target TRIPLE] [--skip-build] [--skip-console-build]
 
 The package contains the public process entrypoints:
-  - cooldis
-  - cooldis-acp-agent
-  - cooldis-mcp-server
-  - share/cooldis/console static assets
-  - share/man/man1/cooldis.1 manual page
+  - verlet
+  - deprecated binary-name compatibility wrapper for v0.3.0
+  - verlet-acp-agent
+  - verlet-mcp-server
+  - share/verlet/console static assets
+  - share/man/man1/verlet.1 manual page
 
 It writes:
-  DIR/cooldis-<version>-<target-triple>.tar.gz
-  DIR/cooldis-<version>-<target-triple>.tar.gz.sha256
+  DIR/verlet-<version>-<target-triple>.tar.gz
+  DIR/verlet-<version>-<target-triple>.tar.gz.sha256
 USAGE
 }
 
@@ -79,14 +89,14 @@ sha256_file() {
 cd "$ROOT"
 
 VERSION="$(
-  sed -n 's/^version = "\(.*\)"/\1/p' crates/cooldis-kernel/Cargo.toml | head -n 1
+  sed -n 's/^version = "\(.*\)"/\1/p' crates/verlet-kernel/Cargo.toml | head -n 1
 )"
 if [[ -z "$VERSION" ]]; then
-  echo "could not read cooldis version from crates/cooldis-kernel/Cargo.toml" >&2
+  echo "could not read verlet version from crates/verlet-kernel/Cargo.toml" >&2
   exit 1
 fi
 
-RELEASE_VERSION="${COOLDIS_RELEASE_VERSION:-}"
+RELEASE_VERSION="${VERLET_RELEASE_VERSION:-}"
 if [[ -z "$RELEASE_VERSION" && "${GITHUB_REF_NAME:-}" == v* ]]; then
   RELEASE_VERSION="${GITHUB_REF_NAME#v}"
 fi
@@ -120,10 +130,12 @@ if [[ -z "$TARGET_DIR" ]]; then
   exit 1
 fi
 
+LEGACY_BIN="cool""dis"
 BINS=(
-  cooldis
-  cooldis-acp-agent
-  cooldis-mcp-server
+  verlet
+  "$LEGACY_BIN"
+  verlet-acp-agent
+  verlet-mcp-server
 )
 
 if [[ "$SKIP_BUILD" != "1" ]]; then
@@ -148,7 +160,7 @@ if [[ ! -f "$CONSOLE_DIST/index.html" || ! -d "$CONSOLE_DIST/assets" ]]; then
   exit 1
 fi
 
-MANUAL="$ROOT/docs/man/cooldis.1"
+MANUAL="$ROOT/docs/man/verlet.1"
 if [[ ! -f "$MANUAL" || -L "$MANUAL" || ! -s "$MANUAL" ]]; then
   echo "missing manual page: $MANUAL" >&2
   exit 1
@@ -163,7 +175,7 @@ else
   RELEASE_BIN_DIR="$TARGET_DIR/$TARGET/release"
 fi
 
-PACKAGE="cooldis-$RELEASE_VERSION-$TARGET"
+PACKAGE="verlet-$RELEASE_VERSION-$TARGET"
 STAGE="$OUT_DIR/$PACKAGE"
 ARCHIVE="$PACKAGE.tar.gz"
 
@@ -181,31 +193,32 @@ for bin in "${BINS[@]}"; do
   chmod 0755 "$STAGE/$bin"
 done
 
-mkdir -p "$STAGE/share/cooldis/console"
-cp -R "$CONSOLE_DIST/." "$STAGE/share/cooldis/console/"
+mkdir -p "$STAGE/share/verlet/console"
+cp -R "$CONSOLE_DIST/." "$STAGE/share/verlet/console/"
 mkdir -p "$STAGE/share/man/man1"
-cp "$MANUAL" "$STAGE/share/man/man1/cooldis.1"
+cp "$MANUAL" "$STAGE/share/man/man1/verlet.1"
 
 cat >"$STAGE/README.txt" <<EOF
-Cooldis $RELEASE_VERSION
+Verlet $RELEASE_VERSION
 Target: $TARGET
 
 Binaries:
-  cooldis              Cooldis CLI
-  cooldis-acp-agent    ACP stdio adapter for hosts that launch an agent process
-  cooldis-mcp-server   MCP stdio adapter for daemon-backed orchestration
+  verlet              Verlet CLI
+  $LEGACY_BIN              Deprecated v0.3.0 compatibility wrapper
+  verlet-acp-agent    ACP stdio adapter for hosts that launch an agent process
+  verlet-mcp-server   MCP stdio adapter for daemon-backed orchestration
 
 Console:
-  ./cooldis console
+  ./verlet console
 
 Manual:
-  man ./share/man/man1/cooldis.1
+  man ./share/man/man1/verlet.1
 
 Smoke:
-  ./cooldis --help
-  ./cooldis console --help
-  ./cooldis-acp-agent --version
-  ./cooldis-mcp-server --help
+  ./verlet --help
+  ./verlet console --help
+  ./verlet-acp-agent --version
+  ./verlet-mcp-server --help
 EOF
 
 rm -f "$OUT_DIR/$ARCHIVE" "$OUT_DIR/$ARCHIVE.sha256"

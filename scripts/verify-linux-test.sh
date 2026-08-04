@@ -151,15 +151,15 @@ case "${1:-}" in
     shift
     expect_arg --mount "${1-}"
     shift
-    expect_arg 'type=volume,src=cooldis-verify-linux,dst=/cooldis-cache' "${1-}"
+    expect_arg 'type=volume,src=verlet-verify-linux,dst=/verlet-cache' "${1-}"
     shift
     expect_arg --env "${1-}"
     shift
-    expect_arg CARGO_HOME=/cooldis-cache/cargo "${1-}"
+    expect_arg CARGO_HOME=/verlet-cache/cargo "${1-}"
     shift
     expect_arg --env "${1-}"
     shift
-    expect_arg RUSTUP_HOME=/cooldis-cache/rustup "${1-}"
+    expect_arg RUSTUP_HOME=/verlet-cache/rustup "${1-}"
     shift
     expect_arg --env "${1-}"
     shift
@@ -168,12 +168,12 @@ case "${1:-}" in
     expect_arg --env "${1-}"
     shift
     expect_arg \
-      "COOLDIS_CARGO_LANE_ROOT=/cooldis-cache/cargo-lanes/$host_triple" \
+      "VERLET_CARGO_LANE_ROOT=/verlet-cache/cargo-lanes/$host_triple" \
       "${1-}"
     shift
     expect_arg --env "${1-}"
     shift
-    expect_arg COOLDIS_VERIFY_MANAGED_CARGO=1 "${1-}"
+    expect_arg VERLET_VERIFY_MANAGED_CARGO=1 "${1-}"
     shift
     if [[ "${1-}" == --env && "${2-}" == CARGO_BUILD_JOBS=2 ]]; then
       shift 2
@@ -193,11 +193,11 @@ case "${1:-}" in
       || die 'container command does not map Ctrl-C to status 130'
     [[ "$1" == *"trap 'exit 143' TERM"* ]] \
       || die 'container command does not map termination to status 143'
-    [[ "$1" == *'exec 9>/cooldis-cache/verify.lock'* ]] \
+    [[ "$1" == *'exec 9>/verlet-cache/verify.lock'* ]] \
       || die 'container command does not open the volume lock'
     [[ "$1" == *'flock -n 9'* ]] \
       || die 'container command does not serialize volume users'
-    [[ "$1" == *"/cooldis-cache/cargo-lanes/$host_triple/*.lock"* ]] \
+    [[ "$1" == *"/verlet-cache/cargo-lanes/$host_triple/*.lock"* ]] \
       || die 'container command does not settle platform-specific lane locks'
     [[ "$1" == *'bash scripts/verify.sh'* ]] \
       || die 'container command does not run the full verifier'
@@ -243,16 +243,16 @@ assert_file_contains "$TMP_DIR/main-dry.out" \
   "type=bind\\,src=$MAIN_REPO/.git\\,dst=/workspace/.git\\,readonly" \
   'main checkout Git directory is over-mounted read-only'
 assert_file_contains "$TMP_DIR/main-dry.out" \
-  'type=volume\,src=cooldis-verify-linux\,dst=/cooldis-cache' \
+  'type=volume\,src=verlet-verify-linux\,dst=/verlet-cache' \
   'named volume is mounted at the cache root'
 assert_file_contains "$TMP_DIR/main-dry.out" \
-  'COOLDIS_CARGO_LANE_ROOT=/cooldis-cache/cargo-lanes/aarch64-unknown-linux-gnu' \
+  'VERLET_CARGO_LANE_ROOT=/verlet-cache/cargo-lanes/aarch64-unknown-linux-gnu' \
   'arm64 Cargo lanes use a platform-specific root inside the named volume'
 assert_file_contains "$TMP_DIR/main-dry.out" \
-  'CARGO_HOME=/cooldis-cache/cargo' \
+  'CARGO_HOME=/verlet-cache/cargo' \
   'Cargo home resolves inside the named volume'
 assert_file_contains "$TMP_DIR/main-dry.out" \
-  'RUSTUP_HOME=/cooldis-cache/rustup' \
+  'RUSTUP_HOME=/verlet-cache/rustup' \
   'Rustup home resolves inside the named volume'
 assert_file_contains "$TMP_DIR/main-dry.out" 'rust:1.97.1-bookworm' \
   'the Linux image pins the workspace Rust version and Debian variant'
@@ -261,14 +261,14 @@ assert_file_contains "$TMP_DIR/main-dry.out" 'bash -c ' \
 assert_file_excludes "$TMP_DIR/main-dry.out" 'bash -lc ' \
   'container bootstrap does not let a login shell hide the image rustup shim'
 assert_file_contains "$TMP_DIR/main-dry.out" \
-  'ln -sf /usr/local/cargo/bin/rustup /cooldis-cache/cargo/bin/rustup' \
+  'ln -sf /usr/local/cargo/bin/rustup /verlet-cache/cargo/bin/rustup' \
   'container bootstrap installs the rustup proxy in persistent Cargo home'
 assert_file_contains "$TMP_DIR/main-dry.out" '--component clippy' \
   'container bootstrap installs every component used by the full verify suite'
 assert_file_contains "$TMP_DIR/main-dry.out" 'stable-aarch64-unknown-linux-gnu' \
   'container bootstrap exposes the pinned toolchain under the stable name'
 assert_file_contains "$TMP_DIR/main-dry.out" \
-  'reset with docker volume rm cooldis-verify-linux' \
+  'reset with docker volume rm verlet-verify-linux' \
   'poisoned toolchain cache fails closed with the documented reset command'
 assert_file_contains "$TMP_DIR/main-dry.out" 'verify_status=' \
   'container shutdown preserves the verify status while locks settle'
@@ -277,7 +277,7 @@ assert_file_contains "$TMP_DIR/main-dry.out" "trap \\'exit 130\\' INT" \
 assert_file_contains "$TMP_DIR/main-dry.out" "trap \\'exit 143\\' TERM" \
   'container bootstrap maps termination to status 143 while blocked'
 assert_file_contains "$TMP_DIR/main-dry.out" \
-  'exec 9>/cooldis-cache/verify.lock' \
+  'exec 9>/verlet-cache/verify.lock' \
   'container bootstrap opens the volume-wide verification lock'
 assert_file_contains "$TMP_DIR/main-dry.out" 'flock -n 9' \
   'container bootstrap serializes users of shared PID-based lane locks'
@@ -311,7 +311,7 @@ assert_file_contains "$TMP_DIR/amd64-dry.out" \
   'stable-x86_64-unknown-linux-gnu' \
   '--amd64 selects the matching pinned stable toolchain alias'
 assert_file_contains "$TMP_DIR/amd64-dry.out" \
-  'COOLDIS_CARGO_LANE_ROOT=/cooldis-cache/cargo-lanes/x86_64-unknown-linux-gnu' \
+  'VERLET_CARGO_LANE_ROOT=/verlet-cache/cargo-lanes/x86_64-unknown-linux-gnu' \
   '--amd64 uses a target lane distinct from arm64'
 assert_file_contains "$TMP_DIR/amd64-dry.out" \
   'cargo-lanes/x86_64-unknown-linux-gnu/*.lock' \

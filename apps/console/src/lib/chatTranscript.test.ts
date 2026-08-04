@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { mergeTranscriptMessages } from "./chatTranscript";
-import type { TranscriptItem } from "./cooldisRpc";
+import type { TranscriptItem } from "./verletRpc";
 import type { ChatMessage } from "./schema";
 
 test("keeps streamed assistant/tool ordering when history has one full assistant item", () => {

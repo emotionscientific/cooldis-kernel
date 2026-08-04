@@ -1,6 +1,6 @@
-# Cooldis
+# Verlet
 
-Cooldis is an open serverless agent platform.
+Verlet is an open serverless agent platform.
 
 Define the agent, not the app around it.
 
@@ -8,7 +8,7 @@ Build agents locally. Publish them to managed cloud. Install agents like
 packages. Govern them like infrastructure. Keep the agent definition portable so
 the managed platform is acceleration, not lock-in.
 
-Cooldis treats an agent as a declarative unit: describe the behavior, tools,
+Verlet treats an agent as a declarative unit: describe the behavior, tools,
 resources, secrets, permissions, context policy, and placement needs before the
 agent runs. The runtime turns that declaration into something it can inspect,
 grant, run, resume, publish, revoke, and audit.
@@ -19,7 +19,7 @@ Serious agents are not hard because prompts are hard. They are hard because ever
 agent turns into a small backend: deployment, tools, secrets, permissions,
 runtime state, logs, failures, retries, rollback, and a place to run.
 
-Cooldis gives that backend shape to the runtime. You focus on the agent: what it
+Verlet gives that backend shape to the runtime. You focus on the agent: what it
 does, what tools it can use, what resources it can see, and what powers it is
 allowed to exercise.
 
@@ -59,17 +59,17 @@ agent declaration
 
 The runtime owns lifecycle, permissions, tool visibility, operation projection,
 events, cancellation, resume, and audit records. Product code can configure and
-call Cooldis without becoming the runtime.
+call Verlet without becoming the runtime.
 
 ## Mental Models
 
-If you know Vercel, think of Cooldis as the local-to-managed path for agents:
+If you know Vercel, think of Verlet as the local-to-managed path for agents:
 define locally, inspect the runtime shape, publish when ready, observe what
 happened, and keep the source definition portable.
 
 If you know Terraform or Dockerfiles, the familiar part is declaration. Declare
 the agent, tools, resources, grants, behavior, and placement instead of hiding
-that shape inside application code. Cooldis turns the declaration into a running
+that shape inside application code. Verlet turns the declaration into a running
 agent across local and future cloud runtimes.
 
 If you know package managers, the destination is installable agents and tools:
@@ -78,7 +78,7 @@ what you approve, and run it under policy.
 
 ## Current Status
 
-Cooldis is experimental. The repository is focused on V1 runtime primitives:
+Verlet is experimental. The repository is focused on V1 runtime primitives:
 agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
 couplings, witnessed OpenAPI operation imports, offline coupling replay,
 local runtime execution, provider adapters,
@@ -103,5 +103,5 @@ harness product layer are V2 direction.
 - [Protocol Surfaces](developers/protocol-surfaces.md)
 - [Threat Model](threat-model.md)
 - [OpenAPI Operation Imports](openapi-adapter.md)
-- [How Cooldis Is Tested](how-cooldis-is-tested.md)
+- [How Verlet Is Tested](how-verlet-is-tested.md)
 - [Roadmap](roadmap.md)

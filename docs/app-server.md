@@ -1,21 +1,21 @@
-# Cooldis RPC Control Plane
+# Verlet RPC Control Plane
 
-Cooldis owns an app-server control plane with a Codex-shaped transport so local
-clients can exercise the Cooldis kernel without importing Codex as a runtime
+Verlet owns an app-server control plane with a Codex-shaped transport so local
+clients can exercise the Verlet kernel without importing Codex as a runtime
 dependency. The app-server copies the wire shape that the Codex remote client
-expects and routes execution through `CooldisSupervisor` / `RuntimeHost`.
+expects and routes execution through `VerletSupervisor` / `RuntimeHost`.
 
 The app-server is protocol, transport, and event projection. It is not a second
 kernel.
 
-`cooldis-mcp-server` reuses this daemon/app-server control plane from the MCP
-side. MCP is therefore another projection over `CooldisSupervisor` and
+`verlet-mcp-server` reuses this daemon/app-server control plane from the MCP
+side. MCP is therefore another projection over `VerletSupervisor` and
 `RuntimeHost`, not an independent scheduler. See
-[Cooldis MCP Server](mcp-server.md).
+[Verlet MCP Server](mcp-server.md).
 
-For Cooldis-owned clients, the `thread/start` control-plane method accepts the
+For Verlet-owned clients, the `thread/start` control-plane method accepts the
 runtime `topology` object and the `parentThreadId` shorthand used by MCP. These
-fields are Cooldis extensions over the Codex-shaped transport; bit-for-bit Codex
+fields are Verlet extensions over the Codex-shaped transport; bit-for-bit Codex
 client parity is not the target of that topology surface.
 
 ## Current Surfaces
@@ -29,25 +29,25 @@ the form `token <value>`. Copy only `<value>` for the client command below. The
 regardless of their working directories:
 
 ```sh
-cooldis identity bootstrap operator:quick-start \
+verlet identity bootstrap operator:quick-start \
   --display "Quick-start operator" \
-  --state-home "$HOME/.cooldis/rpc-quick-start-state"
+  --state-home "$HOME/.verlet/rpc-quick-start-state"
 ```
 
 Start the server in one terminal:
 
 ```sh
-cooldis rpc \
+verlet rpc \
   --listen ws://127.0.0.1:49200/rpc \
-  --state-home "$HOME/.cooldis/rpc-quick-start-state"
+  --state-home "$HOME/.verlet/rpc-quick-start-state"
 ```
 
 Then call it from another terminal, replacing `<token>` with the token printed
 by `identity bootstrap`:
 
 ```sh
-COOLDIS_APP_SERVER_TOKEN="<token>" \
-  cooldis debug rpc call thread/list
+VERLET_APP_SERVER_TOKEN="<token>" \
+  verlet debug rpc call thread/list
 ```
 
 Both transports authenticate every connection before any method dispatch; see
@@ -60,70 +60,70 @@ The direct app-server command currently uses the deterministic local/offline
 provider. The TCP WebSocket listener also serves `GET /healthz` and `GET
 /readyz` with a small JSON `200 OK` response.
 
-`cooldis rpc` also accepts `--runtime-home` and `--cwd`. Without
+`verlet rpc` also accepts `--runtime-home` and `--cwd`. Without
 `--state-home`, it creates a fresh per-process temporary state home and prints
 that path at startup. Use an explicit state home when minting a credential for
 a TCP WebSocket client. A Unix socket server can be started with:
 
 ```sh
-cooldis rpc \
-  --listen unix:///tmp/cooldis.sock \
-  --state-home "$HOME/.cooldis/rpc-quick-start-state"
+verlet rpc \
+  --listen unix:///tmp/verlet.sock \
+  --state-home "$HOME/.verlet/rpc-quick-start-state"
 ```
 
-`cooldis console` starts the same loopback app-server shape for local browser
+`verlet console` starts the same loopback app-server shape for local browser
 operation, binds `127.0.0.1:<port>`, serves the bundled Svelte console from `/`,
 and keeps JSON-RPC on `/rpc`. Each console process generates a session token,
 injects it into `index.html`, and rejects `/rpc` WebSocket upgrades that do not
 present the token through `Sec-WebSocket-Protocol`. Query-string tokens are not
 accepted.
 
-`cooldis chat` starts the bundled terminal console. It launches a private app
+`verlet chat` starts the bundled terminal console. It launches a private app
 server on a temporary Unix socket by default, or attaches to an existing
 endpoint with `--attach`:
 
 ```sh
-cargo run --bin cooldis -- chat
-cargo run --bin cooldis -- chat --attach unix:///tmp/cooldis.sock
+cargo run --bin verlet -- chat
+cargo run --bin verlet -- chat --attach unix:///tmp/verlet.sock
 ```
 
 With a prompt argument, it opens the terminal console and submits that prompt:
 
 ```sh
-cargo run --bin cooldis -- chat "hello from cooldis"
+cargo run --bin verlet -- chat "hello from verlet"
 ```
 
-`cooldis debug rpc` connects to a running standalone or daemon WebSocket app
+`verlet debug rpc` connects to a running standalone or daemon WebSocket app
 server instead of starting a private one. It is useful for protocol debugging
 and for checking live state from scripts. Export the credential first so each
 command presents it:
 
 ```sh
-export COOLDIS_APP_SERVER_TOKEN="<token>"
-cooldis debug rpc call thread/list
-cooldis debug rpc call thread/read '{"threadId":"...","includeTurns":false}'
+export VERLET_APP_SERVER_TOKEN="<token>"
+verlet debug rpc call thread/list
+verlet debug rpc call thread/read '{"threadId":"...","includeTurns":false}'
 ```
 
 By default it connects to `ws://127.0.0.1:49200/rpc`. Pass `--url` for another
 running WebSocket endpoint, or `--config` to read `daemon.app_server.listen`
-from a `cooldis.toml`:
+from a `verlet.toml`:
 
 ```sh
-cooldis debug rpc turn --new "hello from the daemon"
-cooldis debug rpc turn --thread <thread-id> --json "resume here"
-cooldis debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
+verlet debug rpc turn --new "hello from the daemon"
+verlet debug rpc turn --thread <thread-id> --json "resume here"
+verlet debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 ```
 
-`cooldis debug bind` answers why a thread has its effective configuration by
+`verlet debug bind` answers why a thread has its effective configuration by
 projecting its recorded `manifest.compile.completed` and
 `manifest.bind.completed` receipts. It uses the same WebSocket endpoint
 selection as `debug rpc`, and it can inspect the same thread offline from the
 SQLite journal without a daemon:
 
 ```sh
-cargo run --bin cooldis -- debug bind <thread-id>
-cargo run --bin cooldis -- debug bind <thread-id> --json --url ws://127.0.0.1:49200/rpc
-cargo run --bin cooldis -- debug bind <thread-id> --journal .cooldis/state/session_history.sqlite3
+cargo run --bin verlet -- debug bind <thread-id>
+cargo run --bin verlet -- debug bind <thread-id> --json --url ws://127.0.0.1:49200/rpc
+cargo run --bin verlet -- debug bind <thread-id> --journal .verlet/state/session_history.sqlite3
 ```
 
 The command never resolves the manifest again or consults current daemon
@@ -141,13 +141,13 @@ opens no JSON-RPC session, and is witnessed as a rejection. The unauthenticated
 
 ### Modes
 
-`[daemon.identity]` in the daemon config used by `cooldis daemon run` selects
+`[daemon.identity]` in the daemon config used by `verlet daemon run` selects
 the mode (see `daemon/daemon_config.rs`):
 
 - `local` (default when the section is absent): a synthesized single-operator
   identity is projected into the app server, and a Unix-socket peer whose uid
   matches the daemon's effective uid resolves to that operator without a
-  token, so `cooldis` CLI usage on the host keeps working with no migration.
+  token, so `verlet` CLI usage on the host keeps working with no migration.
   The socket file is chmod `0o600` in every mode.
 - `managed`: requires explicit non-blank `tenant_id` and `console_principal`;
   the daemon hard-fails at startup otherwise. It does not synthesize or
@@ -157,7 +157,7 @@ the mode (see `daemon/daemon_config.rs`):
 
 The TCP WebSocket listener remains loopback-only in both modes. A hosted
 deployment that needs remote access must provide a separate trusted transport
-or proxy. Standalone `cooldis rpc` and `cooldis console` construct local-mode
+or proxy. Standalone `verlet rpc` and `verlet console` construct local-mode
 app servers; the console is a private local surface, not a client for a running
 managed daemon.
 
@@ -173,29 +173,29 @@ tenant_id = "tenant-acme"
 console_principal = "operator:root"
 
 [daemon.runtime]
-state_home = "/var/lib/cooldis/state"
+state_home = "/var/lib/verlet/state"
 
 [daemon.app_server]
 listen = "ws://127.0.0.1:49200/rpc"
 ```
 
 ```sh
-cooldis identity bootstrap operator:root \
+verlet identity bootstrap operator:root \
   --display "Root operator" \
-  --state-home /var/lib/cooldis/state
+  --state-home /var/lib/verlet/state
 
-cooldis identity declare adapter:gateway \
+verlet identity declare adapter:gateway \
   --kind adapter \
   --display "Gateway adapter" \
   --declared-by operator:root \
-  --state-home /var/lib/cooldis/state
+  --state-home /var/lib/verlet/state
 
-cooldis identity mint adapter:gateway \
+verlet identity mint adapter:gateway \
   --minted-by operator:root \
-  --state-home /var/lib/cooldis/state
+  --state-home /var/lib/verlet/state
 
-cooldis daemon config validate --config cooldis.toml
-cooldis daemon run --config cooldis.toml
+verlet daemon config validate --config verlet.toml
+verlet daemon run --config verlet.toml
 ```
 
 `bootstrap` declares the first operator and mints its credential atomically.
@@ -205,12 +205,12 @@ shows redacted records, and `revoke-credential` / `revoke-principal` retire
 them. Revocation takes effect at the next connection; live sessions are not
 torn down.
 
-Cooldis-owned daemon clients read the bearer token from the environment. For
+Verlet-owned daemon clients read the bearer token from the environment. For
 example, an operator can connect the debug client with:
 
 ```sh
-COOLDIS_APP_SERVER_TOKEN="$OPERATOR_TOKEN" \
-  cooldis debug rpc call thread/list --config cooldis.toml
+VERLET_APP_SERVER_TOKEN="$OPERATOR_TOKEN" \
+  verlet debug rpc call thread/list --config verlet.toml
 ```
 
 An adapter connects to `/rpc` with `Authorization: Bearer <adapter-token>` and
@@ -224,13 +224,13 @@ authority receives JSON-RPC error `-32003`.
 - `Authorization: Bearer <token>` on the WebSocket upgrade, both transports.
   Header name and scheme are case-insensitive.
 - The console uses the WebSocket subprotocol carrier: the client offers
-  `cooldis-console-token.<token>` and the server echoes exactly that
+  `verlet-console-token.<token>` and the server echoes exactly that
   recognized protocol. Query-parameter tokens are not accepted (they leak into
   logs). The console credential itself is minted by the server at
   construction: at most one is active per state home, a recorded predecessor
   is revoked at startup, and the server retires its own credential on graceful
   shutdown.
-- MCP, ACP, and debug-RPC clients read `COOLDIS_APP_SERVER_TOKEN` from the
+- MCP, ACP, and debug-RPC clients read `VERLET_APP_SERVER_TOKEN` from the
   environment (an explicit config field overrides it) and act with exactly the
   authority of the principal that token resolves to.
 
@@ -280,7 +280,7 @@ Ingress submitted over an authenticated RPC session is stamped
 ## Provider Config
 
 The chat command can point its private app-server runtime at a live
-provider endpoint. Put non-secret settings in a local `cooldis.json`:
+provider endpoint. Put non-secret settings in a local `verlet.json`:
 
 ```json
 {
@@ -298,13 +298,13 @@ provider endpoint. Put non-secret settings in a local `cooldis.json`:
 Then run interactive chat:
 
 ```sh
-cargo run --bin cooldis -- chat
+cargo run --bin verlet -- chat
 ```
 
 Or pass the provider config on the command line:
 
 ```sh
-cargo run --bin cooldis -- chat \
+cargo run --bin verlet -- chat \
   --provider openai \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -359,7 +359,7 @@ AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` and
 
 The Sonnet 4.5 Bedrock raw model ID is
 `anthropic.claude-sonnet-4-5-20250929-v1:0`, but Bedrock accounts can require
-an inference profile ID. Cooldis defaults to the documented global profile,
+an inference profile ID. Verlet defaults to the documented global profile,
 `global.anthropic.claude-sonnet-4-5-20250929-v1:0`; use a regional profile
 such as `us.anthropic.claude-sonnet-4-5-20250929-v1:0` when data routing
 requires it. `anthropic_bedrock` reads credentials from `AWS_ACCESS_KEY_ID`,
@@ -372,9 +372,9 @@ stream events as the native Anthropic adapter.
 
 Provider config resolution is:
 
-- `--config <file>`, otherwise `./cooldis.json` if it exists;
+- `--config <file>`, otherwise `./verlet.json` if it exists;
 - command-line flags override the config file;
-- `--env-file <file>`, `COOLDIS_CHAT_ENV_FILE`, otherwise `./.env`;
+- `--env-file <file>`, `VERLET_CHAT_ENV_FILE`, otherwise `./.env`;
 - base URLs resolve from `base_url`, provider-specific local env, or command
   line flags;
 - keys resolve from `api_key`, `api_key_env`, or provider-standard env vars
@@ -386,7 +386,7 @@ Provider config resolution is:
   `anthropic_bedrock`; local/offline mode remains non-streaming.
 
 Keep real secrets in the environment or a local ignored env file, not in
-committed `cooldis.json`.
+committed `verlet.json`.
 
 The app-server opens project metadata at `state_home/metadata.sqlite3` and user
 metadata at `user_state_home/metadata.sqlite3` on startup. Project metadata owns
@@ -398,7 +398,7 @@ provider path while resolving API keys from the user auth store.
 
 ## Thread Residency
 
-Cooldis follows the Codex-shaped command surface here: the public continuation
+Verlet follows the Codex-shaped command surface here: the public continuation
 operation is `thread/resume`. A resume request attaches to a resident thread when
 one is already loaded, or loads the thread from durable metadata/session state
 when only the stored thread id remains.
@@ -471,8 +471,8 @@ the fork with `thread.spawned`.
 
 `thread/start` accepts `agentRef` for a published `agent://...` ref. The
 app-server resolves aliases from its configured agent registry root
-(`.cooldis/agents` by default) and operation refs from its configured operation
-registry root (`.cooldis/operations` by default), selects a declared model
+(`.verlet/agents` by default) and operation refs from its configured operation
+registry root (`.verlet/operations` by default), selects a declared model
 profile against the configured provider surface, applies allowed
 `runtimeOverrides`, and records the immutable manifest ref in thread lifecycle
 metadata. Relative agent registry roots and operation registry roots are
@@ -517,7 +517,7 @@ daemon routes, and `thread/rebindFork` reject a remote binding rather than
 silently starting it in the local runtime. `sandbox` remains fail-closed.
 
 At startup the app-server also publishes a kernel-synthesized default manifest
-as `agent://cooldis/default@latest`. Its envelope is the configured provider,
+as `agent://verlet/default@latest`. Its envelope is the configured provider,
 model, working directory, and streaming support. If capsule bindings are
 configured with `global_operation_names`, or `load_all_active_when_unbound`,
 startup synthesis resolves the active local operation records and emits pinned
@@ -1055,13 +1055,13 @@ cargo test
 Run the cheap app-server smoke:
 
 ```sh
-cargo run --bin cooldis-app-server-smoke
+cargo run --bin verlet-app-server-smoke
 ```
 
 Run the workbench query-surface smoke:
 
 ```sh
-cargo run --bin cooldis-workbench-smoke
+cargo run --bin verlet-workbench-smoke
 ```
 
 Run the focused MCP server tests:
@@ -1073,13 +1073,13 @@ cargo test mcp_server
 Run a one-shot local/offline chat proof:
 
 ```sh
-cargo run --bin cooldis -- chat "hello from local chat"
+cargo run --bin verlet -- chat "hello from local chat"
 ```
 
 Run an OpenAI Responses-compatible chat proof with a local env file:
 
 ```sh
-cargo run --bin cooldis -- chat \
+cargo run --bin verlet -- chat \
   --provider openai \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -1097,7 +1097,7 @@ COOL_CHAT_OPENAI_OK
 Run an OpenAI Chat Completions-compatible proof:
 
 ```sh
-cargo run --bin cooldis -- chat \
+cargo run --bin verlet -- chat \
   --provider openai_chat_completions \
   --base-url https://api.openai.com \
   --api-key-env OPENAI_API_KEY \
@@ -1108,7 +1108,7 @@ cargo run --bin cooldis -- chat \
 Run an Anthropic Messages proof:
 
 ```sh
-cargo run --bin cooldis -- chat \
+cargo run --bin verlet -- chat \
   --provider anthropic \
   --api-key-env ANTHROPIC_API_KEY \
   --model claude-sonnet-4-5-20250929 \
@@ -1118,7 +1118,7 @@ cargo run --bin cooldis -- chat \
 Run an Anthropic Bedrock proof:
 
 ```sh
-scripts/with-bedrock-env.sh cargo run --bin cooldis -- chat \
+scripts/with-bedrock-env.sh cargo run --bin verlet -- chat \
   --provider anthropic_bedrock \
   --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
   "Reply with exactly COOL_CHAT_BEDROCK_OK and no other text."

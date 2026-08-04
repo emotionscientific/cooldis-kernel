@@ -1,6 +1,6 @@
 # Governance
 
-Cooldis is maintainer-led. Maintainers decide project direction, review
+Verlet is maintainer-led. Maintainers decide project direction, review
 priorities, release timing, and when public contributions fit the current shape
 of the runtime.
 

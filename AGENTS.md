@@ -1,6 +1,6 @@
-# Cooldis Agent Notes
+# Verlet Agent Notes
 
-Cooldis is a standalone Rust runtime repo, split from the product app repo.
+Verlet is a standalone Rust runtime repo, split from the product app repo.
 
 Keep this repo focused on runtime primitives:
 

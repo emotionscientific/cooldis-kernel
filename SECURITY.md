@@ -1,6 +1,6 @@
 # Security Policy
 
-Cooldis is experimental and has not reached a stable production support window.
+Verlet is experimental and has not reached a stable production support window.
 
 ## Supported Versions
 

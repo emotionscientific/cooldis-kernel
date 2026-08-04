@@ -1,6 +1,6 @@
 # Getting Started
 
-Cooldis is early, so the first successful path is local and explicit.
+Verlet is early, so the first successful path is local and explicit.
 
 ## Install And Verify
 
@@ -8,8 +8,8 @@ Clone the repository and run the runtime checks:
 
 ```sh
 cargo test --workspace --all-targets --locked
-cargo run --locked --bin cooldis-vbash-smoke
-cargo run --locked --bin cooldis-wasm-smoke
+cargo run --locked --bin verlet-vbash-smoke
+cargo run --locked --bin verlet-wasm-smoke
 ```
 
 ## Explore The CLI
@@ -17,23 +17,23 @@ cargo run --locked --bin cooldis-wasm-smoke
 The current public CLI surfaces are:
 
 ```sh
-cooldis --help
-cooldis commands
-cooldis console --help
-cooldis chat --help
-cooldis agent --help
-cooldis blob --help
-cooldis tool --help
-cooldis auth --help
-cooldis rpc --help
-cooldis daemon --help
+verlet --help
+verlet commands
+verlet console --help
+verlet chat --help
+verlet agent --help
+verlet blob --help
+verlet tool --help
+verlet auth --help
+verlet rpc --help
+verlet daemon --help
 ```
 
-For the canonical command list and command grouping, see [Cooldis CLI](cli.md).
+For the canonical command list and command grouping, see [Verlet CLI](cli.md).
 
-`cooldis agent plan`, `publish`, `list`, and `show` are the first manifest
-authoring slice. `cooldis blob publish` stores static prompt and context files
-as immutable resources. `cooldis tool build`, `publish`, and `run` are the
+`verlet agent plan`, `publish`, `list`, and `show` are the first manifest
+authoring slice. `verlet blob publish` stores static prompt and context files
+as immutable resources. `verlet tool build`, `publish`, and `run` are the
 local operation path.
 
 ## First Useful Loop

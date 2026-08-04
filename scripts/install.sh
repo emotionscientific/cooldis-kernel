@@ -1,20 +1,83 @@
 #!/bin/sh
 set -eu
 
-REPO="${COOLDIS_REPO:-emotionscientific/cooldis-kernel}"
-VERSION="${COOLDIS_VERSION:-}"
-TARGET="${COOLDIS_TARGET:-}"
-BASE_URL="${COOLDIS_BASE_URL:-}"
-INSTALL_ROOT="${COOLDIS_INSTALL_ROOT:-"$HOME/.cooldis"}"
-BIN_DIR="${COOLDIS_BIN_DIR:-"$HOME/.local/bin"}"
-MAN_DIR="${COOLDIS_MAN_DIR:-${XDG_DATA_HOME:-"$HOME/.local/share"}/man/man1}"
-ARCHIVE="${COOLDIS_ARCHIVE:-}"
-CHECKSUM="${COOLDIS_CHECKSUM:-}"
+INSTALL_SCRIPT_DIR=$(dirname "$0")
+if [ -r "$INSTALL_SCRIPT_DIR/env-compat.sh" ]; then
+  . "$INSTALL_SCRIPT_DIR/env-compat.sh"
+else
+  VERLET_ENV_WARNED=${VERLET_ENV_WARNED-}
+  verlet_env_read() {
+    canonical=$1
+    eval "canonical_is_set=\${$canonical+x}"
+    if [ "$canonical_is_set" = x ]; then
+      eval "VERLET_ENV_VALUE=\${$canonical}"
+      VERLET_ENV_IS_SET=1
+      return
+    fi
+    suffix=${canonical#VERLET_}
+    legacy="COOL""DIS_$suffix"
+    eval "legacy_is_set=\${$legacy+x}"
+    if [ "$legacy_is_set" = x ]; then
+      eval "VERLET_ENV_VALUE=\${$legacy}"
+      VERLET_ENV_IS_SET=1
+      case ":$VERLET_ENV_WARNED:" in
+        *":$legacy:"*) ;;
+        *)
+          printf 'warning: %s is deprecated; use %s (compatibility will be removed in v0.4.0)\n' \
+            "$legacy" "$canonical" >&2
+          VERLET_ENV_WARNED="${VERLET_ENV_WARNED:+$VERLET_ENV_WARNED:}$legacy"
+          ;;
+      esac
+      return
+    fi
+    VERLET_ENV_VALUE=
+    VERLET_ENV_IS_SET=0
+  }
+  verlet_env_promote() {
+    canonical=$1
+    verlet_env_read "$canonical"
+    if [ "$VERLET_ENV_IS_SET" = 1 ]; then
+      export "$canonical=$VERLET_ENV_VALUE"
+    fi
+  }
+fi
+for env_name in \
+  VERLET_REPO \
+  VERLET_VERSION \
+  VERLET_TARGET \
+  VERLET_BASE_URL \
+  VERLET_INSTALL_ROOT \
+  VERLET_BIN_DIR \
+  VERLET_MAN_DIR \
+  VERLET_ARCHIVE \
+  VERLET_CHECKSUM
+do
+  verlet_env_promote "$env_name"
+done
+
+if [ -z "${VERLET_INSTALL_ROOT+x}" ]; then
+  LEGACY_INSTALL_ROOT="$HOME/.""cool""dis"
+  if [ ! -e "$HOME/.verlet" ] && [ -d "$LEGACY_INSTALL_ROOT" ]; then
+    printf 'warning: %s is deprecated; existing installation state will continue to be used in place through v0.3.0\n' \
+      "$LEGACY_INSTALL_ROOT" >&2
+    VERLET_INSTALL_ROOT=$LEGACY_INSTALL_ROOT
+  fi
+fi
+
+REPO="${VERLET_REPO:-emotionscientific/cooldis-kernel}"
+VERSION="${VERLET_VERSION:-}"
+TARGET="${VERLET_TARGET:-}"
+BASE_URL="${VERLET_BASE_URL:-}"
+INSTALL_ROOT="${VERLET_INSTALL_ROOT:-"$HOME/.verlet"}"
+BIN_DIR="${VERLET_BIN_DIR:-"$HOME/.local/bin"}"
+MAN_DIR="${VERLET_MAN_DIR:-${XDG_DATA_HOME:-"$HOME/.local/share"}/man/man1}"
+ARCHIVE="${VERLET_ARCHIVE:-}"
+CHECKSUM="${VERLET_CHECKSUM:-}"
 FORCE=0
 
 usage() {
   cat <<'USAGE'
-install.sh - install or update the Cooldis CLI/kernel runtime.
+install.sh - install or update the Verlet CLI/kernel runtime.
 
 Usage:
   sh install.sh [options]
@@ -25,7 +88,7 @@ Options:
   --target TARGET         Override target triple detection.
   --repo OWNER/REPO       GitHub repository. Default: emotionscientific/cooldis-kernel.
   --base-url URL          Release asset base URL.
-  --install-root DIR      Versioned install root. Default: ~/.cooldis.
+  --install-root DIR      Versioned install root. Default: ~/.verlet.
   --bin-dir DIR           Symlink directory. Default: ~/.local/bin.
   --man-dir DIR           Manual symlink directory.
                           Default: ${XDG_DATA_HOME:-$HOME/.local/share}/man/man1.
@@ -34,12 +97,12 @@ Options:
   --force                 Replace non-symlink files in --bin-dir and --man-dir.
   -h, --help              Show this help.
 
-Environment overrides use the COOLDIS_* names matching the option names.
+Environment overrides use the VERLET_* names matching the option names.
 USAGE
 }
 
 die() {
-  echo "cooldis install: $*" >&2
+  echo "verlet install: $*" >&2
   exit 1
 }
 
@@ -182,7 +245,7 @@ if [ -z "$TARGET" ]; then
 fi
 
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
-WORK_DIR="$(mktemp -d "$TMPDIR_ROOT/cooldis-install.XXXXXX")"
+WORK_DIR="$(mktemp -d "$TMPDIR_ROOT/verlet-install.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
 
 if [ -n "$ARCHIVE" ]; then
@@ -221,7 +284,7 @@ else
     [ -n "$ARCHIVE_URL" ] || ARCHIVE_URL="$BASE_URL/$ARCHIVE_NAME"
     printf '%s  %s\n' "$ARCHIVE_SHA" "$ARCHIVE_NAME" >"$WORK_DIR/$ARCHIVE_NAME.sha256"
   else
-    ARCHIVE_NAME="cooldis-$VERSION-$TARGET.tar.gz"
+    ARCHIVE_NAME="verlet-$VERSION-$TARGET.tar.gz"
     ARCHIVE_URL="$BASE_URL/$ARCHIVE_NAME"
     download_file "$BASE_URL/$ARCHIVE_NAME.sha256" "$WORK_DIR/$ARCHIVE_NAME.sha256"
   fi
@@ -240,19 +303,20 @@ PACKAGE_COUNT="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l | t
 PACKAGE_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 PACKAGE_NAME="$(basename "$PACKAGE_DIR")"
 
-for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
+LEGACY_BIN="cool""dis"
+for bin in verlet "$LEGACY_BIN" verlet-acp-agent verlet-mcp-server; do
   [ -x "$PACKAGE_DIR/$bin" ] || die "archive is missing executable $bin"
 done
-manual_payload="$PACKAGE_DIR/share/man/man1/cooldis.1"
+manual_payload="$PACKAGE_DIR/share/man/man1/verlet.1"
 [ -f "$manual_payload" ] && [ ! -L "$manual_payload" ] && [ -s "$manual_payload" ] \
-  || die "archive is missing regular manual share/man/man1/cooldis.1"
+  || die "archive is missing regular manual share/man/man1/verlet.1"
 
 VERSION_DIR="$INSTALL_ROOT/versions/$PACKAGE_NAME"
 mkdir -p "$INSTALL_ROOT/versions" "$BIN_DIR" "$MAN_DIR"
-for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
+for bin in verlet "$LEGACY_BIN" verlet-acp-agent verlet-mcp-server; do
   require_replaceable_link "$BIN_DIR/$bin"
 done
-manual_link="$MAN_DIR/cooldis.1"
+manual_link="$MAN_DIR/verlet.1"
 require_replaceable_link "$manual_link"
 
 rm -rf "$VERSION_DIR.tmp"
@@ -262,7 +326,7 @@ mv "$VERSION_DIR.tmp" "$VERSION_DIR"
 rm -f "$INSTALL_ROOT/current"
 ln -s "$VERSION_DIR" "$INSTALL_ROOT/current"
 
-for bin in cooldis cooldis-acp-agent cooldis-mcp-server; do
+for bin in verlet "$LEGACY_BIN" verlet-acp-agent verlet-mcp-server; do
   link="$BIN_DIR/$bin"
   if [ -e "$link" ] || [ -L "$link" ]; then
     rm -f "$link"
@@ -273,29 +337,30 @@ done
 if [ -e "$manual_link" ] || [ -L "$manual_link" ]; then
   rm -f "$manual_link"
 fi
-ln -s "$INSTALL_ROOT/current/share/man/man1/cooldis.1" "$manual_link"
+ln -s "$INSTALL_ROOT/current/share/man/man1/verlet.1" "$manual_link"
 
-echo "Installed Cooldis:"
+echo "Installed Verlet:"
 echo "  $VERSION_DIR"
 echo "Linked binaries:"
-echo "  $BIN_DIR/cooldis"
-echo "  $BIN_DIR/cooldis-acp-agent"
-echo "  $BIN_DIR/cooldis-mcp-server"
+echo "  $BIN_DIR/verlet"
+echo "  $BIN_DIR/$LEGACY_BIN (deprecated compatibility wrapper)"
+echo "  $BIN_DIR/verlet-acp-agent"
+echo "  $BIN_DIR/verlet-mcp-server"
 echo "Linked manual:"
-echo "  $MAN_DIR/cooldis.1"
+echo "  $MAN_DIR/verlet.1"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
     echo
-    echo "Add this to your shell profile to use cooldis from any directory:"
+    echo "Add this to your shell profile to use verlet from any directory:"
     echo "  export PATH=\"$BIN_DIR:\$PATH\""
     ;;
 esac
 
 echo
 echo "Get started:"
-echo "  cooldis console"
-echo "  cooldis chat"
-echo "  cooldis init <name>"
-echo "  man cooldis"
+echo "  verlet console"
+echo "  verlet chat"
+echo "  verlet init <name>"
+echo "  man verlet"

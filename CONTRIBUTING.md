@@ -1,6 +1,6 @@
-# Contributing to Cooldis
+# Contributing to Verlet
 
-Cooldis is an experimental agent runtime. This repository is not accepting
+Verlet is an experimental agent runtime. This repository is not accepting
 public contributions yet.
 
 The code is available for inspection, local use, and evaluation, but the
@@ -29,7 +29,7 @@ match the current release path.
 
 ## Development Setup
 
-For local evaluation, Cooldis is a Rust workspace. From the repository root:
+For local evaluation, Verlet is a Rust workspace. From the repository root:
 
 ```sh
 cargo test --workspace --all-targets --locked

@@ -1,13 +1,13 @@
 # Command Contracts
 
-Command contracts are the Unix-shaped projection of Cooldis operations. They
+Command contracts are the Unix-shaped projection of Verlet operations. They
 exist so humans, coding agents, model agents, virtual bash, MCP shims, and future
 HTTP/API projections can share one boring, inspectable contract.
 
 The standard is:
 
 ```text
-A Cooldis command behaves like a boring Unix command unless it declares
+A Verlet command behaves like a boring Unix command unless it declares
 otherwise.
 
 argv + stdin + explicit env + cwd
@@ -37,7 +37,7 @@ or invent ambient host access.
    batch object.
 7. **Text and JSON are explicit modes.** Human text is allowed. Machine output
    should have `--json`, JSONL, or schema-backed stdout.
-8. **No ambient Unix.** Full POSIX is not implied. Cooldis supports a
+8. **No ambient Unix.** Full POSIX is not implied. Verlet supports a
    process-shaped subset: argv, env, cwd, stdin, stdout, stderr, exit status,
    cancellation, and scoped VFS.
 
@@ -154,7 +154,7 @@ Use stable categories so bash control flow is reliable:
 | `7` | Cancelled by caller/runtime. |
 
 Commands may define more specific nonzero codes, but these meanings should stay
-reserved across official Cooldis surfaces.
+reserved across official Verlet surfaces.
 
 ## Bash Control Flow
 
@@ -187,9 +187,9 @@ done < queries.txt
 The same contract should project into:
 
 ```text
-cooldis <command> --help                 short human help
-cooldis tool manual <published-tool> [operation] structured human/agent reference
-cooldis tool manual <published-tool> --json      token-efficient machine reference
+verlet <command> --help                 short human help
+verlet tool manual <published-tool> [operation] structured human/agent reference
+verlet tool manual <published-tool> --json      token-efficient machine reference
 virtual bash: man <command>              thread-visible live command contract
 ToolDefinition.description               compact model-facing description
 MCP description/schema                   compatibility projection
@@ -200,7 +200,7 @@ ABI contract. Capability and effect sections should be generated from accepted
 contracts where possible.
 
 The V0 implementation stores an operation manual in each accepted
-`ToolInterfaceContract` produced by `cooldis tool build --package`. If a package
+`ToolInterfaceContract` produced by `verlet tool build --package`. If a package
 omits the caller-facing description or fixtures, build emits warnings and
 generates a fallback manual from the ABI projection, schemas, required
 capabilities, command binding, and fixtures that do exist.

@@ -1,6 +1,6 @@
 # Kernel Invariants
 
-This page names the public runtime rules that other Cooldis docs rely on. It is
+This page names the public runtime rules that other Verlet docs rely on. It is
 not a private design canon; it is the small vocabulary an OSS reader needs to
 understand what the kernel promises.
 

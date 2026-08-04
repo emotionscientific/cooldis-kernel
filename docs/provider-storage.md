@@ -1,6 +1,6 @@
 # Metadata And Provider Auth Storage
 
-Cooldis needs durable metadata/config storage for state that is not conversation
+Verlet needs durable metadata/config storage for state that is not conversation
 context: provider catalogs, provider credentials, thread metadata, grants,
 bindings, routing config, and similar control-plane records.
 
@@ -20,7 +20,7 @@ Pi separates provider metadata from provider credentials:
 - auth status can report where credentials come from without exposing secret
   values.
 
-Cooldis keeps that shape, but puts it inside a broader runtime-owned metadata
+Verlet keeps that shape, but puts it inside a broader runtime-owned metadata
 store with SQLite first:
 
 ```text
@@ -46,8 +46,8 @@ but browser credential writes use the user auth store.
 The public console defaults to:
 
 ```text
-<project_root>/.cooldis/state/metadata.sqlite3
-~/.cooldis/state/metadata.sqlite3
+<project_root>/.verlet/state/metadata.sqlite3
+~/.verlet/state/metadata.sqlite3
 ```
 
 Seeding is idempotent and does not overwrite stored credentials, so a daemon or
@@ -131,12 +131,12 @@ different backend when the deployment shape needs it.
 Local:
 
 ```text
-<project_root>/.cooldis/state/metadata.sqlite3
+<project_root>/.verlet/state/metadata.sqlite3
   llm_provider_records
   thread_lifecycle_records
   future config/grant/capsule binding tables
 
-~/.cooldis/state/metadata.sqlite3
+~/.verlet/state/metadata.sqlite3
   llm_provider_credentials
   named secret values
 ```
