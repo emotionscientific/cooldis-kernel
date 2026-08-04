@@ -9,6 +9,7 @@ target/
 **/.cooldis/
 _site/
 dist/
+verify-output.log
 scratch/
 notes/
 .claude/

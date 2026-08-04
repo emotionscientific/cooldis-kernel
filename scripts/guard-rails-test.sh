@@ -9,6 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GUARD_SCRIPT="$SCRIPT_DIR/guard-rails.sh"
+ENV_COMPAT_SCRIPT="$SCRIPT_DIR/env-compat.sh"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/guard-rails-test.XXXXXX")" || exit 1
 TMP_DIR="$(cd "$TMP_DIR" && pwd -P)"
 GIT_TEMPLATE_DIR="$TMP_DIR/git-template"
@@ -62,6 +63,7 @@ init_repo() {
   REPO="$TMP_DIR/$name"
   mkdir -p "$REPO/scripts" "$REPO/crates/verlet-kernel/src"
   cp "$GUARD_SCRIPT" "$REPO/scripts/guard-rails.sh"
+  cp "$ENV_COMPAT_SCRIPT" "$REPO/scripts/env-compat.sh"
   printf 'pub const runtime_value: &str = "base";\n' >"$REPO/crates/verlet-kernel/src/lib.rs"
   git -C "$REPO" init -q -b current
   git -C "$REPO" config user.name 'Guard Rails Test'
