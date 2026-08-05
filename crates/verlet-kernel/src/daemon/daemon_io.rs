@@ -28,7 +28,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, Value as JsonValue, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -629,6 +629,29 @@ impl DaemonEgressState {
         Ok(())
     }
 
+    fn replace_cursor(
+        &self,
+        route_id: &str,
+        thread_id: &str,
+        cursor: &StreamCursorV1,
+    ) -> IoResult<()> {
+        let cursor_json = serde_json::to_string(cursor)
+            .map_err(|err| IoError::Queue(format!("encode egress cursor: {err}")))?;
+        self.lock_connection()?
+            .execute(
+                "INSERT INTO cooldis_daemon_egress_cursors (
+                    route_id, thread_id, cursor_json, updated_at_ms
+                 )
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(route_id, thread_id) DO UPDATE SET
+                    cursor_json = excluded.cursor_json,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![route_id, thread_id, cursor_json, now_ms() as i64],
+            )
+            .map_err(egress_state_error)?;
+        Ok(())
+    }
+
     fn push_dead_letter(&self, dead_letter: &EgressDeadLetter) -> IoResult<()> {
         let envelope_json = serde_json::to_string(&dead_letter.envelope)
             .map_err(|err| IoError::Queue(format!("encode dead-letter envelope: {err}")))?;
@@ -901,12 +924,123 @@ struct EgressDeadLetter {
     envelope: EgressEnvelope,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct IngressReceiptContext {
     target: IoTarget,
     metadata: BTreeMap<String, String>,
     source_ingress_id: Option<String>,
     turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DrainEgressSource {
+    id: EventRecordId,
+    cursor: StreamCursorV1,
+}
+
+impl DrainEgressSource {
+    fn from_event(event: &EventRecord) -> Self {
+        Self {
+            id: event.id,
+            cursor: event.cursor_v1(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RequestedEgressTemplate {
+    target: IoTarget,
+    kind: EgressKind,
+    source_ingress_id: Option<String>,
+    metadata: BTreeMap<String, String>,
+}
+
+impl RequestedEgressTemplate {
+    fn envelope(&self) -> EgressEnvelope {
+        let mut envelope = EgressEnvelope::new(self.target.clone(), self.kind.clone(), now_ms());
+        envelope.source_ingress_id = self.source_ingress_id.clone();
+        envelope.metadata = self.metadata.clone();
+        envelope
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum DrainEgressWork {
+    Advance {
+        source: DrainEgressSource,
+    },
+    Requested {
+        source: DrainEgressSource,
+        template: RequestedEgressTemplate,
+    },
+    Assistant {
+        source: DrainEgressSource,
+        context: IngressReceiptContext,
+        text: String,
+    },
+}
+
+impl DrainEgressWork {
+    fn source(&self) -> &DrainEgressSource {
+        match self {
+            Self::Advance { source }
+            | Self::Requested { source, .. }
+            | Self::Assistant { source, .. } => source,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DrainIngressContextEvent {
+    Ingress(EventRecordId),
+    Session {
+        source: DrainEgressSource,
+        entry_id: String,
+    },
+}
+
+/// In-memory projection of the egress-relevant portion of one route/thread stream.
+///
+/// The view caches its stream fold position, terminal receipt dedupe cursors,
+/// ingress contexts and their session-order fold, plus delivery work that has not
+/// reached a terminal receipt. It is dropped and rebuilt from one full replay when
+/// missing or when either cursor no longer verifies against the stream. At every
+/// fold boundary its state must equal folding the same records from sequence one;
+/// no field is durable, and no full event record is retained here.
+#[derive(Clone, Debug, PartialEq)]
+struct DrainEgressView {
+    fold_position: Option<StreamCursorV1>,
+    observed_delivery_cursor: Option<StreamCursorV1>,
+    effective_delivery_cursor: Option<StreamCursorV1>,
+    receipt_dedupe_cursors: HashMap<String, ReceiptDedupeCursor>,
+    ingress_contexts: HashMap<EventRecordId, IngressReceiptContext>,
+    pending_contexts: Vec<IngressReceiptContext>,
+    active_context: Option<IngressReceiptContext>,
+    context_events: Vec<DrainIngressContextEvent>,
+    visible_session_entry_ids: HashSet<String>,
+    unresolved_session_entry_ids: HashSet<String>,
+    undelivered_requested_egress: VecDeque<DrainEgressWork>,
+}
+
+impl DrainEgressView {
+    fn new(
+        observed_delivery_cursor: Option<StreamCursorV1>,
+        effective_delivery_cursor: Option<StreamCursorV1>,
+    ) -> Self {
+        Self {
+            fold_position: None,
+            observed_delivery_cursor,
+            effective_delivery_cursor,
+            receipt_dedupe_cursors: HashMap::new(),
+            ingress_contexts: HashMap::new(),
+            pending_contexts: Vec::new(),
+            active_context: None,
+            context_events: Vec::new(),
+            visible_session_entry_ids: HashSet::new(),
+            unresolved_session_entry_ids: HashSet::new(),
+            undelivered_requested_egress: VecDeque::new(),
+        }
+    }
 }
 
 enum IngressClaimAppend {
@@ -944,6 +1078,7 @@ pub struct VerletDaemonIoBridge {
     egress_adapters: Arc<RwLock<HashMap<String, Arc<dyn EgressAdapter>>>>,
     egress_route_configs: Arc<RwLock<HashMap<String, RouteEgressConfig>>>,
     egress_states: Arc<RwLock<HashMap<String, Arc<DaemonEgressState>>>>,
+    egress_drain_views: Arc<Mutex<HashMap<(String, String), Arc<Mutex<Option<DrainEgressView>>>>>>,
     #[cfg(test)]
     pause_after_ingress_claim: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
@@ -995,6 +1130,7 @@ impl VerletDaemonIoBridge {
             egress_adapters: Arc::new(RwLock::new(HashMap::new())),
             egress_route_configs: Arc::new(RwLock::new(HashMap::new())),
             egress_states: Arc::new(RwLock::new(HashMap::new())),
+            egress_drain_views: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             pause_after_ingress_claim: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -1189,6 +1325,10 @@ impl VerletDaemonIoBridge {
         let key = source_scope(protocol, instance_id);
         let state = self.egress_states.read().await.get(&key).cloned();
         let Some(state) = state else {
+            self.egress_drain_views
+                .lock()
+                .await
+                .retain(|(route_key, _), slot| route_key != &key || Arc::strong_count(slot) > 1);
             return Ok(0);
         };
         let route_config = self
@@ -1199,14 +1339,34 @@ impl VerletDaemonIoBridge {
             .cloned()
             .unwrap_or_default();
         let adapter = self.egress_adapters.read().await.get(&key).cloned();
+        let bindings = state.bound_threads(instance_id)?;
+        let bound_thread_ids = bindings
+            .iter()
+            .map(|binding| binding.coordinates.thread_id.to_string())
+            .collect::<HashSet<_>>();
+        self.egress_drain_views
+            .lock()
+            .await
+            .retain(|(route_key, thread_id), slot| {
+                route_key != &key
+                    || bound_thread_ids.contains(thread_id)
+                    || Arc::strong_count(slot) > 1
+            });
         let mut delivered_sources = 0;
-        for binding in state.bound_threads(instance_id)? {
+        for binding in bindings {
             let handle = match self.bound_thread_handle(&binding).await {
                 Ok(handle) => handle,
                 Err(_) => continue,
             };
             delivered_sources += self
-                .drain_thread_egress(&state, &binding, handle, adapter.as_deref(), &route_config)
+                .drain_thread_egress(
+                    &key,
+                    &state,
+                    &binding,
+                    handle,
+                    adapter.as_deref(),
+                    &route_config,
+                )
                 .await?;
         }
         Ok(delivered_sources)
@@ -2184,22 +2344,11 @@ impl VerletDaemonIoBridge {
         ingress_envelope_ids: &[String],
     ) -> IoResult<IngressOutcomeState> {
         tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let state = self
-                    .ingress_outcome_on_streams(streams, ingress_envelope_ids)
-                    .await?;
-                if !matches!(state, IngressOutcomeState::Missing) {
-                    return Ok(state);
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
+            let store = self.ingress_event_store().await?;
+            ingress_outcome_on_store(&store, streams, ingress_envelope_ids).await
         })
         .await
-        .map_err(|_| {
-            IoError::Bridge(
-                "timed out waiting for superseding durable ingress ownership".to_string(),
-            )
-        })?
+        .map_err(|_| ingress_outcome_timeout_error())?
     }
 
     async fn ingress_route_state(
@@ -2524,19 +2673,29 @@ impl VerletDaemonIoBridge {
         let store = self.ingress_event_store().await?;
         let stream_id = EventStreamId::for_thread(coordinates);
         tokio::time::timeout(Duration::from_secs(30), async {
-            let mut next_sequence = EventSequence::new(1);
+            let mut events = store
+                .read_events(&stream_id, None)
+                .await
+                .map_err(verlet_history_error)?;
+            let mut cursor = events.last().map(EventRecord::cursor_v1);
             loop {
-                let events = store
-                    .read_events(&stream_id, Some(next_sequence))
-                    .await
-                    .map_err(verlet_history_error)?;
                 if let Some(evidence) = turn_execution_evidence(&events, turn_id, submission_mode) {
                     return Ok(evidence);
                 }
-                if let Some(last) = events.last() {
-                    next_sequence = EventSequence::new(last.sequence.get() + 1);
-                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
+                events = match &cursor {
+                    Some(cursor) => store
+                        .read_events_after_cursor(&stream_id, cursor)
+                        .await
+                        .map_err(verlet_history_error)?,
+                    None => store
+                        .read_events(&stream_id, Some(EventSequence::new(1)))
+                        .await
+                        .map_err(verlet_history_error)?,
+                };
+                if let Some(last) = events.last() {
+                    cursor = Some(last.cursor_v1());
+                }
             }
         })
         .await
@@ -3834,6 +3993,7 @@ impl VerletDaemonIoBridge {
 
     async fn drain_thread_egress(
         &self,
+        route_key: &str,
         state: &DaemonEgressState,
         binding: &BoundEgressThread,
         handle: RuntimeThreadHandle,
@@ -3841,150 +4001,127 @@ impl VerletDaemonIoBridge {
         route_config: &RouteEgressConfig,
     ) -> IoResult<usize> {
         let thread_id = binding.coordinates.thread_id.to_string();
-        let cursor = state.cursor(&binding.route_id, &thread_id)?;
-        let after_cursor_ids = match &cursor {
-            Some(cursor) => handle
-                .read_thread_events_after_cursor(cursor)
+        let view_key = (route_key.to_string(), thread_id.clone());
+        let view_slot = {
+            let mut views = self.egress_drain_views.lock().await;
+            views
+                .entry(view_key)
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
+        };
+        let mut view_slot = view_slot.lock().await;
+        let persisted_cursor = state.cursor(&binding.route_id, &thread_id)?;
+        let mut rebuild = view_slot
+            .as_ref()
+            .is_none_or(|view| view.observed_delivery_cursor.as_ref() != persisted_cursor.as_ref());
+        let events = if rebuild {
+            handle
+                .read_thread_events(None)
                 .await
                 .map_err(verlet_bridge_error)?
-                .into_iter()
-                .map(|event| event.id)
-                .collect::<HashSet<_>>(),
-            None => HashSet::new(),
+        } else {
+            let view = view_slot.as_ref().expect("checked drain view");
+            match &view.fold_position {
+                Some(cursor) => match handle.read_thread_events_after_cursor(cursor).await {
+                    Ok(events) => events,
+                    Err(_) => {
+                        rebuild = true;
+                        handle
+                            .read_thread_events(None)
+                            .await
+                            .map_err(verlet_bridge_error)?
+                    }
+                },
+                None => handle
+                    .read_thread_events(Some(EventSequence::new(1)))
+                    .await
+                    .map_err(verlet_bridge_error)?,
+            }
         };
-        let all_events = handle
-            .read_thread_events(None)
-            .await
-            .map_err(verlet_bridge_error)?;
         let context = handle
             .session_context()
             .await
             .map_err(verlet_bridge_error)?;
-        let mut receipt_cursors = receipt_dedupe_cursors(&all_events);
-        let mut pending_contexts = Vec::<IngressReceiptContext>::new();
-        let mut active_context = None;
+        if rebuild {
+            let effective_cursor = verified_delivery_cursor(
+                &events,
+                &EventStreamId::for_thread(&binding.coordinates),
+                persisted_cursor.as_ref(),
+            );
+            *view_slot = Some(DrainEgressView::new(
+                persisted_cursor.clone(),
+                effective_cursor,
+            ));
+        }
+        let view = view_slot.as_mut().expect("drain view initialized");
+        fold_drain_egress_events(view, &events, &context.entries, route_config)?;
+
         let mut delivered_sources = 0;
-
-        for event in &all_events {
-            if let Some(context) = ingress_context_from_event(event) {
-                pending_contexts.push(context);
-            }
-            if let Some(entry) = session_entry_for_event(event, &context.entries)
-                && session_entry_is_user_authored(entry)
-                && !pending_contexts.is_empty()
-            {
-                active_context = Some(pending_contexts.remove(0));
-            }
-
-            if matches!(
-                event.kind,
-                EventKind::IoEgressDelivered | EventKind::IoEgressFailed
-            ) {
-                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
-                if !after_cursor {
-                    continue;
+        while let Some(work) = view.undelivered_requested_egress.front().cloned() {
+            match work {
+                DrainEgressWork::Advance { source } => {
+                    store_drain_delivery_cursor(state, binding, view, &source.cursor)?;
+                    view.undelivered_requested_egress.pop_front();
                 }
-                state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
-                continue;
-            }
-
-            if event.kind == EventKind::IoEgressRequested {
-                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
-                if !after_cursor {
-                    continue;
-                }
-                let envelope = match requested_egress_from_event(event, &all_events) {
-                    Ok(Some(envelope)) => envelope,
-                    Ok(None) => {
-                        state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
-                        continue;
+                DrainEgressWork::Requested { source, template } => {
+                    let outcome = self
+                        .deliver_projected_envelope(
+                            state,
+                            binding,
+                            &handle,
+                            adapter,
+                            &source,
+                            0,
+                            template.envelope(),
+                            route_config.retry,
+                            &mut view.receipt_dedupe_cursors,
+                        )
+                        .await?;
+                    match outcome {
+                        EnvelopeDeliveryOutcome::Delivered(cursor) => {
+                            store_drain_delivery_cursor(state, binding, view, &cursor)?;
+                            view.undelivered_requested_egress.pop_front();
+                            delivered_sources += 1;
+                        }
+                        EnvelopeDeliveryOutcome::Blocked => break,
                     }
-                    Err(err) => {
-                        eprintln!(
-                            "verlet egress projector skipped invalid io.egress.requested event {}: {err}",
-                            event.id
-                        );
-                        state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
-                        continue;
-                    }
-                };
-                let outcome = self
-                    .deliver_projected_envelope(
-                        state,
-                        binding,
-                        &handle,
-                        adapter,
-                        event,
-                        0,
-                        envelope,
-                        route_config.retry,
-                        &mut receipt_cursors,
-                    )
-                    .await?;
-                match outcome {
-                    EnvelopeDeliveryOutcome::Delivered(cursor) => {
-                        state.store_cursor(&binding.route_id, &thread_id, &cursor)?;
-                        delivered_sources += 1;
-                    }
-                    EnvelopeDeliveryOutcome::Blocked => break,
                 }
-                continue;
-            }
-
-            let Some(text) = assistant_text_from_session_event(event, &context.entries) else {
-                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
-                if !after_cursor {
-                    continue;
-                }
-                state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
-                continue;
-            };
-            let Some(source_context) = active_context.clone() else {
-                let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
-                if !after_cursor {
-                    continue;
-                }
-                state.store_cursor(&binding.route_id, &thread_id, &event.cursor_v1())?;
-                continue;
-            };
-            let completed_turn_id = source_context.turn_id.clone();
-            let after_cursor = cursor.is_none() || after_cursor_ids.contains(&event.id);
-            if !after_cursor
-                && !source_has_partial_projected_receipts(
-                    route_config,
-                    event,
-                    &source_context,
-                    &text,
-                    &receipt_cursors,
-                )
-            {
-                continue;
-            }
-
-            match self
-                .deliver_assistant_source(
-                    state,
-                    binding,
-                    &handle,
-                    adapter,
-                    route_config,
-                    event,
-                    source_context,
+                DrainEgressWork::Assistant {
+                    source,
+                    context,
                     text,
-                    &mut receipt_cursors,
-                )
-                .await?
-            {
-                SourceDeliveryOutcome::Completed => {
-                    delivered_sources += 1;
-                    if let Some(completed_turn_id) = completed_turn_id {
-                        self.clear_active_turn_if_matches(&binding.scope_key, &completed_turn_id);
+                } => {
+                    let completed_turn_id = context.turn_id.clone();
+                    match self
+                        .deliver_assistant_source(
+                            state,
+                            binding,
+                            &handle,
+                            adapter,
+                            route_config,
+                            &source,
+                            context,
+                            text,
+                            &mut view.receipt_dedupe_cursors,
+                        )
+                        .await?
+                    {
+                        SourceDeliveryOutcome::Completed(cursor) => {
+                            store_drain_delivery_cursor(state, binding, view, &cursor)?;
+                            view.undelivered_requested_egress.pop_front();
+                            delivered_sources += 1;
+                            if let Some(completed_turn_id) = completed_turn_id {
+                                self.clear_active_turn_if_matches(
+                                    &binding.scope_key,
+                                    &completed_turn_id,
+                                );
+                            }
+                        }
+                        SourceDeliveryOutcome::Blocked => break,
                     }
                 }
-                SourceDeliveryOutcome::Blocked => break,
             }
         }
-
         Ok(delivered_sources)
     }
 
@@ -3995,7 +4132,7 @@ impl VerletDaemonIoBridge {
         handle: &RuntimeThreadHandle,
         adapter: Option<&dyn EgressAdapter>,
         route_config: &RouteEgressConfig,
-        source_event: &EventRecord,
+        source_event: &DrainEgressSource,
         source_context: IngressReceiptContext,
         text: String,
         receipt_cursors: &mut HashMap<String, ReceiptDedupeCursor>,
@@ -4070,13 +4207,8 @@ impl VerletDaemonIoBridge {
             envelope_index += 1;
         }
 
-        let cursor = latest_receipt_cursor.unwrap_or_else(|| source_event.cursor_v1());
-        state.store_cursor(
-            &binding.route_id,
-            &binding.coordinates.thread_id.to_string(),
-            &cursor,
-        )?;
-        Ok(SourceDeliveryOutcome::Completed)
+        let cursor = latest_receipt_cursor.unwrap_or_else(|| source_event.cursor.clone());
+        Ok(SourceDeliveryOutcome::Completed(cursor))
     }
 
     async fn deliver_projected_envelope(
@@ -4085,7 +4217,7 @@ impl VerletDaemonIoBridge {
         binding: &BoundEgressThread,
         handle: &RuntimeThreadHandle,
         adapter: Option<&dyn EgressAdapter>,
-        source_event: &EventRecord,
+        source_event: &DrainEgressSource,
         envelope_index: usize,
         envelope: EgressEnvelope,
         retry: VerletEgressRetryConfig,
@@ -4203,9 +4335,9 @@ impl VerletDaemonIoBridge {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum SourceDeliveryOutcome {
-    Completed,
+    Completed(StreamCursorV1),
     Blocked,
 }
 
@@ -4219,6 +4351,312 @@ enum EnvelopeDeliveryOutcome {
 struct ReceiptDedupeCursor {
     cursor: StreamCursorV1,
     egress_kind: String,
+}
+
+fn verified_delivery_cursor(
+    events: &[EventRecord],
+    stream_id: &EventStreamId,
+    cursor: Option<&StreamCursorV1>,
+) -> Option<StreamCursorV1> {
+    let cursor = cursor?;
+    if cursor.validate_stream_cursor_v1().is_err() || &cursor.stream_id != stream_id {
+        return None;
+    }
+    events
+        .iter()
+        .find(|event| event.sequence == cursor.sequence && event.id == cursor.event_id)
+        .map(|_| cursor.clone())
+}
+
+fn store_drain_delivery_cursor(
+    state: &DaemonEgressState,
+    binding: &BoundEgressThread,
+    view: &mut DrainEgressView,
+    cursor: &StreamCursorV1,
+) -> IoResult<()> {
+    let thread_id = binding.coordinates.thread_id.to_string();
+    if view.observed_delivery_cursor.is_some() && view.effective_delivery_cursor.is_none() {
+        state.replace_cursor(&binding.route_id, &thread_id, cursor)?;
+    } else {
+        state.store_cursor(&binding.route_id, &thread_id, cursor)?;
+    }
+    let retained = match &view.effective_delivery_cursor {
+        Some(current)
+            if current.stream_id == cursor.stream_id
+                && current.sequence.get() >= cursor.sequence.get() =>
+        {
+            current.clone()
+        }
+        _ => cursor.clone(),
+    };
+    view.observed_delivery_cursor = Some(retained.clone());
+    view.effective_delivery_cursor = Some(retained);
+    Ok(())
+}
+
+fn fold_drain_egress_events(
+    view: &mut DrainEgressView,
+    events: &[EventRecord],
+    entries: &[SessionEntry],
+    route_config: &RouteEgressConfig,
+) -> IoResult<()> {
+    for event in events {
+        if let Some((dedupe_key, receipt)) = receipt_dedupe_cursor_from_event(event) {
+            view.receipt_dedupe_cursors.insert(dedupe_key, receipt);
+        }
+    }
+    refresh_drain_session_context(view, entries, route_config);
+
+    for event in events {
+        let source = DrainEgressSource::from_event(event);
+        let after_cursor =
+            drain_source_is_after_delivery_cursor(&source, view.effective_delivery_cursor.as_ref());
+        let mut assistant = None;
+
+        if let Some(context) = ingress_context_from_event(event) {
+            view.ingress_contexts.insert(event.id, context.clone());
+            view.context_events
+                .push(DrainIngressContextEvent::Ingress(event.id));
+            view.pending_contexts.push(context);
+        }
+        if event.kind == EventKind::SessionEntryAppended
+            && let Some(entry_id) = event.payload.get("entry_id").and_then(JsonValue::as_str)
+        {
+            view.context_events.push(DrainIngressContextEvent::Session {
+                source: source.clone(),
+                entry_id: entry_id.to_string(),
+            });
+            if let Some(entry) = entries
+                .iter()
+                .find(|entry| entry.entry_id.to_string() == entry_id)
+            {
+                if session_entry_is_user_authored(entry) && !view.pending_contexts.is_empty() {
+                    view.active_context = Some(view.pending_contexts.remove(0));
+                }
+                if let Some(text) = assistant_text_from_entry(entry)
+                    && let Some(context) = view.active_context.clone()
+                {
+                    assistant = Some((context, text));
+                }
+            } else {
+                view.unresolved_session_entry_ids
+                    .insert(entry_id.to_string());
+            }
+        }
+
+        let work = if event.kind == EventKind::IoEgressRequested && after_cursor {
+            match requested_egress_template_from_event(event, &view.ingress_contexts) {
+                Ok(Some(template)) => DrainEgressWork::Requested {
+                    source: source.clone(),
+                    template,
+                },
+                Ok(None) => DrainEgressWork::Advance {
+                    source: source.clone(),
+                },
+                Err(err) => {
+                    eprintln!(
+                        "verlet egress projector skipped invalid io.egress.requested event {}: {err}",
+                        event.id
+                    );
+                    DrainEgressWork::Advance {
+                        source: source.clone(),
+                    }
+                }
+            }
+        } else if let Some((context, text)) = assistant {
+            let partial = source_has_partial_projected_receipts(
+                route_config,
+                source.id,
+                &context,
+                &text,
+                &view.receipt_dedupe_cursors,
+            );
+            if after_cursor || partial {
+                DrainEgressWork::Assistant {
+                    source: source.clone(),
+                    context,
+                    text,
+                }
+            } else {
+                view.fold_position = Some(source.cursor);
+                continue;
+            }
+        } else if after_cursor {
+            DrainEgressWork::Advance {
+                source: source.clone(),
+            }
+        } else {
+            view.fold_position = Some(source.cursor);
+            continue;
+        };
+        enqueue_drain_egress_work(&mut view.undelivered_requested_egress, work);
+        view.fold_position = Some(source.cursor);
+    }
+    Ok(())
+}
+
+fn refresh_drain_session_context(
+    view: &mut DrainEgressView,
+    entries: &[SessionEntry],
+    route_config: &RouteEgressConfig,
+) {
+    let visible_entry_ids = entries
+        .iter()
+        .map(|entry| entry.entry_id.to_string())
+        .collect::<HashSet<_>>();
+    if view.visible_session_entry_ids == visible_entry_ids {
+        return;
+    }
+    view.visible_session_entry_ids = visible_entry_ids;
+    view.pending_contexts.clear();
+    view.active_context = None;
+    view.unresolved_session_entry_ids.clear();
+    let mut assistants = HashMap::<EventRecordId, (IngressReceiptContext, String)>::new();
+    for event in &view.context_events {
+        match event {
+            DrainIngressContextEvent::Ingress(event_id) => {
+                if let Some(context) = view.ingress_contexts.get(event_id) {
+                    view.pending_contexts.push(context.clone());
+                }
+            }
+            DrainIngressContextEvent::Session { source, entry_id } => {
+                let Some(entry) = entries
+                    .iter()
+                    .find(|entry| entry.entry_id.to_string() == *entry_id)
+                else {
+                    view.unresolved_session_entry_ids.insert(entry_id.clone());
+                    continue;
+                };
+                if session_entry_is_user_authored(entry) && !view.pending_contexts.is_empty() {
+                    view.active_context = Some(view.pending_contexts.remove(0));
+                }
+                if let Some(text) = assistant_text_from_entry(entry)
+                    && let Some(context) = view.active_context.clone()
+                {
+                    assistants.insert(source.id, (context, text));
+                }
+            }
+        }
+    }
+
+    let session_sources = view
+        .context_events
+        .iter()
+        .filter_map(|event| match event {
+            DrainIngressContextEvent::Session { source, .. } => Some((source.id, source.clone())),
+            DrainIngressContextEvent::Ingress(_) => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut reconciled = VecDeque::new();
+    while let Some(work) = view.undelivered_requested_egress.pop_front() {
+        let source = work.source().clone();
+        if !session_sources.contains_key(&source.id) {
+            reconciled.push_back(work);
+            continue;
+        }
+        let after_cursor =
+            drain_source_is_after_delivery_cursor(&source, view.effective_delivery_cursor.as_ref());
+        if let Some((context, text)) = assistants.get(&source.id) {
+            let partial = source_has_partial_projected_receipts(
+                route_config,
+                source.id,
+                context,
+                text,
+                &view.receipt_dedupe_cursors,
+            );
+            if after_cursor || partial {
+                reconciled.push_back(DrainEgressWork::Assistant {
+                    source,
+                    context: context.clone(),
+                    text: text.clone(),
+                });
+            }
+        } else if after_cursor {
+            reconciled.push_back(DrainEgressWork::Advance { source });
+        }
+    }
+    for (event_id, (context, text)) in assistants {
+        if reconciled.iter().any(|work| work.source().id == event_id) {
+            continue;
+        }
+        let Some(source) = session_sources.get(&event_id).cloned() else {
+            continue;
+        };
+        let after_cursor =
+            drain_source_is_after_delivery_cursor(&source, view.effective_delivery_cursor.as_ref());
+        let partial = source_has_partial_projected_receipts(
+            route_config,
+            source.id,
+            &context,
+            &text,
+            &view.receipt_dedupe_cursors,
+        );
+        if after_cursor || partial {
+            reconciled.push_back(DrainEgressWork::Assistant {
+                source,
+                context,
+                text,
+            });
+        }
+    }
+    reconciled
+        .make_contiguous()
+        .sort_by_key(|work| work.source().cursor.sequence.get());
+    view.undelivered_requested_egress.clear();
+    for work in reconciled {
+        enqueue_drain_egress_work(&mut view.undelivered_requested_egress, work);
+    }
+}
+
+fn enqueue_drain_egress_work(queue: &mut VecDeque<DrainEgressWork>, work: DrainEgressWork) {
+    if queue
+        .iter()
+        .any(|queued| queued.source().id == work.source().id)
+    {
+        return;
+    }
+    if matches!(queue.back(), Some(DrainEgressWork::Advance { .. }))
+        && matches!(&work, DrainEgressWork::Advance { .. })
+    {
+        queue.pop_back();
+    }
+    queue.push_back(work);
+}
+
+fn drain_source_is_after_delivery_cursor(
+    source: &DrainEgressSource,
+    cursor: Option<&StreamCursorV1>,
+) -> bool {
+    cursor.is_none_or(|cursor| {
+        cursor.stream_id != source.cursor.stream_id
+            || source.cursor.sequence.get() > cursor.sequence.get()
+    })
+}
+
+fn receipt_dedupe_cursor_from_event(event: &EventRecord) -> Option<(String, ReceiptDedupeCursor)> {
+    if !matches!(
+        event.kind,
+        EventKind::IoEgressDelivered | EventKind::IoEgressFailed
+    ) {
+        return None;
+    }
+    let dedupe_key = event
+        .payload
+        .get("dedupe_key")
+        .and_then(JsonValue::as_str)?
+        .to_string();
+    let egress_kind = event
+        .payload
+        .get("egress_kind")
+        .and_then(JsonValue::as_str)?
+        .to_string();
+    Some((
+        dedupe_key,
+        ReceiptDedupeCursor {
+            cursor: event.cursor_v1(),
+            egress_kind,
+        },
+    ))
 }
 
 impl VerletDaemonIoBridge {
@@ -5803,7 +6241,7 @@ fn sibling_egress(source: &EgressEnvelope, kind: EgressKind) -> EgressEnvelope {
 
 fn source_has_partial_projected_receipts(
     route_config: &RouteEgressConfig,
-    source_event: &EventRecord,
+    source_event_id: EventRecordId,
     source_context: &IngressReceiptContext,
     text: &str,
     receipt_cursors: &HashMap<String, ReceiptDedupeCursor>,
@@ -5834,7 +6272,7 @@ fn source_has_partial_projected_receipts(
                 },
             );
             note_projection_receipt_presence(
-                source_event.id,
+                source_event_id,
                 envelope_index,
                 &typing_envelope.kind,
                 receipt_cursors,
@@ -5845,7 +6283,7 @@ fn source_has_partial_projected_receipts(
         }
 
         note_projection_receipt_presence(
-            source_event.id,
+            source_event_id,
             envelope_index,
             &projected.kind,
             receipt_cursors,
@@ -5896,7 +6334,7 @@ fn retain_newest_cursor(slot: &mut Option<StreamCursorV1>, candidate: StreamCurs
 async fn append_egress_delivered_receipt(
     handle: &RuntimeThreadHandle,
     binding: &BoundEgressThread,
-    source_event: &EventRecord,
+    source_event: &DrainEgressSource,
     envelope_index: usize,
     dedupe_key: &str,
     envelope: &EgressEnvelope,
@@ -5922,7 +6360,7 @@ async fn append_egress_delivered_receipt(
 async fn append_egress_failed_receipt(
     handle: &RuntimeThreadHandle,
     binding: &BoundEgressThread,
-    source_event: &EventRecord,
+    source_event: &DrainEgressSource,
     envelope_index: usize,
     dedupe_key: &str,
     envelope: &EgressEnvelope,
@@ -5947,7 +6385,7 @@ async fn append_egress_failed_receipt(
 
 async fn append_egress_receipt_event(
     handle: &RuntimeThreadHandle,
-    source_event: &EventRecord,
+    source_event: &DrainEgressSource,
     kind: EventKind,
     payload: JsonValue,
 ) -> IoResult<EventRecord> {
@@ -6036,37 +6474,6 @@ fn payload_object_mut(payload: &mut JsonValue) -> IoResult<&mut JsonMap<String, 
         .ok_or_else(|| IoError::Bridge("receipt payload did not encode as object".to_string()))
 }
 
-fn receipt_dedupe_cursors(events: &[EventRecord]) -> HashMap<String, ReceiptDedupeCursor> {
-    events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.kind,
-                EventKind::IoEgressDelivered | EventKind::IoEgressFailed
-            )
-        })
-        .filter_map(|event| {
-            let dedupe_key = event
-                .payload
-                .get("dedupe_key")
-                .and_then(JsonValue::as_str)
-                .map(ToOwned::to_owned)?;
-            let egress_kind = event
-                .payload
-                .get("egress_kind")
-                .and_then(JsonValue::as_str)
-                .map(ToOwned::to_owned)?;
-            Some((
-                dedupe_key,
-                ReceiptDedupeCursor {
-                    cursor: event.cursor_v1(),
-                    egress_kind,
-                },
-            ))
-        })
-        .collect()
-}
-
 fn ingress_context_from_event(event: &EventRecord) -> Option<IngressReceiptContext> {
     if event.kind != EventKind::TurnSubmitted {
         return None;
@@ -6097,6 +6504,64 @@ fn ingress_context_from_event(event: &EventRecord) -> Option<IngressReceiptConte
         source_ingress_id,
         turn_id,
     })
+}
+
+#[cfg(test)]
+async fn await_ingress_outcome_on_store<S: EventStore + ?Sized>(
+    store: &S,
+    streams: &[EventStreamId],
+    ingress_envelope_ids: &[String],
+) -> IoResult<IngressOutcomeState> {
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        ingress_outcome_on_store(store, streams, ingress_envelope_ids),
+    )
+    .await
+    .map_err(|_| ingress_outcome_timeout_error())?
+}
+
+async fn ingress_outcome_on_store<S: EventStore + ?Sized>(
+    store: &S,
+    streams: &[EventStreamId],
+    ingress_envelope_ids: &[String],
+) -> IoResult<IngressOutcomeState> {
+    let mut events = Vec::new();
+    let mut cursors = Vec::with_capacity(streams.len());
+    for stream in streams {
+        let stream_events = store
+            .read_events(stream, None)
+            .await
+            .map_err(verlet_history_error)?;
+        cursors.push(stream_events.last().map(EventRecord::cursor_v1));
+        events.extend(stream_events);
+    }
+    loop {
+        let state = ingress_outcome_fold(&events, ingress_envelope_ids)?;
+        if !matches!(state, IngressOutcomeState::Missing) {
+            return Ok(state);
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        for (index, stream) in streams.iter().enumerate() {
+            let new_events = match &cursors[index] {
+                Some(cursor) => store
+                    .read_events_after_cursor(stream, cursor)
+                    .await
+                    .map_err(verlet_history_error)?,
+                None => store
+                    .read_events(stream, Some(EventSequence::new(1)))
+                    .await
+                    .map_err(verlet_history_error)?,
+            };
+            if let Some(last) = new_events.last() {
+                cursors[index] = Some(last.cursor_v1());
+            }
+            events.extend(new_events);
+        }
+    }
+}
+
+fn ingress_outcome_timeout_error() -> IoError {
+    IoError::Bridge("timed out waiting for superseding durable ingress ownership".to_string())
 }
 
 fn ingress_outcome_fold(
@@ -6316,20 +6781,17 @@ fn turn_execution_evidence(
         .cloned()
 }
 
-fn requested_egress_from_event(
+fn requested_egress_template_from_event(
     event: &EventRecord,
-    events: &[EventRecord],
-) -> IoResult<Option<EgressEnvelope>> {
+    ingress_contexts: &HashMap<EventRecordId, IngressReceiptContext>,
+) -> IoResult<Option<RequestedEgressTemplate>> {
     let request = serde_json::from_value::<IoEgressRequestedPayload>(event.payload.clone())
         .map_err(|err| IoError::Bridge(format!("invalid io.egress.requested payload: {err}")))?;
     let kind = serde_json::from_value::<EgressKind>(request.egress_kind)
         .map_err(|err| IoError::Bridge(format!("invalid requested egress kind: {err}")))?;
-    let matched_context = request.match_event_id.and_then(|match_event_id| {
-        events
-            .iter()
-            .find(|candidate| candidate.id == match_event_id)
-            .and_then(ingress_context_from_event)
-    });
+    let matched_context = request
+        .match_event_id
+        .and_then(|match_event_id| ingress_contexts.get(&match_event_id));
     let target = if let Some(context) = &matched_context {
         context.target.clone()
     } else if let Some(target) = request.resolved_target {
@@ -6338,16 +6800,20 @@ fn requested_egress_from_event(
     } else {
         return Ok(None);
     };
-    let mut envelope = EgressEnvelope::new(target, kind, now_ms());
-    if let Some(context) = matched_context {
-        envelope.source_ingress_id = context.source_ingress_id;
-        envelope.metadata = context.metadata;
+    let (source_ingress_id, metadata) = if let Some(context) = matched_context {
+        (context.source_ingress_id.clone(), context.metadata.clone())
     } else {
-        envelope.metadata = envelope.target.metadata.clone();
-    }
-    Ok(Some(envelope))
+        (None, target.metadata.clone())
+    };
+    Ok(Some(RequestedEgressTemplate {
+        target,
+        kind,
+        source_ingress_id,
+        metadata,
+    }))
 }
 
+#[cfg(test)]
 fn assistant_text_from_session_event(
     event: &EventRecord,
     entries: &[SessionEntry],
@@ -6356,6 +6822,7 @@ fn assistant_text_from_session_event(
     assistant_text_from_entry(entry)
 }
 
+#[cfg(test)]
 fn session_entry_for_event<'a>(
     event: &EventRecord,
     entries: &'a [SessionEntry],

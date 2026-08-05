@@ -31,11 +31,15 @@ use crate::{
     PublishedOperationSource,
     RuntimeExecutionPolicy,
     RuntimeServices,
+    RuntimeStore,
+    SessionContext,
+    SessionEntryId,
     SessionStore,
     StreamCursorV1,
     THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
     TenantRegistration,
     TenantRuntimeContext,
+    ThreadBaseRef,
     ThreadCommand,
     ThreadContext,
     ThreadEvent,
@@ -115,6 +119,197 @@ impl IngressSink for FailFirstCaptureSink {
 
 struct CaptureEgress {
     sender: mpsc::UnboundedSender<EgressEnvelope>,
+}
+
+#[derive(Clone)]
+struct CountingRuntimeStore {
+    inner: Arc<dyn RuntimeStore>,
+    full_replay_reads: Arc<AtomicUsize>,
+    after_cursor_reads: Arc<AtomicUsize>,
+    block_next_full_read: Arc<AtomicBool>,
+    full_read_started: Arc<Notify>,
+    release_full_read: Arc<Notify>,
+}
+
+impl CountingRuntimeStore {
+    fn new(inner: Arc<dyn RuntimeStore>) -> Self {
+        Self {
+            inner,
+            full_replay_reads: Arc::new(AtomicUsize::new(0)),
+            after_cursor_reads: Arc::new(AtomicUsize::new(0)),
+            block_next_full_read: Arc::new(AtomicBool::new(false)),
+            full_read_started: Arc::new(Notify::new()),
+            release_full_read: Arc::new(Notify::new()),
+        }
+    }
+
+    fn reset_read_counts(&self) {
+        self.full_replay_reads.store(0, Ordering::SeqCst);
+        self.after_cursor_reads.store(0, Ordering::SeqCst);
+    }
+
+    fn read_counts(&self) -> (usize, usize) {
+        (
+            self.full_replay_reads.load(Ordering::SeqCst),
+            self.after_cursor_reads.load(Ordering::SeqCst),
+        )
+    }
+
+    fn block_next_full_read(&self) {
+        self.block_next_full_read.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_full_read_started(&self) {
+        self.full_read_started.notified().await;
+    }
+
+    fn release_full_read(&self) {
+        self.release_full_read.notify_one();
+    }
+}
+
+#[async_trait]
+impl SessionStore for CountingRuntimeStore {
+    async fn append(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+    ) -> crate::HistoryResult<SessionEntry> {
+        self.inner.append(coordinates, parent_entry_id, kind).await
+    }
+
+    async fn append_with_provenance(
+        &self,
+        coordinates: &ThreadCoordinates,
+        parent_entry_id: Option<SessionEntryId>,
+        kind: SessionEntryKind,
+        provenance: EventProvenance,
+    ) -> crate::HistoryResult<SessionEntry> {
+        self.inner
+            .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
+            .await
+    }
+
+    async fn append_turn_input(
+        &self,
+        coordinates: &ThreadCoordinates,
+        turn_id: &str,
+        kind: SessionEntryKind,
+    ) -> crate::HistoryResult<SessionEntry> {
+        self.inner
+            .append_turn_input(coordinates, turn_id, kind)
+            .await
+    }
+
+    async fn active_leaf(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> crate::HistoryResult<Option<SessionEntryId>> {
+        self.inner.active_leaf(coordinates).await
+    }
+
+    async fn select_branch(
+        &self,
+        coordinates: &ThreadCoordinates,
+        leaf_entry_id: Option<SessionEntryId>,
+    ) -> crate::HistoryResult<()> {
+        self.inner.select_branch(coordinates, leaf_entry_id).await
+    }
+
+    async fn build_context(
+        &self,
+        coordinates: &ThreadCoordinates,
+    ) -> crate::HistoryResult<SessionContext> {
+        self.inner.build_context(coordinates).await
+    }
+
+    async fn clone_branch(
+        &self,
+        source_coordinates: &ThreadCoordinates,
+        source_leaf: Option<SessionEntryId>,
+        target_coordinates: &ThreadCoordinates,
+    ) -> crate::HistoryResult<Option<SessionEntryId>> {
+        self.inner
+            .clone_branch(source_coordinates, source_leaf, target_coordinates)
+            .await
+    }
+
+    async fn fork_by_reference(
+        &self,
+        source_coordinates: &ThreadCoordinates,
+        target_coordinates: &ThreadCoordinates,
+        base: ThreadBaseRef,
+    ) -> crate::HistoryResult<()> {
+        self.inner
+            .fork_by_reference(source_coordinates, target_coordinates, base)
+            .await
+    }
+}
+
+#[async_trait]
+impl EventStore for CountingRuntimeStore {
+    async fn append_events(
+        &self,
+        stream_id: &EventStreamId,
+        records: Vec<NewEventRecord>,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        self.inner.append_events(stream_id, records).await
+    }
+
+    async fn append_events_fenced(
+        &self,
+        stream_id: &EventStreamId,
+        expected_next_sequence: EventSequence,
+        records: Vec<NewEventRecord>,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        self.inner
+            .append_events_fenced(stream_id, expected_next_sequence, records)
+            .await
+    }
+
+    async fn read_events(
+        &self,
+        stream_id: &EventStreamId,
+        from_sequence: Option<EventSequence>,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        if from_sequence.is_none() {
+            self.full_replay_reads.fetch_add(1, Ordering::SeqCst);
+            if self.block_next_full_read.swap(false, Ordering::SeqCst) {
+                self.full_read_started.notify_one();
+                self.release_full_read.notified().await;
+            }
+        }
+        self.inner.read_events(stream_id, from_sequence).await
+    }
+
+    async fn read_events_after_cursor(
+        &self,
+        stream_id: &EventStreamId,
+        cursor: &StreamCursorV1,
+    ) -> crate::HistoryResult<Vec<EventRecord>> {
+        self.after_cursor_reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.read_events_after_cursor(stream_id, cursor).await
+    }
+}
+
+#[async_trait]
+// lexicon-allow: observation_store - deterministic counting wrapper delegates the history trait.
+impl crate::ObservationStore for CountingRuntimeStore {
+    async fn append_observation(
+        &self,
+        record: crate::NewObservationRecord,
+    ) -> crate::HistoryResult<crate::ObservationRecord> {
+        self.inner.append_observation(record).await
+    }
+
+    async fn list_observations(
+        &self,
+        scope: &ThreadCoordinates,
+        kind: Option<&str>,
+    ) -> crate::HistoryResult<Vec<crate::ObservationRecord>> {
+        self.inner.list_observations(scope, kind).await
+    }
 }
 
 impl IoProtocolAdapter for CaptureEgress {
@@ -695,6 +890,51 @@ async fn test_server_at_root(fixture_root: &Path) -> VerletAppServer {
     config.skill_registry_root = fixture_root.join("skills");
     apply_test_identity(&mut config, fixture_root);
     VerletAppServer::new_local(config).await.unwrap()
+}
+
+async fn test_server_with_counting_store_at_root(
+    fixture_root: &Path,
+) -> (VerletAppServer, Arc<CountingRuntimeStore>) {
+    let socket_path = fixture_root.join("app-server-counting.sock");
+    let listen = AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
+    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    config.runtime_home = fixture_root.join("runtime");
+    config.state_home = fixture_root.join("state");
+    config.user_state_home = fixture_root.join("user-state");
+    // lexicon-allow: capsule - existing app-server operation binding config field
+    config.capsule_bindings.registry_root = Some(fixture_root.join("operations"));
+    config.agent_registry_root = fixture_root.join("agents");
+    config.blob_registry_root = fixture_root.join("blobs");
+    config.skill_registry_root = fixture_root.join("skills");
+    apply_test_identity(&mut config, fixture_root);
+    let runtime_config = AgentLoopConfig::new(
+        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
+        APP_SERVER_LOCAL_PROVIDER,
+        APP_SERVER_LOCAL_MODEL,
+    );
+    let runtime_factory = Arc::new(AgentLoopFactory::new(
+        runtime_config,
+        Arc::new(RecordingRouteProviderClient::default()),
+    ));
+    let counting = Arc::new(StdMutex::new(None));
+    let counting_for_decorator = Arc::clone(&counting);
+    let server = VerletAppServer::with_runtime_factory_and_session_store_decorator(
+        config,
+        runtime_factory,
+        move |inner| {
+            let store = Arc::new(CountingRuntimeStore::new(inner));
+            *counting_for_decorator.lock().unwrap() = Some(Arc::clone(&store));
+            store
+        },
+    )
+    .await
+    .unwrap();
+    let store = counting
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("session-store decorator should publish the counting wrapper");
+    (server, store)
 }
 
 async fn test_server_with_provider_at_root(
@@ -1677,6 +1917,62 @@ async fn submit_and_wait_for_assistant_event(
     let expected = format!("local:{text}");
     wait_for_assistant_text(bridge, &thread_id, &expected).await;
     (thread_id, expected)
+}
+
+async fn append_requested_sticker(
+    bridge: &VerletDaemonIoBridge,
+    thread_id: &str,
+    file_id: &str,
+) -> EventRecord {
+    let parsed = ThreadId::parse_str(thread_id).unwrap();
+    let handle = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, parsed)
+        .await
+        .unwrap();
+    let ingress_event = handle
+        .read_thread_events(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| {
+            event.kind == EventKind::TurnSubmitted && event.payload["turn_id"].as_str().is_some()
+        })
+        .expect("ingress turn submission");
+    let ingress_context = ingress_context_from_event(&ingress_event).unwrap();
+    let mut target = ingress_context.target.clone();
+    target.metadata = ingress_context.metadata;
+    let mut payload = serde_json::to_value(IoEgressRequestedPayload {
+        egress_kind: serde_json::to_value(EgressKind::PlatformAction {
+            action: "sticker".to_string(),
+            payload: json!({ "file_id": file_id }),
+        })
+        .unwrap(),
+        resolved_target: Some(serde_json::to_value(target).unwrap()),
+        requested_by_tool_call_id: "call_incremental_retry".to_string(),
+        quote: Some("incremental retry".to_string()),
+        match_event_id: Some(ingress_event.id),
+    })
+    .unwrap();
+    payload.as_object_mut().unwrap().insert(
+        "schema".to_string(),
+        json!(EventKind::IoEgressRequested.payload_schema_id()),
+    );
+    handle
+        .append_thread_event_record(NewEventRecord::discharged(
+            handle.context().coordinates.clone(),
+            EventKind::IoEgressRequested,
+            payload,
+            EventProvenance {
+                source_streams: vec![EventStreamId::for_thread(&handle.context().coordinates)],
+                source_event_ids: vec![ingress_event.id],
+                discharged_by: Some("rpc:append_events".to_string()),
+                function: Some("io_egress_requested/v1".to_string()),
+                ..EventProvenance::default()
+            },
+        ))
+        .await
+        .unwrap()
 }
 
 async fn wait_for_assistant_text(bridge: &VerletDaemonIoBridge, thread_id: &str, expected: &str) {
@@ -7088,6 +7384,640 @@ async fn clock_route_revoke_prevents_further_ticks() {
     let _ = std::fs::remove_file(db);
 }
 
+#[tokio::test(start_paused = true)]
+async fn await_ingress_outcome_initial_snapshot_obeys_timeout() {
+    let root = test_root("ingress-outcome-initial-read-timeout");
+    let (_server, store) = test_server_with_counting_store_at_root(&root).await;
+    store.block_next_full_read();
+    let waiting_store = Arc::clone(&store);
+    let wait = tokio::spawn(async move {
+        await_ingress_outcome_on_store(
+            waiting_store.as_ref(),
+            &[EventStreamId::new("control:missing")],
+            &["missing-ingress".to_string()],
+        )
+        .await
+    });
+    store.wait_for_full_read_started().await;
+
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    if !wait.is_finished() {
+        store.release_full_read();
+        wait.abort();
+        let _ = wait.await;
+        panic!("the initial stream snapshot escaped the ingress outcome timeout");
+    }
+    let err = wait.await.unwrap().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("timed out waiting for superseding durable ingress ownership")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn egress_drain_replays_once_then_reads_only_after_view_cursor() {
+    let root = test_root("egress-counting-store");
+    let db = root.join("io.sqlite");
+    let (server, store) = test_server_with_counting_store_at_root(&root).await;
+    let bridge = VerletDaemonIoBridge::from_app_server(&server);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    bridge
+        .register_egress_adapter(
+            "telegram.bot",
+            "main",
+            Arc::new(CaptureEgress { sender: tx }),
+        )
+        .await;
+    register_route_state(&bridge, &route_with_egress(Vec::new(), None), &db).await;
+    let receipt = bridge
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope("count reads"),
+        ))
+        .await
+        .unwrap();
+    let thread_id = receipt.thread_id.expect("thread id");
+    wait_for_assistant_text(&bridge, &thread_id, "daemon route ok").await;
+
+    store.reset_read_counts();
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    rx.recv().await.expect("first projected egress");
+    assert_eq!(store.read_counts().0, 1, "initial view build replays once");
+
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    let (full_replays, after_cursor_reads) = store.read_counts();
+    assert_eq!(
+        full_replays, 1,
+        "steady-state ticks must not replay the thread stream"
+    );
+    assert!(
+        after_cursor_reads >= 2,
+        "steady-state ticks should read strictly after the view fold cursor"
+    );
+
+    let view = bridge
+        .egress_drain_views
+        .lock()
+        .await
+        .get(&(source_scope("telegram.bot", "main"), thread_id.clone()))
+        .cloned()
+        .expect("thread drain view");
+    view.lock()
+        .await
+        .as_mut()
+        .and_then(|view| view.fold_position.as_mut())
+        .expect("view fold cursor")
+        .event_id = EventRecordId::new();
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store.read_counts().0,
+        2,
+        "a mismatched view cursor should trigger exactly one rebuild replay"
+    );
+    assert!(rx.try_recv().is_err(), "cursor rebuild must not redeliver");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn egress_drain_view_incremental_fold_equals_full_replay_fold() {
+    let root = test_root("egress-fold-equivalence");
+    let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
+    let receipt = bridge
+        .submit_envelope(with_bridge_principal(
+            &bridge,
+            telegram_queue_envelope("fold equivalence"),
+        ))
+        .await
+        .unwrap();
+    let thread_id = receipt.thread_id.expect("thread id");
+    wait_for_assistant_text(&bridge, &thread_id, "local:fold equivalence").await;
+    let handle = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap();
+    let events = handle.read_thread_events(None).await.unwrap();
+    let context = handle.session_context().await.unwrap();
+    let route_config = RouteEgressConfig::default();
+    let mut replay = DrainEgressView::new(None, None);
+    fold_drain_egress_events(&mut replay, &events, &context.entries, &route_config).unwrap();
+
+    for chunk_size in 1..=events.len().min(4) {
+        let mut incremental = DrainEgressView::new(None, None);
+        for chunk in events.chunks(chunk_size) {
+            fold_drain_egress_events(&mut incremental, chunk, &context.entries, &route_config)
+                .unwrap();
+        }
+        assert_eq!(
+            incremental, replay,
+            "chunk size {chunk_size} diverged from the full-replay fold"
+        );
+    }
+
+    let user_entry_ids = context
+        .entries
+        .iter()
+        .filter(|entry| session_entry_is_user_authored(entry))
+        .map(|entry| entry.entry_id.to_string())
+        .collect::<HashSet<_>>();
+    let user_event_index = events
+        .iter()
+        .position(|event| {
+            event.kind == EventKind::SessionEntryAppended
+                && event
+                    .payload
+                    .get("entry_id")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|entry_id| user_entry_ids.contains(entry_id))
+        })
+        .expect("user session event");
+    let entries_visible_before_user = events[..user_event_index]
+        .iter()
+        .filter_map(|event| event.payload.get("entry_id").and_then(JsonValue::as_str))
+        .collect::<HashSet<_>>();
+    let entries_visible_before_user = context
+        .entries
+        .iter()
+        .filter(|entry| entries_visible_before_user.contains(entry.entry_id.to_string().as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut delayed_context = DrainEgressView::new(None, None);
+    fold_drain_egress_events(
+        &mut delayed_context,
+        &events[..=user_event_index],
+        &entries_visible_before_user,
+        &route_config,
+    )
+    .unwrap();
+    assert!(
+        !delayed_context.unresolved_session_entry_ids.is_empty(),
+        "the first fold should retain the missing session entry for re-evaluation"
+    );
+    fold_drain_egress_events(
+        &mut delayed_context,
+        &events[user_event_index + 1..],
+        &context.entries,
+        &route_config,
+    )
+    .unwrap();
+    assert_eq!(
+        delayed_context, replay,
+        "a session entry that becomes visible on the next tick must preserve full-replay state"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn egress_drain_view_compacts_advances_behind_blocked_work() {
+    let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+    let stream_id = EventStreamId::for_thread(&coordinates);
+    let event = |sequence| {
+        EventRecord::from_new(
+            stream_id.clone(),
+            EventSequence::new(sequence),
+            NewEventRecord::witnessed(coordinates.clone(), EventKind::TurnWaiting, json!({})),
+        )
+    };
+    let blocked_source = DrainEgressSource::from_event(&event(1));
+    let mut view = DrainEgressView::new(None, None);
+    view.undelivered_requested_egress
+        .push_back(DrainEgressWork::Requested {
+            source: blocked_source,
+            template: RequestedEgressTemplate {
+                target: IoTarget::reply_to(&test_envelope("blocked")),
+                kind: EgressKind::PlatformAction {
+                    action: "blocked".to_string(),
+                    payload: json!({}),
+                },
+                source_ingress_id: None,
+                metadata: BTreeMap::new(),
+            },
+        });
+    let advances = (2..=101).map(event).collect::<Vec<_>>();
+
+    fold_drain_egress_events(&mut view, &advances, &[], &RouteEgressConfig::default()).unwrap();
+
+    assert_eq!(
+        view.undelivered_requested_egress.len(),
+        2,
+        "a blocked head should retain only the newest consecutive advance"
+    );
+    assert!(matches!(
+        view.undelivered_requested_egress.back(),
+        Some(DrainEgressWork::Advance { source }) if source.cursor.sequence.get() == 101
+    ));
+}
+
+#[tokio::test]
+async fn egress_drain_prunes_views_for_unbound_and_removed_routes() {
+    let root = test_root("egress-view-prune");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, mut rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "view prune").await;
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    rx.recv().await.expect("initial projected egress");
+    assert_eq!(bridge.egress_drain_views.lock().await.len(), 1);
+
+    let route_key = source_scope("telegram.bot", "main");
+    let active_slot = bridge
+        .egress_drain_views
+        .lock()
+        .await
+        .get(&(route_key.clone(), thread_id.clone()))
+        .cloned()
+        .unwrap();
+    let state = bridge
+        .egress_states
+        .read()
+        .await
+        .get(&route_key)
+        .cloned()
+        .unwrap();
+    let binding = state
+        .bound_threads("main")
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.coordinates.thread_id.to_string() == thread_id)
+        .unwrap();
+    state
+        .lock_connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM cooldis_daemon_egress_threads
+             WHERE route_id = ?1 AND thread_id = ?2",
+            params!["main", thread_id],
+        )
+        .unwrap();
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    let retained_slot = bridge
+        .egress_drain_views
+        .lock()
+        .await
+        .get(&(route_key.clone(), thread_id.clone()))
+        .cloned()
+        .expect("an in-flight slot remains the serialization anchor");
+    assert!(Arc::ptr_eq(&active_slot, &retained_slot));
+    drop(retained_slot);
+    drop(active_slot);
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        bridge.egress_drain_views.lock().await.is_empty(),
+        "an unbound thread must not retain a drain view"
+    );
+
+    state
+        .bind_thread("main", &route_key, &binding.scope_key, &binding.coordinates)
+        .unwrap();
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(bridge.egress_drain_views.lock().await.len(), 1);
+    bridge.egress_states.write().await.remove(&route_key);
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        bridge.egress_drain_views.lock().await.is_empty(),
+        "a removed route must not retain its drain views"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn egress_drain_rebuild_after_restart_does_not_duplicate_delivery() {
+    let root = test_root("egress-view-restart-dedupe");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (server, bridge, mut first_rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "deliver once").await;
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    first_rx.recv().await.expect("initial delivery");
+    drop(bridge);
+
+    let restarted = VerletDaemonIoBridge::from_app_server(&server);
+    let (tx, mut restarted_rx) = mpsc::unbounded_channel();
+    restarted
+        .register_egress_adapter(
+            "telegram.bot",
+            "main",
+            Arc::new(CaptureEgress { sender: tx }),
+        )
+        .await;
+    register_route_state(&restarted, &route, &db).await;
+    assert_eq!(
+        restarted
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(restarted_rx.try_recv().is_err());
+    let delivered = egress_receipts(&restarted, &thread_id, EventKind::IoEgressDelivered).await;
+    assert_eq!(delivered.len(), 1);
+
+    let state = restarted
+        .egress_states
+        .read()
+        .await
+        .get(&source_scope("telegram.bot", "main"))
+        .cloned()
+        .unwrap();
+    let valid_cursor = state.cursor("main", &thread_id).unwrap().unwrap();
+    let mut mismatched_cursor = valid_cursor.clone();
+    mismatched_cursor.event_id = EventRecordId::new();
+    state
+        .lock_connection()
+        .unwrap()
+        .execute(
+            "UPDATE cooldis_daemon_egress_cursors
+             SET cursor_json = ?1
+             WHERE route_id = 'main' AND thread_id = ?2",
+            params![
+                serde_json::to_string(&mismatched_cursor).unwrap(),
+                thread_id
+            ],
+        )
+        .unwrap();
+    let _ = restarted
+        .drain_egress_once("telegram.bot", "main")
+        .await
+        .unwrap();
+    assert!(restarted_rx.try_recv().is_err());
+    assert_eq!(
+        state.cursor("main", &thread_id).unwrap(),
+        Some(valid_cursor)
+    );
+    assert_eq!(
+        restarted
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0,
+        "a repaired persisted cursor must not cause a rebuild loop"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn egress_drain_keeps_requested_egress_until_adapter_appears() {
+    let root = test_root("egress-requested-adapter-late");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (server, bridge, mut initial_rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "before request").await;
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    initial_rx.recv().await.expect("initial assistant delivery");
+    bridge
+        .egress_adapters
+        .write()
+        .await
+        .remove(&source_scope("telegram.bot", "main"));
+    append_requested_sticker(&bridge, &thread_id, "file-incremental").await;
+
+    for _ in 0..3 {
+        assert_eq!(
+            bridge
+                .drain_egress_once("telegram.bot", "main")
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    drop(bridge);
+
+    let adapter = Arc::new(ScriptedEgress::new(
+        std::iter::empty::<&str>(),
+        &["late-adapter-delivery"],
+    ));
+    let restarted = VerletDaemonIoBridge::from_app_server(&server);
+    register_route_state(&restarted, &route, &db).await;
+    restarted
+        .register_egress_adapter("telegram.bot", "main", adapter.clone())
+        .await;
+    assert_eq!(
+        restarted
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    let calls = adapter.calls().await;
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(
+        &calls[0].kind,
+        EgressKind::PlatformAction { action, payload }
+            if action == "sticker"
+                && payload["file_id"].as_str() == Some("file-incremental")
+    ));
+    assert_eq!(
+        restarted
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(adapter.calls().await.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn egress_drain_late_receipt_completes_queued_work_without_redelivery() {
+    let root = test_root("egress-late-receipt-dedupe");
+    let db = root.join("io.sqlite");
+    let route = route_with_egress(Vec::new(), None);
+    let (_server, bridge, mut initial_rx) = test_bridge_at_root(&root).await;
+    register_route_state(&bridge, &route, &db).await;
+    let (thread_id, _) = submit_and_wait_for_assistant_event(&bridge, "late receipt").await;
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    initial_rx.recv().await.expect("initial assistant delivery");
+    bridge
+        .egress_adapters
+        .write()
+        .await
+        .remove(&source_scope("telegram.bot", "main"));
+    let requested = append_requested_sticker(&bridge, &thread_id, "late-receipt").await;
+    let cursor_before_block = egress_cursor(&bridge, &thread_id).await.unwrap();
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        egress_cursor(&bridge, &thread_id).await,
+        Some(cursor_before_block.clone()),
+        "blocked work must leave the durable cursor behind its source"
+    );
+    assert!(requested.sequence.get() > cursor_before_block.sequence.get());
+
+    let route_key = source_scope("telegram.bot", "main");
+    let (source, envelope) = {
+        let view_slot = bridge
+            .egress_drain_views
+            .lock()
+            .await
+            .get(&(route_key.clone(), thread_id.clone()))
+            .cloned()
+            .unwrap();
+        let view_slot = view_slot.lock().await;
+        match view_slot
+            .as_ref()
+            .unwrap()
+            .undelivered_requested_egress
+            .front()
+            .cloned()
+            .unwrap()
+        {
+            DrainEgressWork::Requested { source, template } => (source, template.envelope()),
+            other => panic!("expected queued requested egress, got {other:?}"),
+        }
+    };
+    let handle = bridge
+        .supervisor
+        .get_thread(&bridge.tenant_id, ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap();
+    let state = bridge
+        .egress_states
+        .read()
+        .await
+        .get(&route_key)
+        .cloned()
+        .unwrap();
+    let binding = state
+        .bound_threads("main")
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.coordinates.thread_id.to_string() == thread_id)
+        .unwrap();
+    let dedupe_key = egress_dedupe_key(source.id, 0);
+    let receipt = append_egress_delivered_receipt(
+        &handle,
+        &binding,
+        &source,
+        0,
+        &dedupe_key,
+        &envelope,
+        &DeliveryReceipt::delivered(&envelope, "delivered-before-retry"),
+        1,
+    )
+    .await
+    .unwrap();
+    let adapter = Arc::new(ScriptedEgress::new(
+        std::iter::empty::<&str>(),
+        &["must-not-deliver"],
+    ));
+    bridge
+        .register_egress_adapter("telegram.bot", "main", adapter.clone())
+        .await;
+
+    assert_eq!(
+        bridge
+            .drain_egress_once("telegram.bot", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(adapter.calls().await.is_empty());
+    assert_eq!(
+        egress_cursor(&bridge, &thread_id).await,
+        Some(receipt.cursor_v1())
+    );
+    let view_slot = bridge
+        .egress_drain_views
+        .lock()
+        .await
+        .get(&(route_key, thread_id))
+        .cloned()
+        .unwrap();
+    assert!(
+        view_slot
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .undelivered_requested_egress
+            .is_empty()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() {
     let root = test_root("egress-restart");
@@ -8395,7 +9325,7 @@ async fn egress_projector_recovers_missing_projection_after_partial_receipt_curs
     let partial_receipt = append_egress_delivered_receipt(
         &handle,
         &binding,
-        &source_event,
+        &DrainEgressSource::from_event(&source_event),
         0,
         &partial_dedupe_key,
         &typing_envelope,
