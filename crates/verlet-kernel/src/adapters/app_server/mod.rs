@@ -84,6 +84,7 @@ use verlet_process::{
 };
 mod connection;
 mod default_manifest;
+mod orchestrator_boundary;
 mod subscriptions;
 #[cfg(test)]
 mod tests;

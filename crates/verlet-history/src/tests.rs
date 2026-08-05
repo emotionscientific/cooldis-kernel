@@ -552,6 +552,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "policy.bound",
         "grant.petitioned",
         "timer.fired",
+        "client.record.appended",
         "io.ingress.received",
         "io.ingress.claimed",
         "io.ingress.settled",
@@ -625,6 +626,10 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         "cooldis.event.timer.fired/1"
     );
     assert_eq!(
+        EventKind::ClientRecordAppended.payload_schema_id(),
+        "cooldis.event.client.record.appended/1"
+    );
+    assert_eq!(
         EventKind::IoIngressReceived.payload_schema_id(),
         "cooldis.event.io.ingress.received/1"
     );
@@ -651,6 +656,35 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
     assert_eq!(
         EventKind::AdmissionDecided.payload_schema_id(),
         "cooldis.event.admission.decided/1"
+    );
+}
+
+#[test]
+fn client_record_carrier_payload_schema_is_registered_and_strict() {
+    let registry = stream_schema_registry_v1();
+    let schema = EventKind::ClientRecordAppended.payload_schema_id();
+    registry
+        .validate(
+            schema,
+            &serde_json::json!({
+                "client_kind": "placement.bound",
+                "client_schema": "verlet.orch.placement.bound/1",
+                "principal_id": "operator:root",
+                "body": {"agent": "agent://worker@1.0.0"},
+            }),
+        )
+        .unwrap();
+    assert!(
+        registry
+            .validate(
+                schema,
+                &serde_json::json!({
+                    "client_kind": "placement.bound",
+                    "client_schema": "verlet.orch.placement.bound/1",
+                    "principal_id": "operator:root",
+                }),
+            )
+            .is_err()
     );
 }
 

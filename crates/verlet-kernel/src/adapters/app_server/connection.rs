@@ -1,3 +1,4 @@
+use super::orchestrator_boundary::{IngressSubmitParams, StreamAppendParams, StreamReadParams};
 use super::subscriptions::*;
 use super::threads::*;
 use super::*;
@@ -784,6 +785,9 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(&str, AuthorityClass)] = 
     ),
     ("getAuthStatus", AuthorityClass::Interactive),
     ("getConversationSummary", AuthorityClass::Host),
+    ("ingress/submit", AuthorityClass::Ingress),
+    ("stream/append", AuthorityClass::Host),
+    ("stream/read", AuthorityClass::Interactive),
     // These construct or reconstruct runtime bindings and may resolve secrets.
     ("thread/start", AuthorityClass::Host),
     ("thread/spawn", AuthorityClass::Host),
@@ -866,6 +870,8 @@ pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
     "thread/spawn",
     "thread/rebindFork",
     "thread/resume",
+    // Client-owned durable store mutation.
+    "stream/append",
     // Effects that may release or directly invoke host tools.
     "approval/resolve",
     "thread/shellCommand",
@@ -1247,11 +1253,25 @@ impl VerletAppServer {
                     "authMethod": null,
                     "authToken": null,
                     "requiresOpenaiAuth": false,
+                    "principalId": connection.resolved_principal.principal_id,
+                    "kind": connection.resolved_principal.kind,
                 }))
             }
             "getConversationSummary" => {
                 let params: GetConversationSummaryParams = parse_params(params)?;
                 self.get_conversation_summary(params).await
+            }
+            "ingress/submit" => {
+                let params: IngressSubmitParams = parse_params(params)?;
+                self.ingress_submit(connection, params).await
+            }
+            "stream/append" => {
+                let params: StreamAppendParams = parse_params(params)?;
+                self.stream_append(connection, params).await
+            }
+            "stream/read" => {
+                let params: StreamReadParams = parse_params(params)?;
+                self.stream_read(connection, params).await
             }
             "thread/start" => {
                 let params: ThreadStartParams = parse_params(params)?;
@@ -3569,23 +3589,13 @@ impl VerletAppServer {
             content: None,
             envelope_digest,
         };
-        let mut value = serde_json::to_value(payload).map_err(json_codec_error)?;
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "schema".to_string(),
-                json!(crate::EventKind::IoIngressReceived.payload_schema_id()),
-            );
-            object.insert(
-                "principal".to_string(),
-                serde_json::to_value(principal).map_err(json_codec_error)?,
-            );
-        }
         handle
-            .append_control_event(crate::NewEventRecord::witnessed(
+            .append_control_event(rpc_ingress_received_record(
                 coordinates,
-                crate::EventKind::IoIngressReceived,
-                value,
-            ))
+                payload,
+                &principal,
+                None,
+            )?)
             .await
             .map_err(internal_error)
     }
@@ -4829,6 +4839,39 @@ pub(super) fn thread_events_stream_id(
         "{stream}:{}",
         coordinates.thread_id
     )))
+}
+
+pub(super) fn rpc_ingress_received_record(
+    coordinates: crate::ThreadCoordinates,
+    payload: crate::IoIngressReceivedPayload,
+    principal: &verlet_io_core::IoPrincipal,
+    envelope_metadata: Option<&BTreeMap<String, String>>,
+) -> Result<crate::NewEventRecord, JsonRpcErrorError> {
+    let mut value = serde_json::to_value(payload).map_err(json_codec_error)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        internal_error(VerletError::History(
+            "io.ingress.received payload did not encode as an object".to_string(),
+        ))
+    })?;
+    object.insert(
+        "schema".to_string(),
+        json!(crate::EventKind::IoIngressReceived.payload_schema_id()),
+    );
+    object.insert(
+        "principal".to_string(),
+        serde_json::to_value(principal).map_err(json_codec_error)?,
+    );
+    if let Some(metadata) = envelope_metadata {
+        object.insert(
+            "envelope_metadata".to_string(),
+            serde_json::to_value(metadata).map_err(json_codec_error)?,
+        );
+    }
+    Ok(crate::NewEventRecord::witnessed(
+        coordinates,
+        crate::EventKind::IoIngressReceived,
+        value,
+    ))
 }
 
 pub(super) fn absolute_path(path: PathBuf) -> Result<PathBuf, JsonRpcErrorError> {

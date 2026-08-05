@@ -27,6 +27,7 @@ crates/verlet-kernel/src/adapters/agent_loop/tests.rs	Compatibility assertion fo
 crates/verlet-kernel/src/adapters/app_server/default_manifest.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/connection.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/mod.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/app_server/orchestrator_boundary.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/adapters/app_server/threads.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/mcp_client.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
@@ -131,6 +132,7 @@ docs/adr/0005-turso-storage-engine.md	Shipped ADR body is a historical receipt.
 docs/adr/0006-unified-orchestration-semantics.md	Shipped ADR body is a historical receipt.
 docs/adr/0007-adapter-envelope-contract-v0.md	Shipped ADR body is a historical receipt.
 docs/adr/0008-identity-plane-v0.md	Shipped ADR body is a historical receipt.
+docs/adr/0009-orchestrator-boundary-v0.md	Shipped ADR body is a historical receipt.
 docs/agent-cli.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
 docs/agent-manifest-ontology.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
 docs/app-server.md	Current documentation names a stable wire identifier or out-of-scope repository URL.

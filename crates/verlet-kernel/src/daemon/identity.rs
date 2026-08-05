@@ -125,6 +125,7 @@ pub fn authority_class_for_method(method: &str) -> AuthorityClass {
         "thread/resume",
         "thread/debug/export",
         "thread/shellCommand",
+        "stream/append",
     ];
     const HOST_PREFIXES: &[&str] = &[
         "command/",
@@ -144,6 +145,7 @@ pub fn authority_class_for_method(method: &str) -> AuthorityClass {
         "experimentalFeature/list",
         "experimentalFeature/enablement/set",
         "getAuthStatus",
+        "stream/read",
         "skills/list",
         "plugin/list",
         "hooks/list",

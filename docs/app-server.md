@@ -214,7 +214,8 @@ VERLET_APP_SERVER_TOKEN="$OPERATOR_TOKEN" \
 ```
 
 An adapter connects to `/rpc` with `Authorization: Bearer <adapter-token>` and
-can call only `turn/start` on an existing operator-created thread. A missing,
+can call only Ingress methods (`turn/start` and `ingress/submit`) on an existing
+operator-created thread. A missing,
 unknown, expired, or revoked credential is refused during the upgrade with
 `401 Unauthorized`. An authenticated principal that calls a method above its
 authority receives JSON-RPC error `-32003`.
@@ -248,9 +249,9 @@ dispatcher against the principal's kind:
   `mcpSource/*`, `thread/start`, `thread/resume`, `approval/resolve`, ...).
   Operator-only.
 - `Interactive`: reads and conversational control on existing threads
-  (`thread/read`, `thread/list`, `turn/steer`, `mandate/*`, ...).
-- `Ingress`: input delivery. `turn/start` is the only Ingress application
-  method and the only dispatched method an adapter credential can call. It may
+  (`thread/read`, `thread/list`, `stream/read`, `turn/steer`, `mandate/*`, ...).
+- `Ingress`: input delivery. `turn/start` and `ingress/submit` are the only
+  dispatched methods an adapter credential can call. They may
   lazily reconstruct a thread from its committed metadata (replaying the
   operator's standing grant), but adapter callers cannot supply the `cwd`,
   `model`, or `thinking` turn controls.
@@ -270,12 +271,22 @@ Durable identity records (SQLite, same store as session history) capture:
   reason;
 - every host-authority effect (the `HOST_EFFECT_METHODS` subset: command
   execution, filesystem mutations, provider/secret access, runtime
-  construction, approval release), as a row naming session, principal, method,
-  and timestamp, written before the effect runs. A failed witness write blocks
-  the effect.
+  construction, client-stream append, approval release), as a row naming
+  session, principal, method, and timestamp, written before the effect runs. A
+  failed witness write blocks the effect.
 
 Ingress submitted over an authenticated RPC session is stamped
 `via="caller:{session_id}"`, pointing at the witnessed session record.
+
+### `getAuthStatus`
+
+Params: `{ "includeToken": false, "refreshToken": false }`; both fields are
+optional compatibility inputs and do not reveal a credential.
+
+Result:
+`{ "authMethod": null, "authToken": null, "requiresOpenaiAuth": false, "principalId": "operator:root", "kind": "operator" }`.
+`principalId` and `kind` identify the resolved principal for this authenticated
+session; `kind` is `operator` or `adapter`.
 
 ## Provider Config
 
@@ -764,6 +775,50 @@ When `agentRef` is supplied, diagnostics report non-fatal collisions such as an
 existing tool id or an existing import of the same `serverRef`. This method does
 not edit, publish, or republish agent manifests.
 
+### `ingress/submit`
+
+Params:
+`{ "threadId": "...", "input": [...], "delivery": { "deliveryId": "...", "attempt": 1, "metadata": {} }, "dedupeKey": { "scope": "...", "key": "..." }, "correlationId": "...", "tier": "attested" }`.
+`threadId`, `input`, and `delivery` are required. `input` has the same array
+shape as `turn/start`. `tier` defaults to `attested`; `recorded` is reserved
+until the foreign-harness lane exists.
+
+Result:
+`{ "ingressEventId": "...", "deduped": false, "admission": { "decision": "queue", "admissible": true } }`.
+The boundary builds an attributed ADR 0007 envelope, witnesses
+`io.ingress.received`, durably appends `admission.decided`, and only then
+schedules the turn. Redelivery dedupes on the envelope's effective key and
+returns the original ingress event id without scheduling another turn.
+
+### `stream/append`
+
+Params:
+`{ "stream": "client:orch:placement", "records": [{ "kind": "placement.bound", "payloadSchema": "verlet.orch.placement.bound/1", "payload": {} }], "expectedSequence": 1 }`.
+The `client:` stream id, non-empty record batch, lowercase dotted kind, and
+declared non-`cooldis.*` schema id are validated before any append.
+`expectedSequence` is optional and fences the client stream's next sequence.
+
+Result:
+`{ "streamId": "client:orch:placement", "records": [{ "eventId": "...", "sequence": 1 }] }`.
+The batch is atomic and principal-attributed. A stale fence returns JSON-RPC
+error `-32004` with data `{ "expected": 1, "actual": 2 }`. This is a Host
+effect, so the session host-effect witness must commit before validation or
+append execution begins.
+
+### `stream/read`
+
+Params:
+`{ "stream": "client:orch:placement", "streamCursor": {...}, "limit": 100, "kinds": ["placement.bound"] }`.
+Only `client:` stream ids are accepted. `limit` defaults to `100` and is
+clamped to `1..=500`; `kinds` matches the client-declared kind exactly. A
+cursor is verified against the requested stream id, sequence, and event id.
+
+Result: `{ "data": [...], "streamCursor": {...} | null }`. Each row is a
+`cooldis.stream.record/1` envelope whose `kind`, `payload_schema`, and
+`payload` are the client-declared values, with the carrier's sequence and event
+id. `principal_id` identifies the writer. Client streams never schedule work
+and are excluded from startup recovery scans.
+
 ### `thread/list`
 
 Params: none.
@@ -799,6 +854,16 @@ may be available.
 
 Unknown thread ids and malformed cursors fail with JSON-RPC errors. A valid
 thread with no matching events returns an empty `data` array and null cursors.
+
+#### Resumable receipts retrieval
+
+Metering and run-outcome consumers enumerate threads with `thread/list`, then
+tail each thread through `thread/events/list` with a per-stream
+`streamCursor`. Filter for `session.entry.appended` (assistant-message usage),
+`turn.completed` (turn outcomes), and `io.egress.delivered` /
+`io.egress.failed` (egress receipts). Persist the consumer's cursor map as an
+ordinary record in its own `client:` stream. Ephemeral `turn/usage`
+notifications are display hints, not the metering source of truth.
 
 ### `mandate/start`
 
@@ -960,7 +1025,7 @@ recorded.
 The V1 app-server implements the Codex TUI-critical request subset:
 
 - `initialize` and `initialized`;
-- `account/read`;
+- `account/read`, `getAuthStatus`;
 - `agent/list`, `agent/read`, `operation/list`, `model/list`;
 - `mcpSource/list`, `mcpSource/read`, `mcpSource/upsert`,
   `mcpSource/discover`, `mcpSource/delete`, `mcpSource/testTool`,
@@ -971,6 +1036,7 @@ The V1 app-server implements the Codex TUI-critical request subset:
   `thread/debug/export`;
 - `mandate/start`, `mandate/revoke`, `mandate/list`;
 - `approval/resolve`;
+- `ingress/submit`, `stream/append`, `stream/read`;
 - `thread/name/set`, `thread/metadata/update`, `thread/compact/start`,
   `thread/unsubscribe`;
 - `turn/start`, `turn/steer`, `turn/interrupt`.
