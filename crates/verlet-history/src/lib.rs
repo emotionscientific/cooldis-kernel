@@ -305,6 +305,9 @@ pub enum EventKind {
     GrantPetitioned,
     /// A standing mandate produced a clock occurrence.
     TimerFired,
+    /// A boundary client appended one opaque, schema-declared record to a
+    /// client-owned stream. The declared kind and schema live in the payload.
+    ClientRecordAppended,
     /// An external IO route received an ingress envelope.
     IoIngressReceived,
     /// The runtime accepted sole responsibility for an admitted ingress
@@ -368,6 +371,7 @@ impl EventKind {
             Self::PolicyBound,
             Self::GrantPetitioned,
             Self::TimerFired,
+            Self::ClientRecordAppended,
             Self::IoIngressReceived,
             Self::IoIngressClaimed,
             Self::IoIngressSettled,
@@ -418,6 +422,7 @@ impl EventKind {
             Self::PolicyBound => "policy.bound",
             Self::GrantPetitioned => "grant.petitioned",
             Self::TimerFired => "timer.fired",
+            Self::ClientRecordAppended => "client.record.appended",
             Self::IoIngressReceived => "io.ingress.received",
             Self::IoIngressClaimed => "io.ingress.claimed",
             Self::IoIngressSettled => "io.ingress.settled",
@@ -470,6 +475,7 @@ impl EventKind {
             Self::PolicyBound => "cooldis.event.policy.bound/1",
             Self::GrantPetitioned => "cooldis.event.grant.petitioned/1",
             Self::TimerFired => "cooldis.event.timer.fired/1",
+            Self::ClientRecordAppended => "cooldis.event.client.record.appended/1",
             Self::IoIngressReceived => "cooldis.event.io.ingress.received/1",
             Self::IoIngressClaimed => "cooldis.event.io.ingress.claimed/1",
             Self::IoIngressSettled => "cooldis.event.io.ingress.settled/1",
@@ -524,6 +530,7 @@ impl std::str::FromStr for EventKind {
             "policy.bound" => Ok(Self::PolicyBound),
             "grant.petitioned" => Ok(Self::GrantPetitioned),
             "timer.fired" => Ok(Self::TimerFired),
+            "client.record.appended" => Ok(Self::ClientRecordAppended),
             "io.ingress.received" => Ok(Self::IoIngressReceived),
             "io.ingress.claimed" => Ok(Self::IoIngressClaimed),
             "io.ingress.settled" => Ok(Self::IoIngressSettled),
@@ -689,6 +696,14 @@ pub struct TimerFiredPayload {
     pub scheduled_for: String,
     pub occurrence_index: u64,
     pub catch_up: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ClientRecordAppendedPayload {
+    pub client_kind: String,
+    pub client_schema: String,
+    pub principal_id: String,
+    pub body: Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1378,6 +1393,10 @@ pub fn stream_schema_registry_v1() -> &'static SchemaRegistry {
                 timer_fired_payload_schema_v1(),
             )?;
             registry.register(
+                EventKind::ClientRecordAppended.payload_schema_id(),
+                client_record_appended_payload_schema_v1(),
+            )?;
+            registry.register(
                 EventKind::IoIngressReceived.payload_schema_id(),
                 io_ingress_received_payload_schema_v1(),
             )?;
@@ -1945,6 +1964,24 @@ fn timer_fired_payload_schema_v1() -> Value {
             "scheduled_for": {"type": "string"},
             "occurrence_index": {"type": "integer"},
             "catch_up": {"type": "boolean"}
+        }
+    })
+}
+
+fn client_record_appended_payload_schema_v1() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["client_kind", "client_schema", "principal_id", "body"],
+        "additionalProperties": false,
+        "properties": {
+            "client_kind": {"type": "string"},
+            "client_schema": {"type": "string"},
+            "principal_id": {"type": "string"},
+            "body": {
+                "type": ["object", "array", "string", "number", "boolean", "null"],
+                "additionalProperties": true,
+                "items": true
+            }
         }
     })
 }

@@ -57,6 +57,9 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
         ("experimentalFeature/enablement/set", Interactive),
         ("getAuthStatus", Interactive),
         ("getConversationSummary", Host),
+        ("ingress/submit", Ingress),
+        ("stream/append", Host),
+        ("stream/read", Interactive),
         ("thread/start", Host),
         ("thread/spawn", Host),
         ("thread/submit", Interactive),
@@ -5283,6 +5286,293 @@ pin = "mcptool://arcade/verlet_mcp_echo@{schema_hash}"
     );
     mcp_task.abort();
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped() {
+    use crate::EventStore;
+
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let atomic_stream = "client:orch:atomic";
+    let invalid_batch = app
+        .dispatch_request(
+            &connection,
+            "stream/append",
+            Some(json!({
+                "stream": atomic_stream,
+                "records": [
+                    {
+                        "kind": "placement.bound",
+                        "payloadSchema": "verlet.orch.placement.bound/1",
+                        "payload": {"slot": "first"},
+                    },
+                    {
+                        "kind": "placement.BOUND",
+                        "payloadSchema": "verlet.orch.placement.bound/1",
+                        "payload": {"slot": "invalid"},
+                    },
+                ],
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_batch.code, -32602);
+    let empty = app
+        .dispatch_request(
+            &connection,
+            "stream/read",
+            Some(json!({"stream": atomic_stream})),
+        )
+        .await
+        .unwrap();
+    assert!(empty["data"].as_array().unwrap().is_empty());
+
+    let stream = "client:orch:placement";
+    let appended = app
+        .dispatch_request(
+            &connection,
+            "stream/append",
+            Some(json!({
+                "stream": stream,
+                "expectedSequence": 1,
+                "records": [
+                    {
+                        "kind": "placement.bound",
+                        "payloadSchema": "verlet.orch.placement.bound/1",
+                        "payload": {"agent": "agent://worker@1.0.0"},
+                    },
+                    {
+                        "kind": "run.outcome_recorded",
+                        "payloadSchema": "verlet.orch.run.outcome/1",
+                        "payload": {"status": "queued"},
+                    },
+                ],
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(appended["streamId"], stream);
+    assert_eq!(appended["records"][0]["sequence"], 1);
+    assert_eq!(appended["records"][1]["sequence"], 2);
+
+    let first_page = app
+        .dispatch_request(
+            &connection,
+            "stream/read",
+            Some(json!({"stream": stream, "limit": 1})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_page["data"].as_array().unwrap().len(), 1);
+    assert_eq!(first_page["data"][0]["schema"], "cooldis.stream.record/1");
+    assert_eq!(first_page["data"][0]["kind"], "placement.bound");
+    assert_eq!(
+        first_page["data"][0]["payload_schema"],
+        "verlet.orch.placement.bound/1"
+    );
+    assert_eq!(
+        first_page["data"][0]["payload"],
+        json!({"agent": "agent://worker@1.0.0"})
+    );
+    assert_eq!(
+        first_page["data"][0]["principal_id"],
+        connection.resolved_principal.principal_id.as_str()
+    );
+    let cursor = first_page["streamCursor"].clone();
+    assert_eq!(cursor["stream_id"], stream);
+
+    let second_page = app
+        .dispatch_request(
+            &connection,
+            "stream/read",
+            Some(json!({"stream": stream, "streamCursor": cursor, "limit": 1})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_page["data"][0]["kind"], "run.outcome_recorded");
+
+    let filtered = app
+        .dispatch_request(
+            &connection,
+            "stream/read",
+            Some(json!({"stream": stream, "kinds": ["run.outcome_recorded"]})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["data"][0]["kind"], "run.outcome_recorded");
+
+    let conflict = app
+        .dispatch_request(
+            &connection,
+            "stream/append",
+            Some(json!({
+                "stream": stream,
+                "expectedSequence": 1,
+                "records": [{
+                    "kind": "placement.bound",
+                    "payloadSchema": "verlet.orch.placement.bound/1",
+                    "payload": {"agent": "agent://loser@1.0.0"},
+                }],
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, -32004);
+    assert_eq!(conflict.data, Some(json!({"expected": 1, "actual": 3})));
+
+    let wrong_stream = app
+        .dispatch_request(
+            &connection,
+            "stream/read",
+            Some(json!({
+                "stream": "client:orch:other",
+                "streamCursor": first_page["streamCursor"].clone(),
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_stream.code, -32602);
+    assert!(wrong_stream.message.contains("cursor"));
+
+    for forbidden in ["thread:abc", "control:abc", "derived:abc"] {
+        let error = app
+            .dispatch_request(
+                &connection,
+                "stream/read",
+                Some(json!({"stream": forbidden})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, -32602);
+    }
+
+    let store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
+    let carriers = store
+        .read_events(&crate::EventStreamId::new(stream), None)
+        .await
+        .unwrap();
+    assert_eq!(carriers.len(), 2);
+    assert!(
+        carriers
+            .iter()
+            .all(|event| event.kind == crate::EventKind::ClientRecordAppended)
+    );
+    assert_eq!(carriers[0].payload["client_kind"], "placement.bound");
+    assert_eq!(
+        carriers[0].payload["client_schema"],
+        "verlet.orch.placement.bound/1"
+    );
+    assert_eq!(
+        carriers[0].payload["principal_id"],
+        connection.resolved_principal.principal_id.as_str()
+    );
+    let namespace = Uuid::parse_str("530827e2-57cf-405e-9ca7-bb08b18c1ab0").unwrap();
+    let expected_thread_id = Uuid::new_v5(&namespace, stream.as_bytes()).to_string();
+    assert!(
+        carriers
+            .iter()
+            .all(|event| event.coordinates.thread_id.to_string() == expected_thread_id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn app_server_envelope_ingress_records_surface_admission_before_execution() {
+    use crate::EventStore;
+
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let params = json!({
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": "envelope once", "text_elements": []}],
+        "delivery": {"deliveryId": "delivery-1", "attempt": 1, "metadata": {"source": "test"}},
+        "correlationId": "run-1",
+    });
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let app = app.clone();
+        let connection = connection.clone();
+        let params = params.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.spawn(async move {
+            barrier.wait().await;
+            app.dispatch_request(&connection, "ingress/submit", Some(params))
+                .await
+        });
+    }
+    let mut results = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        results.push(result.unwrap().unwrap());
+    }
+    results.sort_by_key(|result| result["deduped"].as_bool().unwrap());
+    assert_eq!(results[0]["deduped"], false);
+    assert_eq!(results[1]["deduped"], true);
+    assert_eq!(results[0]["ingressEventId"], results[1]["ingressEventId"]);
+    assert_eq!(
+        results[0]["admission"],
+        json!({"decision": "queue", "admissible": true})
+    );
+
+    wait_for_session_text(&app, &thread_id, "envelope once").await;
+    let read = app
+        .dispatch_request(
+            &connection,
+            "thread/read",
+            Some(json!({"threadId": thread_id})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read["thread"]["turns"].as_array().unwrap().len(), 1);
+
+    let coordinates = app.coordinates_for_thread(&thread_id).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
+        .await
+        .unwrap();
+    let control_events = store
+        .read_events(&crate::control_stream_id(&coordinates), None)
+        .await
+        .unwrap();
+    let thread_events = store
+        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+        .await
+        .unwrap();
+    let ingress = control_events
+        .iter()
+        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .collect::<Vec<_>>();
+    assert_eq!(ingress.len(), 1);
+    assert_eq!(
+        ingress[0].payload["principal"]["principal_id"],
+        app.user_id()
+    );
+    assert_eq!(
+        ingress[0].payload["envelope_metadata"]["correlation_id"],
+        "run-1"
+    );
+    assert_eq!(
+        ingress[0].payload["envelope_metadata"]["guarantee_tier"],
+        "attested"
+    );
+    let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
+        &control_events,
+        &thread_events,
+    );
+    assert_eq!(
+        admission.payload["route_id"],
+        "surface:app-server-envelope-ingress"
+    );
 }
 
 #[tokio::test]
@@ -11412,6 +11702,8 @@ async fn local_ui_affordance_methods_return_safe_shapes() {
         json!({
             "authMethod": null,
             "authToken": null,
+            "principalId": "local_user",
+            "kind": "operator",
             "requiresOpenaiAuth": false,
         })
     );

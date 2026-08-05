@@ -468,9 +468,9 @@ pub use kernel::coupling_scheduler::{
 pub use kernel::history::{
     AdmissionDecidedPayload, AdmissionDecision, CONTEXT_READ_PLAN_SCHEMA_V1, CacheControl,
     CacheTtl, CanonicalContent, CanonicalMessage, CanonicalStopReason, CanonicalUsage,
-    DEBUG_THREAD_EXPORT_SCHEMA_V1, EVENT_KIND_SCHEMA_VERSION, EventKind, EventOrigin,
-    EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore, EventStreamId,
-    GrantPetitionedPayload, HistoryError, HistoryResult, InMemorySessionStore,
+    ClientRecordAppendedPayload, DEBUG_THREAD_EXPORT_SCHEMA_V1, EVENT_KIND_SCHEMA_VERSION,
+    EventKind, EventOrigin, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore,
+    EventStreamId, GrantPetitionedPayload, HistoryError, HistoryResult, InMemorySessionStore,
     IngressOutcomeIntent, IngressSettledBy, IoEgressDeliveredPayload, IoEgressFailedPayload,
     IoEgressRequestedPayload, IoIngressClaimedPayload, IoIngressReceivedPayload,
     IoIngressSettledPayload, NewEventRecord, NewObservationRecord, ObservationId,

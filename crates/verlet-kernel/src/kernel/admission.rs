@@ -27,6 +27,7 @@ macro_rules! turn_entry_surfaces {
 turn_entry_surfaces! {
     HOST_SUBMIT_SURFACE => "host-submit",
     APP_SERVER_RPC_SURFACE => "app-server-rpc",
+    APP_SERVER_ENVELOPE_INGRESS_SURFACE => "app-server-envelope-ingress",
     MCP_ADAPTER_SURFACE => "mcp-adapter",
     ACP_ADAPTER_SURFACE => "acp-adapter",
     DEBUG_RPC_SURFACE => "debug-rpc",
@@ -315,6 +316,10 @@ mod tests {
         (
             APP_SERVER_RPC_SURFACE,
             "app_server_turn_start_records_surface_admission_before_execution",
+        ),
+        (
+            APP_SERVER_ENVELOPE_INGRESS_SURFACE,
+            "app_server_envelope_ingress_records_surface_admission_before_execution",
         ),
         (
             MCP_ADAPTER_SURFACE,

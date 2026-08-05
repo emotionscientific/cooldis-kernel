@@ -892,6 +892,46 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn client_streams_do_not_participate_in_startup_recovery() {
+        let store = open_store("client-stream-excluded").await;
+        let coordinates = coordinates("tenant", "user", "client-stream");
+        let stream_id = EventStreamId::new("client:orch:runs");
+        store
+            .append_events(
+                &stream_id,
+                vec![NewEventRecord::witnessed(
+                    coordinates,
+                    EventKind::ClientRecordAppended,
+                    json!({
+                        "client_kind": "run.outcome_recorded",
+                        "client_schema": "verlet.orch.run.outcome/1",
+                        "principal_id": "operator:root",
+                        "body": {"status": "completed"},
+                    }),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let ingress = Arc::new(RecordingProcessIngress::with_store(store.clone()));
+        let dispatcher =
+            ProcessHandleDispatcher::new(Arc::new(store.clone()) as Arc<dyn RuntimeStore>, ingress);
+        let sweep = StartupRecoverySweep::new(store.clone(), dispatcher, "tenant", "user");
+        assert_eq!(
+            sweep.run_once().await.unwrap(),
+            StartupRecoveryReceipt::default()
+        );
+        assert!(
+            store
+                .list_control_stream_coordinates()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.read_events(&stream_id, None).await.unwrap().len(), 1);
+    }
+
     struct ThreadTerminalJoinCrashHost {
         store: SqliteSessionStore,
         fault_store: Option<Arc<FaultingRuntimeStore<SqliteSessionStore>>>,

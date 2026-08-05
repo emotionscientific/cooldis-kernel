@@ -61,6 +61,16 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     let server_task = tokio::spawn(async move { server.serve_websocket_listener(listener).await });
 
     let mut operator_rpc = connect_rpc(addr, &operator_token).await;
+    let auth_status = rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(100),
+        "getAuthStatus",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(auth_status["principalId"], OPERATOR_ID);
+    assert_eq!(auth_status["kind"], "operator");
     let thread = rpc_call(
         &mut operator_rpc,
         RequestId::Integer(2),
@@ -165,6 +175,54 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     .await
     .unwrap();
 
+    let envelope_ingress = rpc_call(
+        &mut adapter_rpc,
+        RequestId::Integer(10),
+        "ingress/submit",
+        json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": "adapter envelope ingress", "text_elements": [] }],
+            "delivery": {"deliveryId": "adapter-delivery-1"},
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(envelope_ingress["deduped"], false);
+
+    let denied_stream_append = rpc_call(
+        &mut adapter_rpc,
+        RequestId::Integer(11),
+        "stream/append",
+        json!({
+            "stream": "client:orch:auth",
+            "records": [{
+                "kind": "auth.checked",
+                "payloadSchema": "verlet.orch.auth.checked/1",
+                "payload": {},
+            }],
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied_stream_append.code, METHOD_NOT_AUTHORIZED_CODE);
+    assert_eq!(denied_stream_append.message, denied_command.message);
+
+    rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(101),
+        "stream/append",
+        json!({
+            "stream": "client:orch:auth",
+            "records": [{
+                "kind": "auth.checked",
+                "payloadSchema": "verlet.orch.auth.checked/1",
+                "payload": {"principal": OPERATOR_ID},
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+
     let ingress_events = rpc_call(
         &mut operator_rpc,
         RequestId::Integer(5),
@@ -203,12 +261,21 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
             params![ADAPTER_ID],
         )
         .await,
-        6
+        7
     );
     assert_eq!(
         sql_count(
             &store_path,
             "SELECT COUNT(*) FROM cooldis_identity_host_effects WHERE principal_id = ?1 AND method = 'command/exec' AND witnessed_at_ms > 0",
+            params![OPERATOR_ID],
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_host_effects WHERE principal_id = ?1 AND method = 'stream/append' AND witnessed_at_ms > 0",
             params![OPERATOR_ID],
         )
         .await,
@@ -226,6 +293,32 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     let marker = root.join("unwitnessed-command-ran");
     execute_sql(&store_path, "DROP TABLE cooldis_identity_host_effects").await;
+    let stream_witness_failure = rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(102),
+        "stream/append",
+        json!({
+            "stream": "client:orch:unwitnessed",
+            "records": [{
+                "kind": "auth.checked",
+                "payloadSchema": "verlet.orch.auth.checked/1",
+                "payload": {},
+            }],
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stream_witness_failure.code, -32000);
+    let unwitnessed_stream = rpc_call(
+        &mut operator_rpc,
+        RequestId::Integer(103),
+        "stream/read",
+        json!({"stream": "client:orch:unwitnessed"}),
+    )
+    .await
+    .unwrap();
+    assert!(unwitnessed_stream["data"].as_array().unwrap().is_empty());
+
     let witness_failure = rpc_call(
         &mut operator_rpc,
         RequestId::Integer(6),
