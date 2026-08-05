@@ -3,7 +3,6 @@
 .github/ISSUE_TEMPLATE/config.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
 .gitignore	Legacy state directory remains ignored during the compatibility window.
 CHANGELOG.md	Rename and deprecation-window receipt for v0.3.0.
-README.md	Repository remote site or external workflow identity is out of scope for EMO-520.
 RELEASE.md	Repository remote site or external workflow identity is out of scope for EMO-520.
 apps/console/src/App.svelte	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 apps/console/src/lib/app.svelte.ts	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.

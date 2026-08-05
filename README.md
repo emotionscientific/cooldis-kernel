@@ -1,8 +1,8 @@
 # Verlet
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/emotionscientific/cooldis-kernel)
-[![Verify](https://github.com/emotionscientific/cooldis-kernel/actions/workflows/verify.yml/badge.svg)](https://github.com/emotionscientific/cooldis-kernel/actions/workflows/verify.yml)
-[![Release](https://github.com/emotionscientific/cooldis-kernel/actions/workflows/release.yml/badge.svg)](https://github.com/emotionscientific/cooldis-kernel/actions/workflows/release.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/emotionscientific/verlet-kernel)
+[![Verify](https://github.com/emotionscientific/verlet-kernel/actions/workflows/verify.yml/badge.svg)](https://github.com/emotionscientific/verlet-kernel/actions/workflows/verify.yml)
+[![Release](https://github.com/emotionscientific/verlet-kernel/actions/workflows/release.yml/badge.svg)](https://github.com/emotionscientific/verlet-kernel/actions/workflows/release.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-yellow.svg)](README.md)
 
