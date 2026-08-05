@@ -669,7 +669,6 @@ fn thread_reload_degraded_payload_schema_is_registered() {
     .unwrap();
 
     stream_schema_registry_v1()
-        .unwrap()
         .validate(
             EventKind::ThreadReloadDegraded.payload_schema_id(),
             &payload,
@@ -709,7 +708,7 @@ fn ingress_outcome_payloads_round_trip_whole_and_validate() {
     };
     let claim_value = serde_json::to_value(&claim).unwrap();
     let settle_value = serde_json::to_value(&settle).unwrap();
-    let registry = stream_schema_registry_v1().unwrap();
+    let registry = stream_schema_registry_v1();
 
     registry
         .validate(
@@ -752,7 +751,7 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
     let ingress_event_id = EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000005").unwrap(),
     );
-    let registry = stream_schema_registry_v1().unwrap();
+    let registry = stream_schema_registry_v1();
 
     let cases = [
         (
@@ -1061,7 +1060,6 @@ fn events_0_1_style_stream_record_still_parses_and_unknown_kind_fails_closed() {
         EventKind::TurnCompleted
     );
     stream_schema_registry_v1()
-        .unwrap()
         .validate(
             STREAM_RECORD_SCHEMA_V1,
             &serde_json::to_value(parsed).unwrap(),
@@ -1220,7 +1218,6 @@ fn stream_routing_decision_v1_uses_envelope_fields_not_payload() {
     assert_eq!(baited.route_decision_v1(), decision);
 
     stream_schema_registry_v1()
-        .unwrap()
         .validate(
             STREAM_ROUTING_DECISION_SCHEMA_V1,
             &serde_json::to_value(decision).unwrap(),
@@ -1312,7 +1309,6 @@ fn stream_append_ack_v1_freezes_ack_classes_and_tail_identity() {
     );
 
     stream_schema_registry_v1()
-        .unwrap()
         .validate(
             STREAM_APPEND_ACK_SCHEMA_V1,
             &serde_json::to_value(ack).unwrap(),
@@ -1361,12 +1357,19 @@ fn stream_backend_capabilities_v1_freezes_sqlite_reference_shape() {
     );
 
     stream_schema_registry_v1()
-        .unwrap()
         .validate(
             STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
             &serde_json::to_value(capabilities).unwrap(),
         )
         .unwrap();
+}
+
+#[test]
+fn stream_schema_registry_v1_is_cached_once_per_process() {
+    let first = stream_schema_registry_v1();
+    let second = stream_schema_registry_v1();
+
+    assert!(std::ptr::eq(first, second));
 }
 
 #[test]
@@ -1483,7 +1486,7 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
         ),
     );
 
-    let registry = stream_schema_registry_v1().unwrap();
+    let registry = stream_schema_registry_v1();
     for record in [&compile, &summary, &read_plan_set] {
         record.validate_stream_record_v1().unwrap();
         validate_context_payload_schema_v1(record.kind, &record.payload).unwrap();
