@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -1252,8 +1252,7 @@ impl EventRecord {
     pub fn validate_stream_record_v1(&self) -> HistoryResult<()> {
         let envelope = serde_json::to_value(self.to_stream_record_v1())
             .map_err(|err| HistoryError::Codec(format!("encode stream record envelope: {err}")))?;
-        let registry =
-            stream_schema_registry_v1().map_err(|err| HistoryError::Codec(err.to_string()))?;
+        let registry = stream_schema_registry_v1();
         registry
             .validate(STREAM_RECORD_SCHEMA_V1, &envelope)
             .map_err(|err| HistoryError::Codec(err.to_string()))?;
@@ -1304,103 +1303,114 @@ impl StreamCursorV1 {
         let cursor = serde_json::to_value(self)
             .map_err(|err| HistoryError::Codec(format!("encode stream cursor envelope: {err}")))?;
         stream_schema_registry_v1()
-            .map_err(|err| HistoryError::Codec(err.to_string()))?
             .validate(STREAM_CURSOR_SCHEMA_V1, &cursor)
             .map_err(|err| HistoryError::Codec(err.to_string()))
     }
 }
 
-pub fn stream_schema_registry_v1() -> Result<SchemaRegistry, JsonSchemaValidationError> {
-    let mut registry = SchemaRegistry::new();
-    registry.register(STREAM_RECORD_SCHEMA_V1, stream_record_schema_v1())?;
-    registry.register(STREAM_CURSOR_SCHEMA_V1, stream_cursor_schema_v1())?;
-    registry.register(
-        STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
-        stream_backend_capabilities_schema_v1(),
-    )?;
-    registry.register(STREAM_APPEND_ACK_SCHEMA_V1, stream_append_ack_schema_v1())?;
-    registry.register(
-        STREAM_ROUTING_DECISION_SCHEMA_V1,
-        stream_routing_decision_schema_v1(),
-    )?;
-    registry.register(CONTEXT_READ_PLAN_SCHEMA_V1, context_read_plan_schema_v1())?;
-    registry.register(
-        DEBUG_THREAD_EXPORT_SCHEMA_V1,
-        debug_thread_export_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ContextCompileCompleted.payload_schema_id(),
-        context_compile_completed_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ContextSummaryCompleted.payload_schema_id(),
-        context_summary_completed_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ContextReadPlanSet.payload_schema_id(),
-        context_read_plan_set_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ThreadSpawnRequested.payload_schema_id(),
-        thread_spawn_requested_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ThreadSpawned.payload_schema_id(),
-        thread_spawned_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ThreadJoined.payload_schema_id(),
-        thread_joined_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ThreadBranchSelected.payload_schema_id(),
-        thread_branch_selected_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::ThreadReloadDegraded.payload_schema_id(),
-        thread_reload_degraded_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::PolicyBound.payload_schema_id(),
-        policy_bound_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::GrantPetitioned.payload_schema_id(),
-        grant_petitioned_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::TimerFired.payload_schema_id(),
-        timer_fired_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::IoIngressReceived.payload_schema_id(),
-        io_ingress_received_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::IoIngressClaimed.payload_schema_id(),
-        io_ingress_claimed_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::IoIngressSettled.payload_schema_id(),
-        io_ingress_settled_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::IoEgressRequested.payload_schema_id(),
-        io_egress_requested_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::IoEgressDelivered.payload_schema_id(),
-        io_egress_delivered_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::IoEgressFailed.payload_schema_id(),
-        io_egress_failed_payload_schema_v1(),
-    )?;
-    registry.register(
-        EventKind::AdmissionDecided.payload_schema_id(),
-        admission_decided_payload_schema_v1(),
-    )?;
-    Ok(registry)
+/// Returns the frozen V1 stream schema registry, cached once per process.
+///
+/// # Panics
+///
+/// Panics on first use if any frozen schema is malformed.
+pub fn stream_schema_registry_v1() -> &'static SchemaRegistry {
+    static REGISTRY: LazyLock<SchemaRegistry> = LazyLock::new(|| {
+        (|| -> Result<SchemaRegistry, JsonSchemaValidationError> {
+            let mut registry = SchemaRegistry::new();
+            registry.register(STREAM_RECORD_SCHEMA_V1, stream_record_schema_v1())?;
+            registry.register(STREAM_CURSOR_SCHEMA_V1, stream_cursor_schema_v1())?;
+            registry.register(
+                STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
+                stream_backend_capabilities_schema_v1(),
+            )?;
+            registry.register(STREAM_APPEND_ACK_SCHEMA_V1, stream_append_ack_schema_v1())?;
+            registry.register(
+                STREAM_ROUTING_DECISION_SCHEMA_V1,
+                stream_routing_decision_schema_v1(),
+            )?;
+            registry.register(CONTEXT_READ_PLAN_SCHEMA_V1, context_read_plan_schema_v1())?;
+            registry.register(
+                DEBUG_THREAD_EXPORT_SCHEMA_V1,
+                debug_thread_export_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ContextCompileCompleted.payload_schema_id(),
+                context_compile_completed_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ContextSummaryCompleted.payload_schema_id(),
+                context_summary_completed_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ContextReadPlanSet.payload_schema_id(),
+                context_read_plan_set_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ThreadSpawnRequested.payload_schema_id(),
+                thread_spawn_requested_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ThreadSpawned.payload_schema_id(),
+                thread_spawned_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ThreadJoined.payload_schema_id(),
+                thread_joined_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ThreadBranchSelected.payload_schema_id(),
+                thread_branch_selected_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::ThreadReloadDegraded.payload_schema_id(),
+                thread_reload_degraded_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::PolicyBound.payload_schema_id(),
+                policy_bound_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::GrantPetitioned.payload_schema_id(),
+                grant_petitioned_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::TimerFired.payload_schema_id(),
+                timer_fired_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::IoIngressReceived.payload_schema_id(),
+                io_ingress_received_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::IoIngressClaimed.payload_schema_id(),
+                io_ingress_claimed_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::IoIngressSettled.payload_schema_id(),
+                io_ingress_settled_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::IoEgressRequested.payload_schema_id(),
+                io_egress_requested_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::IoEgressDelivered.payload_schema_id(),
+                io_egress_delivered_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::IoEgressFailed.payload_schema_id(),
+                io_egress_failed_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::AdmissionDecided.payload_schema_id(),
+                admission_decided_payload_schema_v1(),
+            )?;
+            Ok(registry)
+        })()
+        .expect("frozen V1 stream schema registry must contain only valid schemas")
+    });
+
+    &REGISTRY
 }
 
 fn event_kind_routes_to_model_trace(kind: EventKind) -> bool {
@@ -1490,7 +1500,7 @@ pub fn validate_context_payload_schema_v1(
     kind: EventKind,
     payload: &Value,
 ) -> Result<(), JsonSchemaValidationError> {
-    stream_schema_registry_v1()?.validate(kind.payload_schema_id(), payload)
+    stream_schema_registry_v1().validate(kind.payload_schema_id(), payload)
 }
 
 fn stream_record_schema_v1() -> Value {

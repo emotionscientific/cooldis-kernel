@@ -275,7 +275,7 @@ fn ingress_outcome_protocol_contract_matches_fixture() {
     };
     let claim_value = serde_json::to_value(&claim).unwrap();
     let settle_value = serde_json::to_value(&settle).unwrap();
-    let registry = stream_schema_registry_v1().unwrap();
+    let registry = stream_schema_registry_v1();
     registry
         .validate(
             EventKind::IoIngressClaimed.payload_schema_id(),
@@ -547,7 +547,7 @@ fn stream_schema_v1_contract_matches_fixture() {
         branch_selection.clone(),
         reload_degraded,
     ];
-    let schema_registry = stream_schema_registry_v1().unwrap();
+    let schema_registry = stream_schema_registry_v1();
     for record in &records {
         record.validate_stream_record_v1().unwrap();
         validate_context_payload_schema_v1(record.kind, &record.payload).unwrap();
@@ -734,7 +734,6 @@ fn debug_thread_export_v1_contract_matches_fixture() {
     });
 
     stream_schema_registry_v1()
-        .unwrap()
         .validate(DEBUG_THREAD_EXPORT_SCHEMA_V1, &bundle)
         .unwrap();
     support::assert_json_fixture("contracts/debug_thread_export_v1.json", bundle);
