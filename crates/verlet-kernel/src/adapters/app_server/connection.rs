@@ -2556,11 +2556,6 @@ impl VerletAppServer {
             "receipts": receipts,
         });
         stream_schema_registry_v1()
-            .map_err(|err| {
-                internal_error(VerletError::RuntimeFactory(format!(
-                    "debug export schema registry failed: {err}"
-                )))
-            })?
             .validate(DEBUG_THREAD_EXPORT_SCHEMA_V1, &bundle)
             .map_err(|err| {
                 internal_error(VerletError::RuntimeFactory(format!(
