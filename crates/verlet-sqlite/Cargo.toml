@@ -6,10 +6,10 @@ license = "Apache-2.0"
 description = "Engine-owner crate for verlet SQLite stores (ADR 0005): configuration, connections, migrations, DST IO hook"
 
 [dependencies]
-turso = "=0.7.0-pre.19"
-turso_core = "=0.7.0-pre.19"
-thiserror = "2"
+turso = { workspace = true }
+turso_core = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
-tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tempfile = { workspace = true }

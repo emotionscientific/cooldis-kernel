@@ -5,17 +5,17 @@ edition = "2024"
 publish = false
 
 [dependencies]
-async-trait = "0.1"
+async-trait = { workspace = true }
 verlet-abi = { path = "../verlet-abi" }
 verlet-history = { path = "../verlet-history" }
 verlet-runtime-contracts = { path = "../verlet-runtime-contracts" }
 verlet-sqlite = { path = "../verlet-sqlite" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["rt"] }
-uuid = { version = "1", features = ["v7"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
-futures-executor = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+futures-executor = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
