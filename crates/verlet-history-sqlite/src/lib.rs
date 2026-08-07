@@ -772,7 +772,7 @@ async fn sqlite_rebuild_active_leaves_from_events(
                 "SELECT DISTINCT thread_id
                  FROM event_records
                  WHERE kind = ?1",
-                verlet_sqlite::params![verlet_history::EventKind::ThreadBranchSelected.as_str()],
+                verlet_sqlite::params![verlet_history::EventKind::ThreadBranchSelected.as_ref()],
             )
             .await
             .map_err(verlet_history::storage_error)?;
@@ -804,8 +804,8 @@ async fn sqlite_rebuild_active_leaves_from_events(
                  WHERE kind IN (?1, ?2)
                  ORDER BY rowid",
                 verlet_sqlite::params![
-                    verlet_history::EventKind::SessionEntryAppended.as_str(),
-                    verlet_history::EventKind::ThreadBranchSelected.as_str(),
+                    verlet_history::EventKind::SessionEntryAppended.as_ref(),
+                    verlet_history::EventKind::ThreadBranchSelected.as_ref(),
                 ],
             )
             .await
@@ -822,12 +822,12 @@ async fn sqlite_rebuild_active_leaves_from_events(
         }
     }
 
+    let branch_selected_kind: &str = verlet_history::EventKind::ThreadBranchSelected.as_ref();
     for (kind, stored_thread_id, payload_json) in journal_entries {
         if !selected_threads.contains(&stored_thread_id) {
             continue;
         }
-        let selected_entry_id = if kind == verlet_history::EventKind::ThreadBranchSelected.as_str()
-        {
+        let selected_entry_id = if kind == branch_selected_kind {
             let payload: verlet_history::ThreadBranchSelectedPayload =
                 serde_json::from_str(&payload_json).map_err(verlet_history::codec_error)?;
             if payload.thread_id.to_string() != stored_thread_id {
@@ -945,7 +945,7 @@ async fn sqlite_migrate_event_records_schema(
         for (event_id, kind) in identity_rows {
             let payload_schema = kind
                 .parse::<verlet_history::EventKind>()
-                .map(|kind| kind.payload_schema_id().to_string())
+                .map(|kind| kind.payload_schema_id())
                 .unwrap_or_default();
             connection
                 .execute(
@@ -978,8 +978,8 @@ async fn sqlite_migrate_event_records_schema(
                  WHERE kind IN (?1, ?2)
                  ORDER BY stream_id, sequence",
                 verlet_sqlite::params![
-                    verlet_history::EventKind::SessionEntryAppended.as_str(),
-                    verlet_history::EventKind::ContextCompileCompleted.as_str(),
+                    verlet_history::EventKind::SessionEntryAppended.as_ref(),
+                    verlet_history::EventKind::ContextCompileCompleted.as_ref(),
                 ],
             )
             .await
@@ -998,31 +998,32 @@ async fn sqlite_migrate_event_records_schema(
         }
     }
 
+    let session_entry_appended_kind: &str =
+        verlet_history::EventKind::SessionEntryAppended.as_ref();
     for (event_id, _stream_id, kind, payload_json) in rows_to_backfill {
-        let (origin, provenance) =
-            if kind == verlet_history::EventKind::SessionEntryAppended.as_str() {
-                match serde_json::from_str::<verlet_history::SessionEntry>(&payload_json) {
-                    Ok(entry) if verlet_history::session_entry_is_user_authored(&entry.kind) => (
-                        verlet_history::EventOrigin::Witnessed,
-                        verlet_history::EventProvenance::default(),
-                    ),
-                    _ => (
-                        verlet_history::EventOrigin::Discharged,
-                        verlet_history::EventProvenance {
-                            discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
-                            ..verlet_history::EventProvenance::default()
-                        },
-                    ),
-                }
-            } else {
-                (
+        let (origin, provenance) = if kind == session_entry_appended_kind {
+            match serde_json::from_str::<verlet_history::SessionEntry>(&payload_json) {
+                Ok(entry) if verlet_history::session_entry_is_user_authored(&entry.kind) => (
+                    verlet_history::EventOrigin::Witnessed,
+                    verlet_history::EventProvenance::default(),
+                ),
+                _ => (
                     verlet_history::EventOrigin::Discharged,
                     verlet_history::EventProvenance {
                         discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
                         ..verlet_history::EventProvenance::default()
                     },
-                )
-            };
+                ),
+            }
+        } else {
+            (
+                verlet_history::EventOrigin::Discharged,
+                verlet_history::EventProvenance {
+                    discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
+                    ..verlet_history::EventProvenance::default()
+                },
+            )
+        };
         let provenance_json =
             serde_json::to_string(&provenance).map_err(verlet_history::codec_error)?;
         connection
@@ -1030,7 +1031,7 @@ async fn sqlite_migrate_event_records_schema(
                 "UPDATE event_records
                  SET origin = ?1, provenance_json = ?2
                  WHERE event_id = ?3",
-                verlet_sqlite::params![origin.as_str(), provenance_json, event_id],
+                verlet_sqlite::params![origin.as_ref(), provenance_json, event_id],
             )
             .await
             .map_err(verlet_history::storage_error)?;
@@ -1228,8 +1229,8 @@ async fn sqlite_insert_event(
                 event.coordinates.user_id.as_str(),
                 event.coordinates.session_id.as_str(),
                 event.created_at_ms,
-                event.kind.as_str(),
-                event.origin.as_str(),
+                event.kind.as_ref(),
+                event.origin.as_ref(),
                 provenance_json,
                 payload_json,
             ],
@@ -1319,14 +1320,18 @@ fn sqlite_event_from_row(
     }
     let payload_schema: String = row.get(2).map_err(verlet_history::storage_error)?;
     let kind: String = row.get(10).map_err(verlet_history::storage_error)?;
-    let kind = kind.parse::<verlet_history::EventKind>()?;
+    let kind = verlet_history::EventKind::try_from(kind)?;
     let expected_payload_schema = kind.payload_schema_id();
     if payload_schema != expected_payload_schema {
         return Err(verlet_history::codec_error(format!(
             "event record {event_id} kind {kind} has payload_schema {payload_schema:?}, expected {expected_payload_schema:?}"
         )));
     }
-    let origin: String = row.get(11).map_err(verlet_history::storage_error)?;
+    let origin_name: String = row.get(11).map_err(verlet_history::storage_error)?;
+    let origin: Result<verlet_history::EventOrigin, _> = origin_name.parse();
+    let origin = origin.map_err(|_| {
+        verlet_history::HistoryError::Codec(format!("unknown event origin: {origin_name}"))
+    })?;
     let provenance_json: String = row.get(12).map_err(verlet_history::storage_error)?;
     let payload_json: String = row.get(13).map_err(verlet_history::storage_error)?;
     let event = verlet_history::EventRecord {
@@ -1349,7 +1354,7 @@ fn sqlite_event_from_row(
         },
         created_at_ms: row.get(9).map_err(verlet_history::storage_error)?,
         kind,
-        origin: verlet_history::parse_event_origin(&origin)?,
+        origin,
         provenance: serde_json::from_str(&provenance_json).map_err(verlet_history::codec_error)?,
         payload: serde_json::from_str(&payload_json).map_err(verlet_history::codec_error)?,
     };

@@ -700,8 +700,9 @@ impl IoTarget {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, strum::AsRefStr)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum EgressKind {
     AssistantDelta {
         text: String,
@@ -843,8 +844,19 @@ pub trait IngressSink: Send + Sync {
 
 /// Controls whether an ingress adapter must persist events before the kernel
 /// sees them.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum IngressPersistenceMode {
     /// Persist inbound envelopes through an [`IngressQueueStore`] before a
     /// worker resolves/admits them into the runtime.
@@ -1043,6 +1055,60 @@ fn default_visibility_timeout_secs() -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// `AsRef<str>` names the kind for egress bookkeeping. `PlatformAction`
+    /// carries a field the derive cannot interpolate; callers append it.
+    #[test]
+    fn egress_kind_names_are_pinned() {
+        let kinds = [
+            crate::EgressKind::AssistantDelta {
+                text: String::new(),
+            },
+            crate::EgressKind::AssistantMessage {
+                text: String::new(),
+            },
+            crate::EgressKind::Status {
+                text: String::new(),
+            },
+            crate::EgressKind::ToolStarted {
+                name: String::new(),
+            },
+            crate::EgressKind::ToolCompleted {
+                name: String::new(),
+                success: true,
+            },
+            crate::EgressKind::Error {
+                message: String::new(),
+            },
+            crate::EgressKind::Silence { reason: None },
+            crate::EgressKind::PlatformAction {
+                action: String::new(),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let names: Vec<&str> = kinds.iter().map(|kind| kind.as_ref()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "assistant_delta",
+                "assistant_message",
+                "status",
+                "tool_started",
+                "tool_completed",
+                "error",
+                "silence",
+                "platform_action",
+            ]
+        );
+    }
+
+    #[test]
+    fn ingress_persistence_mode_names_are_pinned() {
+        let durable: &'static str = crate::IngressPersistenceMode::DurableQueue.into();
+        let best_effort: &'static str = crate::IngressPersistenceMode::BestEffortDirect.into();
+        assert_eq!(durable, "durable_queue");
+        assert_eq!(best_effort, "best_effort_direct");
+    }
 
     fn telegram_like_envelope() -> crate::IngressEnvelope {
         let source = crate::IoSource::new("telegram.bot", "main");

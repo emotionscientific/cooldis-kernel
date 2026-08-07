@@ -813,9 +813,7 @@ impl RuntimeKernelControl {
                 ),
                 (
                     "mode".to_string(),
-                    verlet_runtime_contracts::TurnSubmissionMode::Queue
-                        .as_str()
-                        .to_string(),
+                    verlet_runtime_contracts::TurnSubmissionMode::Queue.to_string(),
                 ),
             ]);
             crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
@@ -861,9 +859,7 @@ impl RuntimeKernelControl {
             ),
             (
                 "mode".to_string(),
-                verlet_runtime_contracts::TurnSubmissionMode::Queue
-                    .as_str()
-                    .to_string(),
+                verlet_runtime_contracts::TurnSubmissionMode::Queue.to_string(),
             ),
         ]);
         if submitted {

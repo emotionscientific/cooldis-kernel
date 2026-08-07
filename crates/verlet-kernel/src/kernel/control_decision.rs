@@ -206,8 +206,20 @@ pub struct PlacementDecisionPayload {
     pub placement: PlacementTarget,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum PlacementTarget {
     Local,
     Remote,
@@ -770,13 +782,16 @@ fn coupling_matches_tool_request(
     coupling: &crate::AgentManifestCouplingBinding,
     tool_name: &str,
 ) -> bool {
+    let requested_kind: &str = crate::EventKind::ToolCallRequested.as_ref();
+    let decision_kind: &str = crate::EventKind::ToolCallDecision.as_ref();
+    let suspended_kind: &str = crate::EventKind::ToolCallSuspended.as_ref();
     coupling.role == crate::CouplingRole::Controller
-        && coupling.trigger_kind == crate::EventKind::ToolCallRequested.as_str()
+        && coupling.trigger_kind == requested_kind
         && coupling.sink_stream == "control"
-        && coupling.sink_kinds.iter().any(|kind| {
-            kind == crate::EventKind::ToolCallDecision.as_str()
-                || kind == crate::EventKind::ToolCallSuspended.as_str()
-        })
+        && coupling
+            .sink_kinds
+            .iter()
+            .any(|kind| kind == decision_kind || kind == suspended_kind)
         && coupling.trigger_match.iter().all(|(key, expected)| {
             matches!(key.as_str(), "tool" | "tool_name" | "name")
                 && expected.as_str() == Some(tool_name)

@@ -710,10 +710,7 @@ impl crate::capabilities::execution::ExternalCommandExecutor for RecordingExtern
                 ))
             }
             crate::capabilities::execution::ExternalCommandInvocation::Script(_) => {
-                let prefix = match request.executor {
-                    crate::capabilities::execution::ExternalExecutorKind::HostBash => "host",
-                    crate::capabilities::execution::ExternalExecutorKind::RemoteLinux => "remote",
-                };
+                let prefix: &str = request.executor.as_ref();
                 Ok(crate::capabilities::execution::ExternalCommandResult::new(
                     crate::capabilities::execution::VirtualCommandOutput {
                         stdout: format!("{prefix} stdout\n"),

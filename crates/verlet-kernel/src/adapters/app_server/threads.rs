@@ -47,7 +47,8 @@ pub(super) struct AppServerTurnState {
     pub(super) completion_scheduled: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::AsRefStr, strum::Display)]
+#[strum(serialize_all = "camelCase")]
 pub(super) enum AppServerTurnStatus {
     InProgress,
     Completed,
@@ -769,13 +770,10 @@ pub(super) fn require_local_binding_surface(
         .map(|placement| placement.target.clone())
         .unwrap_or(crate::PlacementTarget::Local);
     if target != crate::PlacementTarget::Local {
+        let target: &str = target.as_ref();
         return Err(crate::VerletError::RuntimeFactory(format!(
-            "{surface} does not execute placement target {}; remote placement is supported by thread/spawn",
-            match target {
-                crate::PlacementTarget::Local => "local",
-                crate::PlacementTarget::Remote => "remote",
-                crate::PlacementTarget::Sandbox => "sandbox",
-            }
+            "{surface} does not execute placement target {target}; \
+             remote placement is supported by thread/spawn"
         )));
     }
     Ok(())
@@ -981,11 +979,12 @@ pub(super) fn turn_json(turn: &AppServerTurnState) -> serde_json::Value {
     let duration_ms = turn
         .completed_at_ms
         .map(|completed| completed.saturating_sub(turn.started_at_ms));
+    let status: &str = turn.status.as_ref();
     serde_json::json!({
         "id": turn.id,
         "items": turn.items,
         "itemsView": "full",
-        "status": turn_status_string(turn.status),
+        "status": status,
         "error": turn.error,
         "startedAt": turn.started_at_ms / 1000,
         "completedAt": completed_at,
@@ -1003,15 +1002,6 @@ pub(super) fn thread_status_json(status: crate::ThreadStatus) -> serde_json::Val
         crate::ThreadStatus::Idle => serde_json::json!({ "type": "idle" }),
         crate::ThreadStatus::Stopped => serde_json::json!({ "type": "notLoaded" }),
         crate::ThreadStatus::Failed => serde_json::json!({ "type": "systemError" }),
-    }
-}
-
-pub(super) fn turn_status_string(status: AppServerTurnStatus) -> &'static str {
-    match status {
-        AppServerTurnStatus::InProgress => "inProgress",
-        AppServerTurnStatus::Completed => "completed",
-        AppServerTurnStatus::Interrupted => "interrupted",
-        AppServerTurnStatus::Failed => "failed",
     }
 }
 
@@ -1107,17 +1097,13 @@ pub(super) fn app_server_thinking_json(
 
 pub(super) fn app_server_thinking_value(thinking: &crate::ThinkingConfig) -> serde_json::Value {
     match thinking {
-        crate::ThinkingConfig::Effort { effort } => serde_json::json!({
-            "type": "effort",
-            "effort": match effort {
-                crate::ThinkingEffort::Low => "low",
-                crate::ThinkingEffort::Medium => "medium",
-                crate::ThinkingEffort::High => "high",
-                crate::ThinkingEffort::XHigh => "xhigh",
-                crate::ThinkingEffort::Max => "max",
-                crate::ThinkingEffort::Other(value) => value.as_str(),
-            },
-        }),
+        crate::ThinkingConfig::Effort { effort } => {
+            let effort: &str = effort.as_ref();
+            serde_json::json!({
+                "type": "effort",
+                "effort": effort,
+            })
+        }
         crate::ThinkingConfig::Budget { budget_tokens } => serde_json::json!({
             "type": "budget",
             "budgetTokens": budget_tokens,

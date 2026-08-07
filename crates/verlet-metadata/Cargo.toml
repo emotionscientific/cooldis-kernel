@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 uuid = { workspace = true, features = ["v7"] }
+strum.workspace = true
 
 [dev-dependencies]
 futures-executor = { workspace = true }

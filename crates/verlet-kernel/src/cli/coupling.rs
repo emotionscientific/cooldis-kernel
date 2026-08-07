@@ -465,7 +465,7 @@ pub(super) fn event_record_from_export_value(
         serde_json::from_value::<crate::StreamRecordEnvelopeV1>(value).map_err(|err| {
             crate::cli::usage_error(format!("export stream record is invalid: {err}"))
         })?;
-    let kind = envelope.kind.parse::<crate::EventKind>().map_err(|err| {
+    let kind = crate::EventKind::try_from(envelope.kind).map_err(|err| {
         crate::cli::usage_error(format!("export stream record kind is invalid: {err}"))
     })?;
     Ok(crate::EventRecord {
@@ -772,7 +772,7 @@ impl CouplingReplayReport {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CouplingReplayRunReport {
     coupling_id: String,
-    status: &'static str,
+    status: String,
     scheduler_status: crate::CouplingRunStatus,
     blocked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -792,9 +792,9 @@ impl CouplingReplayRunReport {
         Self {
             coupling_id: run.coupling_id,
             status: if blocked {
-                "blocked"
+                "blocked".to_string()
             } else {
-                coupling_run_status_name(run.status)
+                run.status.to_string()
             },
             scheduler_status: run.status,
             blocked,
@@ -830,14 +830,6 @@ pub(super) fn replay_run_is_blocked(run: &crate::CouplingRunReceipt) -> bool {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.starts_with("budget:"))
-}
-
-pub(super) fn coupling_run_status_name(status: crate::CouplingRunStatus) -> &'static str {
-    match status {
-        crate::CouplingRunStatus::Completed => "completed",
-        crate::CouplingRunStatus::Failed => "failed",
-        crate::CouplingRunStatus::Skipped => "skipped",
-    }
 }
 
 pub(super) fn parse_coupling_init_args(

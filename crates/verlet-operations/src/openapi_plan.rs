@@ -71,6 +71,8 @@ pub enum OpenApiImportError {
         operation_id: String,
         parameter: String,
         location: String,
+        #[source]
+        source: strum::ParseError,
     },
     #[error(
         "OpenAPI operation {operation_id:?} parameter {parameter:?} uses unsupported serialization"
@@ -177,8 +179,9 @@ pub struct ImportedOperationPlan {
 }
 
 /// Supported OpenAPI parameter locations used by the HTTP request renderer.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, strum::EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum OperationParameterLocation {
     Path,
     Query,
@@ -612,18 +615,14 @@ fn normalize_parameter(
             message: format!("operation {operation_id:?} contains an empty parameter name"),
         });
     }
-    let location = match parameter.location.as_str() {
-        "path" => OperationParameterLocation::Path,
-        "query" => OperationParameterLocation::Query,
-        "header" => OperationParameterLocation::Header,
-        other => {
-            return Err(OpenApiImportError::UnsupportedParameterLocation {
-                operation_id: operation_id.to_string(),
-                parameter: parameter.name,
-                location: other.to_string(),
-            });
+    let location: OperationParameterLocation = parameter.location.parse().map_err(|err| {
+        OpenApiImportError::UnsupportedParameterLocation {
+            operation_id: operation_id.to_string(),
+            parameter: parameter.name.clone(),
+            location: parameter.location.clone(),
+            source: err,
         }
-    };
+    })?;
     if matches!(location, OperationParameterLocation::Header) {
         validate_import_header_parameter(operation_id, &parameter.name)?;
     }

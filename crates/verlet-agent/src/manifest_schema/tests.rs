@@ -768,3 +768,36 @@ fn runtime_tool_round_budget_supports_finite_unlimited_and_absent() {
             .unwrap_err();
     assert!(err.to_string().contains("max_tool_rounds"));
 }
+
+#[test]
+fn runtime_override_key_and_workspace_mode_names_are_pinned() {
+    let keys: Vec<&'static str> = [
+        crate::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd,
+        crate::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming,
+        crate::manifest_schema::AgentManifestRuntimeOverrideKey::TurnTimeoutMs,
+        crate::manifest_schema::AgentManifestRuntimeOverrideKey::CancellationGraceMs,
+        crate::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds,
+        crate::manifest_schema::AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes,
+    ]
+    .into_iter()
+    .map(std::convert::Into::into)
+    .collect();
+    assert_eq!(
+        keys,
+        vec![
+            "default_cwd",
+            "streaming",
+            "turn_timeout_ms",
+            "cancellation_grace_ms",
+            "max_tool_rounds",
+            "compaction.auto_at_text_bytes",
+        ]
+    );
+
+    let read_only: &'static str =
+        crate::manifest_schema::AgentManifestWorkspaceMode::ReadOnly.into();
+    let read_write: &'static str =
+        crate::manifest_schema::AgentManifestWorkspaceMode::ReadWrite.into();
+    assert_eq!(read_only, "ro");
+    assert_eq!(read_write, "rw");
+}

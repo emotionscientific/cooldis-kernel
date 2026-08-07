@@ -69,7 +69,8 @@ impl SplitMix64 {
 }
 
 /// How much probability mass a derivation spends across the schedule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
 pub enum Intensity {
     Sparse,
     Moderate,

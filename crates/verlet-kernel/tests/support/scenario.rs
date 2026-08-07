@@ -2244,7 +2244,8 @@ impl crate::support::fault_plan::CrashCutHost for ScenarioHarness {
 
 /// Operation alphabet v1 (ADR 0004). Deliberately small; growing it is a
 /// versioned vocabulary change, never a silent addition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ScenarioOp {
     StartThread,
     SubmitTurn,
@@ -2552,6 +2553,7 @@ async fn minimize_scenario(
         ops: ops.clone(),
         plan,
     };
+    let op_names: Vec<&str> = ops.iter().map(|op| op.as_ref()).collect();
     let mut failure = run_scenario_once(&minimized, invariants)
         .await
         .expect_err("the minimized scenario must retain the original failure class");
@@ -2564,7 +2566,7 @@ async fn minimize_scenario(
             value: serde_json::json!({
                 "seed": seed,
                 "vocabulary_version": failure.vocabulary_version,
-                "ops": ops.iter().map(|op| op_name(*op)).collect::<Vec<_>>(),
+                "ops": op_names,
                 "directives": minimized.plan.directives,
             }),
         });
@@ -2582,19 +2584,6 @@ async fn failure_matches(
             .violations
             .iter()
             .any(|violation| target.contains(&(violation.invariant, violation.detail.clone()))),
-    }
-}
-
-fn op_name(op: ScenarioOp) -> &'static str {
-    match op {
-        ScenarioOp::StartThread => "start_thread",
-        ScenarioOp::SubmitTurn => "submit_turn",
-        ScenarioOp::Steer => "steer",
-        ScenarioOp::Cancel => "cancel",
-        ScenarioOp::Fork => "fork",
-        ScenarioOp::Restart => "restart",
-        ScenarioOp::DrainQueue => "drain_queue",
-        ScenarioOp::ShutdownAll => "shutdown_all",
     }
 }
 
@@ -2621,15 +2610,12 @@ fn corpus_intensity(
     entry: &CorpusEntry,
     index: usize,
 ) -> Result<crate::support::fault_plan::Intensity, String> {
-    match entry.intensity.as_str() {
-        "sparse" => Ok(crate::support::fault_plan::Intensity::Sparse),
-        "moderate" => Ok(crate::support::fault_plan::Intensity::Moderate),
-        "hostile" => Ok(crate::support::fault_plan::Intensity::Hostile),
-        intensity => Err(format!(
-            "corpus entry {index} (seed {}) has unknown intensity {intensity:?}",
-            entry.seed
-        )),
-    }
+    entry.intensity.parse().map_err(|_| {
+        format!(
+            "corpus entry {index} (seed {}) has unknown intensity {:?}",
+            entry.seed, entry.intensity
+        )
+    })
 }
 
 fn load_corpus(

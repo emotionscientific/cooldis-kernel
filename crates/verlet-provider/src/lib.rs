@@ -100,32 +100,21 @@ pub enum ThinkingConfig {
     Disabled,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// `AsRef<str>` is the OpenAI and Anthropic wire spelling; both APIs accept the
+/// same effort vocabulary. It diverges from the serde representation for
+/// [`ThinkingEffort::XHigh`]: serde emits `x_high`, the wire wants `xhigh`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, strum::AsRefStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ThinkingEffort {
     Low,
     Medium,
     High,
+    #[strum(serialize = "xhigh")]
     XHigh,
     Max,
+    #[strum(transparent)]
     Other(String),
-}
-
-impl ThinkingEffort {
-    pub fn as_openai_wire(&self) -> &str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Max => "max",
-            Self::Other(value) => value.as_str(),
-        }
-    }
-
-    pub fn as_anthropic_wire(&self) -> &str {
-        self.as_openai_wire()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1269,23 +1258,14 @@ pub struct OpenAIResponsesAdapter {
     pub reasoning_summary: OpenAIReasoningSummary,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum OpenAIReasoningSummary {
     Auto,
     Concise,
     Detailed,
+    #[strum(transparent)]
     Other(String),
-}
-
-impl OpenAIReasoningSummary {
-    fn as_wire(&self) -> &str {
-        match self {
-            Self::Auto => "auto",
-            Self::Concise => "concise",
-            Self::Detailed => "detailed",
-            Self::Other(value) => value.as_str(),
-        }
-    }
 }
 
 impl Default for OpenAIResponsesAdapter {
@@ -1874,8 +1854,8 @@ fn openai_reasoning(
                 .to_string(),
         }),
         Some(ThinkingConfig::Effort { effort }) => Ok(Some(serde_json::json!({
-            "effort": effort.as_openai_wire(),
-            "summary": summary.as_wire(),
+            "effort": effort.as_ref(),
+            "summary": summary.as_ref(),
         }))),
     }
 }
@@ -1907,10 +1887,7 @@ fn openai_chat_thinking(
         }),
         Some(ThinkingConfig::Effort { effort }) => match effort {
             ThinkingEffort::Low | ThinkingEffort::Medium | ThinkingEffort::High => {
-                let mut values = vec![(
-                    "reasoning_effort",
-                    serde_json::json!(effort.as_openai_wire()),
-                )];
+                let mut values = vec![("reasoning_effort", serde_json::json!(effort.as_ref()))];
                 if zhipu_convention {
                     values.push(("thinking", serde_json::json!({"type": "enabled"})));
                 }
@@ -1923,7 +1900,7 @@ fn openai_chat_thinking(
                     capability: "thinking_effort",
                     detail: format!(
                         "OpenAI Chat Completions reasoning_effort supports low, medium, or high; got {}",
-                        effort.as_openai_wire()
+                        effort.as_ref()
                     ),
                 })
             }
@@ -2516,7 +2493,7 @@ fn anthropic_thinking(thinking: &Option<ThinkingConfig>) -> Option<serde_json::V
                     "display": "summarized",
                 }
             });
-            value["output_config"] = serde_json::json!({"effort": effort.as_anthropic_wire()});
+            value["output_config"] = serde_json::json!({"effort": effort.as_ref()});
             Some(value)
         }
     }

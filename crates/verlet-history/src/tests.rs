@@ -565,13 +565,12 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "admission.decided",
     ];
     assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.3");
-    let kinds = crate::EventKind::all();
-    assert_eq!(
-        kinds.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
-        expected
-    );
+    let kinds = <crate::EventKind as strum::VariantArray>::VARIANTS;
+    let actual: Vec<&str> = kinds.iter().map(|kind| kind.as_ref()).collect();
+    assert_eq!(actual, expected);
     for kind in kinds {
-        assert_eq!(kind.as_str().parse::<crate::EventKind>().unwrap(), *kind);
+        let parsed: crate::EventKind = kind.as_ref().parse().unwrap();
+        assert_eq!(parsed, *kind);
         let json = serde_json::to_string(&kind).unwrap();
         assert_eq!(
             serde_json::from_str::<crate::EventKind>(&json).unwrap(),
@@ -579,9 +578,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         );
     }
 
-    let err = "unknown.event.kind"
-        .parse::<crate::EventKind>()
-        .unwrap_err();
+    let err = crate::EventKind::try_from("unknown.event.kind".to_string()).unwrap_err();
     assert!(
         matches!(err, crate::HistoryError::Codec(message) if message.contains("unknown event kind"))
     );
@@ -675,7 +672,7 @@ fn client_record_carrier_payload_schema_is_registered_and_strict() {
     let schema = crate::EventKind::ClientRecordAppended.payload_schema_id();
     registry
         .validate(
-            schema,
+            &schema,
             &serde_json::json!({
                 "client_kind": "placement.bound",
                 "client_schema": "verlet.orch.placement.bound/1",
@@ -687,7 +684,7 @@ fn client_record_carrier_payload_schema_is_registered_and_strict() {
     assert!(
         registry
             .validate(
-                schema,
+                &schema,
                 &serde_json::json!({
                     "client_kind": "placement.bound",
                     "client_schema": "verlet.orch.placement.bound/1",
@@ -716,7 +713,7 @@ fn thread_reload_degraded_payload_schema_is_registered() {
 
     crate::stream_schema_registry_v1()
         .validate(
-            crate::EventKind::ThreadReloadDegraded.payload_schema_id(),
+            &crate::EventKind::ThreadReloadDegraded.payload_schema_id(),
             &payload,
         )
         .unwrap();
@@ -758,13 +755,13 @@ fn ingress_outcome_payloads_round_trip_whole_and_validate() {
 
     registry
         .validate(
-            crate::EventKind::IoIngressClaimed.payload_schema_id(),
+            &crate::EventKind::IoIngressClaimed.payload_schema_id(),
             &claim_value,
         )
         .unwrap();
     registry
         .validate(
-            crate::EventKind::IoIngressSettled.payload_schema_id(),
+            &crate::EventKind::IoIngressSettled.payload_schema_id(),
             &settle_value,
         )
         .unwrap();
@@ -990,7 +987,7 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
         let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, payload);
         registry
-            .validate(kind.payload_schema_id(), &decoded)
+            .validate(&kind.payload_schema_id(), &decoded)
             .unwrap();
     }
 }
@@ -1158,7 +1155,7 @@ fn canonical_usage_survives_assistant_session_entry_stream_record() {
     let envelope = event.to_stream_record_v1();
     assert_eq!(
         envelope.kind,
-        crate::EventKind::SessionEntryAppended.as_str()
+        crate::EventKind::SessionEntryAppended.as_ref()
     );
     assert_eq!(
         envelope.payload["usage"],
@@ -1729,7 +1726,7 @@ async fn discharged_control_event_kinds_require_provenance() {
         let record = crate::NewEventRecord::discharged(
             coordinates.clone(),
             kind,
-            serde_json::json!({"kind": kind.as_str()}),
+            serde_json::json!({"kind": kind.as_ref()}),
             crate::EventProvenance::default(),
         );
         let record_id = record.id;
