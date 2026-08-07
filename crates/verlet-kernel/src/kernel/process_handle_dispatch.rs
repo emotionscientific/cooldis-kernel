@@ -23,25 +23,27 @@ pub struct ProcessHandleDispatcher {
 }
 
 struct ProcessHandleDispatcherInner {
-    store: std::sync::Arc<dyn crate::RuntimeStore>,
-    ingress: std::sync::Arc<dyn crate::ProcessHandleIngressSink>,
+    store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+    ingress: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink>,
     locks: tokio::sync::Mutex<
         std::collections::BTreeMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
     >,
     terminal_monitors:
-        tokio::sync::Mutex<std::collections::HashSet<verlet_process::VerletProcessId>>,
+        tokio::sync::Mutex<std::collections::HashSet<verlet_process::process::VerletProcessId>>,
     live_bindings: tokio::sync::Mutex<
         std::collections::HashMap<
-            verlet_process::VerletProcessId,
-            verlet_runtime_contracts::HandleDispatchEnvelope,
+            verlet_process::process::VerletProcessId,
+            verlet_runtime_contracts::handle::HandleDispatchEnvelope,
         >,
     >,
 }
 
 impl ProcessHandleDispatcher {
     pub fn new(
-        store: std::sync::Arc<dyn crate::RuntimeStore>,
-        ingress: std::sync::Arc<dyn crate::ProcessHandleIngressSink>,
+        store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        ingress: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,
+        >,
     ) -> Self {
         Self {
             inner: std::sync::Arc::new(ProcessHandleDispatcherInner {
@@ -59,7 +61,7 @@ impl ProcessHandleDispatcher {
     /// never a timestamp or stream heuristic, to avoid failing live work.
     pub(crate) async fn is_live_dispatch(
         &self,
-        dispatch_id: &verlet_runtime_contracts::DispatchId,
+        dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
     ) -> bool {
         self.inner
             .live_bindings
@@ -71,25 +73,29 @@ impl ProcessHandleDispatcher {
 
     /// Pins daemon startup ordering: EMO-426 runs before any surface may
     /// install a process binding in this generation.
-    pub(crate) async fn assert_startup_registry_empty(&self) -> crate::VerletResult<()> {
+    pub(crate) async fn assert_startup_registry_empty(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let live_bindings = self.inner.live_bindings.lock().await;
         let terminal_monitors = self.inner.terminal_monitors.lock().await;
         if live_bindings.is_empty() && terminal_monitors.is_empty() {
             return Ok(());
         }
-        Err(crate::VerletError::RuntimeExecution(format!(
-            "startup recovery requires an empty process dispatcher registry ({} live bindings, {} terminal monitors)",
-            live_bindings.len(),
-            terminal_monitors.len(),
-        )))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!(
+                "startup recovery requires an empty process dispatcher registry ({} live bindings, {} terminal monitors)",
+                live_bindings.len(),
+                terminal_monitors.len(),
+            ),
+        ))
     }
 
     /// Submit the stable observer-death outcome through the same process
     /// ingress sink and envelope builder used by live terminal monitors.
     pub(crate) async fn submit_recovery_outcome(
         &self,
-        binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-    ) -> crate::VerletResult<()> {
+        binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         validate_binding(
             binding,
             &binding.consumer,
@@ -105,13 +111,13 @@ impl ProcessHandleDispatcher {
     /// Starts a backend only after the dispatch witness has settled.
     pub async fn dispatch_start(
         &self,
-        consumer: &crate::ThreadCoordinates,
-        dispatch_id: verlet_runtime_contracts::DispatchId,
+        consumer: &verlet_runtime_contracts::ThreadCoordinates,
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId,
         command_digest: String,
-        manager: verlet_process::AsyncExecutionManager,
-        backend: std::sync::Arc<dyn verlet_process::LiveProcessBackend>,
-        request: verlet_process::AsyncProcessStartRequest,
-    ) -> crate::VerletResult<verlet_process::AsyncProcessOutcome> {
+        manager: verlet_process::live::AsyncExecutionManager,
+        backend: std::sync::Arc<dyn verlet_process::live::LiveProcessBackend>,
+        request: verlet_process::live::AsyncProcessStartRequest,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_process::live::AsyncProcessOutcome> {
         self.dispatch_start_inner(
             consumer,
             dispatch_id,
@@ -126,14 +132,14 @@ impl ProcessHandleDispatcher {
 
     pub async fn dispatch_start_cancellable(
         &self,
-        consumer: &crate::ThreadCoordinates,
-        dispatch_id: verlet_runtime_contracts::DispatchId,
+        consumer: &verlet_runtime_contracts::ThreadCoordinates,
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId,
         command_digest: String,
-        manager: verlet_process::AsyncExecutionManager,
-        backend: std::sync::Arc<dyn verlet_process::LiveProcessBackend>,
-        request: verlet_process::AsyncProcessStartRequest,
+        manager: verlet_process::live::AsyncExecutionManager,
+        backend: std::sync::Arc<dyn verlet_process::live::LiveProcessBackend>,
+        request: verlet_process::live::AsyncProcessStartRequest,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> crate::VerletResult<verlet_process::AsyncProcessOutcome> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_process::live::AsyncProcessOutcome> {
         self.dispatch_start_inner(
             consumer,
             dispatch_id,
@@ -149,14 +155,14 @@ impl ProcessHandleDispatcher {
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_start_inner(
         &self,
-        consumer: &crate::ThreadCoordinates,
-        dispatch_id: verlet_runtime_contracts::DispatchId,
+        consumer: &verlet_runtime_contracts::ThreadCoordinates,
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId,
         command_digest: String,
-        manager: verlet_process::AsyncExecutionManager,
-        backend: std::sync::Arc<dyn verlet_process::LiveProcessBackend>,
-        request: verlet_process::AsyncProcessStartRequest,
+        manager: verlet_process::live::AsyncExecutionManager,
+        backend: std::sync::Arc<dyn verlet_process::live::LiveProcessBackend>,
+        request: verlet_process::live::AsyncProcessStartRequest,
         cancellation: Option<tokio_util::sync::CancellationToken>,
-    ) -> crate::VerletResult<verlet_process::AsyncProcessOutcome> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_process::live::AsyncProcessOutcome> {
         let dispatch_lock = {
             let mut locks = self.inner.locks.lock().await;
             locks
@@ -179,9 +185,11 @@ impl ProcessHandleDispatcher {
                 Err(_) => {
                     self.forget_settled_binding(&binding, process_id, &dispatch_lock)
                         .await;
-                    return Err(crate::VerletError::RuntimeExecution(format!(
-                        "process dispatch {dispatch_id} is durably claimed by handle {process_id}, but its live registry entry is gone; refusing to re-execute"
-                    )));
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                        format!(
+                            "process dispatch {dispatch_id} is durably claimed by handle {process_id}, but its live registry entry is gone; refusing to re-execute"
+                        ),
+                    ));
                 }
             };
             self.ensure_terminal_monitor(
@@ -194,10 +202,10 @@ impl ProcessHandleDispatcher {
             return Ok(outcome);
         }
 
-        let process_id = verlet_process::VerletProcessId::new();
-        let binding = verlet_runtime_contracts::HandleDispatchEnvelope {
+        let process_id = verlet_process::process::VerletProcessId::new();
+        let binding = verlet_runtime_contracts::handle::HandleDispatchEnvelope {
             dispatch_id: dispatch_id.clone(),
-            handle: verlet_runtime_contracts::HandleId::process(process_id.to_string()),
+            handle: verlet_runtime_contracts::handle::HandleId::process(process_id.to_string()),
             consumer: consumer.clone(),
             command_digest,
         };
@@ -207,7 +215,7 @@ impl ProcessHandleDispatcher {
             .await?;
 
         let folded = self.fold_dispatch(consumer, &dispatch_id).await?.ok_or_else(|| {
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "process dispatch {dispatch_id} was acknowledged but its durable witness was not observable"
             ))
         })?;
@@ -227,9 +235,11 @@ impl ProcessHandleDispatcher {
                 Err(_) => {
                     self.forget_settled_binding(&binding, original_id, &dispatch_lock)
                         .await;
-                    Err(crate::VerletError::RuntimeExecution(format!(
-                        "process dispatch {dispatch_id} lost the durable serialization race and original handle {original_id} is not in this live registry; refusing to re-execute"
-                    )))
+                    Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                        format!(
+                            "process dispatch {dispatch_id} lost the durable serialization race and original handle {original_id} is not in this live registry; refusing to re-execute"
+                        ),
+                    ))
                 }
             };
         }
@@ -273,12 +283,12 @@ impl ProcessHandleDispatcher {
                         .await;
                     this.forget_settled_binding(&start_binding, process_id, &start_dispatch_lock)
                         .await;
-                    Err(crate::VerletError::from(err))
+                    Err(crate::kernel::runtime_host::VerletError::from(err))
                 }
             }
         });
         start.await.map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "process dispatch {dispatch_id} start task failed: {err}"
             ))
         })?
@@ -289,9 +299,11 @@ impl ProcessHandleDispatcher {
     /// process id alone.
     pub async fn require_live_handle(
         &self,
-        process_id: verlet_process::VerletProcessId,
-        consumer: Option<&crate::ThreadCoordinates>,
-    ) -> crate::VerletResult<verlet_runtime_contracts::HandleDispatchEnvelope> {
+        process_id: verlet_process::process::VerletProcessId,
+        consumer: Option<&verlet_runtime_contracts::ThreadCoordinates>,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+    > {
         let binding = self
             .inner
             .live_bindings
@@ -300,22 +312,22 @@ impl ProcessHandleDispatcher {
             .get(&process_id)
             .cloned()
             .ok_or_else(|| {
-                crate::VerletError::RuntimeExecution(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                     "process {process_id} is not bound to a witnessed dispatch on this owning surface"
                 ))
             })?;
         if consumer.is_some_and(|consumer| consumer != &binding.consumer) {
-            return Err(crate::VerletError::RuntimeExecution(format!(
-                "process {process_id} belongs to a different handle consumer"
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!("process {process_id} belongs to a different handle consumer"),
+            ));
         }
         Ok(binding)
     }
 
     async fn ensure_terminal_monitor(
         &self,
-        binding: verlet_runtime_contracts::HandleDispatchEnvelope,
-        manager: verlet_process::AsyncExecutionManager,
+        binding: verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+        manager: verlet_process::live::AsyncExecutionManager,
         output_cap_bytes: usize,
         dispatch_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     ) {
@@ -331,7 +343,7 @@ impl ProcessHandleDispatcher {
                 match manager.snapshot(process_id, output_cap_bytes).await {
                     Ok(outcome)
                         if outcome.snapshot.status
-                            != verlet_process::ProcessSnapshotStatus::Running =>
+                            != verlet_process::live::ProcessSnapshotStatus::Running =>
                     {
                         let envelope = match terminal_envelope(&binding, &outcome.snapshot) {
                             Ok(envelope) => envelope,
@@ -389,7 +401,7 @@ impl ProcessHandleDispatcher {
 
     async fn deliver_setup_failure(
         &self,
-        binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
+        binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
         reason: &str,
     ) {
         let envelope = setup_failure_envelope(binding, reason);
@@ -417,8 +429,8 @@ impl ProcessHandleDispatcher {
 
     async fn forget_settled_binding(
         &self,
-        binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-        process_id: verlet_process::VerletProcessId,
+        binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+        process_id: verlet_process::process::VerletProcessId,
         dispatch_lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
     ) {
         self.inner.live_bindings.lock().await.remove(&process_id);
@@ -433,19 +445,24 @@ impl ProcessHandleDispatcher {
 
     async fn fold_dispatch(
         &self,
-        consumer: &crate::ThreadCoordinates,
-        dispatch_id: &verlet_runtime_contracts::DispatchId,
-    ) -> crate::VerletResult<Option<verlet_runtime_contracts::HandleDispatchEnvelope>> {
+        consumer: &verlet_runtime_contracts::ThreadCoordinates,
+        dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<verlet_runtime_contracts::handle::HandleDispatchEnvelope>,
+    > {
         let events = self
             .inner
             .store
-            .read_events(&crate::control_stream_id(consumer), None)
+            .read_events(
+                &crate::kernel::control_decision::control_stream_id(consumer),
+                None,
+            )
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         let mut found = None;
         for event in events
             .into_iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
         {
             if event
                 .payload
@@ -455,40 +472,46 @@ impl ProcessHandleDispatcher {
             {
                 continue;
             }
-            let witness = serde_json::from_value::<crate::IoIngressReceivedPayload>(event.payload)
-                .map_err(|err| {
-                    crate::VerletError::History(format!("decode ingress witness: {err}"))
+            let witness =
+                serde_json::from_value::<verlet_history::IoIngressReceivedPayload>(event.payload)
+                    .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(format!(
+                        "decode ingress witness: {err}"
+                    ))
                 })?;
             let content = witness.content.ok_or_else(|| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "process dispatch {dispatch_id} witness omitted its fold content"
                 ))
             })?;
             let content = serde_json::from_value::<verlet_io_core::IngressContent>(content)
                 .map_err(|err| {
-                    crate::VerletError::History(format!("decode process dispatch content: {err}"))
+                    crate::kernel::runtime_host::VerletError::History(format!(
+                        "decode process dispatch content: {err}"
+                    ))
                 })?;
             let verlet_io_core::IngressContent::Event { kind, payload } = content else {
-                return Err(crate::VerletError::History(format!(
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "process dispatch {dispatch_id} witness is not event content"
                 )));
             };
-            if kind != verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND {
-                return Err(crate::VerletError::History(format!(
+            if kind != verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND {
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "process dispatch {dispatch_id} witness has content kind {kind}"
                 )));
             }
-            let binding =
-                serde_json::from_value::<verlet_runtime_contracts::HandleDispatchEnvelope>(payload)
-                    .map_err(|err| {
-                        crate::VerletError::History(format!(
-                            "decode process dispatch envelope: {err}"
-                        ))
-                    })?;
+            let binding = serde_json::from_value::<
+                verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+            >(payload)
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "decode process dispatch envelope: {err}"
+                ))
+            })?;
             if let Some(existing) = &found
                 && existing != &binding
             {
-                return Err(crate::VerletError::History(format!(
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "process dispatch {dispatch_id} has conflicting durable witnesses"
                 )));
             }
@@ -503,34 +526,34 @@ pub fn command_digest(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn validate_binding(
-    binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-    consumer: &crate::ThreadCoordinates,
-    dispatch_id: &verlet_runtime_contracts::DispatchId,
+    binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+    consumer: &verlet_runtime_contracts::ThreadCoordinates,
+    dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
     command_digest: &str,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if binding.consumer != *consumer
         || binding.dispatch_id != *dispatch_id
         || binding.command_digest != command_digest
-        || binding.handle.kind != verlet_runtime_contracts::HandleKind::Process
+        || binding.handle.kind != verlet_runtime_contracts::handle::HandleKind::Process
     {
-        return Err(crate::VerletError::RuntimeExecution(format!(
-            "process dispatch {dispatch_id} retry does not match its durable request"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!("process dispatch {dispatch_id} retry does not match its durable request"),
+        ));
     }
     Ok(())
 }
 
 fn parse_process_handle(
-    binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-) -> crate::VerletResult<verlet_process::VerletProcessId> {
-    if binding.handle.kind != verlet_runtime_contracts::HandleKind::Process {
-        return Err(crate::VerletError::History(format!(
+    binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+) -> crate::kernel::runtime_host::VerletResult<verlet_process::process::VerletProcessId> {
+    if binding.handle.kind != verlet_runtime_contracts::handle::HandleKind::Process {
+        return Err(crate::kernel::runtime_host::VerletError::History(format!(
             "dispatch {} is not bound to a process handle",
             binding.dispatch_id
         )));
     }
     binding.handle.id.parse().map_err(|err| {
-        crate::VerletError::History(format!(
+        crate::kernel::runtime_host::VerletError::History(format!(
             "dispatch {} has invalid process handle: {err}",
             binding.dispatch_id
         ))
@@ -538,8 +561,8 @@ fn parse_process_handle(
 }
 
 fn dispatch_envelope(
-    binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-) -> crate::VerletResult<verlet_io_core::IngressEnvelope> {
+    binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+) -> crate::kernel::runtime_host::VerletResult<verlet_io_core::IngressEnvelope> {
     let mut envelope = verlet_io_core::IngressEnvelope::new(
         verlet_io_core::IoSource::new("cooldis.handle", "process"),
         verlet_io_core::IoConversation::new(
@@ -547,15 +570,17 @@ fn dispatch_envelope(
             verlet_io_core::ConversationKind::System,
         ),
         verlet_io_core::IngressContent::Event {
-            kind: verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND.to_string(),
+            kind: verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND.to_string(),
             payload: serde_json::to_value(binding).map_err(|err| {
-                crate::VerletError::RuntimeExecution(format!("encode process dispatch: {err}"))
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                    "encode process dispatch: {err}"
+                ))
             })?,
         },
         now_ms(),
     )
     .with_dedupe_key(verlet_io_core::IoDedupeKey::new(
-        verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND,
+        verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND,
         binding.dispatch_id.to_string(),
     ))
     .with_delivery(verlet_io_core::IoDelivery::new(
@@ -568,7 +593,7 @@ fn dispatch_envelope(
     ))
     .with_metadata(
         "cooldis_route_id",
-        verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND,
+        verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND,
     )
     .with_metadata("cooldis_route_policy", "observe_only");
     envelope.id = deterministic_ingress_id("dispatch", &binding.dispatch_id);
@@ -576,13 +601,13 @@ fn dispatch_envelope(
 }
 
 fn terminal_envelope(
-    binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-    snapshot: &verlet_process::AsyncProcessSnapshot,
-) -> crate::VerletResult<verlet_io_core::IngressEnvelope> {
+    binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+    snapshot: &verlet_process::live::AsyncProcessSnapshot,
+) -> crate::kernel::runtime_host::VerletResult<verlet_io_core::IngressEnvelope> {
     let (outcome, outcome_reason, retryable) = terminal_projection(snapshot)?;
     outcome_envelope(
         binding,
-        verlet_runtime_contracts::HandleTerminalEnvelope {
+        verlet_runtime_contracts::handle::HandleTerminalEnvelope {
             dispatch_id: binding.dispatch_id.clone(),
             handle: binding.handle.clone(),
             outcome,
@@ -597,15 +622,15 @@ fn terminal_envelope(
 }
 
 fn setup_failure_envelope(
-    binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
+    binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
     reason: &str,
 ) -> verlet_io_core::IngressEnvelope {
     outcome_envelope(
         binding,
-        verlet_runtime_contracts::HandleTerminalEnvelope {
+        verlet_runtime_contracts::handle::HandleTerminalEnvelope {
             dispatch_id: binding.dispatch_id.clone(),
             handle: binding.handle.clone(),
-            outcome: verlet_runtime_contracts::HandleTerminalOutcome::Failed,
+            outcome: verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
             outcome_reason: Some(format!("process setup failed before spawn: {reason}")),
             result: None,
             result_schema_id: None,
@@ -620,14 +645,14 @@ fn setup_failure_envelope(
 /// Stable terminal envelope for a process whose durable dispatch survived
 /// the daemon generation that owned its unreattachable host backend.
 pub(crate) fn recovery_outcome_envelope(
-    binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-) -> crate::VerletResult<verlet_io_core::IngressEnvelope> {
+    binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+) -> crate::kernel::runtime_host::VerletResult<verlet_io_core::IngressEnvelope> {
     outcome_envelope(
         binding,
-        verlet_runtime_contracts::HandleTerminalEnvelope {
+        verlet_runtime_contracts::handle::HandleTerminalEnvelope {
             dispatch_id: binding.dispatch_id.clone(),
             handle: binding.handle.clone(),
-            outcome: verlet_runtime_contracts::HandleTerminalOutcome::Failed,
+            outcome: verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
             outcome_reason: Some(
                 "startup recovery after process observer death; exit status unknown".to_string(),
             ),
@@ -641,9 +666,9 @@ pub(crate) fn recovery_outcome_envelope(
 }
 
 fn outcome_envelope(
-    binding: &verlet_runtime_contracts::HandleDispatchEnvelope,
-    terminal: verlet_runtime_contracts::HandleTerminalEnvelope,
-) -> crate::VerletResult<verlet_io_core::IngressEnvelope> {
+    binding: &verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+    terminal: verlet_runtime_contracts::handle::HandleTerminalEnvelope,
+) -> crate::kernel::runtime_host::VerletResult<verlet_io_core::IngressEnvelope> {
     let mut envelope = verlet_io_core::IngressEnvelope::new(
         verlet_io_core::IoSource::new("cooldis.handle", "process"),
         verlet_io_core::IoConversation::new(
@@ -651,15 +676,17 @@ fn outcome_envelope(
             verlet_io_core::ConversationKind::System,
         ),
         verlet_io_core::IngressContent::Event {
-            kind: verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
+            kind: verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
             payload: serde_json::to_value(terminal).map_err(|err| {
-                crate::VerletError::RuntimeExecution(format!("encode process settlement: {err}"))
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                    "encode process settlement: {err}"
+                ))
             })?,
         },
         now_ms(),
     )
     .with_dedupe_key(verlet_io_core::IoDedupeKey::new(
-        verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+        verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
         binding.dispatch_id.to_string(),
     ))
     .with_delivery(verlet_io_core::IoDelivery::new(
@@ -672,7 +699,7 @@ fn outcome_envelope(
     ))
     .with_metadata(
         "cooldis_route_id",
-        verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+        verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
     )
     .with_metadata("cooldis_route_policy", "queue_per_conversation");
     envelope.id = deterministic_ingress_id("outcome", &binding.dispatch_id);
@@ -688,9 +715,9 @@ fn outcome_envelope(
 /// retryable. The backend's single terminal event wins terminate/natural-exit
 /// races.
 fn terminal_projection(
-    snapshot: &verlet_process::AsyncProcessSnapshot,
-) -> crate::VerletResult<(
-    verlet_runtime_contracts::HandleTerminalOutcome,
+    snapshot: &verlet_process::live::AsyncProcessSnapshot,
+) -> crate::kernel::runtime_host::VerletResult<(
+    verlet_runtime_contracts::handle::HandleTerminalOutcome,
     Option<String>,
     bool,
 )> {
@@ -700,7 +727,7 @@ fn terminal_projection(
         .rev()
         .find(|event| event.kind.is_terminal())
         .ok_or_else(|| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "terminal process snapshot {} has no terminal event",
                 snapshot.label
             ))
@@ -709,48 +736,52 @@ fn terminal_projection(
 }
 
 fn terminal_kind_projection(
-    kind: &verlet_process::VerletProcessEventKind,
+    kind: &verlet_process::process::VerletProcessEventKind,
 ) -> (
-    verlet_runtime_contracts::HandleTerminalOutcome,
+    verlet_runtime_contracts::handle::HandleTerminalOutcome,
     Option<String>,
     bool,
 ) {
     match kind {
-        verlet_process::VerletProcessEventKind::Completed { status } if status.success => (
-            verlet_runtime_contracts::HandleTerminalOutcome::Completed,
-            Some("exit status 0".to_string()),
-            false,
-        ),
-        verlet_process::VerletProcessEventKind::Completed { status } => match status.code {
-            Some(code) => (
-                verlet_runtime_contracts::HandleTerminalOutcome::Failed,
-                Some(format!("exit status {code}")),
+        verlet_process::process::VerletProcessEventKind::Completed { status } if status.success => {
+            (
+                verlet_runtime_contracts::handle::HandleTerminalOutcome::Completed,
+                Some("exit status 0".to_string()),
                 false,
-            ),
-            None => (
-                verlet_runtime_contracts::HandleTerminalOutcome::Failed,
-                Some("process terminated by signal; exit status unavailable".to_string()),
-                true,
-            ),
-        },
-        verlet_process::VerletProcessEventKind::Failed { code, message } => (
-            verlet_runtime_contracts::HandleTerminalOutcome::Failed,
+            )
+        }
+        verlet_process::process::VerletProcessEventKind::Completed { status } => {
+            match status.code {
+                Some(code) => (
+                    verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
+                    Some(format!("exit status {code}")),
+                    false,
+                ),
+                None => (
+                    verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
+                    Some("process terminated by signal; exit status unavailable".to_string()),
+                    true,
+                ),
+            }
+        }
+        verlet_process::process::VerletProcessEventKind::Failed { code, message } => (
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
             Some(format!("{code}: {message}")),
             true,
         ),
-        verlet_process::VerletProcessEventKind::TimedOut {
+        verlet_process::process::VerletProcessEventKind::TimedOut {
             timeout_ms,
             message,
         } => (
-            verlet_runtime_contracts::HandleTerminalOutcome::Failed,
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
             Some(match timeout_ms {
                 Some(ms) => format!("timed out after {ms}ms: {message}"),
                 None => format!("timed out: {message}"),
             }),
             true,
         ),
-        verlet_process::VerletProcessEventKind::Cancelled { reason } => (
-            verlet_runtime_contracts::HandleTerminalOutcome::Cancelled,
+        verlet_process::process::VerletProcessEventKind::Cancelled { reason } => (
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::Cancelled,
             Some(reason.clone()),
             false,
         ),
@@ -760,7 +791,7 @@ fn terminal_kind_projection(
 
 fn deterministic_ingress_id(
     stage: &str,
-    dispatch_id: &verlet_runtime_contracts::DispatchId,
+    dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
 ) -> String {
     let digest =
         verlet_agent::contracts::sha256_hex(format!("{stage}:{}", dispatch_id.as_str()).as_bytes());
@@ -779,25 +810,25 @@ fn now_ms() -> u64 {
 mod tests {
 
     struct RecordingIngress {
-        store: std::sync::Arc<dyn crate::RuntimeStore>,
-        consumer: crate::ThreadCoordinates,
+        store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        consumer: verlet_runtime_contracts::ThreadCoordinates,
     }
 
     #[async_trait::async_trait]
-    impl crate::ProcessHandleIngressSink for RecordingIngress {
+    impl crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink for RecordingIngress {
         async fn submit_process_handle_envelope(
             &self,
             envelope: verlet_io_core::IngressEnvelope,
-        ) -> crate::VerletResult<()> {
+        ) -> crate::kernel::runtime_host::VerletResult<()> {
             let verlet_io_core::IngressContent::Event { kind, .. } = &envelope.content else {
-                return Err(crate::VerletError::RuntimeExecution(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "test process ingress requires event content".to_string(),
                 ));
             };
-            let record = crate::NewEventRecord::witnessed(
+            let record = verlet_history::NewEventRecord::witnessed(
                 self.consumer.clone(),
-                crate::EventKind::IoIngressReceived,
-                serde_json::to_value(crate::IoIngressReceivedPayload {
+                verlet_history::EventKind::IoIngressReceived,
+                serde_json::to_value(verlet_history::IoIngressReceivedPayload {
                     route_id: Some(kind.clone()),
                     dedupe_key: envelope.dedupe_key.map(|key| key.stable_key()),
                     external_conversation_id: Some(envelope.conversation.external_conversation_id),
@@ -809,9 +840,14 @@ mod tests {
                 .unwrap(),
             );
             self.store
-                .append_events(&crate::control_stream_id(&self.consumer), vec![record])
+                .append_events(
+                    &crate::kernel::control_decision::control_stream_id(&self.consumer),
+                    vec![record],
+                )
                 .await
-                .map_err(|err| crate::VerletError::History(err.to_string()))?;
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(err.to_string())
+                })?;
             Ok(())
         }
     }
@@ -819,30 +855,30 @@ mod tests {
     struct DelayedTimeoutBackend;
 
     #[async_trait::async_trait]
-    impl verlet_process::LiveProcessBackend for DelayedTimeoutBackend {
-        fn backend_kind(&self) -> verlet_process::VerletProcessBackend {
-            verlet_process::VerletProcessBackend::Bridge
+    impl verlet_process::live::LiveProcessBackend for DelayedTimeoutBackend {
+        fn backend_kind(&self) -> verlet_process::process::VerletProcessBackend {
+            verlet_process::process::VerletProcessBackend::Bridge
         }
 
         async fn start(
             &self,
-            request: verlet_process::LiveProcessStartRequest,
-            process: verlet_process::VerletProcessHandle,
+            request: verlet_process::live::LiveProcessStartRequest,
+            process: verlet_process::process::VerletProcessHandle,
             cancellation: tokio_util::sync::CancellationToken,
-        ) -> verlet_process::VerletProcessResult<verlet_process::LiveProcessSpawn> {
-            process.record(verlet_process::VerletProcessEventKind::Started {
+        ) -> verlet_process::VerletProcessResult<verlet_process::live::LiveProcessSpawn> {
+            process.record(verlet_process::process::VerletProcessEventKind::Started {
                 command: Some("delayed timeout".to_string()),
             });
             let join = tokio::spawn(async move {
                 cancellation.cancelled().await;
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                process.record(verlet_process::VerletProcessEventKind::TimedOut {
+                process.record(verlet_process::process::VerletProcessEventKind::TimedOut {
                     timeout_ms: Some(request.deadline.remaining().as_millis() as u64),
                     message: "execution deadline elapsed".to_string(),
                 });
                 Ok(())
             });
-            Ok(verlet_process::LiveProcessSpawn { stdin: None, join })
+            Ok(verlet_process::live::LiveProcessSpawn { stdin: None, join })
         }
     }
 
@@ -851,49 +887,52 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl verlet_process::LiveProcessBackend for DelayedCompletionBackend {
-        fn backend_kind(&self) -> verlet_process::VerletProcessBackend {
-            verlet_process::VerletProcessBackend::Bridge
+    impl verlet_process::live::LiveProcessBackend for DelayedCompletionBackend {
+        fn backend_kind(&self) -> verlet_process::process::VerletProcessBackend {
+            verlet_process::process::VerletProcessBackend::Bridge
         }
 
         async fn start(
             &self,
-            _request: verlet_process::LiveProcessStartRequest,
-            process: verlet_process::VerletProcessHandle,
+            _request: verlet_process::live::LiveProcessStartRequest,
+            process: verlet_process::process::VerletProcessHandle,
             _cancellation: tokio_util::sync::CancellationToken,
-        ) -> verlet_process::VerletProcessResult<verlet_process::LiveProcessSpawn> {
-            process.record(verlet_process::VerletProcessEventKind::Started {
+        ) -> verlet_process::VerletProcessResult<verlet_process::live::LiveProcessSpawn> {
+            process.record(verlet_process::process::VerletProcessEventKind::Started {
                 command: Some("delayed completion".to_string()),
             });
             self.started.notify_one();
             let join = tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                process.record(verlet_process::VerletProcessEventKind::Completed {
-                    status: verlet_process::VerletProcessExitStatus::exited(0),
+                process.record(verlet_process::process::VerletProcessEventKind::Completed {
+                    status: verlet_process::process::VerletProcessExitStatus::exited(0),
                 });
                 Ok(())
             });
-            Ok(verlet_process::LiveProcessSpawn { stdin: None, join })
+            Ok(verlet_process::live::LiveProcessSpawn { stdin: None, join })
         }
     }
 
     async fn outcome_count(
-        store: &std::sync::Arc<dyn crate::RuntimeStore>,
-        consumer: &crate::ThreadCoordinates,
-        dispatch_id: &verlet_runtime_contracts::DispatchId,
+        store: &std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        consumer: &verlet_runtime_contracts::ThreadCoordinates,
+        dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
     ) -> usize {
         store
-            .read_events(&crate::control_stream_id(consumer), None)
+            .read_events(
+                &crate::kernel::control_decision::control_stream_id(consumer),
+                None,
+            )
             .await
             .unwrap()
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::IoIngressReceived
+                event.kind == verlet_history::EventKind::IoIngressReceived
                     && event
                         .payload
                         .get("route_id")
                         .and_then(serde_json::Value::as_str)
-                        == Some(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND)
+                        == Some(verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND)
                     && event
                         .payload
                         .pointer("/content/payload/dispatch_id")
@@ -905,9 +944,13 @@ mod tests {
 
     #[tokio::test]
     async fn expired_process_survives_cleanup_until_timeout_outcome_is_acknowledged() {
-        let store: std::sync::Arc<dyn crate::RuntimeStore> =
-            std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let consumer = crate::ThreadCoordinates::new("tenant", "user", "deadline-settlement");
+        let store: std::sync::Arc<dyn verlet_history::RuntimeStore> =
+            std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let consumer = verlet_runtime_contracts::ThreadCoordinates::new(
+            "tenant",
+            "user",
+            "deadline-settlement",
+        );
         let dispatcher = crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new(
             std::sync::Arc::clone(&store),
             std::sync::Arc::new(RecordingIngress {
@@ -915,10 +958,10 @@ mod tests {
                 consumer: consumer.clone(),
             }),
         );
-        let manager = verlet_process::AsyncExecutionManager::default();
-        let backend: std::sync::Arc<dyn verlet_process::LiveProcessBackend> =
+        let manager = verlet_process::live::AsyncExecutionManager::default();
+        let backend: std::sync::Arc<dyn verlet_process::live::LiveProcessBackend> =
             std::sync::Arc::new(DelayedTimeoutBackend);
-        let dispatch_id = verlet_runtime_contracts::DispatchId::new("deadline-dispatch-a");
+        let dispatch_id = verlet_runtime_contracts::handle::DispatchId::new("deadline-dispatch-a");
 
         dispatcher
             .dispatch_start(
@@ -927,8 +970,8 @@ mod tests {
                 crate::kernel::process_handle_dispatch::command_digest(b"process-a"),
                 manager.clone(),
                 std::sync::Arc::clone(&backend),
-                verlet_process::AsyncProcessStartRequest::virtual_bash_script("process-a")
-                    .with_deadline(verlet_process::ExecutionDeadline::from_now(
+                verlet_process::live::AsyncProcessStartRequest::virtual_bash_script("process-a")
+                    .with_deadline(verlet_process::execution::ExecutionDeadline::from_now(
                         std::time::Duration::from_millis(5),
                     ))
                     .with_yield_time(std::time::Duration::ZERO),
@@ -940,12 +983,12 @@ mod tests {
         dispatcher
             .dispatch_start(
                 &consumer,
-                verlet_runtime_contracts::DispatchId::new("deadline-dispatch-b"),
+                verlet_runtime_contracts::handle::DispatchId::new("deadline-dispatch-b"),
                 crate::kernel::process_handle_dispatch::command_digest(b"process-b"),
                 manager,
                 backend,
-                verlet_process::AsyncProcessStartRequest::virtual_bash_script("process-b")
-                    .with_deadline(verlet_process::ExecutionDeadline::from_now(
+                verlet_process::live::AsyncProcessStartRequest::virtual_bash_script("process-b")
+                    .with_deadline(verlet_process::execution::ExecutionDeadline::from_now(
                         std::time::Duration::from_secs(1),
                     ))
                     .with_yield_time(std::time::Duration::ZERO),
@@ -987,9 +1030,13 @@ mod tests {
 
     #[tokio::test]
     async fn caller_cancellation_after_backend_start_does_not_cancel_settlement_monitor() {
-        let store: std::sync::Arc<dyn crate::RuntimeStore> =
-            std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let consumer = crate::ThreadCoordinates::new("tenant", "user", "cancelled-dispatch");
+        let store: std::sync::Arc<dyn verlet_history::RuntimeStore> =
+            std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let consumer = verlet_runtime_contracts::ThreadCoordinates::new(
+            "tenant",
+            "user",
+            "cancelled-dispatch",
+        );
         let dispatcher = crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new(
             std::sync::Arc::clone(&store),
             std::sync::Arc::new(RecordingIngress {
@@ -997,14 +1044,15 @@ mod tests {
                 consumer: consumer.clone(),
             }),
         );
-        let manager = verlet_process::AsyncExecutionManager::default();
+        let manager = verlet_process::live::AsyncExecutionManager::default();
         let started = std::sync::Arc::new(tokio::sync::Notify::new());
         let started_wait = started.notified();
-        let backend: std::sync::Arc<dyn verlet_process::LiveProcessBackend> =
+        let backend: std::sync::Arc<dyn verlet_process::live::LiveProcessBackend> =
             std::sync::Arc::new(DelayedCompletionBackend {
                 started: std::sync::Arc::clone(&started),
             });
-        let dispatch_id = verlet_runtime_contracts::DispatchId::new("cancelled-after-start");
+        let dispatch_id =
+            verlet_runtime_contracts::handle::DispatchId::new("cancelled-after-start");
         let task_dispatcher = dispatcher.clone();
         let task_consumer = consumer.clone();
         let task_dispatch_id = dispatch_id.clone();
@@ -1016,10 +1064,10 @@ mod tests {
                     crate::kernel::process_handle_dispatch::command_digest(b"cancelled-process"),
                     manager,
                     backend,
-                    verlet_process::AsyncProcessStartRequest::virtual_bash_script(
+                    verlet_process::live::AsyncProcessStartRequest::virtual_bash_script(
                         "cancelled-process",
                     )
-                    .with_deadline(verlet_process::ExecutionDeadline::from_now(
+                    .with_deadline(verlet_process::execution::ExecutionDeadline::from_now(
                         std::time::Duration::from_secs(1),
                     ))
                     .with_yield_time(std::time::Duration::from_secs(1)),
@@ -1049,51 +1097,51 @@ mod tests {
     fn outcome_mapping_pins_exit_signal_and_terminate_edges() {
         assert_eq!(
             crate::kernel::process_handle_dispatch::terminal_kind_projection(
-                &verlet_process::VerletProcessEventKind::Completed {
-                    status: verlet_process::VerletProcessExitStatus::exited(0),
+                &verlet_process::process::VerletProcessEventKind::Completed {
+                    status: verlet_process::process::VerletProcessExitStatus::exited(0),
                 }
             ),
             (
-                verlet_runtime_contracts::HandleTerminalOutcome::Completed,
+                verlet_runtime_contracts::handle::HandleTerminalOutcome::Completed,
                 Some("exit status 0".to_string()),
                 false,
             )
         );
         assert_eq!(
             crate::kernel::process_handle_dispatch::terminal_kind_projection(
-                &verlet_process::VerletProcessEventKind::Completed {
-                    status: verlet_process::VerletProcessExitStatus::exited(23),
+                &verlet_process::process::VerletProcessEventKind::Completed {
+                    status: verlet_process::process::VerletProcessExitStatus::exited(23),
                 }
             ),
             (
-                verlet_runtime_contracts::HandleTerminalOutcome::Failed,
+                verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
                 Some("exit status 23".to_string()),
                 false,
             )
         );
         assert_eq!(
             crate::kernel::process_handle_dispatch::terminal_kind_projection(
-                &verlet_process::VerletProcessEventKind::Completed {
-                    status: verlet_process::VerletProcessExitStatus {
+                &verlet_process::process::VerletProcessEventKind::Completed {
+                    status: verlet_process::process::VerletProcessExitStatus {
                         code: None,
                         success: false,
                     },
                 }
             ),
             (
-                verlet_runtime_contracts::HandleTerminalOutcome::Failed,
+                verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed,
                 Some("process terminated by signal; exit status unavailable".to_string()),
                 true,
             )
         );
         assert_eq!(
             crate::kernel::process_handle_dispatch::terminal_kind_projection(
-                &verlet_process::VerletProcessEventKind::Cancelled {
+                &verlet_process::process::VerletProcessEventKind::Cancelled {
                     reason: "operator requested".to_string(),
                 }
             ),
             (
-                verlet_runtime_contracts::HandleTerminalOutcome::Cancelled,
+                verlet_runtime_contracts::handle::HandleTerminalOutcome::Cancelled,
                 Some("operator requested".to_string()),
                 false,
             )
@@ -1102,17 +1150,21 @@ mod tests {
 
     #[test]
     fn setup_failure_is_retryable_process_outcome_without_usage() {
-        let binding = verlet_runtime_contracts::HandleDispatchEnvelope {
-            dispatch_id: verlet_runtime_contracts::DispatchId::new("setup-failure-dispatch"),
-            handle: verlet_runtime_contracts::HandleId::process(
+        let binding = verlet_runtime_contracts::handle::HandleDispatchEnvelope {
+            dispatch_id: verlet_runtime_contracts::handle::DispatchId::new(
+                "setup-failure-dispatch",
+            ),
+            handle: verlet_runtime_contracts::handle::HandleId::process(
                 "018f0000-0000-7000-8000-000000000420",
             ),
-            consumer: crate::ThreadCoordinates {
+            consumer: verlet_runtime_contracts::ThreadCoordinates {
                 tenant_id: "tenant".to_string(),
                 user_id: "user".to_string(),
                 session_id: "session".to_string(),
-                thread_id: crate::ThreadId::parse_str("018f0000-0000-7000-8000-000000000419")
-                    .unwrap(),
+                thread_id: verlet_runtime_contracts::ThreadId::parse_str(
+                    "018f0000-0000-7000-8000-000000000419",
+                )
+                .unwrap(),
             },
             command_digest: "sha256:command".to_string(),
         };
@@ -1124,22 +1176,22 @@ mod tests {
         assert_eq!(
             envelope.dedupe_key,
             Some(verlet_io_core::IoDedupeKey::new(
-                verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+                verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
                 "setup-failure-dispatch"
             ))
         );
         let verlet_io_core::IngressContent::Event { payload, .. } = envelope.content else {
             panic!("setup failure must be event ingress");
         };
-        let terminal: verlet_runtime_contracts::HandleTerminalEnvelope =
+        let terminal: verlet_runtime_contracts::handle::HandleTerminalEnvelope =
             serde_json::from_value(payload).unwrap();
         assert_eq!(
             terminal.handle.kind,
-            verlet_runtime_contracts::HandleKind::Process
+            verlet_runtime_contracts::handle::HandleKind::Process
         );
         assert_eq!(
             terminal.outcome,
-            verlet_runtime_contracts::HandleTerminalOutcome::Failed
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed
         );
         assert!(terminal.retryable);
         assert!(terminal.usage.is_none());
@@ -1155,34 +1207,34 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) fn test_process_dispatcher(
-    store: std::sync::Arc<dyn crate::RuntimeStore>,
-    consumer: crate::ThreadCoordinates,
+    store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+    consumer: verlet_runtime_contracts::ThreadCoordinates,
 ) -> ProcessHandleDispatcher {
     struct TestIngress {
-        store: std::sync::Arc<dyn crate::RuntimeStore>,
-        consumer: crate::ThreadCoordinates,
+        store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        consumer: verlet_runtime_contracts::ThreadCoordinates,
     }
 
     #[async_trait::async_trait]
-    impl crate::ProcessHandleIngressSink for TestIngress {
+    impl crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink for TestIngress {
         async fn submit_process_handle_envelope(
             &self,
             envelope: verlet_io_core::IngressEnvelope,
-        ) -> crate::VerletResult<()> {
+        ) -> crate::kernel::runtime_host::VerletResult<()> {
             let verlet_io_core::IngressContent::Event { kind, .. } = &envelope.content else {
-                return Err(crate::VerletError::RuntimeExecution(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "test process ingress requires event content".to_string(),
                 ));
             };
-            if kind != verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND {
+            if kind != verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND {
                 return Ok(());
             }
-            let record = crate::NewEventRecord::witnessed(
+            let record = verlet_history::NewEventRecord::witnessed(
                 self.consumer.clone(),
-                crate::EventKind::IoIngressReceived,
-                serde_json::to_value(crate::IoIngressReceivedPayload {
+                verlet_history::EventKind::IoIngressReceived,
+                serde_json::to_value(verlet_history::IoIngressReceivedPayload {
                     route_id: Some(
-                        verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND.to_string(),
+                        verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND.to_string(),
                     ),
                     dedupe_key: envelope.dedupe_key.map(|key| key.stable_key()),
                     external_conversation_id: Some(envelope.conversation.external_conversation_id),
@@ -1194,9 +1246,14 @@ pub(crate) fn test_process_dispatcher(
                 .unwrap(),
             );
             self.store
-                .append_events(&crate::control_stream_id(&self.consumer), vec![record])
+                .append_events(
+                    &crate::kernel::control_decision::control_stream_id(&self.consumer),
+                    vec![record],
+                )
                 .await
-                .map_err(|err| crate::VerletError::History(err.to_string()))?;
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(err.to_string())
+                })?;
             Ok(())
         }
     }

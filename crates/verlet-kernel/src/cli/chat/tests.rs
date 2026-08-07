@@ -100,7 +100,7 @@ fn state_tracks_turn_lifecycle_rows() {
 
 fn test_state() -> crate::cli::chat::ChatTuiState {
     crate::cli::chat::ChatTuiState::new(
-        crate::CodexTuiThread {
+        crate::adapters::codex_tui::CodexTuiThread {
             id: "thread-123456".to_string(),
             raw: serde_json::json!({
                 "id": "thread-123456",

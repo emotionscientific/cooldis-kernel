@@ -1,7 +1,3 @@
-pub use verlet_history::{
-    COMPACTION_SUMMARY_PREFIX, compaction_summary_message, render_compaction_summary,
-};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionTrigger {
@@ -48,7 +44,7 @@ impl CompactionPolicy {
     }
 }
 
-pub fn deterministic_compaction_summary(messages: &[crate::CanonicalMessage]) -> String {
+pub fn deterministic_compaction_summary(messages: &[verlet_history::CanonicalMessage]) -> String {
     let mut pieces = messages
         .iter()
         .filter_map(message_text)
@@ -64,23 +60,22 @@ pub fn deterministic_compaction_summary(messages: &[crate::CanonicalMessage]) ->
     pieces.join("\n")
 }
 
-fn message_text(message: &crate::CanonicalMessage) -> Option<String> {
+fn message_text(message: &verlet_history::CanonicalMessage) -> Option<String> {
     match message {
-        crate::CanonicalMessage::User { content, .. }
-        | crate::CanonicalMessage::Assistant { content, .. }
-        | crate::CanonicalMessage::ToolResult { content, .. } => content_text(content),
+        verlet_history::CanonicalMessage::User { content, .. }
+        | verlet_history::CanonicalMessage::Assistant { content, .. }
+        | verlet_history::CanonicalMessage::ToolResult { content, .. } => content_text(content),
     }
 }
 
-fn content_text(content: &[crate::CanonicalContent]) -> Option<String> {
+fn content_text(content: &[verlet_history::CanonicalContent]) -> Option<String> {
     let chunks = content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. }
-            | crate::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
-                None
-            }
+            verlet_history::CanonicalContent::Text { text, .. }
+            | verlet_history::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();

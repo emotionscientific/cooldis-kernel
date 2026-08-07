@@ -1,6 +1,6 @@
-use crate::EventStore as _;
 use chrono::TimeZone as _;
 use std::str::FromStr as _;
+use verlet_history::EventStore as _;
 
 pub const CLOCK_TICK_ROUTE_KIND: &str = "clock.tick";
 pub const TIMER_FIRED_ENVELOPE_KIND: &str = "timer.fired";
@@ -21,7 +21,7 @@ impl DaemonClock for SystemDaemonClock {
 
 pub struct VerletDaemonClockRoute {
     route_id: String,
-    store: crate::SqliteSessionStore,
+    store: verlet_history_sqlite::SqliteSessionStore,
     sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
     clock: std::sync::Arc<dyn DaemonClock>,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -31,7 +31,7 @@ pub struct VerletDaemonClockRoute {
 impl VerletDaemonClockRoute {
     pub fn new(
         route_id: impl Into<String>,
-        store: crate::SqliteSessionStore,
+        store: verlet_history_sqlite::SqliteSessionStore,
         sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
         clock: std::sync::Arc<dyn DaemonClock>,
     ) -> Self {
@@ -57,7 +57,7 @@ impl VerletDaemonClockRoute {
         self
     }
 
-    pub async fn enqueue_due_once(&self) -> crate::VerletResult<usize> {
+    pub async fn enqueue_due_once(&self) -> crate::kernel::runtime_host::VerletResult<usize> {
         let now = self.clock.now();
         let mut schedule = self.build_due_schedule(now).await?;
         let mut enqueued = 0;
@@ -70,7 +70,9 @@ impl VerletDaemonClockRoute {
                 .sink
                 .submit(tick.envelope(&self.route_id, now)?)
                 .await
-                .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?;
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string())
+                })?;
             if ack.accepted {
                 enqueued += 1;
             }
@@ -90,15 +92,19 @@ impl VerletDaemonClockRoute {
     async fn build_due_schedule(
         &self,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::VerletResult<std::collections::BinaryHeap<std::cmp::Reverse<ScheduledTick>>> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        std::collections::BinaryHeap<std::cmp::Reverse<ScheduledTick>>,
+    > {
         let mut heap = std::collections::BinaryHeap::new();
         for coordinates in self
             .store
             .list_control_stream_coordinates()
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
         {
-            let active = crate::list_active_mandates(&self.store, &coordinates).await?;
+            let active =
+                crate::kernel::mandate_lifecycle::list_active_mandates(&self.store, &coordinates)
+                    .await?;
             let fired = fired_occurrence_indices(&self.store, &coordinates).await?;
             for mandate in active {
                 if let Some(tick) =
@@ -114,8 +120,8 @@ impl VerletDaemonClockRoute {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ScheduledTick {
-    coordinates: crate::ThreadCoordinates,
-    mandate_event_id: crate::EventRecordId,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    mandate_event_id: verlet_history::EventRecordId,
     scheduled_for: chrono::DateTime<chrono::Utc>,
     occurrence_index: u64,
     catch_up: bool,
@@ -126,8 +132,8 @@ impl ScheduledTick {
         &self,
         route_id: &str,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::VerletResult<verlet_io_core::IngressEnvelope> {
-        let payload = crate::TimerFiredPayload {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_io_core::IngressEnvelope> {
+        let payload = verlet_history::TimerFiredPayload {
             mandate_event_id: self.mandate_event_id,
             scheduled_for: self
                 .scheduled_for
@@ -194,21 +200,28 @@ impl PartialOrd for ScheduledTick {
 }
 
 async fn fired_occurrence_indices(
-    store: &crate::SqliteSessionStore,
-    coordinates: &crate::ThreadCoordinates,
-) -> crate::VerletResult<std::collections::HashSet<(crate::EventRecordId, u64)>> {
+    store: &verlet_history_sqlite::SqliteSessionStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> crate::kernel::runtime_host::VerletResult<
+    std::collections::HashSet<(verlet_history::EventRecordId, u64)>,
+> {
     let events = store
-        .read_events(&crate::control_stream_id(coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut fired = std::collections::HashSet::new();
     for event in events {
-        if event.kind != crate::EventKind::TimerFired {
+        if event.kind != verlet_history::EventKind::TimerFired {
             continue;
         }
-        let payload =
-            serde_json::from_value::<crate::TimerFiredPayload>(event.payload).map_err(|err| {
-                crate::VerletError::History(format!("timer.fired payload is invalid: {err}"))
+        let payload = serde_json::from_value::<verlet_history::TimerFiredPayload>(event.payload)
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "timer.fired payload is invalid: {err}"
+                ))
             })?;
         fired.insert((payload.mandate_event_id, payload.occurrence_index));
     }
@@ -216,12 +229,12 @@ async fn fired_occurrence_indices(
 }
 
 fn next_tick_for_mandate(
-    coordinates: &crate::ThreadCoordinates,
-    mandate: &crate::ActiveMandate,
-    fired: &std::collections::HashSet<(crate::EventRecordId, u64)>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    mandate: &crate::kernel::mandate_lifecycle::ActiveMandate,
+    fired: &std::collections::HashSet<(verlet_history::EventRecordId, u64)>,
     route_started_at: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
-) -> crate::VerletResult<Option<ScheduledTick>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<ScheduledTick>> {
     let Some(schedule) = mandate.payload.schedule.as_ref() else {
         return Ok(None);
     };
@@ -240,7 +253,9 @@ fn next_tick_for_mandate(
 
     let mut scheduled_for = occurrence_at_index(schedule, start, occurrence_index)?;
     match catch_up_policy {
-        crate::MandateCatchUpPolicy::SkipMissed if scheduled_for < route_started_at => {
+        crate::kernel::control_decision::MandateCatchUpPolicy::SkipMissed
+            if scheduled_for < route_started_at =>
+        {
             let Some(index) = first_occurrence_index_at_or_after(
                 schedule,
                 start,
@@ -253,7 +268,7 @@ fn next_tick_for_mandate(
             occurrence_index = index;
             scheduled_for = occurrence_at_index(schedule, start, occurrence_index)?;
         }
-        crate::MandateCatchUpPolicy::CoalesceMissed
+        crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed
             if scheduled_for < route_started_at && scheduled_for <= now =>
         {
             if let Some(index) =
@@ -278,56 +293,57 @@ fn next_tick_for_mandate(
         mandate_event_id,
         scheduled_for,
         occurrence_index,
-        catch_up: catch_up_policy == crate::MandateCatchUpPolicy::CoalesceMissed
+        catch_up: catch_up_policy
+            == crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed
             && scheduled_for < route_started_at,
     }))
 }
 
 fn occurrence_at_index(
-    schedule: &crate::MandateSchedulePayload,
+    schedule: &crate::kernel::control_decision::MandateSchedulePayload,
     start: chrono::DateTime<chrono::Utc>,
     index: u64,
-) -> crate::VerletResult<chrono::DateTime<chrono::Utc>> {
+) -> crate::kernel::runtime_host::VerletResult<chrono::DateTime<chrono::Utc>> {
     match schedule {
-        crate::MandateSchedulePayload::Interval { every_ms } => {
+        crate::kernel::control_decision::MandateSchedulePayload::Interval { every_ms } => {
             let multiplier = index.checked_add(1).ok_or_else(|| {
-                crate::VerletError::RuntimeExecution(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "interval occurrence index overflowed".to_string(),
                 )
             })?;
             let offset_ms = every_ms.checked_mul(multiplier).ok_or_else(|| {
-                crate::VerletError::RuntimeExecution(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "interval occurrence offset overflowed".to_string(),
                 )
             })?;
             let offset_ms = i64::try_from(offset_ms).map_err(|_| {
-                crate::VerletError::RuntimeExecution(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "interval occurrence offset overflowed".to_string(),
                 )
             })?;
             start
                 .checked_add_signed(chrono::Duration::milliseconds(offset_ms))
                 .ok_or_else(|| {
-                    crate::VerletError::RuntimeExecution(
+                    crate::kernel::runtime_host::VerletError::RuntimeExecution(
                         "interval occurrence timestamp overflowed".to_string(),
                     )
                 })
         }
-        crate::MandateSchedulePayload::At { when } => {
+        crate::kernel::control_decision::MandateSchedulePayload::At { when } => {
             if index > 0 {
-                return Err(crate::VerletError::RuntimeExecution(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "at schedule has only one occurrence".to_string(),
                 ));
             }
             parse_utc(when)
         }
-        crate::MandateSchedulePayload::Cron { expr, tz } => {
+        crate::kernel::control_decision::MandateSchedulePayload::Cron { expr, tz } => {
             let (cron, timezone) = cron_schedule(expr, tz)?;
             cron.iter_after(start.with_timezone(&timezone))
                 .nth(index as usize)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .ok_or_else(|| {
-                    crate::VerletError::RuntimeExecution(
+                    crate::kernel::runtime_host::VerletError::RuntimeExecution(
                         "cron schedule did not produce an occurrence".to_string(),
                     )
                 })
@@ -336,20 +352,22 @@ fn occurrence_at_index(
 }
 
 fn first_occurrence_index_at_or_after(
-    schedule: &crate::MandateSchedulePayload,
+    schedule: &crate::kernel::control_decision::MandateSchedulePayload,
     start: chrono::DateTime<chrono::Utc>,
     threshold: chrono::DateTime<chrono::Utc>,
     max_occurrences: Option<u64>,
-) -> crate::VerletResult<Option<u64>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<u64>> {
     match schedule {
-        crate::MandateSchedulePayload::Interval { every_ms } => {
+        crate::kernel::control_decision::MandateSchedulePayload::Interval { every_ms } => {
             let every_ms_i64 = i64::try_from(*every_ms).map_err(|_| {
-                crate::VerletError::RuntimeExecution("interval duration overflowed".to_string())
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                    "interval duration overflowed".to_string(),
+                )
             })?;
             let Some(first) =
                 start.checked_add_signed(chrono::Duration::milliseconds(every_ms_i64))
             else {
-                return Err(crate::VerletError::RuntimeExecution(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "interval occurrence timestamp overflowed".to_string(),
                 ));
             };
@@ -364,13 +382,13 @@ fn first_occurrence_index_at_or_after(
                 Ok(Some(index))
             }
         }
-        crate::MandateSchedulePayload::At { when } => {
+        crate::kernel::control_decision::MandateSchedulePayload::At { when } => {
             let when = parse_utc(when)?;
             Ok((when >= threshold)
                 .then_some(0)
                 .filter(|index| !max_occurrences.is_some_and(|max| *index >= max)))
         }
-        crate::MandateSchedulePayload::Cron { expr, tz } => {
+        crate::kernel::control_decision::MandateSchedulePayload::Cron { expr, tz } => {
             let (cron, timezone) = cron_schedule(expr, tz)?;
             for (index, occurrence) in cron.iter_after(start.with_timezone(&timezone)).enumerate() {
                 let index = index as u64;
@@ -387,20 +405,22 @@ fn first_occurrence_index_at_or_after(
 }
 
 fn latest_occurrence_index_at_or_before(
-    schedule: &crate::MandateSchedulePayload,
+    schedule: &crate::kernel::control_decision::MandateSchedulePayload,
     start: chrono::DateTime<chrono::Utc>,
     threshold: chrono::DateTime<chrono::Utc>,
     max_occurrences: Option<u64>,
-) -> crate::VerletResult<Option<u64>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<u64>> {
     match schedule {
-        crate::MandateSchedulePayload::Interval { every_ms } => {
+        crate::kernel::control_decision::MandateSchedulePayload::Interval { every_ms } => {
             let every_ms_i64 = i64::try_from(*every_ms).map_err(|_| {
-                crate::VerletError::RuntimeExecution("interval duration overflowed".to_string())
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                    "interval duration overflowed".to_string(),
+                )
             })?;
             let Some(first) =
                 start.checked_add_signed(chrono::Duration::milliseconds(every_ms_i64))
             else {
-                return Err(crate::VerletError::RuntimeExecution(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "interval occurrence timestamp overflowed".to_string(),
                 ));
             };
@@ -417,13 +437,13 @@ fn latest_occurrence_index_at_or_before(
             }
             Ok(Some(index))
         }
-        crate::MandateSchedulePayload::At { when } => {
+        crate::kernel::control_decision::MandateSchedulePayload::At { when } => {
             let when = parse_utc(when)?;
             Ok((when <= threshold)
                 .then_some(0)
                 .filter(|index| !max_occurrences.is_some_and(|max| *index >= max)))
         }
-        crate::MandateSchedulePayload::Cron { expr, tz } => {
+        crate::kernel::control_decision::MandateSchedulePayload::Cron { expr, tz } => {
             let (cron, timezone) = cron_schedule(expr, tz)?;
             let mut latest = None;
             for (index, occurrence) in cron.iter_after(start.with_timezone(&timezone)).enumerate() {
@@ -441,40 +461,57 @@ fn latest_occurrence_index_at_or_before(
     }
 }
 
-fn cron_schedule(expr: &str, tz: &str) -> crate::VerletResult<(croner::Cron, chrono_tz::Tz)> {
+fn cron_schedule(
+    expr: &str,
+    tz: &str,
+) -> crate::kernel::runtime_host::VerletResult<(croner::Cron, chrono_tz::Tz)> {
     let cron = croner::Cron::from_str(expr).map_err(|err| {
-        crate::VerletError::RuntimeExecution(format!("malformed cron expression: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+            "malformed cron expression: {err}"
+        ))
     })?;
     let timezone = tz.parse::<chrono_tz::Tz>().map_err(|err| {
-        crate::VerletError::RuntimeExecution(format!("unknown IANA timezone {tz:?}: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+            "unknown IANA timezone {tz:?}: {err}"
+        ))
     })?;
     Ok((cron, timezone))
 }
 
-fn datetime_from_millis(value: i64) -> crate::VerletResult<chrono::DateTime<chrono::Utc>> {
+fn datetime_from_millis(
+    value: i64,
+) -> crate::kernel::runtime_host::VerletResult<chrono::DateTime<chrono::Utc>> {
     chrono::Utc
         .timestamp_millis_opt(value)
         .single()
         .ok_or_else(|| {
-            crate::VerletError::RuntimeExecution(format!("invalid mandate event timestamp {value}"))
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                "invalid mandate event timestamp {value}"
+            ))
         })
 }
 
-fn parse_utc(value: &str) -> crate::VerletResult<chrono::DateTime<chrono::Utc>> {
+fn parse_utc(
+    value: &str,
+) -> crate::kernel::runtime_host::VerletResult<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&chrono::Utc))
         .map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!("invalid RFC3339 instant: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                "invalid RFC3339 instant: {err}"
+            ))
         })
 }
 
-fn json_error(err: serde_json::Error) -> crate::VerletError {
-    crate::VerletError::RuntimeExecution(format!("failed to encode clock tick payload: {err}"))
+fn json_error(err: serde_json::Error) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+        "failed to encode clock tick payload: {err}"
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::EventStore as _;
+    use verlet_history::EventStore as _;
 
     #[derive(Clone)]
     struct FakeClock {
@@ -515,32 +552,35 @@ mod tests {
         crate::daemon::clock_route::parse_utc(value).unwrap()
     }
 
-    fn coordinates() -> crate::ThreadCoordinates {
-        crate::ThreadCoordinates::new("tenant", "user", "session")
+    fn coordinates() -> verlet_runtime_contracts::ThreadCoordinates {
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session")
     }
 
     fn active_mandate(
-        schedule: crate::MandateSchedulePayload,
-        catch_up: crate::MandateCatchUpPolicy,
+        schedule: crate::kernel::control_decision::MandateSchedulePayload,
+        catch_up: crate::kernel::control_decision::MandateCatchUpPolicy,
         started_at: chrono::DateTime<chrono::Utc>,
         max_occurrences: Option<u32>,
-    ) -> crate::ActiveMandate {
+    ) -> crate::kernel::mandate_lifecycle::ActiveMandate {
         let coordinates = coordinates();
-        let event = crate::EventRecord {
-            id: crate::EventRecordId::new(),
-            stream_id: crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
-            sequence: crate::EventSequence::new(1),
+        let event = verlet_history::EventRecord {
+            id: verlet_history::EventRecordId::new(),
+            stream_id: verlet_history::EventStreamId::new(format!(
+                "control:{}",
+                coordinates.thread_id
+            )),
+            sequence: verlet_history::EventSequence::new(1),
             coordinates: coordinates.clone(),
             created_at_ms: started_at.timestamp_millis(),
-            kind: crate::EventKind::MandateStarted,
-            origin: crate::EventOrigin::Witnessed,
+            kind: verlet_history::EventKind::MandateStarted,
+            origin: verlet_history::EventOrigin::Witnessed,
             provenance: Default::default(),
             payload: serde_json::json!({}),
         };
-        crate::ActiveMandate {
+        crate::kernel::mandate_lifecycle::ActiveMandate {
             event,
-            payload: crate::MandateStartedPayload {
-                subject: crate::MandateSubject {
+            payload: crate::kernel::control_decision::MandateStartedPayload {
+                subject: crate::kernel::control_decision::MandateSubject {
                     thread_id: Some(coordinates.thread_id.to_string()),
                     loop_id: None,
                 },
@@ -560,8 +600,8 @@ mod tests {
     #[test]
     fn coalesce_missed_interval_fires_once_at_latest_missed_index() {
         let mandate = active_mandate(
-            crate::MandateSchedulePayload::Interval { every_ms: 60_000 },
-            crate::MandateCatchUpPolicy::CoalesceMissed,
+            crate::kernel::control_decision::MandateSchedulePayload::Interval { every_ms: 60_000 },
+            crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed,
             dt("2026-01-01T00:00:00Z"),
             None,
         );
@@ -583,8 +623,8 @@ mod tests {
     #[test]
     fn skip_missed_interval_waits_until_next_on_time_occurrence() {
         let mandate = active_mandate(
-            crate::MandateSchedulePayload::Interval { every_ms: 60_000 },
-            crate::MandateCatchUpPolicy::SkipMissed,
+            crate::kernel::control_decision::MandateSchedulePayload::Interval { every_ms: 60_000 },
+            crate::kernel::control_decision::MandateCatchUpPolicy::SkipMissed,
             dt("2026-01-01T00:00:00Z"),
             None,
         );
@@ -605,7 +645,7 @@ mod tests {
 
     #[test]
     fn at_schedule_fires_once_and_respects_max_occurrences() {
-        let schedule = crate::MandateSchedulePayload::At {
+        let schedule = crate::kernel::control_decision::MandateSchedulePayload::At {
             when: "2026-01-01T00:01:00Z".to_string(),
         };
         assert_eq!(
@@ -641,7 +681,7 @@ mod tests {
 
     #[test]
     fn cron_schedule_crosses_dst_boundary_with_stable_indices() {
-        let schedule = crate::MandateSchedulePayload::Cron {
+        let schedule = crate::kernel::control_decision::MandateSchedulePayload::Cron {
             expr: "0 30 1 * * *".to_string(),
             tz: "America/New_York".to_string(),
         };
@@ -670,20 +710,20 @@ mod tests {
         let root = std::env::temp_dir()
             .join("verlet-clock-route-tests")
             .join(uuid::Uuid::now_v7().to_string());
-        let store = crate::SqliteSessionStore::open(root.join("history.sqlite3"))
+        let store = verlet_history_sqlite::SqliteSessionStore::open(root.join("history.sqlite3"))
             .await
             .unwrap();
         let coordinates = coordinates();
-        let mandate_event_id = crate::EventRecordId::from_uuid(uuid::Uuid::from_u128(1));
-        let mandate = crate::NewEventRecord {
+        let mandate_event_id = verlet_history::EventRecordId::from_uuid(uuid::Uuid::from_u128(1));
+        let mandate = verlet_history::NewEventRecord {
             id: mandate_event_id,
             coordinates: coordinates.clone(),
             created_at_ms: dt("2026-01-01T00:00:00Z").timestamp_millis(),
-            kind: crate::EventKind::MandateStarted,
-            origin: crate::EventOrigin::Witnessed,
+            kind: verlet_history::EventKind::MandateStarted,
+            origin: verlet_history::EventOrigin::Witnessed,
             provenance: Default::default(),
-            payload: serde_json::to_value(crate::MandateStartedPayload {
-                subject: crate::MandateSubject {
+            payload: serde_json::to_value(crate::kernel::control_decision::MandateStartedPayload {
+                subject: crate::kernel::control_decision::MandateSubject {
                     thread_id: Some(coordinates.thread_id.to_string()),
                     loop_id: None,
                 },
@@ -692,17 +732,24 @@ mod tests {
                 thread_id: Some(coordinates.thread_id.to_string()),
                 max_continuations: None,
                 expires_at_ms: None,
-                schedule: Some(crate::MandateSchedulePayload::At {
-                    when: "2026-01-01T00:01:00Z".to_string(),
-                }),
+                schedule: Some(
+                    crate::kernel::control_decision::MandateSchedulePayload::At {
+                        when: "2026-01-01T00:01:00Z".to_string(),
+                    },
+                ),
                 max_occurrences: None,
-                catch_up: Some(crate::MandateCatchUpPolicy::CoalesceMissed),
+                catch_up: Some(
+                    crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed,
+                ),
                 input_template: None,
             })
             .unwrap(),
         };
         store
-            .append_events(&crate::control_stream_id(&coordinates), vec![mandate])
+            .append_events(
+                &crate::kernel::control_decision::control_stream_id(&coordinates),
+                vec![mandate],
+            )
             .await
             .unwrap();
         let envelopes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

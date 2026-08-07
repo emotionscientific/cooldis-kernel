@@ -1,13 +1,13 @@
-use crate::EventStore as _;
-use crate::LlmProviderAuthStore as _;
-use crate::LlmProviderCatalogStore as _;
-use crate::SecretResolver as _;
-use crate::SessionStore as _;
-use crate::ThreadMetadataStore as _;
 use crate::daemon::identity::IdentityAuthority as _;
 use base64::Engine as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
+use verlet_history::EventStore as _;
+use verlet_history::SessionStore as _;
+use verlet_metadata::provider_store::LlmProviderAuthStore as _;
+use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
+use verlet_metadata::provider_store::ThreadMetadataStore as _;
+use verlet_metadata::secret_store::SecretResolver as _;
 
 #[test]
 fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
@@ -432,7 +432,10 @@ fn manifest_operation_binding_by_name<'a>(
         .unwrap_or_else(|| panic!("expected manifest operation binding {name}"))
 }
 
-fn event_by_kind(events: &[crate::EventRecord], kind: crate::EventKind) -> &crate::EventRecord {
+fn event_by_kind(
+    events: &[verlet_history::EventRecord],
+    kind: verlet_history::EventKind,
+) -> &verlet_history::EventRecord {
     events
         .iter()
         .find(|event| event.kind == kind)
@@ -448,8 +451,8 @@ fn thinking_params_parse_supported_shapes() {
         .unwrap();
     assert_eq!(
         effort.thinking,
-        Some(crate::ThinkingConfig::Effort {
-            effort: crate::ThinkingEffort::XHigh
+        Some(verlet_provider::ThinkingConfig::Effort {
+            effort: verlet_provider::ThinkingEffort::XHigh
         })
     );
 
@@ -460,7 +463,7 @@ fn thinking_params_parse_supported_shapes() {
         .unwrap();
     assert_eq!(
         budget.thinking,
-        Some(crate::ThinkingConfig::Budget {
+        Some(verlet_provider::ThinkingConfig::Budget {
             budget_tokens: 2048
         })
     );
@@ -471,7 +474,7 @@ fn thinking_params_parse_supported_shapes() {
         .unwrap();
     assert_eq!(
         zero_budget.thinking,
-        Some(crate::ThinkingConfig::Budget { budget_tokens: 0 })
+        Some(verlet_provider::ThinkingConfig::Budget { budget_tokens: 0 })
     );
 
     let disabled: crate::adapters::app_server::connection::TurnStartParams =
@@ -481,7 +484,10 @@ fn thinking_params_parse_supported_shapes() {
             "thinking": { "type": "disabled" },
         })))
         .unwrap();
-    assert_eq!(disabled.thinking, Some(crate::ThinkingConfig::Disabled));
+    assert_eq!(
+        disabled.thinking,
+        Some(verlet_provider::ThinkingConfig::Disabled)
+    );
 }
 
 #[test]
@@ -533,20 +539,24 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     let control_events = session_store
-        .read_events(&crate::control_stream_id(&lifecycle.coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&lifecycle.coordinates),
+            None,
+        )
         .await
         .unwrap();
     let thread_events = session_store
         .read_events(
-            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            &verlet_history::EventStreamId::for_thread(&lifecycle.coordinates),
             None,
         )
         .await
@@ -557,7 +567,7 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     );
     assert_eq!(
         admission.payload["schema"],
-        crate::EventKind::AdmissionDecided.payload_schema_id()
+        verlet_history::EventKind::AdmissionDecided.payload_schema_id()
     );
     assert_eq!(admission.payload["route_id"], "surface:app-server-rpc");
     assert_eq!(admission.payload["decision"], "queue");
@@ -571,9 +581,10 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     assert_eq!(source_ids.len(), 1);
     let source_id = source_ids[0].as_str().unwrap();
     assert!(control_events.iter().any(|event| {
-        event.kind == crate::EventKind::IoIngressReceived && event.id.to_string() == source_id
+        event.kind == verlet_history::EventKind::IoIngressReceived
+            && event.id.to_string() == source_id
     }));
-    assert_eq!(admission.origin, crate::EventOrigin::Discharged);
+    assert_eq!(admission.origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(
         admission.provenance.discharged_by.as_deref(),
         Some("policy:admission_surface:app-server-rpc")
@@ -672,25 +683,25 @@ async fn concurrent_new_thread_turn_burst_surfaces_no_history_lock_errors() {
 #[test]
 fn assistant_content_projection_concatenates_thinking_chunks_like_streaming() {
     let messages = vec![
-        crate::CanonicalMessage::user_text("question"),
-        crate::CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::user_text("question"),
+        verlet_history::CanonicalMessage::assistant(
             "openai",
-            crate::ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses,
             "gpt-test",
             vec![
-                crate::CanonicalContent::Thinking {
+                verlet_history::CanonicalContent::Thinking {
                     text: "plan ".to_string(),
-                    provider: crate::ThinkingProvider::Other("unit".to_string()),
-                    metadata: crate::ThinkingMetadata::None,
+                    provider: verlet_history::ThinkingProvider::Other("unit".to_string()),
+                    metadata: verlet_history::ThinkingMetadata::None,
                 },
-                crate::CanonicalContent::Thinking {
+                verlet_history::CanonicalContent::Thinking {
                     text: "check".to_string(),
-                    provider: crate::ThinkingProvider::Other("unit".to_string()),
-                    metadata: crate::ThinkingMetadata::None,
+                    provider: verlet_history::ThinkingProvider::Other("unit".to_string()),
+                    metadata: verlet_history::ThinkingMetadata::None,
                 },
-                crate::CanonicalContent::text("answer"),
+                verlet_history::CanonicalContent::text("answer"),
             ],
-            crate::CanonicalStopReason::EndTurn,
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
     ];
 
@@ -704,31 +715,31 @@ fn assistant_content_projection_concatenates_thinking_chunks_like_streaming() {
 
 #[test]
 fn restored_turn_projection_preserves_thinking_before_text_order() {
-    let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-    let user_entry = crate::SessionEntry::new(
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+    let user_entry = verlet_history::SessionEntry::new(
         coordinates.clone(),
         None,
-        crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::user_text("question"),
+        verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::user_text("question"),
         },
     );
-    let assistant_entry = crate::SessionEntry::new(
+    let assistant_entry = verlet_history::SessionEntry::new(
         coordinates,
         Some(user_entry.entry_id),
-        crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::assistant(
+        verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::assistant(
                 "anthropic_bedrock",
-                crate::ProviderApi::AnthropicMessages,
+                verlet_history::ProviderApi::AnthropicMessages,
                 "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
                 vec![
-                    crate::CanonicalContent::Thinking {
+                    verlet_history::CanonicalContent::Thinking {
                         text: "plan".to_string(),
-                        provider: crate::ThinkingProvider::Anthropic,
-                        metadata: crate::ThinkingMetadata::None,
+                        provider: verlet_history::ThinkingProvider::Anthropic,
+                        metadata: verlet_history::ThinkingMetadata::None,
                     },
-                    crate::CanonicalContent::text("answer"),
+                    verlet_history::CanonicalContent::text("answer"),
                 ],
-                crate::CanonicalStopReason::EndTurn,
+                verlet_history::CanonicalStopReason::EndTurn,
             ),
         },
     );
@@ -951,21 +962,21 @@ async fn app_server_new_local_seeds_default_provider_store() {
         crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
     );
 
-    let store = crate::SqliteMetadataStore::open(&metadata_path)
+    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap();
     let openai_compatible = store
-        .get_provider(crate::OPENAI_COMPATIBLE_PROVIDER_ID)
+        .get_provider(verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
         .await
         .unwrap()
         .expect("app-server boot should seed OpenAI Compatible provider metadata");
     assert_eq!(
         openai_compatible.base_url,
-        crate::OPENAI_COMPATIBLE_BASE_URL
+        verlet_metadata::provider_store::OPENAI_COMPATIBLE_BASE_URL
     );
     assert_eq!(
         openai_compatible.models[0].model_id,
-        crate::OPENAI_COMPATIBLE_DEFAULT_MODEL
+        verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -987,14 +998,15 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
     let provider_id = "fixture-auth";
     let project_metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path)
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(&project_metadata_path)
+            .await
+            .unwrap();
     metadata_store
         .upsert_provider(
-            crate::LlmProviderRecord::new(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
                 provider_id,
-                crate::ProviderApi::OpenAIChatCompletions,
+                verlet_history::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture Auth")
@@ -1041,36 +1053,41 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
             .contains("stored-openai_compatible-key")
     );
 
-    let project_store = crate::SqliteMetadataStore::open(&project_metadata_path)
-        .await
-        .unwrap();
-    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
-        .await
-        .unwrap();
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(&project_metadata_path)
+            .await
+            .unwrap();
+    let user_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(&user_metadata_path)
+            .await
+            .unwrap();
     let provider = project_store
         .get_provider(provider_id)
         .await
         .unwrap()
         .expect("default provider should be seeded");
     assert!(
-        crate::resolve_llm_provider_auth(
+        verlet_metadata::provider_store::resolve_llm_provider_auth(
             &project_store,
             &provider,
-            &crate::LlmProviderAuthContext::new()
+            &verlet_metadata::provider_store::LlmProviderAuthContext::new()
         )
         .await
         .unwrap()
         .is_none()
     );
-    let resolved = crate::resolve_llm_provider_auth(
+    let resolved = verlet_metadata::provider_store::resolve_llm_provider_auth(
         &user_store,
         &provider,
-        &crate::LlmProviderAuthContext::new(),
+        &verlet_metadata::provider_store::LlmProviderAuthContext::new(),
     )
     .await
     .unwrap()
     .expect("stored provider credential should resolve");
-    assert_eq!(resolved.source, crate::LlmProviderAuthSourceKind::Stored);
+    assert_eq!(
+        resolved.source,
+        verlet_metadata::provider_store::LlmProviderAuthSourceKind::Stored
+    );
     assert_eq!(resolved.api_key, "stored-openai_compatible-key");
 
     let deleted = app
@@ -1082,14 +1099,15 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .await
         .unwrap();
     assert_eq!(deleted["auth"]["configured"], false);
-    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
-        .await
-        .unwrap();
+    let user_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(&user_metadata_path)
+            .await
+            .unwrap();
     assert!(
-        crate::resolve_llm_provider_auth(
+        verlet_metadata::provider_store::resolve_llm_provider_auth(
             &user_store,
             &provider,
-            &crate::LlmProviderAuthContext::new()
+            &verlet_metadata::provider_store::LlmProviderAuthContext::new()
         )
         .await
         .unwrap()
@@ -1115,27 +1133,30 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
     let provider_id = "fixture-list";
     let project_metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let metadata_store = crate::SqliteMetadataStore::open(&project_metadata_path)
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(&project_metadata_path)
+            .await
+            .unwrap();
     metadata_store
         .upsert_provider(
-            crate::LlmProviderRecord::new(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
                 provider_id,
-                crate::ProviderApi::OpenAIChatCompletions,
+                verlet_history::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture List")
-            .with_auth(crate::LlmProviderAuthConfig::Env {
-                name: "FIXTURE_API_KEY".to_string(),
-            })
+            .with_auth(
+                verlet_metadata::provider_store::LlmProviderAuthConfig::Env {
+                    name: "FIXTURE_API_KEY".to_string(),
+                },
+            )
             .with_auth_header(true)
             .with_header(
                 "x-fixture",
-                crate::LlmProviderConfigValue::literal("secret-header"),
+                verlet_metadata::provider_store::LlmProviderConfigValue::literal("secret-header"),
             )
             .with_model(
-                crate::LlmProviderModelRecord::new("fixture-model")
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-model")
                     .with_display_name("Fixture Model")
                     .with_context_window_tokens(4096),
             ),
@@ -1143,12 +1164,12 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
         .await
         .unwrap();
     drop(metadata_store);
-    crate::SqliteMetadataStore::open(&user_metadata_path)
+    verlet_metadata::provider_store::SqliteMetadataStore::open(&user_metadata_path)
         .await
         .unwrap()
         .set_credential(
             provider_id,
-            crate::LlmProviderCredential::ApiKey {
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-list-key".to_string(),
             },
         )
@@ -1282,7 +1303,7 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
     assert!(!created.to_string().contains("secret-mode"));
     assert!(!created.to_string().contains("secret-model"));
 
-    let stored = crate::SqliteMetadataStore::open(&metadata_path)
+    let stored = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap()
         .get_provider("fixture-upsert")
@@ -1409,13 +1430,13 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let metadata_store = crate::SqliteMetadataStore::open(&metadata_path)
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap();
     metadata_store
-        .upsert_provider(crate::LlmProviderRecord::new(
+        .upsert_provider(verlet_metadata::provider_store::LlmProviderRecord::new(
             "fixture-delete",
-            crate::ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
             "https://example.invalid/v1",
         ))
         .await
@@ -1423,19 +1444,19 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
     metadata_store
         .set_credential(
             "fixture-delete",
-            crate::LlmProviderCredential::ApiKey {
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-delete-key".to_string(),
             },
         )
         .await
         .unwrap();
     drop(metadata_store);
-    crate::SqliteMetadataStore::open(&user_metadata_path)
+    verlet_metadata::provider_store::SqliteMetadataStore::open(&user_metadata_path)
         .await
         .unwrap()
         .set_credential(
             "fixture-delete",
-            crate::LlmProviderCredential::ApiKey {
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-user-delete-key".to_string(),
             },
         )
@@ -1458,7 +1479,7 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
     assert_eq!(deleted["deleted"], true);
     assert_eq!(deleted["providerId"], "fixture-delete");
 
-    let store = crate::SqliteMetadataStore::open(&metadata_path)
+    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap();
     assert!(
@@ -1475,9 +1496,10 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
             .unwrap()
             .is_none()
     );
-    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
-        .await
-        .unwrap();
+    let user_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(&user_metadata_path)
+            .await
+            .unwrap();
     assert!(
         user_store
             .get_credential("fixture-delete")
@@ -1506,13 +1528,13 @@ async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let metadata_store = crate::SqliteMetadataStore::open(&metadata_path)
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap();
     metadata_store
-        .upsert_provider(crate::LlmProviderRecord::new(
+        .upsert_provider(verlet_metadata::provider_store::LlmProviderRecord::new(
             "fixture-cancel-delete",
-            crate::ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
             "https://example.invalid/v1",
         ))
         .await
@@ -1520,19 +1542,20 @@ async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
     metadata_store
         .set_credential(
             "fixture-cancel-delete",
-            crate::LlmProviderCredential::ApiKey {
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-project-delete-key".to_string(),
             },
         )
         .await
         .unwrap();
-    let user_store = crate::SqliteMetadataStore::open(&user_metadata_path)
-        .await
-        .unwrap();
+    let user_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(&user_metadata_path)
+            .await
+            .unwrap();
     user_store
         .set_credential(
             "fixture-cancel-delete",
-            crate::LlmProviderCredential::ApiKey {
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-user-delete-key".to_string(),
             },
         )
@@ -1633,14 +1656,14 @@ async fn app_server_mcp_status_lists_redacted_remote_sources() {
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
-    let registry = crate::SqliteMcpSourceRegistry::open_async(&metadata_path)
+    let registry = crate::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(&metadata_path)
         .await
         .unwrap();
     registry
         .upsert_source_async(
-            crate::McpRemoteServerConfig::new(
+            crate::adapters::mcp_client::McpRemoteServerConfig::new(
                 "arcade",
-                crate::McpRemoteTransport::StreamableHttp,
+                crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
                 "https://example.com/mcp",
             )
             .unwrap()
@@ -1710,7 +1733,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
     assert!(!upsert.to_string().contains("fixture-secret-like-value"));
 
     assert!(
-        crate::SqliteSecretStore::open(&metadata_path)
+        verlet_metadata::secret_store::SqliteSecretStore::open(&metadata_path)
             .await
             .unwrap()
             .resolve_secret("mcp.arcade.bearer")
@@ -1718,7 +1741,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
             .unwrap()
             .is_none()
     );
-    let secret = crate::SqliteSecretStore::open(&user_metadata_path)
+    let secret = verlet_metadata::secret_store::SqliteSecretStore::open(&user_metadata_path)
         .await
         .unwrap()
         .resolve_secret("mcp.arcade.bearer")
@@ -1726,7 +1749,10 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
         .unwrap()
         .expect("upsert should persist pasted bearer token");
     assert_eq!(secret.value, "fixture-token");
-    assert_eq!(secret.source_kind, crate::SecretSourceKind::Local);
+    assert_eq!(
+        secret.source_kind,
+        verlet_metadata::secret_store::SecretSourceKind::Local
+    );
 
     let list = app
         .dispatch_request(&connection, "mcpSource/list", Some(serde_json::json!({})))
@@ -1842,13 +1868,13 @@ server_ref = "mcp://arcade"
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
-    crate::SqliteMcpSourceRegistry::open_async(&metadata_path)
+    crate::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(&metadata_path)
         .await
         .unwrap()
         .upsert_source_async(
-            crate::McpRemoteServerConfig::new(
+            crate::adapters::mcp_client::McpRemoteServerConfig::new(
                 "arcade",
-                crate::McpRemoteTransport::StreamableHttp,
+                crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
                 "https://example.com/mcp",
             )
             .unwrap(),
@@ -1889,7 +1915,7 @@ server_ref = "mcp://arcade"
         .collect::<std::collections::BTreeSet<_>>();
     assert!(diagnostic_codes.contains("duplicate_tool_id"));
     assert!(diagnostic_codes.contains("source_already_imported"));
-    let current_record = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let current_record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .load_ref("agent://mcp-existing@latest")
         .unwrap();
     assert_eq!(current_record.manifest_hash, existing_record.manifest_hash);
@@ -2039,7 +2065,7 @@ async fn agent_query_methods_project_local_registry_records() {
     assert!(malformed.message.contains("malformed agent ref"));
 
     std::fs::remove_file(
-        crate::LocalAgentRegistry::new(&agent_registry_root)
+        crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
             .version_record_path("local-runner", "0.1.0")
             .unwrap(),
     )
@@ -2127,7 +2153,7 @@ streaming = true
     assert_eq!(from_source["suggestedNextVersion"].as_str(), Some("0.1.1"));
     assert_eq!(from_source["base"]["latestVersion"].as_str(), Some("0.1.0"));
     assert!(
-        !crate::LocalAgentRegistry::new(&agent_registry_root)
+        !crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
             .version_record_path("planner", "0.1.1")
             .unwrap()
             .exists()
@@ -2213,7 +2239,7 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
         Some("Publisher v2")
     );
     assert_eq!(publish["latestAlias"]["version"].as_str(), Some("0.1.1"));
-    let published_record = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let published_record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .load_version_record("publisher", "0.1.1")
         .unwrap();
     assert_eq!(
@@ -2276,11 +2302,8 @@ async fn operation_list_projects_published_registry_records() {
     assert_eq!(list["cursor"], serde_json::Value::Null);
     let operations = list["data"].as_array().unwrap();
     assert!(operations.len() >= 2);
-    assert!(
-        operations
-            .iter()
-            .any(|operation| operation["name"].as_str() == Some(crate::VERLET_THREADS_PACKAGE))
-    );
+    assert!(operations.iter().any(|operation| operation["name"].as_str()
+        == Some(crate::operations::kernel_packages::VERLET_THREADS_PACKAGE)));
     let search = operation_record_by_name(operations, "search");
     assert_eq!(
         search["activeArtifactHash"].as_str(),
@@ -2359,24 +2382,25 @@ async fn model_list_projects_catalog_provider_models() {
             .with_catalog_openai_chat_completions("fixture", Some("fixture-large".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     metadata_store
         .upsert_provider(
-            crate::LlmProviderRecord::new(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
                 "fixture",
-                crate::ProviderApi::OpenAIChatCompletions,
+                verlet_history::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture Models")
             .with_model(
-                crate::LlmProviderModelRecord::new("fixture-small")
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-small")
                     .with_display_name("Fixture Small")
                     .with_context_window_tokens(1024),
             )
             .with_model(
-                crate::LlmProviderModelRecord::new("fixture-large")
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-large")
                     .with_display_name("Fixture Large")
                     .with_max_output_tokens(2048),
             ),
@@ -2386,8 +2410,8 @@ async fn model_list_projects_catalog_provider_models() {
     crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIResponses,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
         "fixture",
         "fixture-large",
     );
@@ -2435,27 +2459,32 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
             .with_catalog_openai_chat_completions("fixture", Some("fixture-default".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     metadata_store
         .upsert_provider(
-            crate::LlmProviderRecord::new(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
                 "fixture",
-                crate::ProviderApi::OpenAIChatCompletions,
+                verlet_history::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture Models")
-            .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
-            .with_model(crate::LlmProviderModelRecord::new("fixture-large")),
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-small"),
+            )
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-large"),
+            ),
         )
         .await
         .unwrap();
     crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIResponses,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
         "fixture",
         "fixture-default",
     );
@@ -2531,10 +2560,12 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
         .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
-    let thread_id = crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap())
-        .expect("thread/start should return a thread id");
+    let thread_id = verlet_runtime_contracts::ThreadId::parse_str(
+        thread_start["thread"]["id"].as_str().unwrap(),
+    )
+    .expect("thread/start should return a thread id");
 
-    let store = crate::SqliteMetadataStore::open(&metadata_path)
+    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap();
     let record = store
@@ -2544,8 +2575,14 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
         .expect("app-server thread/start should persist thread lifecycle metadata");
     assert_eq!(record.coordinates.tenant_id, expected_tenant_id);
     assert_eq!(record.coordinates.user_id, expected_user_id);
-    assert_eq!(record.status, crate::ThreadLifecycleStatus::Idle);
-    assert_eq!(record.topology, crate::ThreadTopology::root());
+    assert_eq!(
+        record.status,
+        verlet_runtime_contracts::ThreadLifecycleStatus::Idle
+    );
+    assert_eq!(
+        record.topology,
+        verlet_runtime_contracts::ThreadTopology::root()
+    );
     assert_eq!(
         store
             .list_thread_lifecycle(&record.coordinates.scope())
@@ -2654,7 +2691,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
         .unwrap();
     let control_events = store
         .read_events(
-            &crate::EventStreamId::new(format!(
+            &verlet_history::EventStreamId::new(format!(
                 "control:{}",
                 parent.context().coordinates.thread_id
             )),
@@ -2666,7 +2703,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
         control_events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::ThreadSpawnRequested
+                event.kind == verlet_history::EventKind::ThreadSpawnRequested
                     && event.payload["correlation_id"] == "rpc-dispatch-1"
                     && event.provenance.discharged_by.as_deref() == Some("dispatcher:thread-spawn")
             })
@@ -2746,9 +2783,9 @@ fn ref_less_thread_start_default_manifest_gate_allows_lowered_params() {
     );
 
     let params = crate::adapters::app_server::connection::ThreadStartParams {
-        runtime_overrides: Some(crate::AgentManifestBindOverrides {
+        runtime_overrides: Some(crate::agent::manifest_bind::AgentManifestBindOverrides {
             default_cwd: Some("workspace".to_string()),
-            ..crate::AgentManifestBindOverrides::default()
+            ..crate::agent::manifest_bind::AgentManifestBindOverrides::default()
         }),
         ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
@@ -2759,9 +2796,9 @@ fn ref_less_thread_start_default_manifest_gate_allows_lowered_params() {
 
     let params = crate::adapters::app_server::connection::ThreadStartParams {
         model: Some(crate::adapters::app_server::APP_SERVER_LOCAL_MODEL.to_string()),
-        runtime_overrides: Some(crate::AgentManifestBindOverrides {
+        runtime_overrides: Some(crate::agent::manifest_bind::AgentManifestBindOverrides {
             default_cwd: Some("workspace".to_string()),
-            ..crate::AgentManifestBindOverrides::default()
+            ..crate::agent::manifest_bind::AgentManifestBindOverrides::default()
         }),
         ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
@@ -2777,7 +2814,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let agent_registry_root = root.join("agents");
-    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
     assert!(registry.list_records().unwrap().is_empty());
 
     let listen =
@@ -2815,8 +2852,10 @@ async fn ref_less_thread_start_binds_default_manifest() {
         )
         .await
         .unwrap();
-    let thread_id =
-        crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap()).unwrap();
+    let thread_id = verlet_runtime_contracts::ThreadId::parse_str(
+        thread_start["thread"]["id"].as_str().unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         thread_start["cwd"].as_str(),
         Some(
@@ -2827,7 +2866,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
         )
     );
 
-    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(metadata_path)
         .await
         .unwrap();
     let lifecycle = metadata_store
@@ -2844,7 +2883,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
         default_record.manifest_hash
     );
     assert_eq!(
-        serde_json::from_str::<crate::AgentManifestBindOverrides>(
+        serde_json::from_str::<crate::agent::manifest_bind::AgentManifestBindOverrides>(
             &lifecycle.metadata
                 [crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA]
         )
@@ -2859,14 +2898,16 @@ async fn ref_less_thread_start_binds_default_manifest() {
         )
     );
 
-    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(session_path)
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 4);
-    let compile = event_by_kind(&events, crate::EventKind::ManifestCompileCompleted);
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
-    assert_eq!(compile.origin, crate::EventOrigin::Discharged);
-    assert_eq!(bind.origin, crate::EventOrigin::Discharged);
+    let compile = event_by_kind(&events, verlet_history::EventKind::ManifestCompileCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
+    assert_eq!(compile.origin, verlet_history::EventOrigin::Discharged);
+    assert_eq!(bind.origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(compile.payload["alias"]["alias"].as_str(), Some("latest"));
     assert_eq!(
         compile.payload["alias"]["manifest_hash"].as_str(),
@@ -2913,8 +2954,8 @@ async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_on
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    config.default_placement = crate::AgentManifestPlacementBinding {
-        target: crate::PlacementTarget::Sandbox,
+    config.default_placement = crate::agent::manifest_bind::AgentManifestPlacementBinding {
+        target: crate::kernel::control_decision::PlacementTarget::Sandbox,
         executor_ref: Some("executor://sandbox/default".to_string()),
         config: std::collections::BTreeMap::new(),
     };
@@ -2938,7 +2979,9 @@ async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_on
         )
         .await
         .unwrap();
-    let thread_id = crate::ThreadId::parse_str(started["thread"]["id"].as_str().unwrap()).unwrap();
+    let thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str(started["thread"]["id"].as_str().unwrap())
+            .unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -2946,24 +2989,28 @@ async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_on
         .await
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     let events = session_store
         .read_events(
-            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            &verlet_history::EventStreamId::for_thread(&lifecycle.coordinates),
             None,
         )
         .await
         .unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     assert_eq!(bind.payload["placement"]["target"], "local");
     let placement_events = events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
+        .filter(|event| event.kind == verlet_history::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(placement_events.len(), 1);
-    assert_eq!(placement_events[0].origin, crate::EventOrigin::Witnessed);
+    assert_eq!(
+        placement_events[0].origin,
+        verlet_history::EventOrigin::Witnessed
+    );
     assert_eq!(placement_events[0].payload["placement"], "local");
     assert_eq!(
         placement_events[0].payload["snapshot_id"],
@@ -2987,8 +3034,8 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    config.default_placement = crate::AgentManifestPlacementBinding {
-        target: crate::PlacementTarget::Sandbox,
+    config.default_placement = crate::agent::manifest_bind::AgentManifestPlacementBinding {
+        target: crate::kernel::control_decision::PlacementTarget::Sandbox,
         executor_ref: Some("executor://sandbox/default".to_string()),
         config: std::collections::BTreeMap::new(),
     };
@@ -3040,7 +3087,9 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
         )
         .await
         .unwrap();
-    let child_id = crate::ThreadId::parse_str(spawned["thread"]["id"].as_str().unwrap()).unwrap();
+    let child_id =
+        verlet_runtime_contracts::ThreadId::parse_str(spawned["thread"]["id"].as_str().unwrap())
+            .unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -3048,24 +3097,28 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
         .await
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     let events = session_store
         .read_events(
-            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            &verlet_history::EventStreamId::for_thread(&lifecycle.coordinates),
             None,
         )
         .await
         .unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     assert_eq!(bind.payload["placement"]["target"], "local");
     let placement_events = events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
+        .filter(|event| event.kind == verlet_history::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(placement_events.len(), 1);
-    assert_eq!(placement_events[0].origin, crate::EventOrigin::Witnessed);
+    assert_eq!(
+        placement_events[0].origin,
+        verlet_history::EventOrigin::Witnessed
+    );
     assert_eq!(placement_events[0].payload["placement"], "local");
     assert_eq!(
         placement_events[0].payload["snapshot_id"],
@@ -3110,7 +3163,7 @@ allow = ["default_cwd"]
 "#,
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
@@ -3121,18 +3174,23 @@ allow = ["default_cwd"]
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     metadata_store
         .upsert_provider(
-            crate::LlmProviderRecord::new(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
                 "fixture",
-                crate::ProviderApi::OpenAIChatCompletions,
+                verlet_history::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
-            .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
-            .with_model(crate::LlmProviderModelRecord::new("fixture-large")),
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-small"),
+            )
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-large"),
+            ),
         )
         .await
         .unwrap();
@@ -3140,8 +3198,8 @@ allow = ["default_cwd"]
         .await
         .unwrap();
     let session_path = config.state_home.join("session_history.sqlite3");
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIChatCompletions,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
         "fixture",
         "fixture-large",
     );
@@ -3172,8 +3230,10 @@ allow = ["default_cwd"]
         )
         .await
         .unwrap();
-    let thread_id =
-        crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap()).unwrap();
+    let thread_id = verlet_runtime_contracts::ThreadId::parse_str(
+        thread_start["thread"]["id"].as_str().unwrap(),
+    )
+    .unwrap();
     assert_eq!(thread_start["model"].as_str(), Some("fixture-small"));
     assert_eq!(thread_start["modelProvider"].as_str(), Some("fixture"));
 
@@ -3197,10 +3257,12 @@ allow = ["default_cwd"]
         "fixture"
     );
 
-    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(session_path)
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     assert_eq!(
         bind.payload["ref_uri"].as_str(),
         Some(record.ref_uri.as_str())
@@ -3224,8 +3286,10 @@ allow = ["default_cwd"]
         )
         .await
         .unwrap();
-    let large_thread_id =
-        crate::ThreadId::parse_str(large_start["thread"]["id"].as_str().unwrap()).unwrap();
+    let large_thread_id = verlet_runtime_contracts::ThreadId::parse_str(
+        large_start["thread"]["id"].as_str().unwrap(),
+    )
+    .unwrap();
     assert_eq!(large_start["model"].as_str(), Some("fixture-large"));
     let large_lifecycle = app
         .inner
@@ -3277,7 +3341,7 @@ allow = ["default_cwd"]
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
@@ -3288,26 +3352,31 @@ allow = ["default_cwd"]
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     metadata_store
         .upsert_provider(
-            crate::LlmProviderRecord::new(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
                 "fixture",
-                crate::ProviderApi::OpenAIChatCompletions,
+                verlet_history::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
-            .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
-            .with_model(crate::LlmProviderModelRecord::new("fixture-large")),
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-small"),
+            )
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-large"),
+            ),
         )
         .await
         .unwrap();
     crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIChatCompletions,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
         "fixture",
         "fixture-large",
     );
@@ -3418,7 +3487,7 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
         .await
         .unwrap();
 
-    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
     let first = registry
         .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
@@ -3465,7 +3534,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     std::fs::create_dir_all(&workspace).unwrap();
     let operation_registry_root = root.join("operations");
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
@@ -3475,19 +3544,20 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     )
     .await;
 
-    let operation_record = crate::LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(crate::VERLET_THREADS_PACKAGE)
-        .expect("startup should publish cooldis-threads");
+    let operation_record =
+        verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
+            .load_record(crate::operations::kernel_packages::VERLET_THREADS_PACKAGE)
+            .expect("startup should publish cooldis-threads");
     assert!(matches!(
         &operation_record.source,
-        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_THREADS_PACKAGE
+        verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_THREADS_PACKAGE
     ));
     assert_eq!(
         operation_record
             .metadata
-            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .get(crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND)
             .and_then(serde_json::Value::as_str),
-        Some(crate::KERNEL_RUNTIME_KIND)
+        Some(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND)
     );
     let expected_operations = thread_operation_names();
     assert_eq!(
@@ -3499,19 +3569,20 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .collect::<Vec<_>>(),
         expected_operations
     );
-    let schedule_record = crate::LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(crate::VERLET_SCHEDULE_PACKAGE)
-        .expect("startup should publish cooldis-schedule");
+    let schedule_record =
+        verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
+            .load_record(crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE)
+            .expect("startup should publish cooldis-schedule");
     assert!(matches!(
         &schedule_record.source,
-        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_SCHEDULE_PACKAGE
+        verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE
     ));
     assert_eq!(
         schedule_record
             .metadata
-            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .get(crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND)
             .and_then(serde_json::Value::as_str),
-        Some(crate::KERNEL_RUNTIME_KIND)
+        Some(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND)
     );
     assert_eq!(
         schedule_record
@@ -3521,31 +3592,32 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .map(|operation| operation.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            crate::MANDATE_START_OPERATION,
-            crate::MANDATE_REVOKE_OPERATION,
-            crate::MANDATE_LIST_OPERATION,
+            crate::operations::kernel_packages::MANDATE_START_OPERATION,
+            crate::operations::kernel_packages::MANDATE_REVOKE_OPERATION,
+            crate::operations::kernel_packages::MANDATE_LIST_OPERATION,
         ]
     );
     assert_eq!(
         schedule_record.capability_grants,
         std::collections::BTreeSet::from([
-            crate::SCHEDULE_MANAGE_CAPABILITY.to_string(),
-            crate::SCHEDULE_READ_CAPABILITY.to_string()
+            crate::operations::kernel_packages::SCHEDULE_MANAGE_CAPABILITY.to_string(),
+            crate::operations::kernel_packages::SCHEDULE_READ_CAPABILITY.to_string()
         ])
     );
-    let process_record = crate::LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(crate::VERLET_PROCESS_PACKAGE)
-        .expect("startup should publish cooldis-process");
+    let process_record =
+        verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
+            .load_record(crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE)
+            .expect("startup should publish cooldis-process");
     assert!(matches!(
         &process_record.source,
-        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_PROCESS_PACKAGE
+        verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE
     ));
     assert_eq!(
         process_record
             .metadata
-            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .get(crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND)
             .and_then(serde_json::Value::as_str),
-        Some(crate::KERNEL_RUNTIME_KIND)
+        Some(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND)
     );
     assert_eq!(
         process_record
@@ -3555,25 +3627,26 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .map(|operation| operation.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            crate::PROCESS_EXEC_OPERATION,
-            crate::PROCESS_POLL_OPERATION,
-            crate::PROCESS_WRITE_OPERATION,
-            crate::PROCESS_TERMINATE_OPERATION,
+            crate::operations::kernel_packages::PROCESS_EXEC_OPERATION,
+            crate::operations::kernel_packages::PROCESS_POLL_OPERATION,
+            crate::operations::kernel_packages::PROCESS_WRITE_OPERATION,
+            crate::operations::kernel_packages::PROCESS_TERMINATE_OPERATION,
         ]
     );
-    let notify_record = crate::LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(crate::VERLET_NOTIFY_PACKAGE)
-        .expect("startup should publish cooldis-notify");
+    let notify_record =
+        verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
+            .load_record(crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE)
+            .expect("startup should publish cooldis-notify");
     assert!(matches!(
         &notify_record.source,
-        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_NOTIFY_PACKAGE
+        verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE
     ));
     assert_eq!(
         notify_record
             .metadata
-            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .get(crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND)
             .and_then(serde_json::Value::as_str),
-        Some(crate::KERNEL_RUNTIME_KIND)
+        Some(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND)
     );
     assert_eq!(
         notify_record
@@ -3583,21 +3656,22 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .map(|operation| operation.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            crate::NOTIFY_PREVIEW_OPERATION,
-            crate::CHANNEL_EMIT_OPERATION
+            crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION,
+            crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION
         ]
     );
 
-    let agent = crate::LocalAgentRegistry::new(root.join("agents"))
+    let agent = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .expect("default manifest should publish");
     let tools = agent.resolved_manifest["tools"].as_array().unwrap();
     assert_eq!(tools.len(), expected_operations.len());
     assert!(tools.iter().all(|tool| {
         !tool["operation_ref"].as_str().is_some_and(|operation_ref| {
-            operation_ref.contains(crate::VERLET_PROCESS_PACKAGE)
-                || operation_ref.contains(crate::VERLET_NOTIFY_PACKAGE)
-                || operation_ref.contains(crate::VERLET_SCHEDULE_PACKAGE)
+            operation_ref.contains(crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE)
+                || operation_ref.contains(crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE)
+                || operation_ref
+                    .contains(crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE)
         })
     }));
     for operation in expected_operations {
@@ -3611,7 +3685,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             Some(
                 format!(
                     "op://{}/{operation}@sha256:{}",
-                    crate::VERLET_THREADS_PACKAGE,
+                    crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
                     operation_record.active_artifact_hash
                 )
                 .as_str()
@@ -3633,20 +3707,21 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     let binding = &bind.payload["operation_bindings"][0];
     assert_eq!(
         binding["name"].as_str(),
-        Some(crate::VERLET_THREADS_PACKAGE)
+        Some(crate::operations::kernel_packages::VERLET_THREADS_PACKAGE)
     );
     assert!(
         bind.payload
@@ -3658,9 +3733,9 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
                 !matches!(
                     binding["name"].as_str(),
                     Some(
-                        crate::VERLET_PROCESS_PACKAGE
-                            | crate::VERLET_NOTIFY_PACKAGE
-                            | crate::VERLET_SCHEDULE_PACKAGE
+                        crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE
+                            | crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE
+                            | crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE
                     )
                 )
             })
@@ -3679,9 +3754,9 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     assert_eq!(
         json_array_string_set(&binding["grants"]),
         std::collections::BTreeSet::from([
-            crate::THREADS_CONTROL_CAPABILITY.to_string(),
-            crate::THREADS_READ_CAPABILITY.to_string(),
-            crate::THREADS_SPAWN_CAPABILITY.to_string()
+            crate::operations::kernel_packages::THREADS_CONTROL_CAPABILITY.to_string(),
+            crate::operations::kernel_packages::THREADS_READ_CAPABILITY.to_string(),
+            crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY.to_string()
         ])
     );
     let direct_tools = binding["direct_tools"].as_array().unwrap();
@@ -3752,12 +3827,12 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
@@ -3816,12 +3891,15 @@ description: Alpha description.
 Alpha body marker.
 "#,
     );
-    let skill_record = crate::LocalSkillRegistry::new(&skill_registry_root)
-        .publish_directory(crate::PublishSkillPackageRequest {
-            package_dir: package_dir.clone(),
-            name: None,
-        })
-        .unwrap();
+    let skill_record =
+        verlet_operations::skill_package::LocalSkillRegistry::new(&skill_registry_root)
+            .publish_directory(
+                verlet_operations::skill_package::PublishSkillPackageRequest {
+                    package_dir: package_dir.clone(),
+                    name: None,
+                },
+            )
+            .unwrap();
     let manifest_path = root.join("skill-runner.verlet.agent.toml");
     std::fs::write(
         &manifest_path,
@@ -3848,12 +3926,12 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
     let client = std::sync::Arc::new(SkillResourceClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-skill-resource-{}.sock", uuid::Uuid::now_v7()),
     ));
@@ -3862,8 +3940,8 @@ streaming = false
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     config.skill_registry_root = skill_registry_root.clone();
-    let mut runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
             crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
         ),
         crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
@@ -3878,9 +3956,10 @@ streaming = false
             None,
             &config,
         );
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
             config,
@@ -3906,17 +3985,20 @@ streaming = false
         "# Alpha\n\nChanged description.\n\nChanged body marker.\n",
     )
     .unwrap();
-    let changed_skill_record = crate::LocalSkillRegistry::new(&skill_registry_root)
-        .publish_directory(crate::PublishSkillPackageRequest {
-            package_dir,
-            name: None,
-        })
-        .unwrap();
+    let changed_skill_record =
+        verlet_operations::skill_package::LocalSkillRegistry::new(&skill_registry_root)
+            .publish_directory(
+                verlet_operations::skill_package::PublishSkillPackageRequest {
+                    package_dir,
+                    name: None,
+                },
+            )
+            .unwrap();
     assert_ne!(
         changed_skill_record.active_artifact_hash,
         skill_record.active_artifact_hash
     );
-    let parsed_thread_id = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -3970,10 +4052,9 @@ streaming = false
         "an ordinary fork must inherit the source thread's pinned skill binding"
     );
     assert!(
-        fork_handle
-            .context()
-            .metadata
-            .contains_key(crate::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+        fork_handle.context().metadata.contains_key(
+            crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA
+        )
     );
     let (_, fork_bind_receipt) =
         crate::adapters::app_server::threads::active_manifest_receipt_payloads(&fork_handle)
@@ -4096,12 +4177,12 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
     let client = std::sync::Arc::new(WorkspaceSkillDiscoveryClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let listen =
         crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
             "verlet-workspace-skill-discovery-{}.sock",
@@ -4111,12 +4192,12 @@ streaming = false
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    config.default_workspace = Some(crate::AgentManifestWorkspaceBinding {
+    config.default_workspace = Some(crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: host_workspace.clone(),
-        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     });
-    let mut runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
             crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
         ),
         crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
@@ -4132,9 +4213,10 @@ streaming = false
             None,
             &config,
         );
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
             config,
@@ -4179,7 +4261,7 @@ Changed discovery body marker.
 "#,
     )
     .unwrap();
-    let parsed_thread_id = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -4356,7 +4438,7 @@ budget_share = 0.75
         ),
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
     let prompt_ref = record.resolved_manifest["resources"][0]["ref"]
@@ -4368,7 +4450,7 @@ budget_share = 0.75
     let expected_prompt_digest = format!("sha256:{prompt_hash}");
 
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-prompt-resource-{}.sock", uuid::Uuid::now_v7()),
     ));
@@ -4381,8 +4463,8 @@ budget_share = 0.75
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     config.blob_registry_root = blob_registry_root;
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
             crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
         ),
         crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
@@ -4396,9 +4478,10 @@ budget_share = 0.75
             None,
             &config,
         );
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
             config,
@@ -4489,9 +4572,11 @@ async fn child_agent_policy_rejects_manifest_thread_spawn_row() {
     std::fs::create_dir_all(&workspace).unwrap();
     let operation_registry_root = root.join("operations");
     let agent_registry_root = root.join("agents");
-    let operation_record = crate::ensure_verlet_threads_published(Some(&operation_registry_root))
-        .unwrap()
-        .expect("kernel package should publish for policy test");
+    let operation_record = crate::operations::kernel_packages::ensure_verlet_threads_published(
+        Some(&operation_registry_root),
+    )
+    .unwrap()
+    .expect("kernel package should publish for policy test");
     let manifest_path = root.join("blocked-spawn.verlet.agent.toml");
     std::fs::write(
         &manifest_path,
@@ -4526,12 +4611,12 @@ streaming = false
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
     let app = test_app_with_provider_root(
         &root,
         &workspace,
@@ -4563,9 +4648,11 @@ async fn schedule_manifest_direct_tool_starts_mandate_and_requires_grant() {
     std::fs::create_dir_all(&workspace).unwrap();
     let operation_registry_root = root.join("operations");
     let agent_registry_root = root.join("agents");
-    let operation_record = crate::ensure_verlet_schedule_published(Some(&operation_registry_root))
-        .unwrap()
-        .expect("kernel package should publish for schedule direct-tool test");
+    let operation_record = crate::operations::kernel_packages::ensure_verlet_schedule_published(
+        Some(&operation_registry_root),
+    )
+    .unwrap()
+    .expect("kernel package should publish for schedule direct-tool test");
 
     let manifest_path = root.join("scheduler.verlet.agent.toml");
     std::fs::write(
@@ -4595,11 +4682,11 @@ default_cwd = "."
 streaming = false
 "#,
             operation_record.active_artifact_hash,
-            crate::SCHEDULE_MANAGE_CAPABILITY
+            crate::operations::kernel_packages::SCHEDULE_MANAGE_CAPABILITY
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
@@ -4634,7 +4721,7 @@ streaming = false
         ),
     )
     .unwrap();
-    let err = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let err = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(
             &no_grant_manifest_path,
             &operation_registry_root,
@@ -4644,7 +4731,7 @@ streaming = false
     assert!(err.to_string().contains("mandate_start:schedule.manage"));
 
     let client = std::sync::Arc::new(ScheduleMandateStartClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
@@ -4727,12 +4814,12 @@ max_tool_rounds = 64
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&worker_manifest_path)
         .unwrap();
 
     let client = std::sync::Arc::new(ThreadSpawnAgentRefClient::new("agent://worker@latest"));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let listen =
         crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
             "verlet-thread-spawn-agent-ref-{}.sock",
@@ -4746,8 +4833,8 @@ max_tool_rounds = 64
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let mut runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other("local_offline".to_string()),
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other("local_offline".to_string()),
         "local_offline",
         "echo",
     );
@@ -4761,9 +4848,10 @@ max_tool_rounds = 64
             None,
             &config,
         );
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
             config,
@@ -4791,7 +4879,7 @@ max_tool_rounds = 64
     .unwrap();
 
     wait_for_provider_requests(&client, 3).await;
-    let root_id = crate::ThreadId::parse_str(&root_thread_id).unwrap();
+    let root_id = verlet_runtime_contracts::ThreadId::parse_str(&root_thread_id).unwrap();
     let list = app
         .dispatch_request(&connection, "thread/list", None)
         .await
@@ -4804,11 +4892,13 @@ max_tool_rounds = 64
         .expect("thread/list should expose the spawned child thread");
     let child_thread_id = child_thread["id"].as_str().unwrap().to_string();
 
-    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(metadata_path)
         .await
         .unwrap();
     let child_record = metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&child_thread_id).unwrap())
+        .get_thread_lifecycle(
+            verlet_runtime_contracts::ThreadId::parse_str(&child_thread_id).unwrap(),
+        )
         .await
         .unwrap()
         .expect("thread_spawn should persist child thread lifecycle metadata");
@@ -4863,11 +4953,11 @@ max_tool_rounds = 64
     .await
     .unwrap();
     wait_for_provider_requests(&client, 5).await;
-    let child_id = crate::ThreadId::parse_str(&child_thread_id).unwrap();
+    let child_id = verlet_runtime_contracts::ThreadId::parse_str(&child_thread_id).unwrap();
     let stopped_child_record = wait_for_lifecycle_status(
         &metadata_store,
         child_id,
-        crate::ThreadLifecycleStatus::Stopped,
+        verlet_runtime_contracts::ThreadLifecycleStatus::Stopped,
     )
     .await;
     assert_eq!(stopped_child_record.parent_thread_id, Some(root_id));
@@ -4895,7 +4985,7 @@ async fn default_manifest_publish_recovers_partial_version_without_latest() {
     )
     .unwrap();
 
-    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
     std::fs::remove_file(
         registry
             .alias_record_path(
@@ -4976,7 +5066,7 @@ fn default_manifest_publish_serializes_concurrent_startup() {
         std::collections::BTreeSet::from(["1.0.0", "1.0.1"])
     );
 
-    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
     let latest = registry
         .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
@@ -5020,7 +5110,7 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
             .await
             .unwrap();
         thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-        first_record = crate::LocalAgentRegistry::new(&agent_registry_root)
+        first_record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
             .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
             .unwrap();
         assert_eq!(first_record.version, "1.0.0");
@@ -5047,7 +5137,7 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
     let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&connection).await;
 
-    let latest = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let latest = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(latest.version, "1.0.1");
@@ -5069,8 +5159,8 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
         .unwrap();
     assert_eq!(resume["thread"]["id"].as_str(), Some(thread_id.as_str()));
 
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
-    let lifecycle = crate::SqliteMetadataStore::open(metadata_path)
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
+    let lifecycle = verlet_metadata::provider_store::SqliteMetadataStore::open(metadata_path)
         .await
         .unwrap()
         .get_thread_lifecycle(parsed)
@@ -5125,8 +5215,8 @@ async fn app_server_startup_skips_stale_manifest_threads() {
         thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
     }
 
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
-    let store = crate::SqliteMetadataStore::open(&metadata_path)
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
+    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap();
     let mut lifecycle = store
@@ -5207,7 +5297,7 @@ allow = ["streaming"]
 "#,
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
@@ -5236,8 +5326,10 @@ allow = ["streaming"]
         )
         .await
         .unwrap();
-    let thread_id = crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap())
-        .expect("thread/start should return a thread id");
+    let thread_id = verlet_runtime_contracts::ThreadId::parse_str(
+        thread_start["thread"]["id"].as_str().unwrap(),
+    )
+    .expect("thread/start should return a thread id");
     assert_eq!(
         thread_start["model"].as_str(),
         Some(crate::adapters::app_server::APP_SERVER_LOCAL_MODEL)
@@ -5254,7 +5346,7 @@ allow = ["streaming"]
         )
     );
 
-    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(metadata_path)
         .await
         .unwrap();
     let lifecycle = metadata_store
@@ -5271,21 +5363,23 @@ allow = ["streaming"]
         record.manifest_hash
     );
 
-    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(session_path)
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 4);
-    let compile = event_by_kind(&events, crate::EventKind::ManifestCompileCompleted);
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
-    assert_eq!(compile.origin, crate::EventOrigin::Discharged);
-    assert_eq!(bind.origin, crate::EventOrigin::Discharged);
+    let compile = event_by_kind(&events, verlet_history::EventKind::ManifestCompileCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
+    assert_eq!(compile.origin, verlet_history::EventOrigin::Discharged);
+    assert_eq!(bind.origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(
         compile.provenance.discharged_by.as_deref(),
-        Some(crate::MANIFEST_COMPILER_DISCHARGED_BY)
+        Some(crate::agent::manifest_bind::MANIFEST_COMPILER_DISCHARGED_BY)
     );
     assert_eq!(
         bind.provenance.discharged_by.as_deref(),
-        Some(crate::MANIFEST_BINDER_DISCHARGED_BY)
+        Some(crate::agent::manifest_bind::MANIFEST_BINDER_DISCHARGED_BY)
     );
     assert_eq!(bind.provenance.source_event_ids, vec![compile.id]);
     assert_eq!(compile.payload["alias"]["alias"].as_str(), Some("latest"));
@@ -5304,10 +5398,13 @@ allow = ["streaming"]
     assert_eq!(bind.payload["placement"]["target"], "local");
     let placement_events = events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
+        .filter(|event| event.kind == verlet_history::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(placement_events.len(), 1);
-    assert_eq!(placement_events[0].origin, crate::EventOrigin::Witnessed);
+    assert_eq!(
+        placement_events[0].origin,
+        verlet_history::EventOrigin::Witnessed
+    );
     assert_eq!(placement_events[0].payload["placement"], "local");
     assert_eq!(
         placement_events[0].payload["snapshot_id"],
@@ -5322,8 +5419,8 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
     let bound = app
         .bind_app_server_agent_ref(
             crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
-            &crate::AgentManifestModelProfileSelection::default(),
-            &crate::AgentManifestBindOverrides::default(),
+            &crate::agent::manifest_bind::AgentManifestModelProfileSelection::default(),
+            &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
             None,
             None,
         )
@@ -5340,11 +5437,11 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
     let handle = app
         .inner
         .supervisor
-        .start_thread(crate::ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: app.inner.tenant_id.clone(),
             user_id: app.inner.user_id.clone(),
             session_id: "manifest-lifecycle-cancel".to_string(),
-            topology: crate::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata,
         })
         .await
@@ -5388,7 +5485,7 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
                 .await
                 .unwrap()
                 .iter()
-                .any(|event| event.kind == crate::EventKind::ManifestBindCompleted);
+                .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted);
             let has_lifecycle = app
                 .inner
                 .metadata_store
@@ -5411,11 +5508,13 @@ struct StartingOnlyRuntimeFactory {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntimeFactory for StartingOnlyRuntimeFactory {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for StartingOnlyRuntimeFactory {
     async fn build(
         &self,
-        _context: &crate::ThreadContext,
-    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
+        _context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
         Ok(Box::new(StartingOnlyRuntime {
             started: self.started.clone(),
         }))
@@ -5427,17 +5526,22 @@ struct StartingOnlyRuntime {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntime for StartingOnlyRuntime {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntime for StartingOnlyRuntime {
     async fn run(
         self: Box<Self>,
-        context: crate::ThreadContext,
-        _services: crate::RuntimeServices,
-        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
-        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-        _status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        context: verlet_runtime_contracts::ThreadContext,
+        _services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<
+            crate::kernel::runtime_host::runtime_api::ThreadCommand,
+        >,
+        events: tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
+        _status: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
         cancellation: tokio_util::sync::CancellationToken,
     ) {
-        let _ = events.send(crate::ThreadEvent::Started { context });
+        let _ =
+            events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Started { context });
         self.started.notify_one();
         tokio::select! {
             _ = cancellation.cancelled() => {}
@@ -5479,7 +5583,7 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
@@ -5488,9 +5592,9 @@ streaming = false
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    config.default_workspace = Some(crate::AgentManifestWorkspaceBinding {
+    config.default_workspace = Some(crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: host_workspace,
-        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     });
     let started = std::sync::Arc::new(tokio::sync::Notify::new());
     let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
@@ -5553,7 +5657,7 @@ streaming = false
                 .unwrap()
                 .iter()
                 .any(|event| {
-                    event.kind == crate::EventKind::ManifestBindCompleted
+                    event.kind == verlet_history::EventKind::ManifestBindCompleted
                         && event.payload["workspace"].is_object()
                 })
             {
@@ -5622,19 +5726,21 @@ server_ref = "mcp://arcade"
         std::sync::Arc::new(UniverseCallingClient::default())
     })
     .await;
-    crate::SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
-        .await
-        .unwrap()
-        .upsert_source_async(
-            crate::McpRemoteServerConfig::new(
-                "arcade",
-                crate::McpRemoteTransport::StreamableHttp,
-                mcp_url,
-            )
-            .unwrap(),
+    crate::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(
+        &app.inner.metadata_store_path,
+    )
+    .await
+    .unwrap()
+    .upsert_source_async(
+        crate::adapters::mcp_client::McpRemoteServerConfig::new(
+            "arcade",
+            crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
+            mcp_url,
         )
-        .await
-        .unwrap();
+        .unwrap(),
+    )
+    .await
+    .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -5647,7 +5753,7 @@ server_ref = "mcp://arcade"
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -5706,7 +5812,7 @@ server_ref = "mcp://arcade"
     assert_eq!(call["is_error"].as_bool(), Some(false));
     assert_eq!(
         call["output_hash"].as_str(),
-        Some(crate::agent::contracts::sha256_hex(b"REMOTE_MCP_OK hello").as_str())
+        Some(verlet_agent::contracts::sha256_hex(b"REMOTE_MCP_OK hello").as_str())
     );
     mcp_task.abort();
     let _ = std::fs::remove_dir_all(root);
@@ -5719,7 +5825,7 @@ async fn pinned_protocol_tool_import_projects_direct_row() {
     std::fs::create_dir_all(&workspace).unwrap();
     let agent_registry_root = root.join("agents");
     let schema = app_mcp_echo_schema("string");
-    let schema_hash = crate::schema_hash_of(&schema).unwrap();
+    let schema_hash = crate::agent::tool_universe::schema_hash_of(&schema).unwrap();
     publish_agent_manifest(
         &root,
         &agent_registry_root,
@@ -5743,19 +5849,21 @@ pin = "mcptool://arcade/verlet_mcp_echo@{schema_hash}"
         std::sync::Arc::new(PinnedDirectCallingClient::default())
     })
     .await;
-    crate::SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
-        .await
-        .unwrap()
-        .upsert_source_async(
-            crate::McpRemoteServerConfig::new(
-                "arcade",
-                crate::McpRemoteTransport::StreamableHttp,
-                mcp_url,
-            )
-            .unwrap(),
+    crate::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(
+        &app.inner.metadata_store_path,
+    )
+    .await
+    .unwrap()
+    .upsert_source_async(
+        crate::adapters::mcp_client::McpRemoteServerConfig::new(
+            "arcade",
+            crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
+            mcp_url,
         )
-        .await
-        .unwrap();
+        .unwrap(),
+    )
+    .await
+    .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -5962,18 +6070,18 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         assert_eq!(error.code, -32602);
     }
 
-    let store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
     let carriers = store
-        .read_events(&crate::EventStreamId::new(stream), None)
+        .read_events(&verlet_history::EventStreamId::new(stream), None)
         .await
         .unwrap();
     assert_eq!(carriers.len(), 2);
     assert!(
         carriers
             .iter()
-            .all(|event| event.kind == crate::EventKind::ClientRecordAppended)
+            .all(|event| event.kind == verlet_history::EventKind::ClientRecordAppended)
     );
     assert_eq!(carriers[0].payload["client_kind"], "placement.bound");
     assert_eq!(
@@ -6047,20 +6155,26 @@ async fn app_server_envelope_ingress_records_surface_admission_before_execution(
     assert_eq!(read["thread"]["turns"].as_array().unwrap().len(), 1);
 
     let coordinates = app.coordinates_for_thread(&thread_id).await.unwrap();
-    let store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
     let control_events = store
-        .read_events(&crate::control_stream_id(&coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let thread_events = store
-        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let ingress = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
         .collect::<Vec<_>>();
     assert_eq!(ingress.len(), 1);
     assert_eq!(
@@ -6259,7 +6373,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     );
     assert!(context_event["payload"].is_object());
 
-    let listed_thread_id = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let listed_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -6267,15 +6381,19 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .await
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     session_store
         .append_events(
-            &crate::EventStreamId::new(format!("control:{}", lifecycle.coordinates.thread_id)),
-            vec![crate::NewEventRecord::witnessed(
+            &verlet_history::EventStreamId::new(format!(
+                "control:{}",
+                lifecycle.coordinates.thread_id
+            )),
+            vec![verlet_history::NewEventRecord::witnessed(
                 lifecycle.coordinates.clone(),
-                crate::EventKind::MandateStarted,
+                verlet_history::EventKind::MandateStarted,
                 serde_json::json!({
                     "subject": { "loop_id": "loop-1" },
                     "mandate_id": "mandate-1",
@@ -6307,12 +6425,12 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         Some("witnessed")
     );
 
-    let thread_stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let control_stream_id =
-        crate::EventStreamId::new(format!("control:{}", lifecycle.coordinates.thread_id));
-    let request_event = crate::NewEventRecord::witnessed(
+        verlet_history::EventStreamId::new(format!("control:{}", lifecycle.coordinates.thread_id));
+    let request_event = verlet_history::NewEventRecord::witnessed(
         lifecycle.coordinates.clone(),
-        crate::EventKind::ToolCallRequested,
+        verlet_history::EventKind::ToolCallRequested,
         serde_json::json!({
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
             "snapshot_id": "snapshot-approval",
@@ -6325,30 +6443,30 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .append_events(&thread_stream_id, vec![request_event])
         .await
         .unwrap();
-    let suspended_event = crate::NewEventRecord::discharged(
+    let suspended_event = verlet_history::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
-        crate::EventKind::ToolCallSuspended,
+        verlet_history::EventKind::ToolCallSuspended,
         serde_json::json!({
-            "schema": crate::EventKind::ToolCallSuspended.payload_schema_id(),
+            "schema": verlet_history::EventKind::ToolCallSuspended.payload_schema_id(),
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
             "snapshot_id": "snapshot-approval",
             "approval_id": "approval-1",
             "reason": "operator approval required",
         }),
-        crate::EventProvenance {
+        verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             source_event_ids: vec![request_event_id],
             discharged_by: Some("coupling:test-approval".to_string()),
             function: Some("approval_wait/v1".to_string()),
-            ..crate::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
     );
     let suspended_event_id = suspended_event.id;
-    let waiting_event = crate::NewEventRecord::discharged(
+    let waiting_event = verlet_history::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
-        crate::EventKind::TurnWaiting,
+        verlet_history::EventKind::TurnWaiting,
         serde_json::json!({
-            "schema": crate::EventKind::TurnWaiting.payload_schema_id(),
+            "schema": verlet_history::EventKind::TurnWaiting.payload_schema_id(),
             "turn_id": "turn-pending",
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
             "snapshot_id": "snapshot-approval",
@@ -6357,12 +6475,12 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             "reason": "operator approval required",
             "continuation": "tool.call",
         }),
-        crate::EventProvenance {
+        verlet_history::EventProvenance {
             source_streams: vec![control_stream_id.clone()],
             source_event_ids: vec![suspended_event_id],
             discharged_by: Some("scheduler:tool-decision".to_string()),
             function: Some("tool_wait/v1".to_string()),
-            ..crate::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
     );
     session_store
@@ -6517,36 +6635,36 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             .contains("approval approval-1 already resolved")
     );
 
-    let decision_event = crate::NewEventRecord::discharged(
+    let decision_event = verlet_history::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
-        crate::EventKind::ToolCallDecision,
+        verlet_history::EventKind::ToolCallDecision,
         serde_json::json!({
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
             "snapshot_id": "snapshot-approval",
             "outcome": { "decision": "allow" },
         }),
-        crate::EventProvenance {
+        verlet_history::EventProvenance {
             source_streams: vec![control_stream_id.clone()],
             source_event_ids: vec![suspended_event_id],
             discharged_by: Some("coupling:test-approval".to_string()),
             function: Some("approval_decision/v1".to_string()),
-            ..crate::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
     );
     let decision_event_id = decision_event.id;
-    let resumed_event = crate::NewEventRecord::discharged(
+    let resumed_event = verlet_history::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
-        crate::EventKind::TurnResumed,
+        verlet_history::EventKind::TurnResumed,
         serde_json::json!({
             "turn_id": "turn-pending",
             "consumed_fact_id": decision_event_id.to_string(),
         }),
-        crate::EventProvenance {
+        verlet_history::EventProvenance {
             source_streams: vec![control_stream_id.clone()],
             source_event_ids: vec![decision_event_id],
             discharged_by: Some("scheduler:tool-decision".to_string()),
             function: Some("tool_resume/v1".to_string()),
-            ..crate::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
     );
     session_store
@@ -6579,19 +6697,21 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
 
     session_store
         .append_events(
-            &crate::EventStreamId::new(format!(
+            &verlet_history::EventStreamId::new(format!(
                 "derived:memory:{}",
                 lifecycle.coordinates.thread_id
             )),
-            vec![crate::NewEventRecord::discharged(
+            vec![verlet_history::NewEventRecord::discharged(
                 lifecycle.coordinates.clone(),
-                crate::EventKind::SessionEntryAppended,
+                verlet_history::EventKind::SessionEntryAppended,
                 serde_json::json!({ "fact": "likes receipts" }),
-                crate::EventProvenance {
-                    source_streams: vec![crate::EventStreamId::for_thread(&lifecycle.coordinates)],
+                verlet_history::EventProvenance {
+                    source_streams: vec![verlet_history::EventStreamId::for_thread(
+                        &lifecycle.coordinates,
+                    )],
                     discharged_by: Some("coupling:test-memory".to_string()),
                     function: Some("op://test/memory@sha256:test".to_string()),
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             )],
         )
@@ -6761,12 +6881,12 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             && receipt["payloadSchema"].as_str() == Some("cooldis.event.session.entry.appended/1")
     }));
 
-    let child_thread_id = crate::ThreadId::new();
-    let thread_spawned = crate::NewEventRecord::witnessed(
+    let child_thread_id = verlet_runtime_contracts::ThreadId::new();
+    let thread_spawned = verlet_history::NewEventRecord::witnessed(
         lifecycle.coordinates.clone(),
-        crate::EventKind::ThreadSpawned,
+        verlet_history::EventKind::ThreadSpawned,
         serde_json::json!({
-            "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
+            "schema": verlet_history::EventKind::ThreadSpawned.payload_schema_id(),
             "parent_thread_id": lifecycle.coordinates.thread_id.to_string(),
             "child_thread_id": child_thread_id.to_string(),
             "child_manifest_hash": "sha256:debug-child",
@@ -6775,11 +6895,11 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         }),
     );
     let spawned_event_id = thread_spawned.id;
-    let io_ingress = crate::NewEventRecord::witnessed(
+    let io_ingress = verlet_history::NewEventRecord::witnessed(
         lifecycle.coordinates.clone(),
-        crate::EventKind::IoIngressReceived,
+        verlet_history::EventKind::IoIngressReceived,
         serde_json::json!({
-            "schema": crate::EventKind::IoIngressReceived.payload_schema_id(),
+            "schema": verlet_history::EventKind::IoIngressReceived.payload_schema_id(),
             "route_id": "debug-route",
             "envelope_digest": "sha256:debug-envelope",
         }),
@@ -6790,21 +6910,21 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             &control_stream_id,
             vec![
                 thread_spawned,
-                crate::NewEventRecord::witnessed(
+                verlet_history::NewEventRecord::witnessed(
                     lifecycle.coordinates.clone(),
-                    crate::EventKind::ThreadJoined,
+                    verlet_history::EventKind::ThreadJoined,
                     serde_json::json!({
-                        "schema": crate::EventKind::ThreadJoined.payload_schema_id(),
+                        "schema": verlet_history::EventKind::ThreadJoined.payload_schema_id(),
                         "child_thread_id": child_thread_id.to_string(),
                         "spawned_event_id": spawned_event_id.to_string(),
                         "terminal_state": "completed",
                     }),
                 ),
-                crate::NewEventRecord::witnessed(
+                verlet_history::NewEventRecord::witnessed(
                     lifecycle.coordinates.clone(),
-                    crate::EventKind::PolicyBound,
+                    verlet_history::EventKind::PolicyBound,
                     serde_json::json!({
-                        "schema": crate::EventKind::PolicyBound.payload_schema_id(),
+                        "schema": verlet_history::EventKind::PolicyBound.payload_schema_id(),
                         "policy_kind": "coupling_set",
                         "policy_id": "debug-policy",
                         "content_hash": "sha256:debug-policy",
@@ -6812,11 +6932,11 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
                     }),
                 ),
                 io_ingress,
-                crate::NewEventRecord::witnessed(
+                verlet_history::NewEventRecord::witnessed(
                     lifecycle.coordinates.clone(),
-                    crate::EventKind::AdmissionDecided,
+                    verlet_history::EventKind::AdmissionDecided,
                     serde_json::json!({
-                        "schema": crate::EventKind::AdmissionDecided.payload_schema_id(),
+                        "schema": verlet_history::EventKind::AdmissionDecided.payload_schema_id(),
                         "route_id": "debug-route",
                         "policy_hash": "sha256:debug-policy",
                         "decision": "queue",
@@ -6941,7 +7061,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     assert_eq!(empty_events[3]["kind"].as_str(), Some("placement.decision"));
     assert_eq!(empty_page["cursor"], serde_json::Value::Null);
 
-    let bulk_thread_id = crate::ThreadId::parse_str(&empty_thread_id).unwrap();
+    let bulk_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&empty_thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -6949,15 +7069,16 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .await
         .unwrap()
         .unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     let bulk_events = (0..501)
         .map(|idx| {
-            crate::NewEventRecord::witnessed(
+            verlet_history::NewEventRecord::witnessed(
                 lifecycle.coordinates.clone(),
-                crate::EventKind::SessionEntryAppended,
+                verlet_history::EventKind::SessionEntryAppended,
                 serde_json::json!({ "idx": idx }),
             )
         })
@@ -7269,7 +7390,7 @@ allow = ["default_cwd", "max_tool_rounds"]
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let no_cwd_manifest_path = root.join("closed-no-cwd.verlet.agent.toml");
@@ -7293,7 +7414,7 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&no_cwd_manifest_path)
         .unwrap();
 
@@ -7330,7 +7451,8 @@ streaming = false
         .await
         .unwrap();
     let thread_id =
-        crate::ThreadId::parse_str(cwd_start["thread"]["id"].as_str().unwrap()).unwrap();
+        verlet_runtime_contracts::ThreadId::parse_str(cwd_start["thread"]["id"].as_str().unwrap())
+            .unwrap();
     assert_eq!(
         cwd_start["cwd"].as_str(),
         Some(
@@ -7348,7 +7470,7 @@ streaming = false
         .unwrap()
         .expect("cwd-lowered manifest start should persist lifecycle metadata");
     assert_eq!(
-        serde_json::from_str::<crate::AgentManifestBindOverrides>(
+        serde_json::from_str::<crate::agent::manifest_bind::AgentManifestBindOverrides>(
             &lifecycle.metadata
                 [crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA]
         )
@@ -7367,10 +7489,12 @@ streaming = false
             [crate::adapters::app_server::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA],
         "64"
     );
-    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(session_path)
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     assert_eq!(
         bind.payload["overridden_keys"].as_array().unwrap(),
         &vec![serde_json::json!("default_cwd")]
@@ -7421,7 +7545,9 @@ streaming = false
         )
         .await
         .unwrap();
-    let rebound_id = crate::ThreadId::parse_str(rebind["thread"]["id"].as_str().unwrap()).unwrap();
+    let rebound_id =
+        verlet_runtime_contracts::ThreadId::parse_str(rebind["thread"]["id"].as_str().unwrap())
+            .unwrap();
     let rebound = app
         .inner
         .metadata_store
@@ -7494,7 +7620,7 @@ streaming = false
             .contains("operations are declared in an agent manifest")
     );
 
-    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(metadata_path)
         .await
         .unwrap();
     assert_eq!(
@@ -7543,12 +7669,12 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&operation_registry_root)
         .with_global_operation_name("global");
@@ -7560,8 +7686,11 @@ streaming = false
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let mut runtime_config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     runtime_config.max_tokens = 128;
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
@@ -7598,7 +7727,10 @@ streaming = false
     wait_for_provider_requests(&client, 1).await;
     let requests = client.requests();
     assert!(!tool_names(&requests[0]).contains(&"global_global_search".to_string()));
-    assert!(!tool_names(&requests[0]).contains(&crate::TOOL_SEARCH_TOOL.to_string()));
+    assert!(
+        !tool_names(&requests[0])
+            .contains(&crate::agent::tool_universe::TOOL_SEARCH_TOOL.to_string())
+    );
     assert!(
         !requests[0]
             .tools
@@ -7646,7 +7778,7 @@ streaming = false
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
     publish_echo_operation(&operation_registry_root, "search", "search", "new").await;
@@ -7657,7 +7789,7 @@ streaming = false
         "printf verlet | search",
         "old:verlet",
     ));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&operation_registry_root);
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
@@ -7668,8 +7800,11 @@ streaming = false
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let mut runtime_config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     runtime_config.max_tokens = 128;
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
@@ -7751,12 +7886,12 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
     let client = std::sync::Arc::new(WorkspaceBindingClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &app_cwd,
@@ -7804,21 +7939,22 @@ streaming = false
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     let events = session_store
         .read_events(
-            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            &verlet_history::EventStreamId::for_thread(&lifecycle.coordinates),
             None,
         )
         .await
         .unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     assert_eq!(bind.payload["workspace"]["guest_path"], "/work");
     assert_eq!(bind.payload["workspace"]["mode"], "rw");
     assert_eq!(
@@ -7837,7 +7973,9 @@ streaming = false
         )
         .await
         .unwrap();
-    let fork_id = crate::ThreadId::parse_str(fork["thread"]["id"].as_str().unwrap()).unwrap();
+    let fork_id =
+        verlet_runtime_contracts::ThreadId::parse_str(fork["thread"]["id"].as_str().unwrap())
+            .unwrap();
     let fork_lifecycle = app
         .inner
         .metadata_store
@@ -7937,7 +8075,7 @@ streaming = false
         ),
     )
     .unwrap();
-    let agent = crate::LocalAgentRegistry::new(&agent_registry_root)
+    let agent = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
@@ -7968,7 +8106,7 @@ streaming = false
         .await
         .unwrap();
     let thread_id_string = thread["thread"]["id"].as_str().unwrap().to_string();
-    let thread_id = crate::ThreadId::parse_str(&thread_id_string).unwrap();
+    let thread_id = verlet_runtime_contracts::ThreadId::parse_str(&thread_id_string).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -7976,10 +8114,10 @@ streaming = false
         .await
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
-    let coupling_set: crate::BoundCouplingSet = serde_json::from_str(
+    let coupling_set: crate::agent::manifest_bind::BoundCouplingSet = serde_json::from_str(
         lifecycle
             .metadata
-            .get(crate::THREAD_BOUND_COUPLING_SET_METADATA)
+            .get(crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA)
             .expect("bound coupling set metadata should be persisted"),
     )
     .unwrap();
@@ -7990,7 +8128,7 @@ streaming = false
     assert_eq!(coupling.id, "std::context.spill");
     assert_eq!(
         coupling.trigger_kind,
-        crate::EventKind::ContextCompileCompleted
+        verlet_history::EventKind::ContextCompileCompleted
     );
     assert_eq!(coupling.sink.stream, "derived:context");
     assert_eq!(
@@ -8115,12 +8253,12 @@ streaming = false
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&operation_registry_root);
     let listen =
@@ -8134,8 +8272,11 @@ streaming = false
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let session_path = config.state_home.join("session_history.sqlite3");
-    let mut runtime_config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     runtime_config.max_tokens = 128;
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
@@ -8162,32 +8303,34 @@ streaming = false
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
-    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(session_path)
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     assert_eq!(
         bind.payload["operation_bindings"][0]["operations"],
         serde_json::json!(["profile"])
     );
-    let request = crate::ToolCallRequestedPayload {
-        subject: crate::ToolCallSubject {
+    let request = crate::kernel::control_decision::ToolCallRequestedPayload {
+        subject: crate::kernel::control_decision::ToolCallSubject {
             turn_id: "turn-effect-class".to_string(),
             call_id: "call-effect-class".to_string(),
         },
         snapshot_id: bind.payload["manifest_hash"].as_str().unwrap().to_string(),
-        tool_name: crate::BASH_TOOL.to_string(),
+        tool_name: verlet_vbash::BASH_TOOL.to_string(),
         arguments: serde_json::json!({"command":"profile customer-1"}),
         args_fingerprint: None,
         holds: Vec::new(),
     };
     assert_eq!(
         crate::adapters::agent_loop::effect_class_for_request(&events, &request).unwrap(),
-        crate::EffectClass::Idempotent,
+        verlet_agent::manifest_schema::EffectClass::Idempotent,
         "the runtime lookup must read the class from the real top-level bind receipt shape"
     );
 
@@ -8220,9 +8363,9 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
         r#"[{"name":"analytics","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net:https://example.com"]}]"#
             .to_string(),
     );
-    let context = crate::ThreadContext::with_topology_and_metadata(
-        crate::ThreadCoordinates::new("tenant", "user", "session"),
-        crate::ThreadTopology::root(),
+    let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+        verlet_runtime_contracts::ThreadTopology::root(),
         metadata,
     );
 
@@ -8230,11 +8373,11 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
         crate::adapters::app_server::threads::thread_manifest_operation_bindings(&context).unwrap();
     assert_eq!(
         bindings,
-        vec![crate::AgentManifestOperationBinding {
+        vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
-            effect_class: crate::EffectClass::AtMostOnce,
+            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
             grant_expiries: Vec::new(),
             operations: Vec::new(),
@@ -8251,16 +8394,19 @@ fn apply_manifest_runtime_metadata_injects_tool_use_instruction_once() {
         crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
         instruction.to_string(),
     );
-    let context = crate::ThreadContext::with_topology_and_metadata(
-        crate::ThreadCoordinates::new("tenant", "user", "session"),
-        crate::ThreadTopology::root(),
+    let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+        verlet_runtime_contracts::ThreadTopology::root(),
         metadata,
     );
-    let mut config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config
         .system
-        .push(crate::SystemBlock::text("Base instruction."));
+        .push(verlet_provider::SystemBlock::text("Base instruction."));
 
     crate::adapters::app_server::threads::apply_manifest_runtime_metadata(&context, &mut config)
         .unwrap();
@@ -8290,13 +8436,16 @@ fn apply_manifest_runtime_metadata_injects_legacy_tool_use_instruction() {
         r#"[{"name":"file-read","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":[]}]"#
             .to_string(),
     );
-    let context = crate::ThreadContext::with_topology_and_metadata(
-        crate::ThreadCoordinates::new("tenant", "user", "session"),
-        crate::ThreadTopology::root(),
+    let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+        verlet_runtime_contracts::ThreadTopology::root(),
         metadata,
     );
-    let mut config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
 
     crate::adapters::app_server::threads::apply_manifest_runtime_metadata(&context, &mut config)
         .unwrap();
@@ -8340,12 +8489,16 @@ async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_sto
     let root =
         std::env::temp_dir().join(format!("verlet-provider-resolve-{}", uuid::Uuid::now_v7()));
     let store_path = root.join("metadata.sqlite3");
-    let store = crate::SqliteMetadataStore::open(&store_path).await.unwrap();
-    crate::seed_default_llm_providers(&store).await.unwrap();
+    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&store_path)
+        .await
+        .unwrap();
+    verlet_metadata::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
     store
         .set_credential(
-            crate::OPENAI_COMPATIBLE_PROVIDER_ID,
-            crate::LlmProviderCredential::ApiKey {
+            verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID,
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-openai_compatible-key".to_string(),
             },
         )
@@ -8355,8 +8508,8 @@ async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_sto
     let resolved = crate::adapters::app_server::resolve_catalog_openai_chat_completions_provider(
         &store,
         &store,
-        &crate::LlmProviderAuthContext::new(),
-        crate::OPENAI_COMPATIBLE_PROVIDER_ID,
+        &verlet_metadata::provider_store::LlmProviderAuthContext::new(),
+        verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID,
         None,
         777,
         false,
@@ -8366,11 +8519,11 @@ async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_sto
 
     assert_eq!(
         resolved.runtime_config.provider,
-        crate::OPENAI_COMPATIBLE_PROVIDER_ID
+        verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID
     );
     assert_eq!(
         resolved.runtime_config.model,
-        crate::OPENAI_COMPATIBLE_DEFAULT_MODEL
+        verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL
     );
     assert_eq!(resolved.runtime_config.max_tokens, 777);
     assert!(!resolved.runtime_config.stream);
@@ -8380,7 +8533,7 @@ async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_sto
     );
     assert_eq!(
         resolved.endpoint.auth,
-        crate::ProviderAuth::Bearer {
+        verlet_provider::ProviderAuth::Bearer {
             token: "stored-openai_compatible-key".to_string()
         }
     );
@@ -8475,7 +8628,7 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let source_id = crate::ThreadId::parse_str(&source_thread_id).unwrap();
+    let source_id = verlet_runtime_contracts::ThreadId::parse_str(&source_thread_id).unwrap();
     let source_lifecycle = app
         .inner
         .metadata_store
@@ -8483,15 +8636,16 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
         .await
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     let _source_entry = session_store
         .append(
             &source_lifecycle.coordinates,
             None,
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::user_text("explicit fork checkpoint"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("explicit fork checkpoint"),
             },
         )
         .await
@@ -8581,7 +8735,7 @@ async fn thread_fork_rejects_unavailable_checkpoint_id() {
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let checkpoint_id = crate::ThreadCheckpointId::new();
+    let checkpoint_id = verlet_runtime_contracts::ThreadCheckpointId::new();
 
     let err = app
         .dispatch_request(
@@ -8611,7 +8765,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let source_id = crate::ThreadId::parse_str(&source_thread_id).unwrap();
+    let source_id = verlet_runtime_contracts::ThreadId::parse_str(&source_thread_id).unwrap();
     let source_lifecycle = app
         .inner
         .metadata_store
@@ -8619,15 +8773,16 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         .await
         .unwrap()
         .unwrap();
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
     let source_entry = session_store
         .append(
             &source_lifecycle.coordinates,
             None,
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::user_text("borrowed source message"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("borrowed source message"),
             },
         )
         .await
@@ -8669,7 +8824,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
             .is_some()
     );
 
-    let child_id = crate::ThreadId::parse_str(child_thread_id).unwrap();
+    let child_id = verlet_runtime_contracts::ThreadId::parse_str(child_thread_id).unwrap();
     let child_lifecycle = app
         .inner
         .metadata_store
@@ -8705,7 +8860,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
     );
     assert!(matches!(
         child_context.entries.last().unwrap().kind,
-        crate::SessionEntryKind::Runtime { ref kind, .. } if kind == "thread_rebind_fork"
+        verlet_history::SessionEntryKind::Runtime { ref kind, .. } if kind == "thread_rebind_fork"
     ));
     assert_eq!(child_context.source_cuts.len(), 2);
     assert!(child_context.source_cuts[0].inherited);
@@ -8713,25 +8868,25 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
 
     let child_events = session_store
         .read_events(
-            &crate::EventStreamId::for_thread(&child_lifecycle.coordinates),
+            &verlet_history::EventStreamId::for_thread(&child_lifecycle.coordinates),
             None,
         )
         .await
         .unwrap();
     let child_bind_events = child_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .collect::<Vec<_>>();
     assert_eq!(child_bind_events.len(), 1);
     assert_eq!(child_bind_events[0].payload["placement"]["target"], "local");
     let child_placement_events = child_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
+        .filter(|event| event.kind == verlet_history::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(child_placement_events.len(), 1);
     assert_eq!(
         child_placement_events[0].origin,
-        crate::EventOrigin::Witnessed
+        verlet_history::EventOrigin::Witnessed
     );
     assert_eq!(child_placement_events[0].payload["placement"], "local");
     assert_eq!(
@@ -8885,7 +9040,7 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let record = app
         .inner
         .metadata_store
@@ -8957,7 +9112,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
         config
     };
     let first = crate::adapters::app_server::VerletAppServer::new_local(config_for(
-        crate::AgentManifestPlacementBinding::default(),
+        crate::agent::manifest_bind::AgentManifestPlacementBinding::default(),
     ))
     .await
     .unwrap();
@@ -8972,8 +9127,12 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
         .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
-    let absent_id = crate::ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
-    let corrupt_id = crate::ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
+    let absent_id =
+        verlet_runtime_contracts::ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let corrupt_id =
+        verlet_runtime_contracts::ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap())
+            .unwrap();
     let mut absent_lifecycle = first
         .inner
         .metadata_store
@@ -9023,8 +9182,8 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
     drop(first);
 
     let restarted = crate::adapters::app_server::VerletAppServer::new_local(config_for(
-        crate::AgentManifestPlacementBinding {
-            target: crate::PlacementTarget::Sandbox,
+        crate::agent::manifest_bind::AgentManifestPlacementBinding {
+            target: crate::kernel::control_decision::PlacementTarget::Sandbox,
             executor_ref: Some("executor://new-daemon-default".to_string()),
             config: std::collections::BTreeMap::new(),
         },
@@ -9055,20 +9214,21 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
         ])
     );
 
-    let session_store = crate::SqliteSessionStore::open(&restarted.inner.session_store_path)
-        .await
-        .unwrap();
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&restarted.inner.session_store_path)
+            .await
+            .unwrap();
     for lifecycle in [&absent_lifecycle, &corrupt_lifecycle] {
         let events = session_store
             .read_events(
-                &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+                &verlet_history::EventStreamId::for_thread(&lifecycle.coordinates),
                 None,
             )
             .await
             .unwrap();
         let bind_events = events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted)
+            .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
             .collect::<Vec<_>>();
         assert_eq!(bind_events.len(), 2);
         assert!(
@@ -9078,7 +9238,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
         );
         let placement_events = events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::PlacementDecision)
+            .filter(|event| event.kind == verlet_history::EventKind::PlacementDecision)
             .collect::<Vec<_>>();
         assert_eq!(placement_events.len(), 2);
         assert!(
@@ -9126,7 +9286,7 @@ streaming = false
 "#,
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(&agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let config_for = |host_path: &std::path::Path| {
@@ -9139,10 +9299,11 @@ streaming = false
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.agent_registry_root = agent_registry_root.clone();
-        config.default_workspace = Some(crate::AgentManifestWorkspaceBinding {
-            host_path: host_path.to_path_buf(),
-            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
-        });
+        config.default_workspace =
+            Some(crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
+                host_path: host_path.to_path_buf(),
+                mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+            });
         config
     };
 
@@ -9192,9 +9353,15 @@ streaming = false
         )
         .await
         .unwrap();
-    let absent_id = crate::ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
-    let corrupt_id = crate::ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
-    let drifted_id = crate::ThreadId::parse_str(drifted["thread"]["id"].as_str().unwrap()).unwrap();
+    let absent_id =
+        verlet_runtime_contracts::ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let corrupt_id =
+        verlet_runtime_contracts::ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let drifted_id =
+        verlet_runtime_contracts::ThreadId::parse_str(drifted["thread"]["id"].as_str().unwrap())
+            .unwrap();
     let mut absent_lifecycle = first
         .inner
         .metadata_store
@@ -9220,7 +9387,8 @@ streaming = false
         .inner
         .metadata_store
         .get_thread_lifecycle(
-            crate::ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap(),
+            verlet_runtime_contracts::ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap())
+                .unwrap(),
         )
         .await
         .unwrap()
@@ -9229,23 +9397,26 @@ streaming = false
         .inner
         .metadata_store
         .get_thread_lifecycle(
-            crate::ThreadId::parse_str(valid_fork["thread"]["id"].as_str().unwrap()).unwrap(),
+            verlet_runtime_contracts::ThreadId::parse_str(
+                valid_fork["thread"]["id"].as_str().unwrap(),
+            )
+            .unwrap(),
         )
         .await
         .unwrap()
         .unwrap();
     assert!(
-        crate::SqliteSessionStore::open(&first.inner.session_store_path)
+        verlet_history_sqlite::SqliteSessionStore::open(&first.inner.session_store_path)
             .await
             .unwrap()
             .read_events(
-                &crate::EventStreamId::for_thread(&valid_fork_lifecycle.coordinates),
+                &verlet_history::EventStreamId::for_thread(&valid_fork_lifecycle.coordinates),
                 None,
             )
             .await
             .unwrap()
             .iter()
-            .any(|event| event.kind == crate::EventKind::ManifestBindCompleted),
+            .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted),
         "a plain fork must receive its own durable workspace bind witness"
     );
     absent_lifecycle
@@ -9257,11 +9428,13 @@ streaming = false
     );
     drifted_lifecycle.metadata.insert(
         crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA.to_string(),
-        serde_json::to_string(&crate::AgentManifestResolvedWorkspaceMount {
-            guest_path: std::path::PathBuf::from("/work"),
-            host_path: std::fs::canonicalize(&replacement_workspace).unwrap(),
-            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
-        })
+        serde_json::to_string(
+            &crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount {
+                guest_path: std::path::PathBuf::from("/work"),
+                host_path: std::fs::canonicalize(&replacement_workspace).unwrap(),
+                mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+            },
+        )
         .unwrap(),
     );
     first
@@ -9352,18 +9525,20 @@ streaming = false
         .inner
         .metadata_store
         .get_thread_lifecycle(
-            crate::ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap(),
+            verlet_runtime_contracts::ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap())
+                .unwrap(),
         )
         .await
         .unwrap()
         .unwrap();
-    let inherited: crate::AgentManifestResolvedWorkspaceMount = serde_json::from_str(
-        valid_reloaded
-            .metadata
-            .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
-            .unwrap(),
-    )
-    .unwrap();
+    let inherited: crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount =
+        serde_json::from_str(
+            valid_reloaded
+                .metadata
+                .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
+                .unwrap(),
+        )
+        .unwrap();
     assert_eq!(
         inherited.host_path,
         std::fs::canonicalize(&first_workspace).unwrap(),
@@ -9385,7 +9560,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
     std::fs::create_dir_all(&workspace).unwrap();
     // lexicon-allow: capsule - existing test provider helper type
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
@@ -9402,7 +9577,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let mut record = app
         .inner
         .metadata_store
@@ -9525,7 +9700,7 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
         "command -v search && printf verlet | search",
         "search:verlet",
     ));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
         crate::adapters::app_server::CapsuleBindingsConfig::default()
@@ -9544,16 +9719,17 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     let exa_binding = manifest_operation_binding_by_name(&bind.payload, "search");
     assert_eq!(exa_binding["name"].as_str(), Some("search"));
     assert_eq!(
@@ -9585,7 +9761,7 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
     let alpha = publish_echo_operation(&registry_root, "alpha", "alpha_search", "alpha").await;
     let beta = publish_echo_operation(&registry_root, "beta", "beta_search", "beta").await;
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
         crate::adapters::app_server::CapsuleBindingsConfig::default()
@@ -9604,27 +9780,31 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("load-all default manifest thread should persist lifecycle metadata");
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     let alpha_binding = manifest_operation_binding_by_name(&bind.payload, "alpha");
     let beta_binding = manifest_operation_binding_by_name(&bind.payload, "beta");
-    let thread_binding =
-        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_THREADS_PACKAGE);
+    let thread_binding = manifest_operation_binding_by_name(
+        &bind.payload,
+        crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
+    );
     assert!(
         bind.payload
             .get("operation_bindings")
             .and_then(serde_json::Value::as_array)
             .unwrap()
             .iter()
-            .all(|binding| binding["name"].as_str() != Some(crate::VERLET_PROCESS_PACKAGE))
+            .all(|binding| binding["name"].as_str()
+                != Some(crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE))
     );
     assert_eq!(
         alpha_binding,
@@ -9645,11 +9825,11 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
     assert_eq!(
         thread_binding["direct_tools"],
         serde_json::json!([
-            { "operation": crate::THREAD_CANCEL_OPERATION, "tool_name": crate::THREAD_CANCEL_OPERATION },
-            { "operation": crate::THREAD_SPAWN_OPERATION, "tool_name": crate::THREAD_SPAWN_OPERATION },
-            { "operation": crate::THREAD_STATUS_OPERATION, "tool_name": crate::THREAD_STATUS_OPERATION },
-            { "operation": crate::THREAD_SUBMIT_OPERATION, "tool_name": crate::THREAD_SUBMIT_OPERATION },
-            { "operation": crate::THREAD_WAIT_OPERATION, "tool_name": crate::THREAD_WAIT_OPERATION }
+            { "operation": crate::operations::kernel_packages::THREAD_CANCEL_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_CANCEL_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_SPAWN_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_SPAWN_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_STATUS_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_STATUS_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_WAIT_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_WAIT_OPERATION }
         ])
     );
     let _ = std::fs::remove_dir_all(registry_root);
@@ -9691,7 +9871,7 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     std::fs::create_dir_all(&registry_root).unwrap();
     // lexicon-allow: capsule - existing test provider helper type
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
     // lexicon-allow: capsule - existing operation binding test helper
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
@@ -9712,52 +9892,56 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("empty registry default manifest thread should persist lifecycle metadata");
-    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-        .await
-        .unwrap();
-    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+            .await
+            .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
     let bindings = bind.payload["operation_bindings"].as_array().unwrap();
     assert_eq!(bindings.len(), 3);
-    assert!(
-        bindings
-            .iter()
-            .all(|binding| binding["name"].as_str() != Some(crate::VERLET_PROCESS_PACKAGE))
+    assert!(bindings.iter().all(|binding| binding["name"].as_str()
+        != Some(crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE)));
+    let thread_binding = manifest_operation_binding_by_name(
+        &bind.payload,
+        crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
     );
-    let thread_binding =
-        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_THREADS_PACKAGE);
     assert_eq!(
         thread_binding["direct_tools"],
         serde_json::json!([
-            { "operation": crate::THREAD_CANCEL_OPERATION, "tool_name": crate::THREAD_CANCEL_OPERATION },
-            { "operation": crate::THREAD_SPAWN_OPERATION, "tool_name": crate::THREAD_SPAWN_OPERATION },
-            { "operation": crate::THREAD_STATUS_OPERATION, "tool_name": crate::THREAD_STATUS_OPERATION },
-            { "operation": crate::THREAD_SUBMIT_OPERATION, "tool_name": crate::THREAD_SUBMIT_OPERATION },
-            { "operation": crate::THREAD_WAIT_OPERATION, "tool_name": crate::THREAD_WAIT_OPERATION }
+            { "operation": crate::operations::kernel_packages::THREAD_CANCEL_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_CANCEL_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_SPAWN_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_SPAWN_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_STATUS_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_STATUS_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION },
+            { "operation": crate::operations::kernel_packages::THREAD_WAIT_OPERATION, "tool_name": crate::operations::kernel_packages::THREAD_WAIT_OPERATION }
         ])
     );
-    let notify_binding =
-        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_NOTIFY_PACKAGE);
+    let notify_binding = manifest_operation_binding_by_name(
+        &bind.payload,
+        crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
+    );
     assert_eq!(
         json_array_string_set(&notify_binding["operations"]),
         std::collections::BTreeSet::from([
-            crate::NOTIFY_PREVIEW_OPERATION.to_string(),
-            crate::CHANNEL_EMIT_OPERATION.to_string()
+            crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION.to_string(),
+            crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string()
         ])
     );
-    let schedule_binding =
-        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_SCHEDULE_PACKAGE);
+    let schedule_binding = manifest_operation_binding_by_name(
+        &bind.payload,
+        crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
+    );
     assert_eq!(
         json_array_string_set(&schedule_binding["operations"]),
         std::collections::BTreeSet::from([
-            crate::MANDATE_START_OPERATION.to_string(),
-            crate::MANDATE_REVOKE_OPERATION.to_string(),
-            crate::MANDATE_LIST_OPERATION.to_string()
+            crate::operations::kernel_packages::MANDATE_START_OPERATION.to_string(),
+            crate::operations::kernel_packages::MANDATE_REVOKE_OPERATION.to_string(),
+            crate::operations::kernel_packages::MANDATE_LIST_OPERATION.to_string()
         ])
     );
     let _ = std::fs::remove_dir_all(registry_root);
@@ -9769,7 +9953,7 @@ async fn app_server_capsule_bindings_reject_thread_operation_scope_injection() {
     publish_echo_operation(&registry_root, "global", "global_search", "global").await;
     publish_echo_operation(&registry_root, "thread", "thread_search", "thread").await;
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
         crate::adapters::app_server::CapsuleBindingsConfig::default()
@@ -9806,7 +9990,7 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
     let registry_root = unique_test_root("capsule-binding-methods");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
         crate::adapters::app_server::CapsuleBindingsConfig::default()
@@ -9923,7 +10107,7 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
     let registry_root = unique_test_root("capsule-binding-reload");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
     let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = first_client;
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
         crate::adapters::app_server::CapsuleBindingsConfig::default()
@@ -9947,7 +10131,8 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
 
     // lexicon-allow: capsule - existing test helper type
     let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        second_client.clone();
     let restarted = test_app_with_provider_and_capsule_bindings(
         provider_client,
         crate::adapters::app_server::CapsuleBindingsConfig::default()
@@ -9994,7 +10179,8 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
     std::fs::create_dir_all(&restarted_cwd).unwrap();
     let thread_id = {
         let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+            first_client.clone();
         let app = test_app_with_provider_root(
             &root,
             &first_cwd,
@@ -10030,7 +10216,8 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
     };
 
     let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        second_client.clone();
     let restarted = test_app_with_provider_root(
         &root,
         &restarted_cwd,
@@ -10109,7 +10296,8 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
         let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+            first_client.clone();
         let app = test_app_with_provider_root(
             &root,
             &workspace,
@@ -10169,7 +10357,8 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
     };
 
     let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        second_client.clone();
     let restarted = test_app_with_provider_root(
         &root,
         &workspace,
@@ -10244,7 +10433,7 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
     let client = std::sync::Arc::new(SequencedStreamCapsuleClient::new_modes([
         SequencedStreamResponse::text_delta(expected),
     ]));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -10316,7 +10505,7 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
         .map(|index| format!("{index:04}|"))
         .collect::<Vec<_>>();
     let expected = deltas.concat();
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> =
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
         std::sync::Arc::new(BurstStreamClient { deltas });
     let app = test_app_with_provider_root_and_stream(
         &root,
@@ -10431,18 +10620,18 @@ async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
         );
     }
     handle
-        .append_thread_event_record(crate::NewEventRecord::discharged(
+        .append_thread_event_record(verlet_history::NewEventRecord::discharged(
             handle.context().coordinates.clone(),
-            crate::EventKind::TurnSubmitted,
+            verlet_history::EventKind::TurnSubmitted,
             serde_json::json!({
-                "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
+                "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
                 "turn_id": turn_id,
             }),
-            crate::EventProvenance {
-                source_event_ids: vec![crate::EventRecordId::new()],
+            verlet_history::EventProvenance {
+                source_event_ids: vec![verlet_history::EventRecordId::new()],
                 discharged_by: Some("projector:io-ingress-apply".to_string()),
                 function: Some("ingress_turn_submit/v1".to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         ))
         .await
@@ -10511,13 +10700,18 @@ async fn lagged_idle_thread_resynchronizes_without_another_status_change() {
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
     let handle = app.handle_for_thread(&thread_id).await.unwrap();
-    assert_eq!(handle.status(), crate::ThreadStatus::Idle);
+    assert_eq!(
+        handle.status(),
+        verlet_runtime_contracts::ThreadStatus::Idle
+    );
     tokio::task::yield_now().await;
 
     for index in 0..1_100 {
-        handle.emit_runtime(crate::RuntimeEventKind::TextDelta {
-            text: format!("idle-{index}"),
-        });
+        handle.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta {
+                text: format!("idle-{index}"),
+            },
+        );
     }
 
     let (saw_started, saw_resynced) =
@@ -10555,7 +10749,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let client = std::sync::Arc::new(LagThenBlockStreamClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -10613,7 +10807,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
     .expect("second provider turn did not start");
     assert_eq!(
         app.handle_for_thread(&thread_id).await.unwrap().status(),
-        crate::ThreadStatus::Running
+        verlet_runtime_contracts::ThreadStatus::Running
     );
     gate.release();
 
@@ -10649,7 +10843,10 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
             thread.active_turn_id.as_deref(),
             Some(second_turn_id.as_str())
         );
-        assert_eq!(thread.status, crate::ThreadStatus::Running);
+        assert_eq!(
+            thread.status,
+            verlet_runtime_contracts::ThreadStatus::Running
+        );
     }
     client.release_second_request();
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &second_turn_id).await;
@@ -10665,7 +10862,7 @@ async fn fast_stream_after_thread_start_idle_completes_with_assistant_text() {
     let client = std::sync::Arc::new(SequencedStreamCapsuleClient::new_modes([
         SequencedStreamResponse::text_delta(expected),
     ]));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -10723,7 +10920,7 @@ async fn provider_failure_turn_completed_carries_error() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let client = std::sync::Arc::new(FailingProviderClient::new("scripted provider failure"));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -10778,7 +10975,8 @@ async fn restored_thread_provider_requests_end_with_current_input() {
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
         let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+            first_client.clone();
         let app = test_app_with_provider_root(
             &root,
             &workspace,
@@ -10820,7 +11018,8 @@ async fn restored_thread_provider_requests_end_with_current_input() {
     };
 
     let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        second_client.clone();
     let restarted = test_app_with_provider_root(
         &root,
         &workspace,
@@ -10887,7 +11086,8 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         let first_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new([
             "before restart completion",
         ]));
-        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+            first_client.clone();
         let app = test_app_with_provider_root_and_stream(
             &root,
             &workspace,
@@ -10930,7 +11130,8 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         "restored completion one",
         "restored completion two",
     ]));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        second_client.clone();
     let restarted = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -11011,7 +11212,8 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
         let first_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new([
             "before restart completion",
         ]));
-        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+            first_client.clone();
         let app = test_app_with_provider_root_and_stream(
             &root,
             &workspace,
@@ -11051,7 +11253,8 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
         SequencedStreamResponse::text_delta("streamed once"),
         SequencedStreamResponse::content("fallback once"),
     ]));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        second_client.clone();
     let restarted = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -11147,7 +11350,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
     let thread_id = {
         // lexicon-allow: capsule - existing app-server test surface; line shifted by repo-wide path qualification
         let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = first_client;
         let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app = test_app_with_provider_root_and_listen(
             &root,
@@ -11186,7 +11389,8 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
 
     // lexicon-allow: capsule - existing test provider helper type
     let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        second_client.clone();
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
     let restarted = test_app_with_provider_root_and_listen(
         &root,
@@ -11264,7 +11468,7 @@ async fn app_server_websocket_listen_accepts_codex_tui_client() {
             .unwrap();
     // lexicon-allow: capsule - existing test helper type
     let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = first_client;
     let app = test_app_with_provider_root_and_listen(
         &root,
         &root,
@@ -11411,7 +11615,7 @@ async fn app_server_websocket_listen_serves_health_endpoints() {
             .unwrap();
     // lexicon-allow: capsule - existing test client name
     let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = first_client;
     let app = test_app_with_provider_root_and_listen(
         &root,
         &root,
@@ -11603,9 +11807,11 @@ fn boundary_bearer_parser_accepts_case_and_whitespace_and_skips_unrelated_protoc
 
 #[test]
 fn session_close_witness_failure_does_not_mask_the_read_error() {
-    let read_error =
-        crate::VerletError::RuntimeFactory("original websocket read error".to_string());
-    let close_error = crate::VerletError::History("close witness failed".to_string());
+    let read_error = crate::kernel::runtime_host::VerletError::RuntimeFactory(
+        "original websocket read error".to_string(),
+    );
+    let close_error =
+        crate::kernel::runtime_host::VerletError::History("close witness failed".to_string());
     let error = crate::adapters::app_server::connection::finish_websocket_session(
         Err(read_error),
         Err(close_error),
@@ -11719,7 +11925,9 @@ async fn failed_session_close_rearms_the_drop_witness() {
         std::sync::Arc::clone(&app.inner.identity_clock),
         connection_state.witnessed_session_id.clone(),
     );
-    let store = crate::SqliteSessionStore::open(&store_path).await.unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&store_path)
+        .await
+        .unwrap();
     let database = store.sqlite_database();
     let database_connection = database.connect().await.unwrap();
     database_connection
@@ -11831,7 +12039,9 @@ async fn oversized_pre_upgrade_headers_fail_closed_with_one_witness() {
 }
 
 async fn identity_sql_count(path: &std::path::Path, query: &str) -> i64 {
-    let store = crate::SqliteSessionStore::open(path).await.unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(path)
+        .await
+        .unwrap();
     let connection = store.sqlite_database().connect().await.unwrap();
     let mut rows = connection.query(query, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
@@ -11884,7 +12094,7 @@ async fn app_server_websocket_listen_rejects_non_loopback_without_auth() {
         crate::adapters::app_server::AppServerListenAddr::parse("ws://0.0.0.0:0/rpc").unwrap();
     // lexicon-allow: capsule - existing test client name
     let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = first_client;
     let app = test_app_with_provider_root_and_listen(
         &root,
         &root,
@@ -12132,11 +12342,13 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
                 .messages
                 .iter()
                 .filter_map(|message| match message {
-                    crate::CanonicalMessage::User { content, .. } => Some(
+                    verlet_history::CanonicalMessage::User { content, .. } => Some(
                         content
                             .iter()
                             .filter_map(|content| match content {
-                                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                                verlet_history::CanonicalContent::Text { text, .. } => {
+                                    Some(text.as_str())
+                                }
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
@@ -12144,7 +12356,9 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
                     ),
                     _ => None,
                 })
-                .find(|text| text.contains(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND));
+                .find(|text| {
+                    text.contains(verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND)
+                });
             if let Some(text) = text {
                 break text;
             }
@@ -12261,27 +12475,33 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
     let (events, thread_events) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let events = store
-                .read_events(&crate::control_stream_id(&coordinates), None)
+                .read_events(
+                    &crate::kernel::control_decision::control_stream_id(&coordinates),
+                    None,
+                )
                 .await
                 .unwrap();
             let outcomes = events
                 .iter()
                 .filter(|event| {
-                    event.kind == crate::EventKind::IoIngressReceived
+                    event.kind == verlet_history::EventKind::IoIngressReceived
                         && event
                             .payload
                             .get("route_id")
                             .and_then(serde_json::Value::as_str)
-                            == Some(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND)
+                            == Some(verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND)
                 })
                 .count();
             let thread_events = store
-                .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+                .read_events(
+                    &verlet_history::EventStreamId::for_thread(&coordinates),
+                    None,
+                )
                 .await
                 .unwrap();
             let turns = thread_events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+                .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
                 .count();
             if outcomes == 1 && turns == 1 {
                 break (events, thread_events);
@@ -12296,12 +12516,12 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
         events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::IoIngressReceived
+                event.kind == verlet_history::EventKind::IoIngressReceived
                     && event
                         .payload
                         .get("route_id")
                         .and_then(serde_json::Value::as_str)
-                        == Some(verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND)
+                        == Some(verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND)
             })
             .count(),
         1
@@ -12309,15 +12529,15 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1
     );
 
-    let terminal = verlet_runtime_contracts::HandleTerminalEnvelope {
-        dispatch_id: verlet_runtime_contracts::DispatchId::new(dispatch_id.clone()),
-        handle: verlet_runtime_contracts::HandleId::process(process_id),
-        outcome: verlet_runtime_contracts::HandleTerminalOutcome::Completed,
+    let terminal = verlet_runtime_contracts::handle::HandleTerminalEnvelope {
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId::new(dispatch_id.clone()),
+        handle: verlet_runtime_contracts::handle::HandleId::process(process_id),
+        outcome: verlet_runtime_contracts::handle::HandleTerminalOutcome::Completed,
         outcome_reason: Some("exit status 0".to_string()),
         result: None,
         result_schema_id: None,
@@ -12332,13 +12552,13 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
             verlet_io_core::ConversationKind::System,
         ),
         verlet_io_core::IngressContent::Event {
-            kind: verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
+            kind: verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
             payload: serde_json::to_value(terminal).unwrap(),
         },
         1,
     )
     .with_dedupe_key(verlet_io_core::IoDedupeKey::new(
-        verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+        verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
         dispatch_id.clone(),
     ))
     .with_delivery(verlet_io_core::IoDelivery::new(dispatch_id.clone()))
@@ -12349,18 +12569,18 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
     ))
     .with_metadata(
         "cooldis_route_id",
-        verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+        verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
     )
     .with_metadata("cooldis_route_policy", "queue_per_conversation");
     duplicate.id = events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::IoIngressReceived
+            event.kind == verlet_history::EventKind::IoIngressReceived
                 && event
                     .payload
                     .get("route_id")
                     .and_then(serde_json::Value::as_str)
-                    == Some(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND)
+                    == Some(verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND)
         })
         .and_then(|event| event.payload.get("ingress_message_id"))
         .and_then(serde_json::Value::as_str)
@@ -12377,30 +12597,36 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
         .unwrap();
 
     let events = store
-        .read_events(&crate::control_stream_id(&coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
         events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::IoIngressReceived
+                event.kind == verlet_history::EventKind::IoIngressReceived
                     && event
                         .payload
                         .get("route_id")
                         .and_then(serde_json::Value::as_str)
-                        == Some(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND)
+                        == Some(verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND)
             })
             .count(),
         1
     );
     assert_eq!(
         store
-            .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+            .read_events(
+                &verlet_history::EventStreamId::for_thread(&coordinates),
+                None
+            )
             .await
             .unwrap()
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1
     );
@@ -12625,16 +12851,19 @@ async fn thinking_precedence_flows_to_provider_requests() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let client = std::sync::Arc::new(ThinkingRecorderClient::new());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-app-server-test-{}.sock", uuid::Uuid::now_v7()),
     ));
     let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let mut runtime_config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    runtime_config.thinking = Some(crate::ThinkingConfig::Budget { budget_tokens: 99 });
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    runtime_config.thinking = Some(verlet_provider::ThinkingConfig::Budget { budget_tokens: 99 });
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
         provider_client,
@@ -12658,7 +12887,7 @@ async fn thinking_precedence_flows_to_provider_requests() {
         .await;
     assert_eq!(
         client.requests()[0].thinking,
-        Some(crate::ThinkingConfig::Budget { budget_tokens: 99 })
+        Some(verlet_provider::ThinkingConfig::Budget { budget_tokens: 99 })
     );
 
     let thread_start = app
@@ -12677,8 +12906,8 @@ async fn thinking_precedence_flows_to_provider_requests() {
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &inherited_turn_id).await;
     assert_eq!(
         client.requests()[1].thinking,
-        Some(crate::ThinkingConfig::Effort {
-            effort: crate::ThinkingEffort::High
+        Some(verlet_provider::ThinkingConfig::Effort {
+            effort: verlet_provider::ThinkingEffort::High
         })
     );
 
@@ -12699,7 +12928,7 @@ async fn thinking_precedence_flows_to_provider_requests() {
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &override_turn_id).await;
     assert_eq!(
         client.requests()[2].thinking,
-        Some(crate::ThinkingConfig::Disabled)
+        Some(verlet_provider::ThinkingConfig::Disabled)
     );
 
     let next_turn_id = start_text_turn(&app, &connection, &thread_id, "thread-level-again").await;
@@ -12707,8 +12936,8 @@ async fn thinking_precedence_flows_to_provider_requests() {
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &next_turn_id).await;
     assert_eq!(
         client.requests()[3].thinking,
-        Some(crate::ThinkingConfig::Effort {
-            effort: crate::ThinkingEffort::High
+        Some(verlet_provider::ThinkingConfig::Effort {
+            effort: verlet_provider::ThinkingEffort::High
         })
     );
 
@@ -12721,20 +12950,20 @@ async fn thinking_stream_projects_as_distinct_items() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let client = std::sync::Arc::new(ThinkingRecorderClient::with_stream(vec![
-        crate::ProviderStreamEvent::ThinkingDelta {
+        verlet_provider::ProviderStreamEvent::ThinkingDelta {
             text: "plan ".to_string(),
         },
-        crate::ProviderStreamEvent::TextDelta {
+        verlet_provider::ProviderStreamEvent::TextDelta {
             text: "answer".to_string(),
         },
-        crate::ProviderStreamEvent::ThinkingDelta {
+        verlet_provider::ProviderStreamEvent::ThinkingDelta {
             text: "check".to_string(),
         },
-        crate::ProviderStreamEvent::Done {
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        verlet_provider::ProviderStreamEvent::Done {
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         },
     ]));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -12800,14 +13029,14 @@ async fn non_stream_thinking_delta_precedes_text_when_content_does() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let client = std::sync::Arc::new(ThinkingRecorderClient::with_complete_content(vec![
-        crate::CanonicalContent::Thinking {
+        verlet_history::CanonicalContent::Thinking {
             text: "plan".to_string(),
-            provider: crate::ThinkingProvider::Other("unit".to_string()),
-            metadata: crate::ThinkingMetadata::None,
+            provider: verlet_history::ThinkingProvider::Other("unit".to_string()),
+            metadata: verlet_history::ThinkingMetadata::None,
         },
-        crate::CanonicalContent::text("answer"),
+        verlet_history::CanonicalContent::text("answer"),
     ]));
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -12890,7 +13119,7 @@ async fn local_thread_read_echoes_thread_thinking_config() {
     )
     .await
     .unwrap();
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -12901,8 +13130,8 @@ async fn local_thread_read_echoes_thread_thinking_config() {
     assert_eq!(
         crate::adapters::app_server::threads::thread_metadata_thinking(&lifecycle.metadata)
             .unwrap(),
-        Some(crate::ThinkingConfig::Effort {
-            effort: crate::ThinkingEffort::Low
+        Some(verlet_provider::ThinkingConfig::Effort {
+            effort: verlet_provider::ThinkingEffort::Low
         })
     );
 
@@ -12923,8 +13152,8 @@ async fn local_thread_read_echoes_thread_thinking_config() {
     assert_eq!(
         crate::adapters::app_server::threads::thread_metadata_thinking(&lifecycle.metadata)
             .unwrap(),
-        Some(crate::ThinkingConfig::Effort {
-            effort: crate::ThinkingEffort::Low
+        Some(verlet_provider::ThinkingConfig::Effort {
+            effort: verlet_provider::ThinkingEffort::Low
         })
     );
 }
@@ -13041,7 +13270,7 @@ async fn initialize_for_test(
 
 // lexicon-allow: capsule - existing app-server test helper name
 async fn test_app_with_provider_and_capsule_bindings(
-    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
+    provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type and parameter
     capsule_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
 ) -> crate::adapters::app_server::VerletAppServer {
@@ -13058,8 +13287,11 @@ async fn test_app_with_provider_and_capsule_bindings(
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    let mut runtime_config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     runtime_config.max_tokens = 128;
     // lexicon-allow: capsule - existing app-server config parameter
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
@@ -13076,7 +13308,7 @@ async fn test_app_with_provider_and_capsule_bindings(
 async fn test_app_with_provider_root(
     root: &std::path::Path,
     cwd: &std::path::Path,
-    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
+    provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
     operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
 ) -> crate::adapters::app_server::VerletAppServer {
@@ -13090,7 +13322,7 @@ async fn test_app_with_provider_root(
 async fn test_app_with_provider_root_and_stream(
     root: &std::path::Path,
     cwd: &std::path::Path,
-    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
+    provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
     operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
     stream: bool,
@@ -13113,7 +13345,7 @@ async fn test_app_with_provider_root_and_listen(
     root: &std::path::Path,
     cwd: &std::path::Path,
     listen: crate::adapters::app_server::AppServerListenAddr,
-    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
+    provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
     operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
 ) -> crate::adapters::app_server::VerletAppServer {
@@ -13132,7 +13364,7 @@ async fn test_app_with_provider_root_listen_and_stream(
     root: &std::path::Path,
     cwd: &std::path::Path,
     listen: crate::adapters::app_server::AppServerListenAddr,
-    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
+    provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
     operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
     stream: bool,
@@ -13151,8 +13383,11 @@ async fn test_app_with_provider_root_listen_and_stream(
             "gpt-test",
         );
     }
-    let mut runtime_config =
-        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     runtime_config.max_tokens = 128;
     runtime_config.stream = stream;
     // lexicon-allow: capsule - existing app-server test helper
@@ -13161,9 +13396,10 @@ async fn test_app_with_provider_root_listen_and_stream(
         provider_client,
         operation_bindings,
     ); // lexicon-allow: capsule - existing app-server test helper
-    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
-        .await
-        .unwrap();
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
     crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
         config,
         runtime_factory,
@@ -13205,7 +13441,7 @@ async fn submit_provider_turn_without_subscription(
             &coordinates,
             turn_id.clone(),
             input,
-            crate::TurnSubmissionMode::Queue,
+            verlet_runtime_contracts::TurnSubmissionMode::Queue,
         )
         .await
         .unwrap();
@@ -13265,23 +13501,25 @@ async fn publish_echo_operation(
     record_name: &str,
     operation_name: &str,
     prefix: &str,
-) -> crate::PublishedOperationRecord {
+) -> verlet_operations::operation_store::PublishedOperationRecord {
     std::fs::create_dir_all(registry_root).unwrap();
     let wasm = wat::parse_str(echo_operation_guest(prefix, operation_name))
         .expect("echo operation fixture should compile");
     let artifact_path = registry_root.join(format!("{record_name}.wasm"));
     std::fs::write(&artifact_path, wasm).unwrap();
-    crate::LocalOperationRegistry::new(registry_root)
-        .publish_artifact(crate::PublishOperationRequest {
-            name: record_name.to_string(),
-            artifact_path: artifact_path.clone(),
-            source: crate::PublishedOperationSource::Wasm {
-                bin_path: artifact_path,
+    verlet_operations::operation_store::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: record_name.to_string(),
+                artifact_path: artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact_path,
+                },
+                interface: None,
+                capability_grants: Default::default(),
+                metadata: Default::default(),
             },
-            interface: None,
-            capability_grants: Default::default(),
-            metadata: Default::default(),
-        })
+        )
         .await
         .unwrap()
 }
@@ -13290,23 +13528,25 @@ async fn publish_multi_echo_operation(
     registry_root: &std::path::Path,
     record_name: &str,
     operations: &[(&str, &str)],
-) -> crate::PublishedOperationRecord {
+) -> verlet_operations::operation_store::PublishedOperationRecord {
     std::fs::create_dir_all(registry_root).unwrap();
     let wasm = wat::parse_str(multi_echo_operation_guest(operations))
         .expect("multi-operation fixture should compile");
     let artifact_path = registry_root.join(format!("{record_name}.wasm"));
     std::fs::write(&artifact_path, wasm).unwrap();
-    crate::LocalOperationRegistry::new(registry_root)
-        .publish_artifact(crate::PublishOperationRequest {
-            name: record_name.to_string(),
-            artifact_path: artifact_path.clone(),
-            source: crate::PublishedOperationSource::Wasm {
-                bin_path: artifact_path,
+    verlet_operations::operation_store::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: record_name.to_string(),
+                artifact_path: artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact_path,
+                },
+                interface: None,
+                capability_grants: Default::default(),
+                metadata: Default::default(),
             },
-            interface: None,
-            capability_grants: Default::default(),
-            metadata: Default::default(),
-        })
+        )
         .await
         .unwrap()
 }
@@ -13318,7 +13558,7 @@ fn publish_agent_manifest(
     title: &str,
     summary: &str,
     tool_blocks: &[String],
-) -> crate::PublishedAgentRecord {
+) -> crate::agent::manifest::PublishedAgentRecord {
     let manifest_path = root.join(format!("{name}.verlet.agent.toml"));
     let tools = if tool_blocks.is_empty() {
         String::new()
@@ -13349,7 +13589,7 @@ streaming = false
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap()
 }
@@ -13367,7 +13607,7 @@ async fn app_server_with_tool_client<T>(
     client: std::sync::Arc<T>,
 ) -> crate::adapters::app_server::VerletAppServer
 where
-    T: crate::ProviderClient + 'static,
+    T: verlet_provider::ProviderClient + 'static,
 {
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-tool-universe-{}.sock", uuid::Uuid::now_v7()),
@@ -13376,8 +13616,8 @@ where
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
             crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
         ),
         crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
@@ -13407,72 +13647,74 @@ where
 
 #[derive(Default)]
 struct UniverseCallingClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     step: std::sync::Mutex<usize>,
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for UniverseCallingClient {
+impl verlet_provider::ProviderClient for UniverseCallingClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let mut step = self.step.lock().unwrap();
         let response = match *step {
             0 => {
                 let names = tool_names(request);
-                assert!(names.contains(&crate::TOOL_SEARCH_TOOL.to_string()));
-                assert!(names.contains(&crate::TOOL_DESCRIBE_TOOL.to_string()));
-                assert!(names.contains(&crate::TOOL_CALL_TOOL.to_string()));
+                assert!(names.contains(&crate::agent::tool_universe::TOOL_SEARCH_TOOL.to_string()));
+                assert!(
+                    names.contains(&crate::agent::tool_universe::TOOL_DESCRIBE_TOOL.to_string())
+                );
+                assert!(names.contains(&crate::agent::tool_universe::TOOL_CALL_TOOL.to_string()));
                 assert!(!names.contains(&"verlet_mcp_echo".to_string()));
-                crate::ProviderResponse {
-                    content: vec![crate::CanonicalContent::tool_call(
+                verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::tool_call(
                         "call_search",
-                        crate::TOOL_SEARCH_TOOL,
+                        crate::agent::tool_universe::TOOL_SEARCH_TOOL,
                         serde_json::json!({"query": "echo"}),
                     )],
-                    usage: crate::CanonicalUsage::default(),
-                    stop_reason: crate::CanonicalStopReason::ToolUse,
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::ToolUse,
                 }
             }
             1 => {
                 let text = text_from_canonical_messages(&request.messages);
                 assert!(text.contains("verlet_mcp_echo"));
-                crate::ProviderResponse {
-                    content: vec![crate::CanonicalContent::tool_call(
+                verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::tool_call(
                         "call_describe",
-                        crate::TOOL_DESCRIBE_TOOL,
+                        crate::agent::tool_universe::TOOL_DESCRIBE_TOOL,
                         serde_json::json!({"tool": "verlet_mcp_echo"}),
                     )],
-                    usage: crate::CanonicalUsage::default(),
-                    stop_reason: crate::CanonicalStopReason::ToolUse,
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::ToolUse,
                 }
             }
             2 => {
                 let text = text_from_canonical_messages(&request.messages);
                 assert!(text.contains("SCHEMA HASH"));
                 assert!(text.contains("mcp://arcade"));
-                crate::ProviderResponse {
-                    content: vec![crate::CanonicalContent::tool_call(
+                verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::tool_call(
                         "call_universe",
-                        crate::TOOL_CALL_TOOL,
+                        crate::agent::tool_universe::TOOL_CALL_TOOL,
                         serde_json::json!({
                             "tool": "verlet_mcp_echo",
                             "arguments": {"message": "hello"}
                         }),
                     )],
-                    usage: crate::CanonicalUsage::default(),
-                    stop_reason: crate::CanonicalStopReason::ToolUse,
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::ToolUse,
                 }
             }
             _ => {
                 let text = text_from_canonical_messages(&request.messages);
                 assert!(text.contains("REMOTE_MCP_OK hello"));
-                crate::ProviderResponse {
-                    content: vec![crate::CanonicalContent::text("universe completed")],
-                    usage: crate::CanonicalUsage::default(),
-                    stop_reason: crate::CanonicalStopReason::EndTurn,
+                verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::text("universe completed")],
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                 }
             }
         };
@@ -13483,38 +13725,38 @@ impl crate::ProviderClient for UniverseCallingClient {
 
 #[derive(Default)]
 struct PinnedDirectCallingClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     step: std::sync::Mutex<usize>,
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for PinnedDirectCallingClient {
+impl verlet_provider::ProviderClient for PinnedDirectCallingClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let mut step = self.step.lock().unwrap();
         let response = if *step == 0 {
             let names = tool_names(request);
-            assert!(names.contains(&crate::TOOL_SEARCH_TOOL.to_string()));
+            assert!(names.contains(&crate::agent::tool_universe::TOOL_SEARCH_TOOL.to_string()));
             assert!(names.contains(&"verlet_mcp_echo".to_string()));
-            crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::tool_call(
+            verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
                     "call_direct",
                     "verlet_mcp_echo",
                     serde_json::json!({"message": "hello"}),
                 )],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::ToolUse,
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
             }
         } else {
             let text = text_from_canonical_messages(&request.messages);
             assert!(text.contains("REMOTE_MCP_OK hello"));
-            crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::text("pinned completed")],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::EndTurn,
+            verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::text("pinned completed")],
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn,
             }
         };
         *step += 1;
@@ -13827,9 +14069,9 @@ fn wat_bytes(bytes: &[u8]) -> String {
 
 #[derive(Default)]
 struct ThinkingRecorderClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
-    complete_content: std::sync::Mutex<Option<Vec<crate::CanonicalContent>>>,
-    stream_events: std::sync::Mutex<Option<Vec<crate::ProviderStreamEvent>>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+    complete_content: std::sync::Mutex<Option<Vec<verlet_history::CanonicalContent>>>,
+    stream_events: std::sync::Mutex<Option<Vec<verlet_provider::ProviderStreamEvent>>>,
 }
 
 impl ThinkingRecorderClient {
@@ -13841,7 +14083,7 @@ impl ThinkingRecorderClient {
         }
     }
 
-    fn with_complete_content(complete_content: Vec<crate::CanonicalContent>) -> Self {
+    fn with_complete_content(complete_content: Vec<verlet_history::CanonicalContent>) -> Self {
         Self {
             requests: std::sync::Mutex::new(Vec::new()),
             complete_content: std::sync::Mutex::new(Some(complete_content)),
@@ -13849,7 +14091,7 @@ impl ThinkingRecorderClient {
         }
     }
 
-    fn with_stream(stream_events: Vec<crate::ProviderStreamEvent>) -> Self {
+    fn with_stream(stream_events: Vec<verlet_provider::ProviderStreamEvent>) -> Self {
         Self {
             requests: std::sync::Mutex::new(Vec::new()),
             complete_content: std::sync::Mutex::new(None),
@@ -13857,34 +14099,36 @@ impl ThinkingRecorderClient {
         }
     }
 
-    fn requests(&self) -> Vec<crate::ProviderRequest> {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for ThinkingRecorderClient {
+impl verlet_provider::ProviderClient for ThinkingRecorderClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
-        Ok(crate::ProviderResponse {
+        Ok(verlet_provider::ProviderResponse {
             content: self
                 .complete_content
                 .lock()
                 .unwrap()
                 .clone()
-                .unwrap_or_else(|| vec![crate::CanonicalContent::text("thinking recorded")]),
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+                .unwrap_or_else(|| {
+                    vec![verlet_history::CanonicalContent::text("thinking recorded")]
+                }),
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
         self.requests.lock().unwrap().push(request.clone());
         Ok(self
             .stream_events
@@ -13893,11 +14137,11 @@ impl crate::ProviderClient for ThinkingRecorderClient {
             .clone()
             .unwrap_or_else(|| {
                 vec![
-                    crate::ProviderStreamEvent::TextDelta {
+                    verlet_provider::ProviderStreamEvent::TextDelta {
                         text: "thinking recorded".to_string(),
                     },
-                    crate::ProviderStreamEvent::Done {
-                        stop_reason: crate::CanonicalStopReason::EndTurn,
+                    verlet_provider::ProviderStreamEvent::Done {
+                        stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                     },
                 ]
             }))
@@ -13907,12 +14151,12 @@ impl crate::ProviderClient for ThinkingRecorderClient {
 #[derive(Default)]
 // lexicon-allow: capsule - existing test client name
 struct InspectingCapsuleClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
 }
 
 // lexicon-allow: capsule - existing test client name
 impl InspectingCapsuleClient {
-    fn requests(&self) -> Vec<crate::ProviderRequest> {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -13920,22 +14164,22 @@ impl InspectingCapsuleClient {
 // lexicon-allow: capsule - existing test client name
 #[async_trait::async_trait]
 // lexicon-allow: capsule - existing test client name
-impl crate::ProviderClient for InspectingCapsuleClient {
+impl verlet_provider::ProviderClient for InspectingCapsuleClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text("inspected")],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text("inspected")],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
 
 struct ThreadSpawnAgentRefClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     agent_ref: String,
     cancel_calls: std::sync::Mutex<usize>,
 }
@@ -13951,57 +14195,65 @@ impl ThreadSpawnAgentRefClient {
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for ThreadSpawnAgentRefClient {
+impl verlet_provider::ProviderClient for ThreadSpawnAgentRefClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
         if has_tool_result {
             if latest_user_text(request).as_deref() == Some("cancel worker")
                 && *self.cancel_calls.lock().unwrap() == 0
-                && tool_names(request).contains(&crate::THREAD_CANCEL_OPERATION.to_string())
+                && tool_names(request).contains(
+                    &crate::operations::kernel_packages::THREAD_CANCEL_OPERATION.to_string(),
+                )
             {
                 *self.cancel_calls.lock().unwrap() += 1;
-                return Ok(crate::ProviderResponse {
-                    content: vec![crate::CanonicalContent::tool_call(
+                return Ok(verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::tool_call(
                         "call_thread_cancel_1",
-                        crate::THREAD_CANCEL_OPERATION,
+                        crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
                         serde_json::json!({ "task_name": "worker" }),
                     )],
-                    usage: crate::CanonicalUsage::default(),
-                    stop_reason: crate::CanonicalStopReason::ToolUse,
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::ToolUse,
                 });
             }
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::text("root observed child spawn")],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::EndTurn,
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::text(
+                    "root observed child spawn",
+                )],
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn,
             });
         }
-        if tool_names(request).contains(&crate::THREAD_SPAWN_OPERATION.to_string()) {
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::tool_call(
+        if tool_names(request)
+            .contains(&crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string())
+        {
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
                     "call_thread_spawn_1",
-                    crate::THREAD_SPAWN_OPERATION,
+                    crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
                     serde_json::json!({
                         "task_name": "worker",
                         "message": "hello bound child",
                         "agent_ref": self.agent_ref,
                     }),
                 )],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::ToolUse,
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
             });
         }
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text("child agent replied")],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "child agent replied",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -14014,20 +14266,20 @@ impl ProviderRequestRecorder for ThreadSpawnAgentRefClient {
 
 #[derive(Default)]
 struct ScheduleMandateStartClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for ScheduleMandateStartClient {
+impl verlet_provider::ProviderClient for ScheduleMandateStartClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
         if has_tool_result {
             let text = text_from_canonical_messages(&request.messages);
             assert!(
@@ -14038,29 +14290,32 @@ impl crate::ProviderClient for ScheduleMandateStartClient {
                 text.contains("mandate_event_id"),
                 "expected mandate event id in provider context: {text}"
             );
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::text("schedule mandate started")],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::EndTurn,
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::text(
+                    "schedule mandate started",
+                )],
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn,
             });
         }
 
         let names = tool_names(request);
         assert!(
-            names.contains(&crate::MANDATE_START_OPERATION.to_string()),
+            names
+                .contains(&crate::operations::kernel_packages::MANDATE_START_OPERATION.to_string()),
             "expected mandate_start direct tool in {names:?}"
         );
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::tool_call(
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::tool_call(
                 "call_mandate_start_1",
-                crate::MANDATE_START_OPERATION,
+                crate::operations::kernel_packages::MANDATE_START_OPERATION,
                 serde_json::json!({
                     "schedule": { "interval": { "every_ms": 60_000 } },
                     "input_template": "remind me in a minute"
                 }),
             )],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::ToolUse,
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::ToolUse,
         })
     }
 }
@@ -14095,7 +14350,7 @@ impl SequencedStreamResponse {
 
 // lexicon-allow: capsule - existing test client name
 struct SequencedStreamCapsuleClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     responses: std::sync::Mutex<Vec<SequencedStreamResponse>>,
 }
 
@@ -14121,63 +14376,65 @@ impl LagThenBlockStreamClient {
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for BurstStreamClient {
+impl verlet_provider::ProviderClient for BurstStreamClient {
     async fn complete(
         &self,
-        _request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text(self.deltas.concat())],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        _request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(self.deltas.concat())],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        _request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        _request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
         let mut events = self
             .deltas
             .iter()
             .cloned()
-            .map(|text| crate::ProviderStreamEvent::TextDelta { text })
+            .map(|text| verlet_provider::ProviderStreamEvent::TextDelta { text })
             .collect::<Vec<_>>();
-        events.push(crate::ProviderStreamEvent::Done {
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        events.push(verlet_provider::ProviderStreamEvent::Done {
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         });
         Ok(events)
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for LagThenBlockStreamClient {
+impl verlet_provider::ProviderClient for LagThenBlockStreamClient {
     async fn complete(
         &self,
-        _request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text("lag race completion")],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        _request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "lag race completion",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        _request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        _request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
         let request_index = self
             .request_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if request_index == 0 {
             let mut events = (0..1_100)
-                .map(|index| crate::ProviderStreamEvent::TextDelta {
+                .map(|index| verlet_provider::ProviderStreamEvent::TextDelta {
                     text: format!("{index:04}|"),
                 })
                 .collect::<Vec<_>>();
-            events.push(crate::ProviderStreamEvent::Done {
-                stop_reason: crate::CanonicalStopReason::EndTurn,
+            events.push(verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn,
             });
             return Ok(events);
         }
@@ -14185,11 +14442,11 @@ impl crate::ProviderClient for LagThenBlockStreamClient {
         self.second_request_started.notify_one();
         self.release_second_request.notified().await;
         Ok(vec![
-            crate::ProviderStreamEvent::TextDelta {
+            verlet_provider::ProviderStreamEvent::TextDelta {
                 text: "second turn complete".to_string(),
             },
-            crate::ProviderStreamEvent::Done {
-                stop_reason: crate::CanonicalStopReason::EndTurn,
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn,
             },
         ])
     }
@@ -14208,7 +14465,7 @@ impl SequencedStreamCapsuleClient {
         }
     }
 
-    fn next_response(&self, request: &crate::ProviderRequest) -> SequencedStreamResponse {
+    fn next_response(&self, request: &verlet_provider::ProviderRequest) -> SequencedStreamResponse {
         self.requests.lock().unwrap().push(request.clone());
         let mut responses = self.responses.lock().unwrap();
         if responses.is_empty() {
@@ -14221,43 +14478,43 @@ impl SequencedStreamCapsuleClient {
 // lexicon-allow: capsule - existing test client name
 #[async_trait::async_trait]
 // lexicon-allow: capsule - existing test client name
-impl crate::ProviderClient for SequencedStreamCapsuleClient {
+impl verlet_provider::ProviderClient for SequencedStreamCapsuleClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         let text = self.next_response(request).text().to_string();
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text(text)],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(text)],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
         let response = self.next_response(request);
         let mut events = match response {
             SequencedStreamResponse::TextDelta(text) => {
-                vec![crate::ProviderStreamEvent::TextDelta { text }]
+                vec![verlet_provider::ProviderStreamEvent::TextDelta { text }]
             }
             SequencedStreamResponse::Content(text) => {
-                vec![crate::ProviderStreamEvent::Content {
-                    content: crate::CanonicalContent::text(text),
+                vec![verlet_provider::ProviderStreamEvent::Content {
+                    content: verlet_history::CanonicalContent::text(text),
                 }]
             }
         };
-        events.push(crate::ProviderStreamEvent::Done {
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        events.push(verlet_provider::ProviderStreamEvent::Done {
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         });
         Ok(events)
     }
 }
 
 struct FailingProviderClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     message: String,
 }
 
@@ -14269,46 +14526,46 @@ impl FailingProviderClient {
         }
     }
 
-    fn record(&self, request: &crate::ProviderRequest) -> crate::ProviderError {
+    fn record(&self, request: &verlet_provider::ProviderRequest) -> verlet_provider::ProviderError {
         self.requests.lock().unwrap().push(request.clone());
-        crate::ProviderError::Decode(self.message.clone())
+        verlet_provider::ProviderError::Decode(self.message.clone())
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for FailingProviderClient {
+impl verlet_provider::ProviderClient for FailingProviderClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         Err(self.record(request))
     }
 
     async fn stream(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
         Err(self.record(request))
     }
 }
 
 #[derive(Default)]
 struct SkillResourceClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for SkillResourceClient {
+impl verlet_provider::ProviderClient for SkillResourceClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let text = text_from_canonical_messages(&request.messages);
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             assert!(
                 text.contains("alpha — Alpha description."),
@@ -14316,16 +14573,16 @@ impl crate::ProviderClient for SkillResourceClient {
             );
             let names = tool_names(request);
             assert!(names.contains(&"bash".to_string()));
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::tool_call(
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
                     "call_bash_skill",
                     "bash",
                     serde_json::json!({
                         "command": "cat /skills/alpha.md; printf '\\nWRITE:\\n'; echo nope > /skills/alpha.md"
                     }),
                 )],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::ToolUse,
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -14337,31 +14594,33 @@ impl crate::ProviderClient for SkillResourceClient {
             text.contains("read-only") || text.contains("denied"),
             "bash result did not include read-only denial: {text}"
         );
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text("skill read completed")],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "skill read completed",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
 
 #[derive(Default)]
 struct WorkspaceSkillDiscoveryClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for WorkspaceSkillDiscoveryClient {
+impl verlet_provider::ProviderClient for WorkspaceSkillDiscoveryClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let text = text_from_canonical_messages(&request.messages);
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             assert!(
                 text.contains(
@@ -14370,28 +14629,28 @@ impl crate::ProviderClient for WorkspaceSkillDiscoveryClient {
                 "provider request did not include the witnessed workspace skill index: {text}"
             );
             assert!(tool_names(request).contains(&"bash".to_string()));
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::tool_call(
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
                     "call_bash_workspace_skill",
                     "bash",
                     serde_json::json!({
                         "command": "cat /work/.agents/skills/alpha/SKILL.md"
                     }),
                 )],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::ToolUse,
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
             });
         }
         assert!(
             text.contains("Changed discovery body marker."),
             "workspace bash did not read the live edited skill body: {text}"
         );
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text(
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
                 "workspace skill read completed",
             )],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -14404,24 +14663,24 @@ impl ProviderRequestRecorder for WorkspaceSkillDiscoveryClient {
 
 #[derive(Default)]
 struct WorkspaceBindingClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for WorkspaceBindingClient {
+impl verlet_provider::ProviderClient for WorkspaceBindingClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             assert!(tool_names(request).contains(&"bash".to_string()));
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::tool_call(
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
                     "call_workspace_bash",
                     "bash",
                     serde_json::json!({
@@ -14441,8 +14700,8 @@ printf traversal > /work/../outside.txt
 printf absolute > /absolute-outside.txt"#
                     }),
                 )],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::ToolUse,
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -14461,10 +14720,12 @@ printf absolute > /absolute-outside.txt"#
                 || text.contains("Permission denied"),
             "symlink escape denial was not returned: {text}"
         );
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text("workspace edit completed")],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "workspace edit completed",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -14477,7 +14738,7 @@ impl ProviderRequestRecorder for WorkspaceBindingClient {
 
 // lexicon-allow: capsule - existing test client name
 struct BashCallingCapsuleClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     direct_tool_name: String,
     shell_command_name: String,
     command: String,
@@ -14501,23 +14762,23 @@ impl BashCallingCapsuleClient {
         }
     }
 
-    fn requests(&self) -> Vec<crate::ProviderRequest> {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
 // lexicon-allow: capsule - existing test client name
-impl crate::ProviderClient for BashCallingCapsuleClient {
+impl verlet_provider::ProviderClient for BashCallingCapsuleClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             let names = tool_names(request);
             assert!(
@@ -14527,14 +14788,14 @@ impl crate::ProviderClient for BashCallingCapsuleClient {
                 names
             );
             assert_bash_tool_describes(request, &self.shell_command_name);
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::tool_call(
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
                     "call_bash_1",
                     "bash",
                     serde_json::json!({ "command": self.command }),
                 )],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::ToolUse,
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -14544,11 +14805,13 @@ impl crate::ProviderClient for BashCallingCapsuleClient {
             "expected bash result to contain {:?}, got: {text}",
             self.expected_output
         );
-        Ok(crate::ProviderResponse {
-            // lexicon-allow: capsule - existing fixture response text
-            content: vec![crate::CanonicalContent::text("capsule command completed")],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                // lexicon-allow: capsule - existing fixture response text
+                "capsule command completed",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -14570,10 +14833,10 @@ where
 }
 
 async fn wait_for_lifecycle_status(
-    store: &crate::SqliteMetadataStore,
-    thread_id: crate::ThreadId,
-    status: crate::ThreadLifecycleStatus,
-) -> crate::ThreadLifecycleRecord {
+    store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    status: verlet_runtime_contracts::ThreadLifecycleStatus,
+) -> verlet_runtime_contracts::ThreadLifecycleRecord {
     for _ in 0..1_500 {
         if let Some(record) = store.get_thread_lifecycle(thread_id).await.unwrap()
             && record.status == status
@@ -14590,7 +14853,7 @@ async fn wait_for_session_text(
     thread_id: &str,
     expected: &str,
 ) {
-    let parsed = crate::ThreadId::parse_str(thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id).unwrap();
     for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
@@ -14978,7 +15241,7 @@ async fn wait_for_assistant_texts(
     thread_id: &str,
     expected_count: usize,
 ) -> Vec<String> {
-    let parsed = crate::ThreadId::parse_str(thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id).unwrap();
     for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
@@ -14997,16 +15260,15 @@ async fn wait_for_assistant_texts(
     panic!("timed out waiting for {expected_count} assistant message(s) in {thread_id}");
 }
 
-fn assistant_texts(messages: &[crate::CanonicalMessage]) -> Vec<String> {
+fn assistant_texts(messages: &[verlet_history::CanonicalMessage]) -> Vec<String> {
     messages
         .iter()
         .filter_map(|message| match message {
-            crate::CanonicalMessage::Assistant { content, .. } => Some(
+            verlet_history::CanonicalMessage::Assistant { content, .. } => Some(
                 crate::adapters::app_server::text_from_canonical_content(content),
             ),
-            crate::CanonicalMessage::User { .. } | crate::CanonicalMessage::ToolResult { .. } => {
-                None
-            }
+            verlet_history::CanonicalMessage::User { .. }
+            | verlet_history::CanonicalMessage::ToolResult { .. } => None,
         })
         .filter(|text| !text.is_empty())
         .collect()
@@ -15052,13 +15314,13 @@ fn item_text_by_type(items: &[serde_json::Value], item_type: &str) -> Option<Str
         .and_then(item_text)
 }
 
-fn last_user_message_text(request: &crate::ProviderRequest) -> Option<String> {
+fn last_user_message_text(request: &verlet_provider::ProviderRequest) -> Option<String> {
     request
         .messages
         .iter()
         .rev()
         .find_map(|message| match message {
-            crate::CanonicalMessage::User { content, .. } => Some(
+            verlet_history::CanonicalMessage::User { content, .. } => Some(
                 crate::adapters::app_server::text_from_canonical_content(content),
             ),
             _ => None,
@@ -15086,14 +15348,14 @@ fn item_text(item: &serde_json::Value) -> Option<String> {
 async fn connect_tui_test_client(
     socket: &std::path::Path,
     client_name: &str,
-) -> crate::CodexTuiTestClient<tokio::net::UnixStream> {
+) -> crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match crate::CodexTuiTestClient::connect_unix(
+        match crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
             socket,
-            crate::CodexTuiConnectConfig {
+            crate::adapters::codex_tui::CodexTuiConnectConfig {
                 client_name: client_name.to_string(),
-                ..crate::CodexTuiConnectConfig::default()
+                ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -15115,15 +15377,15 @@ async fn connect_tui_test_client(
 async fn connect_ws_tui_test_client(
     url: &str,
     token: &str,
-) -> crate::CodexTuiTestClient<tokio::net::TcpStream> {
+) -> crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match crate::CodexTuiTestClient::connect_websocket(
+        match crate::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
             url,
-            crate::CodexTuiConnectConfig {
+            crate::adapters::codex_tui::CodexTuiConnectConfig {
                 client_name: "websocket-listen-test".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..crate::CodexTuiConnectConfig::default()
+                ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -15142,12 +15404,12 @@ async fn connect_ws_tui_test_client(
 }
 
 async fn mint_app_server_test_token(app: &crate::adapters::app_server::VerletAppServer) -> String {
-    let store = crate::SqliteSessionStore::open(app.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
         .await
         .unwrap();
     let authority = crate::daemon::identity::SqliteIdentityAuthority::new(
         store,
-        std::sync::Arc::new(crate::SystemDaemonClock),
+        std::sync::Arc::new(crate::daemon::clock_route::SystemDaemonClock),
         None,
     )
     .await
@@ -15249,7 +15511,7 @@ impl ProviderRequestRecorder for BashCallingCapsuleClient {
     }
 }
 
-fn tool_names(request: &crate::ProviderRequest) -> Vec<String> {
+fn tool_names(request: &verlet_provider::ProviderRequest) -> Vec<String> {
     request
         .tools
         .iter()
@@ -15257,9 +15519,9 @@ fn tool_names(request: &crate::ProviderRequest) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-fn latest_user_text(request: &crate::ProviderRequest) -> Option<String> {
+fn latest_user_text(request: &verlet_provider::ProviderRequest) -> Option<String> {
     request.messages.iter().rev().find_map(|message| {
-        let crate::CanonicalMessage::User { content, .. } = message else {
+        let verlet_history::CanonicalMessage::User { content, .. } = message else {
             return None;
         };
         Some(crate::adapters::app_server::text_from_canonical_content(
@@ -15270,22 +15532,26 @@ fn latest_user_text(request: &crate::ProviderRequest) -> Option<String> {
 
 fn thread_operation_names() -> Vec<&'static str> {
     vec![
-        crate::THREAD_SPAWN_OPERATION,
-        crate::THREAD_SUBMIT_OPERATION,
-        crate::THREAD_WAIT_OPERATION,
-        crate::THREAD_STATUS_OPERATION,
-        crate::THREAD_CANCEL_OPERATION,
+        crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
+        crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
+        crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
+        crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
+        crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
     ]
 }
 
 fn thread_operation_capability(operation: &str) -> &'static str {
     match operation {
-        crate::THREAD_SPAWN_OPERATION => crate::THREADS_SPAWN_CAPABILITY,
-        crate::THREAD_SUBMIT_OPERATION | crate::THREAD_CANCEL_OPERATION => {
-            crate::THREADS_CONTROL_CAPABILITY
+        crate::operations::kernel_packages::THREAD_SPAWN_OPERATION => {
+            crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
         }
-        crate::THREAD_WAIT_OPERATION | crate::THREAD_STATUS_OPERATION => {
-            crate::THREADS_READ_CAPABILITY
+        crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION
+        | crate::operations::kernel_packages::THREAD_CANCEL_OPERATION => {
+            crate::operations::kernel_packages::THREADS_CONTROL_CAPABILITY
+        }
+        crate::operations::kernel_packages::THREAD_WAIT_OPERATION
+        | crate::operations::kernel_packages::THREAD_STATUS_OPERATION => {
+            crate::operations::kernel_packages::THREADS_READ_CAPABILITY
         }
         other => panic!("unknown thread operation {other}"),
     }
@@ -15304,7 +15570,7 @@ fn json_array_string_set(value: &serde_json::Value) -> std::collections::BTreeSe
         .collect()
 }
 
-fn assert_bash_tool_describes(request: &crate::ProviderRequest, command: &str) {
+fn assert_bash_tool_describes(request: &verlet_provider::ProviderRequest, command: &str) {
     let description = bash_tool_description(request);
     assert!(
         description.contains(command),
@@ -15312,7 +15578,7 @@ fn assert_bash_tool_describes(request: &crate::ProviderRequest, command: &str) {
     );
 }
 
-fn assert_bash_tool_omits(request: &crate::ProviderRequest, command: &str) {
+fn assert_bash_tool_omits(request: &verlet_provider::ProviderRequest, command: &str) {
     let description = bash_tool_description(request);
     assert!(
         !description.contains(command),
@@ -15320,7 +15586,7 @@ fn assert_bash_tool_omits(request: &crate::ProviderRequest, command: &str) {
     );
 }
 
-fn assert_bash_tool_absent_or_omits(request: &crate::ProviderRequest, command: &str) {
+fn assert_bash_tool_absent_or_omits(request: &verlet_provider::ProviderRequest, command: &str) {
     let Some(description) = request
         .tools
         .iter()
@@ -15335,7 +15601,7 @@ fn assert_bash_tool_absent_or_omits(request: &crate::ProviderRequest, command: &
     );
 }
 
-fn bash_tool_description(request: &crate::ProviderRequest) -> String {
+fn bash_tool_description(request: &verlet_provider::ProviderRequest) -> String {
     request
         .tools
         .iter()
@@ -15344,13 +15610,13 @@ fn bash_tool_description(request: &crate::ProviderRequest) -> String {
         .expect("bash tool should be advertised")
 }
 
-fn text_from_canonical_messages(messages: &[crate::CanonicalMessage]) -> String {
+fn text_from_canonical_messages(messages: &[verlet_history::CanonicalMessage]) -> String {
     messages
         .iter()
         .map(|message| match message {
-            crate::CanonicalMessage::User { content, .. }
-            | crate::CanonicalMessage::Assistant { content, .. }
-            | crate::CanonicalMessage::ToolResult { content, .. } => {
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => {
                 crate::adapters::app_server::text_from_canonical_content(content)
             }
         })

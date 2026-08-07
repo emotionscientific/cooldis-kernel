@@ -1,12 +1,12 @@
 #[tokio::test]
 async fn kernel_thread_operations_spawn_and_control_child_by_task_name() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -17,7 +17,7 @@ async fn kernel_thread_operations_spawn_and_control_child_by_task_name() {
 
     let spawn = provider
         .invoke_json(
-            crate::THREAD_SPAWN_OPERATION,
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "message": "echo tool-child",
@@ -33,7 +33,7 @@ async fn kernel_thread_operations_spawn_and_control_child_by_task_name() {
 
     let wait = provider
         .invoke_json(
-            crate::THREAD_WAIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "timeout_ms": 1_000,
@@ -47,7 +47,7 @@ async fn kernel_thread_operations_spawn_and_control_child_by_task_name() {
 
     let status = provider
         .invoke_json(
-            crate::THREAD_STATUS_OPERATION,
+            crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
             serde_json::json!({"task_name": "worker"}),
         )
         .await
@@ -58,7 +58,7 @@ async fn kernel_thread_operations_spawn_and_control_child_by_task_name() {
 
     provider
         .invoke_json(
-            crate::THREAD_CANCEL_OPERATION,
+            crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
             }),
@@ -70,13 +70,13 @@ async fn kernel_thread_operations_spawn_and_control_child_by_task_name() {
 
 #[tokio::test]
 async fn kernel_thread_operations_decode_errors_do_not_echo_raw_thread_id_values() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session-a"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session-a"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -84,11 +84,11 @@ async fn kernel_thread_operations_decode_errors_do_not_echo_raw_thread_id_values
         host.kernel_control(),
         root.context().clone(),
     );
-    let raw_id = crate::ThreadId::new().to_string();
+    let raw_id = verlet_runtime_contracts::ThreadId::new().to_string();
 
     for (operation, arguments) in [
         (
-            crate::THREAD_SPAWN_OPERATION,
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "message": "work",
@@ -96,7 +96,7 @@ async fn kernel_thread_operations_decode_errors_do_not_echo_raw_thread_id_values
             }),
         ),
         (
-            crate::THREAD_SUBMIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "message": "work",
@@ -104,21 +104,21 @@ async fn kernel_thread_operations_decode_errors_do_not_echo_raw_thread_id_values
             }),
         ),
         (
-            crate::THREAD_WAIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "target_thread_id": raw_id,
             }),
         ),
         (
-            crate::THREAD_STATUS_OPERATION,
+            crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "target_thread_id": raw_id,
             }),
         ),
         (
-            crate::THREAD_CANCEL_OPERATION,
+            crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "target_thread_id": raw_id,
@@ -137,13 +137,13 @@ async fn kernel_thread_operations_decode_errors_do_not_echo_raw_thread_id_values
 
 #[tokio::test]
 async fn retried_thread_submit_dispatch_enqueues_one_turn() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -153,7 +153,7 @@ async fn retried_thread_submit_dispatch_enqueues_one_turn() {
     );
     provider
         .invoke_json(
-            crate::THREAD_SPAWN_OPERATION,
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
             serde_json::json!({"task_name": "worker", "message": "echo initial"}),
         )
         .await
@@ -165,11 +165,17 @@ async fn retried_thread_submit_dispatch_enqueues_one_turn() {
     });
 
     let first = provider
-        .invoke_json(crate::THREAD_SUBMIT_OPERATION, arguments.clone())
+        .invoke_json(
+            crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
+            arguments.clone(),
+        )
         .await
         .unwrap();
     let retry = provider
-        .invoke_json(crate::THREAD_SUBMIT_OPERATION, arguments)
+        .invoke_json(
+            crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
+            arguments,
+        )
         .await
         .unwrap();
 
@@ -191,10 +197,10 @@ async fn retried_thread_submit_dispatch_enqueues_one_turn() {
                 .filter(|message| {
                     matches!(
                         message,
-                        crate::CanonicalMessage::User { content, .. }
+                        verlet_history::CanonicalMessage::User { content, .. }
                             if content.iter().any(|content| matches!(
                                 content,
-                                crate::CanonicalContent::Text { text, .. }
+                                verlet_history::CanonicalContent::Text { text, .. }
                                     if text == "echo submit-once"
                             ))
                     )
@@ -215,39 +221,39 @@ async fn retried_thread_submit_dispatch_enqueues_one_turn() {
 
 #[tokio::test]
 async fn thread_submit_dispatch_fold_is_scoped_to_the_target_thread() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let caller = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let first_target = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let second_target = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let control = host.kernel_control();
-    let dispatch_id = verlet_runtime_contracts::DispatchId::new("shared-submit-dispatch");
+    let dispatch_id = verlet_runtime_contracts::handle::DispatchId::new("shared-submit-dispatch");
 
     let first = control
         .submit_to_thread_with_dispatch(
             caller.context(),
             first_target.context().coordinates.thread_id,
             dispatch_id.clone(),
-            crate::TurnInput::text("echo first target"),
+            crate::kernel::runtime_host::turn::TurnInput::text("echo first target"),
         )
         .await
         .unwrap();
@@ -256,7 +262,7 @@ async fn thread_submit_dispatch_fold_is_scoped_to_the_target_thread() {
             caller.context(),
             first_target.context().coordinates.thread_id,
             dispatch_id.clone(),
-            crate::TurnInput::text("echo folded retry"),
+            crate::kernel::runtime_host::turn::TurnInput::text("echo folded retry"),
         )
         .await
         .unwrap();
@@ -265,7 +271,7 @@ async fn thread_submit_dispatch_fold_is_scoped_to_the_target_thread() {
             caller.context(),
             second_target.context().coordinates.thread_id,
             dispatch_id,
-            crate::TurnInput::text("echo second target"),
+            crate::kernel::runtime_host::turn::TurnInput::text("echo second target"),
         )
         .await
         .unwrap();
@@ -282,26 +288,26 @@ async fn thread_submit_dispatch_fold_is_scoped_to_the_target_thread() {
     let second_session = second_target.session_context().await.unwrap();
     assert!(first_session.messages.iter().any(|message| matches!(
         message,
-        crate::CanonicalMessage::User { content, .. }
+        verlet_history::CanonicalMessage::User { content, .. }
             if content.iter().any(|content| matches!(
                 content,
-                crate::CanonicalContent::Text { text, .. } if text == "echo first target"
+                verlet_history::CanonicalContent::Text { text, .. } if text == "echo first target"
             ))
     )));
     assert!(first_session.messages.iter().all(|message| !matches!(
         message,
-        crate::CanonicalMessage::User { content, .. }
+        verlet_history::CanonicalMessage::User { content, .. }
             if content.iter().any(|content| matches!(
                 content,
-                crate::CanonicalContent::Text { text, .. } if text == "echo folded retry"
+                verlet_history::CanonicalContent::Text { text, .. } if text == "echo folded retry"
             ))
     )));
     assert!(second_session.messages.iter().any(|message| matches!(
         message,
-        crate::CanonicalMessage::User { content, .. }
+        verlet_history::CanonicalMessage::User { content, .. }
             if content.iter().any(|content| matches!(
                 content,
-                crate::CanonicalContent::Text { text, .. } if text == "echo second target"
+                verlet_history::CanonicalContent::Text { text, .. } if text == "echo second target"
             ))
     )));
 
@@ -310,13 +316,13 @@ async fn thread_submit_dispatch_fold_is_scoped_to_the_target_thread() {
 
 #[tokio::test]
 async fn compatibility_submit_without_dispatch_keeps_legacy_turn_identity() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -327,7 +333,7 @@ async fn compatibility_submit_without_dispatch_keeps_legacy_turn_identity() {
             root.context(),
             root.context().coordinates.thread_id,
             None,
-            crate::TurnInput::text("echo compatibility submit"),
+            crate::kernel::runtime_host::turn::TurnInput::text("echo compatibility submit"),
         )
         .await
         .unwrap();
@@ -340,13 +346,13 @@ async fn compatibility_submit_without_dispatch_keeps_legacy_turn_identity() {
 
 #[tokio::test]
 async fn kernel_process_operations_exec_and_poll_host_command() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -363,7 +369,7 @@ async fn kernel_process_operations_exec_and_poll_host_command() {
 
     let started = provider
         .invoke_json(
-            crate::PROCESS_EXEC_OPERATION,
+            crate::operations::kernel_packages::PROCESS_EXEC_OPERATION,
             serde_json::json!({
                 "command": ["/bin/sh", "-c", "sleep 0.1; printf done"],
                 "yield_time_ms": 1,
@@ -380,7 +386,7 @@ async fn kernel_process_operations_exec_and_poll_host_command() {
 
     let polled = provider
         .invoke_json(
-            crate::PROCESS_POLL_OPERATION,
+            crate::operations::kernel_packages::PROCESS_POLL_OPERATION,
             serde_json::json!({
                 "process_id": process_id.clone(),
                 "yield_time_ms": 1_000,
@@ -402,13 +408,13 @@ async fn kernel_process_operations_exec_and_poll_host_command() {
 
 #[tokio::test]
 async fn kernel_process_operations_write_and_terminate_host_process() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -425,7 +431,7 @@ async fn kernel_process_operations_write_and_terminate_host_process() {
 
     let started = provider
         .invoke_json(
-            crate::PROCESS_EXEC_OPERATION,
+            crate::operations::kernel_packages::PROCESS_EXEC_OPERATION,
             serde_json::json!({
                 "command": ["/bin/cat"],
                 "stream_stdin": true,
@@ -441,7 +447,7 @@ async fn kernel_process_operations_write_and_terminate_host_process() {
 
     let wrote = provider
         .invoke_json(
-            crate::PROCESS_WRITE_OPERATION,
+            crate::operations::kernel_packages::PROCESS_WRITE_OPERATION,
             serde_json::json!({
                 "process_id": process_id.clone(),
                 "delta_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "hello\n"),
@@ -458,7 +464,7 @@ async fn kernel_process_operations_write_and_terminate_host_process() {
     let process_id = wrote["process_id"].as_str().unwrap().to_string();
     let terminated = provider
         .invoke_json(
-            crate::PROCESS_TERMINATE_OPERATION,
+            crate::operations::kernel_packages::PROCESS_TERMINATE_OPERATION,
             serde_json::json!({
                 "process_id": process_id,
                 "reason": "test cleanup",

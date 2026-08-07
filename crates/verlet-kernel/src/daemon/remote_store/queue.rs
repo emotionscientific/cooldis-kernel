@@ -26,21 +26,25 @@ pub const SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1: &str = "cooldis.stream.sync_ingres
 pub const SYNC_INGRESS_QUEUE_STREAM_PREFIX: &str = "sync-ingress:";
 
 /// The exact pull stream assigned to one child queue.
-pub fn remote_ingress_queue_stream_id(target_thread_id: crate::ThreadId) -> crate::EventStreamId {
-    crate::EventStreamId::new(format!(
+pub fn remote_ingress_queue_stream_id(
+    target_thread_id: verlet_runtime_contracts::ThreadId,
+) -> verlet_history::EventStreamId {
+    verlet_history::EventStreamId::new(format!(
         "{SYNC_INGRESS_QUEUE_STREAM_PREFIX}{target_thread_id}"
     ))
 }
 
 /// Parse a queue stream id without accepting adjacent textual prefixes.
-pub fn remote_ingress_queue_target(stream_id: &crate::EventStreamId) -> Option<crate::ThreadId> {
+pub fn remote_ingress_queue_target(
+    stream_id: &verlet_history::EventStreamId,
+) -> Option<verlet_runtime_contracts::ThreadId> {
     let value = stream_id
         .as_str()
         .strip_prefix(SYNC_INGRESS_QUEUE_STREAM_PREFIX)?;
     if value.is_empty() || value.contains(':') {
         return None;
     }
-    crate::ThreadId::parse_str(value).ok()
+    verlet_runtime_contracts::ThreadId::parse_str(value).ok()
 }
 
 /// One durable parent-to-child envelope, keyed by dispatch identity.
@@ -48,10 +52,10 @@ pub fn remote_ingress_queue_target(stream_id: &crate::EventStreamId) -> Option<c
 pub struct RemoteIngressQueueEntryV1 {
     pub schema: String,
     /// Dispatch identity of the submit/steer; the fold key.
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
     /// The child thread this entry addresses, as the child's runtime knows
     /// it (the queue prefix is derived from it).
-    pub target_thread_id: crate::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
     pub envelope: verlet_io_core::IngressEnvelope,
     pub enqueued_at_ms: i64,
 }
@@ -77,7 +81,7 @@ pub struct RemoteIngressQueuePage {
     pub entries: Vec<RemoteIngressQueueEntryV1>,
     /// Store position to pass as `after` on the next tail. An empty page
     /// returns the input position unchanged.
-    pub next: Option<crate::EventSequence>,
+    pub next: Option<verlet_history::EventSequence>,
 }
 
 /// The store-hosted queue, both directions.
@@ -97,7 +101,7 @@ pub trait RemoteIngressQueue: Send + Sync {
     async fn enqueue(
         &self,
         entry: RemoteIngressQueueEntryV1,
-    ) -> crate::VerletResult<RemoteEnqueueReceipt>;
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteEnqueueReceipt>;
 
     /// Child side: entries for `target_thread_id` after `after`, oldest
     /// first. Position is store order. The child persists `page.next` only
@@ -106,18 +110,18 @@ pub trait RemoteIngressQueue: Send + Sync {
     /// admission dedupes on dispatch identity.
     async fn tail_pending(
         &self,
-        target_thread_id: crate::ThreadId,
-        after: Option<crate::EventSequence>,
-    ) -> crate::VerletResult<RemoteIngressQueuePage>;
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        after: Option<verlet_history::EventSequence>,
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteIngressQueuePage>;
 
     /// Child side: mark `dispatch_id` delivered into the child's ingress
     /// lane. Bookkeeping only (see module doc); acknowledging an unknown or
     /// already-acknowledged id is a no-op.
     async fn acknowledge(
         &self,
-        target_thread_id: crate::ThreadId,
-        dispatch_id: &verlet_runtime_contracts::DispatchId,
-    ) -> crate::VerletResult<()>;
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 }
 
 /// SQLite implementation hosted alongside the daemon's event store.
@@ -129,7 +133,7 @@ pub trait RemoteIngressQueue: Send + Sync {
 /// [`SYNC_INGRESS_QUEUE_STREAM_PREFIX`].
 #[derive(Clone)]
 pub struct SqliteRemoteIngressQueue {
-    store: crate::SqliteSessionStore,
+    store: verlet_history_sqlite::SqliteSessionStore,
 }
 
 impl std::fmt::Debug for SqliteRemoteIngressQueue {
@@ -140,13 +144,15 @@ impl std::fmt::Debug for SqliteRemoteIngressQueue {
 }
 
 impl SqliteRemoteIngressQueue {
-    pub async fn new(store: crate::SqliteSessionStore) -> crate::VerletResult<Self> {
+    pub async fn new(
+        store: verlet_history_sqlite::SqliteSessionStore,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let queue = Self { store };
         queue.init_schema().await?;
         Ok(queue)
     }
 
-    async fn init_schema(&self) -> crate::VerletResult<()> {
+    async fn init_schema(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
             let database = store.sqlite_database();
@@ -188,17 +194,20 @@ impl SqliteRemoteIngressQueue {
     /// Project pending queue rows through the authenticated pull surface.
     pub(crate) async fn pull_after(
         &self,
-        stream_id: &crate::EventStreamId,
-        cursor: Option<crate::StreamCursorV1>,
-    ) -> crate::VerletResult<Vec<crate::StreamRecordEnvelopeV1>> {
+        stream_id: &verlet_history::EventStreamId,
+        cursor: Option<verlet_history::StreamCursorV1>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::StreamRecordEnvelopeV1>>
+    {
         let target_thread_id = remote_ingress_queue_target(stream_id).ok_or_else(|| {
-            crate::VerletError::History(format!("invalid remote ingress queue stream {stream_id}"))
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "invalid remote ingress queue stream {stream_id}"
+            ))
         })?;
         let after = match cursor {
             Some(cursor) => {
                 cursor.validate_stream_cursor_v1().map_err(history_error)?;
                 if cursor.stream_id != *stream_id {
-                    return Err(crate::VerletError::History(
+                    return Err(crate::kernel::runtime_host::VerletError::History(
                         "remote ingress queue cursor belongs to a different stream".to_string(),
                     ));
                 }
@@ -215,9 +224,9 @@ impl SqliteRemoteIngressQueue {
 
     async fn verify_cursor(
         &self,
-        target_thread_id: crate::ThreadId,
-        cursor: &crate::StreamCursorV1,
-    ) -> crate::VerletResult<()> {
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        cursor: &verlet_history::StreamCursorV1,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let mut rows = connection
@@ -229,13 +238,13 @@ impl SqliteRemoteIngressQueue {
             .await
             .map_err(storage_error)?;
         let Some(row) = rows.next().await.map_err(storage_error)? else {
-            return Err(crate::VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "remote ingress queue cursor sequence is absent".to_string(),
             ));
         };
         let event_id = row.get::<String>(0).map_err(storage_error)?;
         if event_id != cursor.event_id.to_string() {
-            return Err(crate::VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "remote ingress queue cursor event id diverged".to_string(),
             ));
         }
@@ -244,12 +253,12 @@ impl SqliteRemoteIngressQueue {
 
     async fn pending_rows(
         &self,
-        target_thread_id: crate::ThreadId,
-        after: Option<crate::EventSequence>,
-    ) -> crate::VerletResult<Vec<StoredQueueRow>> {
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        after: Option<verlet_history::EventSequence>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<StoredQueueRow>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
-        let after = after.map(crate::EventSequence::get).unwrap_or(0);
+        let after = after.map(verlet_history::EventSequence::get).unwrap_or(0);
         let mut rows = connection
             .query(
                 "SELECT sequence, event_id, entry_json
@@ -264,12 +273,13 @@ impl SqliteRemoteIngressQueue {
             .map_err(storage_error)?;
         let mut pending = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let sequence = crate::EventSequence::new(row.get::<i64>(0).map_err(storage_error)?);
+            let sequence =
+                verlet_history::EventSequence::new(row.get::<i64>(0).map_err(storage_error)?);
             let event_id = parse_event_id(&row.get::<String>(1).map_err(storage_error)?)?;
             let encoded = row.get::<String>(2).map_err(storage_error)?;
             let entry = decode_entry(&encoded)?;
             if entry.target_thread_id != target_thread_id {
-                return Err(crate::VerletError::History(
+                return Err(crate::kernel::runtime_host::VerletError::History(
                     "remote ingress queue row target does not match its partition".to_string(),
                 ));
             }
@@ -285,31 +295,33 @@ impl SqliteRemoteIngressQueue {
 
 #[derive(Clone)]
 struct StoredQueueRow {
-    sequence: crate::EventSequence,
-    event_id: crate::EventRecordId,
+    sequence: verlet_history::EventSequence,
+    event_id: verlet_history::EventRecordId,
     entry: RemoteIngressQueueEntryV1,
 }
 
 impl StoredQueueRow {
     fn into_wire(
         self,
-        stream_id: crate::EventStreamId,
-    ) -> crate::VerletResult<crate::StreamRecordEnvelopeV1> {
+        stream_id: verlet_history::EventStreamId,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::StreamRecordEnvelopeV1> {
         let payload = serde_json::to_value(&self.entry).map_err(|error| {
-            crate::VerletError::History(format!("encode remote ingress queue entry: {error}"))
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "encode remote ingress queue entry: {error}"
+            ))
         })?;
-        Ok(crate::StreamRecordEnvelopeV1 {
-            schema: crate::STREAM_RECORD_SCHEMA_V1.to_string(),
+        Ok(verlet_history::StreamRecordEnvelopeV1 {
+            schema: verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
             event_id: self.event_id,
             stream_id,
             sequence: self.sequence,
             coordinates: queue_coordinates(self.entry.target_thread_id),
             created_at_ms: self.entry.enqueued_at_ms,
             kind: "sync.ingress.queue.entry".to_string(),
-            origin: crate::EventOrigin::Witnessed,
+            origin: verlet_history::EventOrigin::Witnessed,
             payload_schema: SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1.to_string(),
             trace_context: None,
-            provenance: crate::EventProvenance::default(),
+            provenance: verlet_history::EventProvenance::default(),
             payload,
         })
     }
@@ -320,7 +332,7 @@ impl RemoteIngressQueue for SqliteRemoteIngressQueue {
     async fn enqueue(
         &self,
         entry: RemoteIngressQueueEntryV1,
-    ) -> crate::VerletResult<RemoteEnqueueReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteEnqueueReceipt> {
         validate_entry(&entry)?;
         let store = self.store.clone();
         cancellation_safe(async move {
@@ -348,7 +360,7 @@ impl RemoteIngressQueue for SqliteRemoteIngressQueue {
                 drop(existing_rows);
                 let existing = decode_entry(&encoded)?;
                 if existing != entry {
-                    return Err(crate::VerletError::History(format!(
+                    return Err(crate::kernel::runtime_host::VerletError::History(format!(
                         "remote ingress dispatch {} already exists with a different payload",
                         entry.dispatch_id
                     )));
@@ -374,16 +386,18 @@ impl RemoteIngressQueue for SqliteRemoteIngressQueue {
                 .await
                 .map_err(storage_error)?
                 .ok_or_else(|| {
-                    crate::VerletError::History(
+                    crate::kernel::runtime_host::VerletError::History(
                         "remote ingress queue sequence query returned no row".to_string(),
                     )
                 })?
                 .get::<i64>(0)
                 .map_err(storage_error)?;
             drop(sequence_rows);
-            let event_id = crate::EventRecordId::new();
+            let event_id = verlet_history::EventRecordId::new();
             let entry_json = serde_json::to_string(&entry).map_err(|error| {
-                crate::VerletError::History(format!("encode remote ingress queue entry: {error}"))
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "encode remote ingress queue entry: {error}"
+                ))
             })?;
             transaction
                 .execute(
@@ -411,9 +425,9 @@ impl RemoteIngressQueue for SqliteRemoteIngressQueue {
 
     async fn tail_pending(
         &self,
-        target_thread_id: crate::ThreadId,
-        after: Option<crate::EventSequence>,
-    ) -> crate::VerletResult<RemoteIngressQueuePage> {
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        after: Option<verlet_history::EventSequence>,
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteIngressQueuePage> {
         let rows = self.pending_rows(target_thread_id, after).await?;
         let next = rows.last().map(|row| row.sequence).or(after);
         Ok(RemoteIngressQueuePage {
@@ -424,9 +438,9 @@ impl RemoteIngressQueue for SqliteRemoteIngressQueue {
 
     async fn acknowledge(
         &self,
-        target_thread_id: crate::ThreadId,
-        dispatch_id: &verlet_runtime_contracts::DispatchId,
-    ) -> crate::VerletResult<()> {
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         let dispatch_id = dispatch_id.clone();
         cancellation_safe(async move {
@@ -456,24 +470,26 @@ impl RemoteIngressQueue for SqliteRemoteIngressQueue {
     }
 }
 
-fn validate_entry(entry: &RemoteIngressQueueEntryV1) -> crate::VerletResult<()> {
+fn validate_entry(
+    entry: &RemoteIngressQueueEntryV1,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if entry.schema != SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1 {
-        return Err(crate::VerletError::History(
+        return Err(crate::kernel::runtime_host::VerletError::History(
             "unsupported remote ingress queue entry schema".to_string(),
         ));
     }
     let Some(dedupe_key) = entry.envelope.dedupe_key.as_ref() else {
-        return Err(crate::VerletError::History(
+        return Err(crate::kernel::runtime_host::VerletError::History(
             "remote ingress queue entry requires a dispatch dedupe key".to_string(),
         ));
     };
     if dedupe_key.key != entry.dispatch_id.as_str() {
-        return Err(crate::VerletError::History(
+        return Err(crate::kernel::runtime_host::VerletError::History(
             "remote ingress queue dedupe key does not match dispatch id".to_string(),
         ));
     }
     if entry.enqueued_at_ms != 0 {
-        return Err(crate::VerletError::History(
+        return Err(crate::kernel::runtime_host::VerletError::History(
             "remote ingress queue enqueued_at_ms must be zero for stable retry identity"
                 .to_string(),
         ));
@@ -481,22 +497,34 @@ fn validate_entry(entry: &RemoteIngressQueueEntryV1) -> crate::VerletResult<()> 
     Ok(())
 }
 
-fn decode_entry(encoded: &str) -> crate::VerletResult<RemoteIngressQueueEntryV1> {
+fn decode_entry(
+    encoded: &str,
+) -> crate::kernel::runtime_host::VerletResult<RemoteIngressQueueEntryV1> {
     let entry = serde_json::from_str::<RemoteIngressQueueEntryV1>(encoded).map_err(|error| {
-        crate::VerletError::History(format!("decode remote ingress queue entry: {error}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "decode remote ingress queue entry: {error}"
+        ))
     })?;
     validate_entry(&entry)?;
     Ok(entry)
 }
 
-fn parse_event_id(value: &str) -> crate::VerletResult<crate::EventRecordId> {
+fn parse_event_id(
+    value: &str,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecordId> {
     uuid::Uuid::parse_str(value)
-        .map(crate::EventRecordId::from_uuid)
-        .map_err(|error| crate::VerletError::History(format!("decode queue event id: {error}")))
+        .map(verlet_history::EventRecordId::from_uuid)
+        .map_err(|error| {
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "decode queue event id: {error}"
+            ))
+        })
 }
 
-fn queue_coordinates(target_thread_id: crate::ThreadId) -> crate::ThreadCoordinates {
-    crate::ThreadCoordinates {
+fn queue_coordinates(
+    target_thread_id: verlet_runtime_contracts::ThreadId,
+) -> verlet_runtime_contracts::ThreadCoordinates {
+    verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: "remote-ingress".to_string(),
         user_id: "remote-ingress".to_string(),
         session_id: "remote-ingress".to_string(),
@@ -511,22 +539,24 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn history_error(error: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::History(error.to_string())
+fn history_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(error.to_string())
 }
 
-fn storage_error(error: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::History(error.to_string())
+fn storage_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(error.to_string())
 }
 
 async fn cancellation_safe<T>(
-    future: impl std::future::Future<Output = crate::VerletResult<T>> + Send + 'static,
-) -> crate::VerletResult<T>
+    future: impl std::future::Future<Output = crate::kernel::runtime_host::VerletResult<T>>
+    + Send
+    + 'static,
+) -> crate::kernel::runtime_host::VerletResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        crate::VerletError::History(format!(
+        crate::kernel::runtime_host::VerletError::History(format!(
             "remote ingress queue transaction task failed: {error}"
         ))
     })?

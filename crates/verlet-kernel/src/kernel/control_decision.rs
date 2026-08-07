@@ -216,10 +216,10 @@ pub enum PlacementTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolDecisionRequest {
-    pub coordinates: crate::ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
-    pub request_event_id: crate::EventRecordId,
+    pub request_event_id: verlet_history::EventRecordId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,10 +230,10 @@ pub struct ToolControllerBinding {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingToolCallSuspension {
-    pub suspended_event_id: crate::EventRecordId,
+    pub suspended_event_id: verlet_history::EventRecordId,
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
-    pub request_event_id: Option<crate::EventRecordId>,
+    pub request_event_id: Option<verlet_history::EventRecordId>,
     pub approval_id: Option<String>,
     pub reason: Option<String>,
 }
@@ -242,19 +242,19 @@ pub struct PendingToolCallSuspension {
 pub enum ToolCallDecision {
     NoDecision,
     Allow {
-        consumed_fact_id: crate::EventRecordId,
+        consumed_fact_id: verlet_history::EventRecordId,
     },
     Rewrite {
-        consumed_fact_id: crate::EventRecordId,
+        consumed_fact_id: verlet_history::EventRecordId,
         arguments: serde_json::Value,
     },
     Deny {
-        consumed_fact_id: Option<crate::EventRecordId>,
+        consumed_fact_id: Option<verlet_history::EventRecordId>,
         reason: String,
         fail_closed: bool,
     },
     Wait {
-        consumed_fact_id: crate::EventRecordId,
+        consumed_fact_id: verlet_history::EventRecordId,
         approval_id: Option<String>,
         reason: Option<String>,
     },
@@ -262,10 +262,10 @@ pub enum ToolCallDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnContinuationDecisionRequest {
-    pub coordinates: crate::ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub subject: TurnContinuationSubject,
     pub snapshot_id: String,
-    pub request_event_id: crate::EventRecordId,
+    pub request_event_id: verlet_history::EventRecordId,
     pub now_ms: i64,
     pub completed_continuations: u32,
 }
@@ -274,12 +274,12 @@ pub struct TurnContinuationDecisionRequest {
 pub enum TurnContinuationDecision {
     NoRequest,
     Accept {
-        consumed_request_id: crate::EventRecordId,
+        consumed_request_id: verlet_history::EventRecordId,
         mandate_id: String,
         next_turn_input: String,
     },
     Reject {
-        consumed_request_id: Option<crate::EventRecordId>,
+        consumed_request_id: Option<verlet_history::EventRecordId>,
         reason: String,
         fail_closed: bool,
     },
@@ -287,10 +287,10 @@ pub enum TurnContinuationDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlacementDecisionRequest {
-    pub coordinates: crate::ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub subject: PlacementSubject,
     pub snapshot_id: String,
-    pub request_event_id: crate::EventRecordId,
+    pub request_event_id: verlet_history::EventRecordId,
     pub default_target: PlacementTarget,
     pub allowed_targets: std::collections::BTreeSet<PlacementTarget>,
 }
@@ -301,18 +301,18 @@ pub enum PlacementDecision {
         target: PlacementTarget,
     },
     Selected {
-        consumed_fact_id: crate::EventRecordId,
+        consumed_fact_id: verlet_history::EventRecordId,
         target: PlacementTarget,
     },
     Deny {
-        consumed_fact_id: Option<crate::EventRecordId>,
+        consumed_fact_id: Option<verlet_history::EventRecordId>,
         reason: String,
         fail_closed: bool,
     },
 }
 
 impl ToolCallDecision {
-    pub fn consumed_fact_id(&self) -> Option<crate::EventRecordId> {
+    pub fn consumed_fact_id(&self) -> Option<verlet_history::EventRecordId> {
         match self {
             Self::NoDecision => None,
             Self::Allow { consumed_fact_id }
@@ -329,19 +329,19 @@ impl ToolCallDecision {
     }
 }
 
-pub async fn decide_tool_call<S: crate::EventStore + ?Sized>(
+pub async fn decide_tool_call<S: verlet_history::EventStore + ?Sized>(
     store: &S,
     request: ToolDecisionRequest,
-) -> crate::VerletResult<ToolCallDecision> {
+) -> crate::kernel::runtime_host::VerletResult<ToolCallDecision> {
     let control_events = store
         .read_events(&control_stream_id(&request.coordinates), None)
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut terminal_candidates = Vec::new();
     let mut wait_candidates = Vec::new();
     for event in control_events {
         match event.kind {
-            crate::EventKind::ToolCallDecision => {
+            verlet_history::EventKind::ToolCallDecision => {
                 let payload = match serde_json::from_value::<ToolCallDecisionPayload>(
                     event.payload.clone(),
                 ) {
@@ -364,7 +364,7 @@ pub async fn decide_tool_call<S: crate::EventStore + ?Sized>(
                 }
                 terminal_candidates.push(tool_decision_from_payload(event.id, payload));
             }
-            crate::EventKind::ToolCallSuspended => {
+            verlet_history::EventKind::ToolCallSuspended => {
                 let payload =
                     match serde_json::from_value::<ToolCallSuspendedPayload>(event.payload.clone())
                     {
@@ -416,11 +416,11 @@ pub async fn decide_tool_call<S: crate::EventStore + ?Sized>(
     }
 }
 
-pub async fn active_tool_controller_for_request<S: crate::EventStore + ?Sized>(
+pub async fn active_tool_controller_for_request<S: verlet_history::EventStore + ?Sized>(
     store: &S,
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     tool_name: &str,
-) -> crate::VerletResult<Option<ToolControllerBinding>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<ToolControllerBinding>> {
     let Some((_, receipt)) = active_manifest_bind_receipt(store, coordinates).await? else {
         return Ok(None);
     };
@@ -436,61 +436,76 @@ pub async fn active_tool_controller_for_request<S: crate::EventStore + ?Sized>(
     Ok(None)
 }
 
-pub async fn active_manifest_bind_receipt<S: crate::EventStore + ?Sized>(
+pub async fn active_manifest_bind_receipt<S: verlet_history::EventStore + ?Sized>(
     store: &S,
-    coordinates: &crate::ThreadCoordinates,
-) -> crate::VerletResult<Option<(crate::EventRecordId, crate::AgentManifestBindReceipt)>> {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> crate::kernel::runtime_host::VerletResult<
+    Option<(
+        verlet_history::EventRecordId,
+        crate::agent::manifest_bind::AgentManifestBindReceipt,
+    )>,
+> {
     let thread_events = store
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let Some(event) = thread_events
         .into_iter()
-        .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .max_by_key(|event| event.sequence.get())
     else {
         return Ok(None);
     };
-    let receipt = serde_json::from_value::<crate::AgentManifestBindReceipt>(event.payload)
-        .map_err(|err| {
-            crate::VerletError::History(format!(
-                "manifest.bind.completed payload is invalid: {err}"
-            ))
-        })?;
+    let receipt = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
+        event.payload,
+    )
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "manifest.bind.completed payload is invalid: {err}"
+        ))
+    })?;
     Ok(Some((event.id, receipt)))
 }
 
-pub async fn list_pending_tool_call_suspensions<S: crate::EventStore + ?Sized>(
+pub async fn list_pending_tool_call_suspensions<S: verlet_history::EventStore + ?Sized>(
     store: &S,
-    coordinates: &crate::ThreadCoordinates,
-) -> crate::VerletResult<Vec<PendingToolCallSuspension>> {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> crate::kernel::runtime_host::VerletResult<Vec<PendingToolCallSuspension>> {
     let control_events = store
         .read_events(&control_stream_id(coordinates), None)
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let thread_events = store
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut terminal_subjects = std::collections::BTreeSet::<(ToolCallSubject, String)>::new();
     for event in control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ToolCallDecision)
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallDecision)
     {
         let payload = serde_json::from_value::<ToolCallDecisionPayload>(event.payload.clone())
             .map_err(|err| {
-                crate::VerletError::History(format!("tool.call.decision payload is invalid: {err}"))
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "tool.call.decision payload is invalid: {err}"
+                ))
             })?;
         terminal_subjects.insert((payload.subject, payload.snapshot_id));
     }
     let mut completions = Vec::new();
     for event in thread_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallCompleted)
     {
         let payload = serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone())
             .map_err(|err| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "tool.call.completed payload is invalid: {err}"
                 ))
             })?;
@@ -500,11 +515,11 @@ pub async fn list_pending_tool_call_suspensions<S: crate::EventStore + ?Sized>(
     let mut pending = Vec::new();
     for event in control_events
         .into_iter()
-        .filter(|event| event.kind == crate::EventKind::ToolCallSuspended)
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallSuspended)
     {
         let payload = serde_json::from_value::<ToolCallSuspendedPayload>(event.payload.clone())
             .map_err(|err| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "tool.call.suspended payload is invalid: {err}"
                 ))
             })?;
@@ -513,13 +528,13 @@ pub async fn list_pending_tool_call_suspensions<S: crate::EventStore + ?Sized>(
             .and_then(|request_event_id| {
                 thread_events.iter().find(|event| {
                     event.id == request_event_id
-                        && event.kind == crate::EventKind::ToolCallRequested
+                        && event.kind == verlet_history::EventKind::ToolCallRequested
                 })
             })
             .map(|request_event| {
                 serde_json::from_value::<ToolCallRequestedPayload>(request_event.payload.clone())
                     .map_err(|err| {
-                        crate::VerletError::History(format!(
+                        crate::kernel::runtime_host::VerletError::History(format!(
                             "tool.call.requested payload is invalid: {err}"
                         ))
                     })
@@ -559,17 +574,17 @@ pub async fn list_pending_tool_call_suspensions<S: crate::EventStore + ?Sized>(
     Ok(pending)
 }
 
-pub async fn decide_turn_continuation<S: crate::EventStore + ?Sized>(
+pub async fn decide_turn_continuation<S: verlet_history::EventStore + ?Sized>(
     store: &S,
     request: TurnContinuationDecisionRequest,
-) -> crate::VerletResult<TurnContinuationDecision> {
+) -> crate::kernel::runtime_host::VerletResult<TurnContinuationDecision> {
     let control_events = store
         .read_events(&control_stream_id(&request.coordinates), None)
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut candidates = Vec::new();
     for event in &control_events {
-        if event.kind != crate::EventKind::TurnContinueRequested {
+        if event.kind != verlet_history::EventKind::TurnContinueRequested {
             continue;
         }
         let payload =
@@ -654,17 +669,17 @@ pub async fn decide_turn_continuation<S: crate::EventStore + ?Sized>(
     })
 }
 
-pub async fn decide_placement<S: crate::EventStore + ?Sized>(
+pub async fn decide_placement<S: verlet_history::EventStore + ?Sized>(
     store: &S,
     request: PlacementDecisionRequest,
-) -> crate::VerletResult<PlacementDecision> {
+) -> crate::kernel::runtime_host::VerletResult<PlacementDecision> {
     let control_events = store
         .read_events(&control_stream_id(&request.coordinates), None)
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut candidates = Vec::new();
     for event in control_events {
-        if event.kind != crate::EventKind::PlacementDecision {
+        if event.kind != verlet_history::EventKind::PlacementDecision {
             continue;
         }
         let payload =
@@ -719,12 +734,14 @@ pub async fn decide_placement<S: crate::EventStore + ?Sized>(
     })
 }
 
-pub fn control_stream_id(coordinates: &crate::ThreadCoordinates) -> crate::EventStreamId {
-    crate::EventStreamId::new(format!("control:{}", coordinates.thread_id))
+pub fn control_stream_id(
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> verlet_history::EventStreamId {
+    verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id))
 }
 
 fn tool_decision_from_payload(
-    consumed_fact_id: crate::EventRecordId,
+    consumed_fact_id: verlet_history::EventRecordId,
     payload: ToolCallDecisionPayload,
 ) -> ToolCallDecision {
     match payload.outcome {
@@ -741,24 +758,32 @@ fn tool_decision_from_payload(
     }
 }
 
-fn fresh_control_fact(event: &crate::EventRecord, request: &ToolDecisionRequest) -> bool {
+fn fresh_control_fact(event: &verlet_history::EventRecord, request: &ToolDecisionRequest) -> bool {
     fresh_control_event(event, request.request_event_id)
 }
 
-fn provenance_reaches_request(event: &crate::EventRecord, request: &ToolDecisionRequest) -> bool {
+fn provenance_reaches_request(
+    event: &verlet_history::EventRecord,
+    request: &ToolDecisionRequest,
+) -> bool {
     provenance_reaches_event(event, request.request_event_id)
 }
 
-fn fresh_control_event(event: &crate::EventRecord, request_event_id: crate::EventRecordId) -> bool {
+fn fresh_control_event(
+    event: &verlet_history::EventRecord,
+    request_event_id: verlet_history::EventRecordId,
+) -> bool {
     match event.origin {
-        crate::EventOrigin::Witnessed => true,
-        crate::EventOrigin::Discharged => provenance_reaches_event(event, request_event_id),
+        verlet_history::EventOrigin::Witnessed => true,
+        verlet_history::EventOrigin::Discharged => {
+            provenance_reaches_event(event, request_event_id)
+        }
     }
 }
 
 fn provenance_reaches_event(
-    event: &crate::EventRecord,
-    request_event_id: crate::EventRecordId,
+    event: &verlet_history::EventRecord,
+    request_event_id: verlet_history::EventRecordId,
 ) -> bool {
     event
         .provenance
@@ -767,15 +792,15 @@ fn provenance_reaches_event(
 }
 
 fn coupling_matches_tool_request(
-    coupling: &crate::AgentManifestCouplingBinding,
+    coupling: &crate::agent::manifest_bind::AgentManifestCouplingBinding,
     tool_name: &str,
 ) -> bool {
-    coupling.role == crate::CouplingRole::Controller
-        && coupling.trigger_kind == crate::EventKind::ToolCallRequested.as_str()
+    coupling.role == crate::agent::manifest_bind::CouplingRole::Controller
+        && coupling.trigger_kind == verlet_history::EventKind::ToolCallRequested.as_str()
         && coupling.sink_stream == "control"
         && coupling.sink_kinds.iter().any(|kind| {
-            kind == crate::EventKind::ToolCallDecision.as_str()
-                || kind == crate::EventKind::ToolCallSuspended.as_str()
+            kind == verlet_history::EventKind::ToolCallDecision.as_str()
+                || kind == verlet_history::EventKind::ToolCallSuspended.as_str()
         })
         && coupling.trigger_match.iter().all(|(key, expected)| {
             matches!(key.as_str(), "tool" | "tool_name" | "name")
@@ -784,20 +809,20 @@ fn coupling_matches_tool_request(
 }
 
 fn latest_matching_mandate(
-    events: &[crate::EventRecord],
+    events: &[verlet_history::EventRecord],
     request: &TurnContinuationDecisionRequest,
-) -> crate::VerletResult<Option<MandateStartedPayload>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<MandateStartedPayload>> {
     let mut matching = Vec::new();
     for event in events {
-        if event.kind != crate::EventKind::MandateStarted
-            || event.origin != crate::EventOrigin::Witnessed
+        if event.kind != verlet_history::EventKind::MandateStarted
+            || event.origin != verlet_history::EventOrigin::Witnessed
         {
             continue;
         }
         let payload = match serde_json::from_value::<MandateStartedPayload>(event.payload.clone()) {
             Ok(payload) => payload,
             Err(err) => {
-                return Err(crate::VerletError::History(format!(
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "mandate.started payload is invalid: {err}"
                 )));
             }
@@ -826,20 +851,20 @@ fn latest_matching_mandate(
 }
 
 fn mandate_rejection_reason(
-    events: &[crate::EventRecord],
+    events: &[verlet_history::EventRecord],
     request: &TurnContinuationDecisionRequest,
     mandate: &MandateStartedPayload,
-) -> crate::VerletResult<Option<String>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<String>> {
     for event in events {
-        if event.kind != crate::EventKind::MandateRevoked
-            || event.origin != crate::EventOrigin::Witnessed
+        if event.kind != verlet_history::EventKind::MandateRevoked
+            || event.origin != verlet_history::EventOrigin::Witnessed
         {
             continue;
         }
         let payload = match serde_json::from_value::<MandateRevokedPayload>(event.payload.clone()) {
             Ok(payload) => payload,
             Err(err) => {
-                return Err(crate::VerletError::History(format!(
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "mandate.revoked payload is invalid: {err}"
                 )));
             }
@@ -859,7 +884,7 @@ fn mandate_rejection_reason(
 }
 #[cfg(test)]
 mod tests {
-    use crate::kernel::history::EventStore as _;
+    use verlet_history::EventStore as _;
 
     #[test]
     fn decision_payload_admissible_is_additive_optional() {
@@ -1164,7 +1189,7 @@ mod tests {
         let fixture = ToolDecisionFixture::new().await;
         fixture
             .append_raw(
-                crate::EventKind::ToolCallDecision,
+                verlet_history::EventKind::ToolCallDecision,
                 serde_json::json!({"bad": true}),
             )
             .await;
@@ -1418,7 +1443,7 @@ mod tests {
 
         fixture
             .append_raw(
-                crate::EventKind::PlacementDecision,
+                verlet_history::EventKind::PlacementDecision,
                 serde_json::to_value(crate::kernel::control_decision::PlacementDecisionPayload {
                     subject: crate::kernel::control_decision::PlacementSubject {
                         invocation_id: "invoke-1".to_string(),
@@ -1507,7 +1532,7 @@ mod tests {
         let fixture = ToolDecisionFixture::new().await;
         fixture
             .append_control_witnessed(
-                crate::EventKind::ToolCallSuspended,
+                verlet_history::EventKind::ToolCallSuspended,
                 serde_json::to_value(crate::kernel::control_decision::ToolCallSuspendedPayload {
                     subject: fixture.subject.clone(),
                     snapshot_id: fixture.snapshot_id.clone(),
@@ -1520,10 +1545,10 @@ mod tests {
         fixture
             .store
             .append_events(
-                &crate::EventStreamId::for_thread(&fixture.coordinates),
-                vec![crate::NewEventRecord::witnessed(
+                &verlet_history::EventStreamId::for_thread(&fixture.coordinates),
+                vec![verlet_history::NewEventRecord::witnessed(
                     fixture.coordinates.clone(),
-                    crate::EventKind::ToolCallCompleted,
+                    verlet_history::EventKind::ToolCallCompleted,
                     serde_json::to_value(
                         crate::kernel::control_decision::ToolCallCompletedPayload {
                             subject: fixture.subject.clone(),
@@ -1553,29 +1578,30 @@ mod tests {
     }
 
     struct ToolDecisionFixture {
-        store: crate::InMemorySessionStore,
-        coordinates: crate::ThreadCoordinates,
+        store: verlet_history::InMemorySessionStore,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
         subject: crate::kernel::control_decision::ToolCallSubject,
         snapshot_id: String,
-        request_event: crate::EventRecord,
+        request_event: verlet_history::EventRecord,
     }
 
     impl ToolDecisionFixture {
         async fn new() -> Self {
-            let store = crate::InMemorySessionStore::default();
-            let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+            let store = verlet_history::InMemorySessionStore::default();
+            let coordinates =
+                verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
             let subject = crate::kernel::control_decision::ToolCallSubject {
                 turn_id: "turn-1".to_string(),
                 call_id: "call-1".to_string(),
             };
             let snapshot_id = "snapshot-a".to_string();
-            let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+            let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
             let request_event = store
                 .append_events(
                     &thread_stream,
-                    vec![crate::NewEventRecord::witnessed(
+                    vec![verlet_history::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        crate::EventKind::ToolCallRequested,
+                        verlet_history::EventKind::ToolCallRequested,
                         serde_json::to_value(
                             crate::kernel::control_decision::ToolCallRequestedPayload {
                                 subject: subject.clone(),
@@ -1648,7 +1674,7 @@ mod tests {
             payload: crate::kernel::control_decision::ToolCallDecisionPayload,
         ) {
             self.append_raw(
-                crate::EventKind::ToolCallDecision,
+                verlet_history::EventKind::ToolCallDecision,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
@@ -1659,7 +1685,7 @@ mod tests {
             payload: crate::kernel::control_decision::ToolCallSuspendedPayload,
         ) {
             self.append_raw(
-                crate::EventKind::ToolCallSuspended,
+                verlet_history::EventKind::ToolCallSuspended,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
@@ -1667,7 +1693,7 @@ mod tests {
 
         async fn append_turn_continue(&self, next_turn_input: &str) {
             self.append_raw(
-                crate::EventKind::TurnContinueRequested,
+                verlet_history::EventKind::TurnContinueRequested,
                 serde_json::to_value(
                     crate::kernel::control_decision::TurnContinueRequestedPayload {
                         subject: crate::kernel::control_decision::TurnContinuationSubject {
@@ -1688,7 +1714,7 @@ mod tests {
             payload: crate::kernel::control_decision::MandateStartedPayload,
         ) {
             self.append_control_witnessed(
-                crate::EventKind::MandateStarted,
+                verlet_history::EventKind::MandateStarted,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
@@ -1699,14 +1725,17 @@ mod tests {
             payload: crate::kernel::control_decision::MandateRevokedPayload,
         ) {
             self.append_control_witnessed(
-                crate::EventKind::MandateRevoked,
+                verlet_history::EventKind::MandateRevoked,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
         }
 
-        async fn append_manifest_bind(&self, couplings: Vec<crate::AgentManifestCouplingBinding>) {
-            let receipt = crate::AgentManifestBindReceipt {
+        async fn append_manifest_bind(
+            &self,
+            couplings: Vec<crate::agent::manifest_bind::AgentManifestCouplingBinding>,
+        ) {
+            let receipt = crate::agent::manifest_bind::AgentManifestBindReceipt {
                 ref_uri: "agent://test/bash".to_string(),
                 manifest_hash: self.snapshot_id.clone(),
                 model_profile_id: "default".to_string(),
@@ -1722,7 +1751,8 @@ mod tests {
                 couplings,
                 granted: Vec::new(),
                 grant_bindings: Vec::new(),
-                effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
+                effective_runtime:
+                    verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
                 placement_origin: None,
@@ -1731,19 +1761,19 @@ mod tests {
             };
             self.store
                 .append_events(
-                    &crate::EventStreamId::for_thread(&self.coordinates),
-                    vec![crate::NewEventRecord::discharged(
+                    &verlet_history::EventStreamId::for_thread(&self.coordinates),
+                    vec![verlet_history::NewEventRecord::discharged(
                         self.coordinates.clone(),
-                        crate::EventKind::ManifestBindCompleted,
+                        verlet_history::EventKind::ManifestBindCompleted,
                         serde_json::to_value(receipt).unwrap(),
-                        crate::EventProvenance {
-                            source_streams: vec![crate::EventStreamId::for_thread(
+                        verlet_history::EventProvenance {
+                            source_streams: vec![verlet_history::EventStreamId::for_thread(
                                 &self.coordinates,
                             )],
                             source_event_ids: vec![self.request_event.id],
                             discharged_by: Some("binder:manifest".to_string()),
                             function: Some("bind/v1".to_string()),
-                            ..crate::EventProvenance::default()
+                            ..verlet_history::EventProvenance::default()
                         },
                     )],
                 )
@@ -1751,22 +1781,22 @@ mod tests {
                 .unwrap();
         }
 
-        async fn append_raw(&self, kind: crate::EventKind, payload: serde_json::Value) {
+        async fn append_raw(&self, kind: verlet_history::EventKind, payload: serde_json::Value) {
             self.store
                 .append_events(
                     &crate::kernel::control_decision::control_stream_id(&self.coordinates),
-                    vec![crate::NewEventRecord::discharged(
+                    vec![verlet_history::NewEventRecord::discharged(
                         self.coordinates.clone(),
                         kind,
                         payload,
-                        crate::EventProvenance {
-                            source_streams: vec![crate::EventStreamId::for_thread(
+                        verlet_history::EventProvenance {
+                            source_streams: vec![verlet_history::EventStreamId::for_thread(
                                 &self.coordinates,
                             )],
                             source_event_ids: vec![self.request_event.id],
                             discharged_by: Some("coupling:test".to_string()),
                             function: Some("op://test/run@sha256:test".to_string()),
-                            ..crate::EventProvenance::default()
+                            ..verlet_history::EventProvenance::default()
                         },
                     )],
                 )
@@ -1776,13 +1806,13 @@ mod tests {
 
         async fn append_control_witnessed(
             &self,
-            kind: crate::EventKind,
+            kind: verlet_history::EventKind,
             payload: serde_json::Value,
         ) {
             self.store
                 .append_events(
                     &crate::kernel::control_decision::control_stream_id(&self.coordinates),
-                    vec![crate::NewEventRecord::witnessed(
+                    vec![verlet_history::NewEventRecord::witnessed(
                         self.coordinates.clone(),
                         kind,
                         payload,
@@ -1796,29 +1826,29 @@ mod tests {
     fn tool_controller_binding(
         id: &str,
         trigger_match: std::collections::BTreeMap<String, serde_json::Value>,
-    ) -> crate::AgentManifestCouplingBinding {
-        crate::AgentManifestCouplingBinding {
+    ) -> crate::agent::manifest_bind::AgentManifestCouplingBinding {
+        crate::agent::manifest_bind::AgentManifestCouplingBinding {
             id: id.to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::ToolCallRequested.to_string(),
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::ToolCallRequested.to_string(),
             trigger_match,
             source_streams: vec!["thread".to_string()],
-            source_kinds: vec![crate::EventKind::ToolCallRequested.to_string()],
+            source_kinds: vec![verlet_history::EventKind::ToolCallRequested.to_string()],
             sink_stream: "control".to_string(),
-            sink_kinds: vec![crate::EventKind::ToolCallDecision.to_string()],
+            sink_kinds: vec![verlet_history::EventKind::ToolCallDecision.to_string()],
             function_ref: "op://policy/bash-gate@sha256:abc".to_string(),
             artifact_hash: "abc".to_string(),
             operation_name: Some("bash_gate".to_string()),
             grants: Vec::new(),
             grant_expiries: Vec::new(),
-            budget: crate::AgentManifestCouplingBudget::default(),
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }
     }
 
     fn decision_consumed_request(
         decision: &crate::kernel::control_decision::TurnContinuationDecision,
-    ) -> Option<crate::EventRecordId> {
+    ) -> Option<verlet_history::EventRecordId> {
         match decision {
             crate::kernel::control_decision::TurnContinuationDecision::Accept {
                 consumed_request_id,

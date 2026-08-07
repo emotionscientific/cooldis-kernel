@@ -1,8 +1,8 @@
-use crate::EventStore as _;
-use crate::SessionStore as _;
 use chrono::TimeZone as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
+use verlet_history::EventStore as _;
+use verlet_history::SessionStore as _;
 use verlet_io_core::IngressQueueStore as _;
 use verlet_io_core::IngressSink as _;
 
@@ -72,7 +72,7 @@ struct CaptureEgress {
 
 #[derive(Clone)]
 struct CountingRuntimeStore {
-    inner: std::sync::Arc<dyn crate::RuntimeStore>,
+    inner: std::sync::Arc<dyn verlet_history::RuntimeStore>,
     full_replay_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     after_cursor_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     block_next_full_read: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -81,7 +81,7 @@ struct CountingRuntimeStore {
 }
 
 impl CountingRuntimeStore {
-    fn new(inner: std::sync::Arc<dyn crate::RuntimeStore>) -> Self {
+    fn new(inner: std::sync::Arc<dyn verlet_history::RuntimeStore>) -> Self {
         Self {
             inner,
             full_replay_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -123,23 +123,23 @@ impl CountingRuntimeStore {
 }
 
 #[async_trait::async_trait]
-impl crate::SessionStore for CountingRuntimeStore {
+impl verlet_history::SessionStore for CountingRuntimeStore {
     async fn append(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        parent_entry_id: Option<crate::SessionEntryId>,
-        kind: crate::SessionEntryKind,
-    ) -> crate::HistoryResult<crate::SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         self.inner.append(coordinates, parent_entry_id, kind).await
     }
 
     async fn append_with_provenance(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        parent_entry_id: Option<crate::SessionEntryId>,
-        kind: crate::SessionEntryKind,
-        provenance: crate::EventProvenance,
-    ) -> crate::HistoryResult<crate::SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+        provenance: verlet_history::EventProvenance,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         self.inner
             .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
             .await
@@ -147,10 +147,10 @@ impl crate::SessionStore for CountingRuntimeStore {
 
     async fn append_turn_input(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
-        kind: crate::SessionEntryKind,
-    ) -> crate::HistoryResult<crate::SessionEntry> {
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         self.inner
             .append_turn_input(coordinates, turn_id, kind)
             .await
@@ -158,32 +158,32 @@ impl crate::SessionStore for CountingRuntimeStore {
 
     async fn active_leaf(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> crate::HistoryResult<Option<crate::SessionEntryId>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         self.inner.active_leaf(coordinates).await
     }
 
     async fn select_branch(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        leaf_entry_id: Option<crate::SessionEntryId>,
-    ) -> crate::HistoryResult<()> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        leaf_entry_id: Option<verlet_history::SessionEntryId>,
+    ) -> verlet_history::HistoryResult<()> {
         self.inner.select_branch(coordinates, leaf_entry_id).await
     }
 
     async fn build_context(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> crate::HistoryResult<crate::SessionContext> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionContext> {
         self.inner.build_context(coordinates).await
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &crate::ThreadCoordinates,
-        source_leaf: Option<crate::SessionEntryId>,
-        target_coordinates: &crate::ThreadCoordinates,
-    ) -> crate::HistoryResult<Option<crate::SessionEntryId>> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        source_leaf: Option<verlet_history::SessionEntryId>,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         self.inner
             .clone_branch(source_coordinates, source_leaf, target_coordinates)
             .await
@@ -191,10 +191,10 @@ impl crate::SessionStore for CountingRuntimeStore {
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &crate::ThreadCoordinates,
-        target_coordinates: &crate::ThreadCoordinates,
-        base: crate::ThreadBaseRef,
-    ) -> crate::HistoryResult<()> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        base: verlet_history::ThreadBaseRef,
+    ) -> verlet_history::HistoryResult<()> {
         self.inner
             .fork_by_reference(source_coordinates, target_coordinates, base)
             .await
@@ -202,21 +202,21 @@ impl crate::SessionStore for CountingRuntimeStore {
 }
 
 #[async_trait::async_trait]
-impl crate::EventStore for CountingRuntimeStore {
+impl verlet_history::EventStore for CountingRuntimeStore {
     async fn append_events(
         &self,
-        stream_id: &crate::EventStreamId,
-        records: Vec<crate::NewEventRecord>,
-    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         self.inner.append_events(stream_id, records).await
     }
 
     async fn append_events_fenced(
         &self,
-        stream_id: &crate::EventStreamId,
-        expected_next_sequence: crate::EventSequence,
-        records: Vec<crate::NewEventRecord>,
-    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         self.inner
             .append_events_fenced(stream_id, expected_next_sequence, records)
             .await
@@ -224,9 +224,9 @@ impl crate::EventStore for CountingRuntimeStore {
 
     async fn read_events(
         &self,
-        stream_id: &crate::EventStreamId,
-        from_sequence: Option<crate::EventSequence>,
-    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        from_sequence: Option<verlet_history::EventSequence>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         if from_sequence.is_none() {
             self.full_replay_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -243,9 +243,9 @@ impl crate::EventStore for CountingRuntimeStore {
 
     async fn read_events_after_cursor(
         &self,
-        stream_id: &crate::EventStreamId,
-        cursor: &crate::StreamCursorV1,
-    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        cursor: &verlet_history::StreamCursorV1,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         self.after_cursor_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.read_events_after_cursor(stream_id, cursor).await
@@ -254,19 +254,19 @@ impl crate::EventStore for CountingRuntimeStore {
 
 #[async_trait::async_trait]
 // lexicon-allow: observation_store - deterministic counting wrapper delegates the history trait.
-impl crate::ObservationStore for CountingRuntimeStore {
+impl verlet_history::ObservationStore for CountingRuntimeStore {
     async fn append_observation(
         &self,
-        record: crate::NewObservationRecord,
-    ) -> crate::HistoryResult<crate::ObservationRecord> {
+        record: verlet_history::NewObservationRecord,
+    ) -> verlet_history::HistoryResult<verlet_history::ObservationRecord> {
         self.inner.append_observation(record).await
     }
 
     async fn list_observations(
         &self,
-        scope: &crate::ThreadCoordinates,
+        scope: &verlet_runtime_contracts::ThreadCoordinates,
         kind: Option<&str>,
-    ) -> crate::HistoryResult<Vec<crate::ObservationRecord>> {
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::ObservationRecord>> {
         self.inner.list_observations(scope, kind).await
     }
 }
@@ -599,7 +599,7 @@ fn with_bridge_principal(
 
 fn route_sink_for_bridge(
     inner: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-    route: &crate::VerletIoRouteConfig,
+    route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
 ) -> crate::daemon::daemon_io::RouteIngressSink {
     crate::daemon::daemon_io::RouteIngressSink::with_route_identity(
@@ -612,7 +612,7 @@ fn route_sink_for_bridge(
 
 fn capture_route_sink(
     inner: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-    route: &crate::VerletIoRouteConfig,
+    route: &crate::daemon::daemon_config::VerletIoRouteConfig,
 ) -> crate::daemon::daemon_io::RouteIngressSink {
     crate::daemon::daemon_io::RouteIngressSink::with_route_identity(
         inner,
@@ -740,22 +740,22 @@ fn test_egress(text: &str) -> verlet_io_core::EgressEnvelope {
 }
 
 fn route_with_egress(
-    egress_projection: Vec<crate::VerletEgressProjectionRuleConfig>,
-    typing_simulation: Option<crate::VerletTypingSimulationConfig>,
-) -> crate::VerletIoRouteConfig {
+    egress_projection: Vec<crate::daemon::daemon_config::VerletEgressProjectionRuleConfig>,
+    typing_simulation: Option<crate::daemon::daemon_config::VerletTypingSimulationConfig>,
+) -> crate::daemon::daemon_config::VerletIoRouteConfig {
     route_with_egress_and_retry(
         egress_projection,
         typing_simulation,
-        crate::VerletEgressRetryConfig::default(),
+        crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
     )
 }
 
 fn route_with_egress_and_retry(
-    egress_projection: Vec<crate::VerletEgressProjectionRuleConfig>,
-    typing_simulation: Option<crate::VerletTypingSimulationConfig>,
-    egress_retry: crate::VerletEgressRetryConfig,
-) -> crate::VerletIoRouteConfig {
-    crate::VerletIoRouteConfig {
+    egress_projection: Vec<crate::daemon::daemon_config::VerletEgressProjectionRuleConfig>,
+    typing_simulation: Option<crate::daemon::daemon_config::VerletTypingSimulationConfig>,
+    egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig,
+) -> crate::daemon::daemon_config::VerletIoRouteConfig {
+    crate::daemon::daemon_config::VerletIoRouteConfig {
         id: "main".to_string(),
         kind: "telegram.bot".to_string(),
         enabled: true,
@@ -790,7 +790,7 @@ async fn test_bridge() -> (
     (bridge, rx, session_store_path)
 }
 
-async fn test_server() -> crate::VerletAppServer {
+async fn test_server() -> crate::adapters::app_server::VerletAppServer {
     test_server_at_root(&test_root("server")).await
 }
 
@@ -804,11 +804,11 @@ async fn remote_queue_redelivery_enters_child_ingress_once() {
     let server = test_server_at_root(&root).await;
     let supervisor = server.supervisor();
     let child = supervisor
-        .start_thread(crate::ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: server.tenant_id().to_string(),
             user_id: server.user_id().to_string(),
             session_id: "remote-child-session".to_string(),
-            topology: crate::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: std::collections::BTreeMap::new(),
         })
         .await
@@ -868,23 +868,29 @@ async fn remote_queue_redelivery_enters_child_ingress_once() {
         .await
         .unwrap();
 
-    let store = crate::SqliteSessionStore::open(&session_store_path)
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&session_store_path)
         .await
         .unwrap();
     let events = store
-        .read_events(&crate::EventStreamId::for_thread(&child_coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&child_coordinates),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1,
         "lost queue acknowledgement must not inject a second child turn"
     );
     let control = store
-        .read_events(&crate::control_stream_id(&child_coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&child_coordinates),
+            None,
+        )
         .await
         .unwrap();
     let admission =
@@ -893,7 +899,7 @@ async fn remote_queue_redelivery_enters_child_ingress_once() {
     assert_eq!(
         control
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1,
         "the durable ingress claim is the child-side dedupe authority"
@@ -904,11 +910,19 @@ async fn remote_queue_redelivery_enters_child_ingress_once() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-async fn test_server_at_root(fixture_root: &std::path::Path) -> crate::VerletAppServer {
+async fn test_server_at_root(
+    fixture_root: &std::path::Path,
+) -> crate::adapters::app_server::VerletAppServer {
     let socket_path = fixture_root.join("app-server.sock");
-    let listen =
-        crate::AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
-    let mut config = crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let listen = crate::adapters::app_server::AppServerListenAddr::parse(&format!(
+        "unix://{}",
+        socket_path.display()
+    ))
+    .unwrap();
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = fixture_root.join("runtime");
     config.state_home = fixture_root.join("state");
     config.user_state_home = fixture_root.join("user-state");
@@ -918,16 +932,27 @@ async fn test_server_at_root(fixture_root: &std::path::Path) -> crate::VerletApp
     config.blob_registry_root = fixture_root.join("blobs");
     config.skill_registry_root = fixture_root.join("skills");
     apply_test_identity(&mut config, fixture_root);
-    crate::VerletAppServer::new_local(config).await.unwrap()
+    crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap()
 }
 
 async fn test_server_with_counting_store_at_root(
     fixture_root: &std::path::Path,
-) -> (crate::VerletAppServer, std::sync::Arc<CountingRuntimeStore>) {
+) -> (
+    crate::adapters::app_server::VerletAppServer,
+    std::sync::Arc<CountingRuntimeStore>,
+) {
     let socket_path = fixture_root.join("app-server-counting.sock");
-    let listen =
-        crate::AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
-    let mut config = crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let listen = crate::adapters::app_server::AppServerListenAddr::parse(&format!(
+        "unix://{}",
+        socket_path.display()
+    ))
+    .unwrap();
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = fixture_root.join("runtime");
     config.state_home = fixture_root.join("state");
     config.user_state_home = fixture_root.join("user-state");
@@ -937,18 +962,20 @@ async fn test_server_with_counting_store_at_root(
     config.blob_registry_root = fixture_root.join("blobs");
     config.skill_registry_root = fixture_root.join("skills");
     apply_test_identity(&mut config, fixture_root);
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let runtime_factory = std::sync::Arc::new(crate::AgentLoopFactory::new(
+    let runtime_factory = std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
         runtime_config,
         std::sync::Arc::new(RecordingRouteProviderClient::default()),
     ));
     let counting = std::sync::Arc::new(std::sync::Mutex::new(None));
     let counting_for_decorator = std::sync::Arc::clone(&counting);
-    let server = crate::VerletAppServer::with_runtime_factory_and_session_store_decorator(
+    let server = crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_session_store_decorator(
         config,
         runtime_factory,
         move |inner| {
@@ -969,12 +996,18 @@ async fn test_server_with_counting_store_at_root(
 
 async fn test_server_with_provider_at_root(
     fixture_root: &std::path::Path,
-    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
-) -> crate::VerletAppServer {
+    provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+) -> crate::adapters::app_server::VerletAppServer {
     let socket_path = fixture_root.join("app-server-provider.sock");
-    let listen =
-        crate::AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
-    let mut config = crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let listen = crate::adapters::app_server::AppServerListenAddr::parse(&format!(
+        "unix://{}",
+        socket_path.display()
+    ))
+    .unwrap();
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = fixture_root.join("runtime");
     config.state_home = fixture_root.join("state");
     config.user_state_home = fixture_root.join("user-state");
@@ -984,10 +1017,12 @@ async fn test_server_with_provider_at_root(
     config.blob_registry_root = fixture_root.join("blobs");
     config.skill_registry_root = fixture_root.join("skills");
     apply_test_identity(&mut config, fixture_root);
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
     let runtime_factory =
         crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
@@ -998,7 +1033,7 @@ async fn test_server_with_provider_at_root(
             None,
             &config,
         );
-    crate::VerletAppServer::with_runtime_factory(config, runtime_factory)
+    crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
         .await
         .unwrap()
 }
@@ -1009,15 +1044,18 @@ async fn test_server_with_route_provider_at_root(
     agent_registry_root: &std::path::Path,
     operation_registry_root: &std::path::Path,
     client: std::sync::Arc<RecordingRouteProviderClient>,
-) -> crate::VerletAppServer {
+) -> crate::adapters::app_server::VerletAppServer {
     let socket_path = fixture_root.join("app-server-recording.sock");
-    let listen =
-        crate::AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
+    let listen = crate::adapters::app_server::AppServerListenAddr::parse(&format!(
+        "unix://{}",
+        socket_path.display()
+    ))
+    .unwrap();
     // lexicon-allow: capsule - existing app-server manifest binding config type
     let bindings =
         // lexicon-allow: capsule - existing app-server config surface; line shifted by repo-wide path qualification
-        crate::CapsuleBindingsConfig::default().with_registry_root(operation_registry_root);
-    let mut config = crate::VerletAppServerConfig::local(listen, workspace)
+        crate::adapters::app_server::CapsuleBindingsConfig::default().with_registry_root(operation_registry_root);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, workspace)
         // lexicon-allow: capsule - existing app-server config method
         .with_capsule_bindings(bindings);
     config.runtime_home = fixture_root.join("runtime");
@@ -1025,14 +1063,18 @@ async fn test_server_with_route_provider_at_root(
     config.user_state_home = fixture_root.join("user-state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
     config.blob_registry_root =
-        crate::default_blob_registry_root_for_agent_registry_root(agent_registry_root);
+        crate::agent::manifest::default_blob_registry_root_for_agent_registry_root(
+            agent_registry_root,
+        );
     apply_test_identity(&mut config, fixture_root);
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
     let runtime_factory =
         crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
             runtime_config,
@@ -1042,7 +1084,7 @@ async fn test_server_with_route_provider_at_root(
             None,
             &config,
         );
-    crate::VerletAppServer::with_runtime_factory(config, runtime_factory)
+    crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
         .await
         .unwrap()
 }
@@ -1050,7 +1092,7 @@ async fn test_server_with_route_provider_at_root(
 async fn test_bridge_at_root(
     fixture_root: &std::path::Path,
 ) -> (
-    crate::VerletAppServer,
+    crate::adapters::app_server::VerletAppServer,
     crate::daemon::daemon_io::VerletDaemonIoBridge,
     tokio::sync::mpsc::UnboundedReceiver<verlet_io_core::EgressEnvelope>,
 ) {
@@ -1070,19 +1112,27 @@ async fn test_bridge_at_root(
 async fn restarted_bridge_at_root(
     fixture_root: &std::path::Path,
 ) -> (
-    crate::VerletAppServer,
+    crate::adapters::app_server::VerletAppServer,
     crate::daemon::daemon_io::VerletDaemonIoBridge,
     tokio::sync::mpsc::UnboundedReceiver<verlet_io_core::EgressEnvelope>,
 ) {
     let socket_path = fixture_root.join("app-server-restarted.sock");
-    let listen =
-        crate::AppServerListenAddr::parse(&format!("unix://{}", socket_path.display())).unwrap();
-    let mut config = crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let listen = crate::adapters::app_server::AppServerListenAddr::parse(&format!(
+        "unix://{}",
+        socket_path.display()
+    ))
+    .unwrap();
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = fixture_root.join("runtime");
     config.state_home = fixture_root.join("state");
     config.user_state_home = fixture_root.join("user-state");
     apply_test_identity(&mut config, fixture_root);
-    let server = crate::VerletAppServer::new_local(config).await.unwrap();
+    let server = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let bridge = crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(&server);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     bridge
@@ -1095,7 +1145,10 @@ async fn restarted_bridge_at_root(
     (server, bridge, rx)
 }
 
-fn apply_test_identity(config: &mut crate::VerletAppServerConfig, fixture_root: &std::path::Path) {
+fn apply_test_identity(
+    config: &mut crate::adapters::app_server::VerletAppServerConfig,
+    fixture_root: &std::path::Path,
+) {
     let suffix = fixture_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -1111,13 +1164,13 @@ fn apply_test_identity(config: &mut crate::VerletAppServerConfig, fixture_root: 
 
 #[derive(Default)]
 struct RecordingRouteProviderClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
 }
 
 struct FailingRouteProviderClient;
 
 impl RecordingRouteProviderClient {
-    fn requests(&self) -> Vec<crate::ProviderRequest> {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -1149,11 +1202,11 @@ impl BlockingRouteProviderClient {
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for BlockingRouteProviderClient {
+impl verlet_provider::ProviderClient for BlockingRouteProviderClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.request_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.request_started.notify_waiters();
@@ -1164,78 +1217,82 @@ impl crate::ProviderClient for BlockingRouteProviderClient {
             }
             released.await;
         }
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text("blocking daemon route ok")],
-            usage: crate::CanonicalUsage {
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "blocking daemon route ok",
+            )],
+            usage: verlet_history::CanonicalUsage {
                 input_tokens: request.messages.len() as u64,
                 output_tokens: 4,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for FailingRouteProviderClient {
+impl verlet_provider::ProviderClient for FailingRouteProviderClient {
     async fn complete(
         &self,
-        _request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
-        Err(crate::ProviderError::Decode(
+        _request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        Err(verlet_provider::ProviderError::Decode(
             "forced child provider failure".to_string(),
         ))
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for RecordingRouteProviderClient {
+impl verlet_provider::ProviderClient for RecordingRouteProviderClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text("daemon route ok")],
-            usage: crate::CanonicalUsage {
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text("daemon route ok")],
+            usage: verlet_history::CanonicalUsage {
                 input_tokens: request.messages.len() as u64,
                 output_tokens: 3,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
 
 #[derive(Clone, Default)]
 struct RuntimeBuildFailureProbe {
-    reject_once: std::sync::Arc<std::sync::Mutex<Option<crate::ThreadId>>>,
-    failures: std::sync::Arc<std::sync::Mutex<Vec<crate::ThreadId>>>,
+    reject_once: std::sync::Arc<std::sync::Mutex<Option<verlet_runtime_contracts::ThreadId>>>,
+    failures: std::sync::Arc<std::sync::Mutex<Vec<verlet_runtime_contracts::ThreadId>>>,
 }
 
 impl RuntimeBuildFailureProbe {
-    fn reject_once(&self, thread_id: crate::ThreadId) {
+    fn reject_once(&self, thread_id: verlet_runtime_contracts::ThreadId) {
         *self.reject_once.lock().unwrap() = Some(thread_id);
     }
 
-    fn failures(&self) -> Vec<crate::ThreadId> {
+    fn failures(&self) -> Vec<verlet_runtime_contracts::ThreadId> {
         self.failures.lock().unwrap().clone()
     }
 }
 
 struct SelectiveRuntimeFactory {
-    inner: crate::AgentLoopFactory,
+    inner: crate::adapters::agent_loop::AgentLoopFactory,
     probe: RuntimeBuildFailureProbe,
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntimeFactory for SelectiveRuntimeFactory {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for SelectiveRuntimeFactory {
     async fn build(
         &self,
-        context: &crate::ThreadContext,
-    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
+        context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
         let thread_id = context.coordinates.thread_id;
         let rejected = {
             let mut reject_once = self.probe.reject_once.lock().unwrap();
@@ -1248,9 +1305,9 @@ impl crate::AgentRuntimeFactory for SelectiveRuntimeFactory {
         };
         if rejected {
             self.probe.failures.lock().unwrap().push(thread_id);
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "test rejected lifecycle load for {thread_id}"
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("test rejected lifecycle load for {thread_id}"),
+            ));
         }
         self.inner.build(context).await
     }
@@ -1264,22 +1321,24 @@ async fn bridge_with_runtime_build_failure(
 ) {
     let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
     let user_id = format!("user-{}", uuid::Uuid::now_v7());
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let client: std::sync::Arc<dyn crate::ProviderClient> =
+    let client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
         std::sync::Arc::new(RecordingRouteProviderClient::default());
     let probe = RuntimeBuildFailureProbe::default();
     let runtime_factory = std::sync::Arc::new(SelectiveRuntimeFactory {
-        inner: crate::AgentLoopFactory::new(runtime_config, client),
+        inner: crate::adapters::agent_loop::AgentLoopFactory::new(runtime_config, client),
         probe: probe.clone(),
     });
-    let supervisor = crate::VerletSupervisor::new();
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(crate::TenantRegistration {
-            context: crate::TenantRuntimeContext::local(
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: crate::kernel::supervisor::TenantRuntimeContext::local(
                 tenant_id.clone(),
                 fixture_root.join("runtime"),
                 fixture_root.join("state"),
@@ -1293,8 +1352,8 @@ async fn bridge_with_runtime_build_failure(
             supervisor,
             tenant_id,
             user_id,
-            crate::APP_SERVER_LOCAL_PROVIDER,
-            crate::APP_SERVER_LOCAL_MODEL,
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+            crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
             std::env::current_dir().unwrap(),
         ),
         probe,
@@ -1303,28 +1362,33 @@ async fn bridge_with_runtime_build_failure(
 
 async fn bridge_with_execution_policy(
     fixture_root: &std::path::Path,
-    execution_policy: crate::RuntimeExecutionPolicy,
+    execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
 ) -> crate::daemon::daemon_io::VerletDaemonIoBridge {
     let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
     let user_id = format!("user-{}", uuid::Uuid::now_v7());
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let client: std::sync::Arc<dyn crate::ProviderClient> =
+    let client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
         std::sync::Arc::new(RecordingRouteProviderClient::default());
-    let runtime_factory = std::sync::Arc::new(crate::AgentLoopFactory::new(runtime_config, client));
-    let context = crate::TenantRuntimeContext::local(
+    let runtime_factory = std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+        runtime_config,
+        client,
+    ));
+    let context = crate::kernel::supervisor::TenantRuntimeContext::local(
         tenant_id.clone(),
         fixture_root.join("runtime"),
         fixture_root.join("state"),
     )
     .with_execution_policy(execution_policy);
     let session_store_path = context.session_history_path();
-    let supervisor = crate::VerletSupervisor::new();
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(crate::TenantRegistration {
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
             context,
             runtime_factory,
         })
@@ -1334,8 +1398,8 @@ async fn bridge_with_execution_policy(
         supervisor,
         tenant_id,
         user_id,
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
         std::env::current_dir().unwrap(),
     );
     bridge.session_store_path = Some(session_store_path);
@@ -1352,11 +1416,13 @@ struct UnresponsiveRuntimeFactory {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntimeFactory for UnresponsiveRuntimeFactory {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for UnresponsiveRuntimeFactory {
     async fn build(
         &self,
-        _context: &crate::ThreadContext,
-    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
+        _context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
         Ok(Box::new(UnresponsiveRuntime {
             state: std::sync::Arc::clone(&self.state),
         }))
@@ -1368,28 +1434,34 @@ struct UnresponsiveRuntime {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntime for UnresponsiveRuntime {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntime for UnresponsiveRuntime {
     async fn run(
         self: Box<Self>,
-        context: crate::ThreadContext,
-        _services: crate::RuntimeServices,
-        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
-        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        context: verlet_runtime_contracts::ThreadContext,
+        _services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<
+            crate::kernel::runtime_host::runtime_api::ThreadCommand,
+        >,
+        events: tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
+        status: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
         _cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
-        let _ = events.send(crate::ThreadEvent::Started { context });
-        let _ = status.send(crate::ThreadStatus::Idle);
+        let _ =
+            events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Started { context });
+        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
         if matches!(
             commands.recv().await,
-            Some(crate::ThreadCommand::Submit { .. })
+            Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit { .. })
         ) {
-            let _ = status.send(crate::ThreadStatus::Running);
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
             self.state.running.notify_one();
             std::future::pending::<()>().await;
         }
-        let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+        let _ = events
+            .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
     }
 }
 
@@ -1405,18 +1477,19 @@ async fn bridge_with_unresponsive_runtime(
     let runtime_factory = std::sync::Arc::new(UnresponsiveRuntimeFactory {
         state: std::sync::Arc::clone(&state),
     });
-    let context = crate::TenantRuntimeContext::local(
+    let context = crate::kernel::supervisor::TenantRuntimeContext::local(
         tenant_id.clone(),
         fixture_root.join("runtime"),
         fixture_root.join("state"),
     )
     .with_execution_policy(
-        crate::RuntimeExecutionPolicy::default().with_cancel_grace_timeout_ms(10_000),
+        crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy::default()
+            .with_cancel_grace_timeout_ms(10_000),
     );
     let session_store_path = context.session_history_path();
-    let supervisor = crate::VerletSupervisor::new();
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(crate::TenantRegistration {
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
             context,
             runtime_factory,
         })
@@ -1426,8 +1499,8 @@ async fn bridge_with_unresponsive_runtime(
         supervisor,
         tenant_id,
         user_id,
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
         std::env::current_dir().unwrap(),
     );
     bridge.session_store_path = Some(session_store_path);
@@ -1444,11 +1517,15 @@ struct PersistedInputCutRuntimeFactory {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntimeFactory for PersistedInputCutRuntimeFactory {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
+    for PersistedInputCutRuntimeFactory
+{
     async fn build(
         &self,
-        _context: &crate::ThreadContext,
-    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
+        _context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
         Ok(Box::new(PersistedInputCutRuntime {
             state: std::sync::Arc::clone(&self.state),
         }))
@@ -1460,32 +1537,48 @@ struct PersistedInputCutRuntime {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntime for PersistedInputCutRuntime {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntime for PersistedInputCutRuntime {
     async fn run(
         self: Box<Self>,
-        context: crate::ThreadContext,
-        services: crate::RuntimeServices,
-        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
-        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        context: verlet_runtime_contracts::ThreadContext,
+        services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<
+            crate::kernel::runtime_host::runtime_api::ThreadCommand,
+        >,
+        events: tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
+        status: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
         cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        let _ = events.send(crate::ThreadEvent::Started { context });
-        let _ = status.send(crate::ThreadStatus::Idle);
-        if let Some(crate::ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await {
-            let _ = status.send(crate::ThreadStatus::Running);
+        let _ =
+            events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Started { context });
+        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
+        if let Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+            turn_id,
+            input,
+            ..
+        }) = commands.recv().await
+        {
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
             let entry = services
                 .append_user_turn_input(&coordinates, &turn_id, &input)
                 .await
                 .unwrap();
-            let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror {
+                    thread_id,
+                    entry,
+                },
+            );
             self.state.input_persisted.notify_one();
             cancellation.cancelled().await;
         }
-        let _ = status.send(crate::ThreadStatus::Stopped);
-        let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+        let _ = events
+            .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
     }
 }
 
@@ -1497,15 +1590,19 @@ struct FailOnceRuntimeState {
 struct FailOnceThenAgentLoopFactory {
     builds: std::sync::atomic::AtomicUsize,
     state: std::sync::Arc<FailOnceRuntimeState>,
-    provider: crate::AgentLoopFactory,
+    provider: crate::adapters::agent_loop::AgentLoopFactory,
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntimeFactory for FailOnceThenAgentLoopFactory {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
+    for FailOnceThenAgentLoopFactory
+{
     async fn build(
         &self,
-        context: &crate::ThreadContext,
-    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
+        context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
         if self
             .builds
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -1524,25 +1621,32 @@ struct FailBeforeEvidenceRuntime {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntime for FailBeforeEvidenceRuntime {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntime for FailBeforeEvidenceRuntime {
     async fn run(
         self: Box<Self>,
-        context: crate::ThreadContext,
-        _services: crate::RuntimeServices,
-        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
-        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        context: verlet_runtime_contracts::ThreadContext,
+        _services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<
+            crate::kernel::runtime_host::runtime_api::ThreadCommand,
+        >,
+        events: tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
+        status: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
         _cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
-        let _ = events.send(crate::ThreadEvent::Started { context });
-        let _ = status.send(crate::ThreadStatus::Idle);
+        let _ =
+            events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Started { context });
+        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
         if commands.recv().await.is_some() {
-            let _ = status.send(crate::ThreadStatus::Failed);
-            let _ = events.send(crate::ThreadEvent::Failed {
-                thread_id,
-                message: "injected failure before execution evidence".to_string(),
-            });
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Failed);
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                    thread_id,
+                    message: "injected failure before execution evidence".to_string(),
+                },
+            );
             self.state.failed.notify_one();
         }
     }
@@ -1550,7 +1654,9 @@ impl crate::AgentRuntime for FailBeforeEvidenceRuntime {
 
 async fn bridge_with_runtime_factory_at_root(
     fixture_root: &std::path::Path,
-    runtime_factory: std::sync::Arc<dyn crate::AgentRuntimeFactory>,
+    runtime_factory: std::sync::Arc<
+        dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+    >,
 ) -> crate::daemon::daemon_io::VerletDaemonIoBridge {
     let suffix = fixture_root
         .file_name()
@@ -1558,15 +1664,15 @@ async fn bridge_with_runtime_factory_at_root(
         .unwrap_or("daemon-io");
     let tenant_id = format!("app-server-{suffix}");
     let user_id = format!("local-user-{suffix}");
-    let context = crate::TenantRuntimeContext::local(
+    let context = crate::kernel::supervisor::TenantRuntimeContext::local(
         tenant_id.clone(),
         fixture_root.join("runtime"),
         fixture_root.join("state"),
     );
     let session_store_path = context.session_history_path();
-    let supervisor = crate::VerletSupervisor::new();
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(crate::TenantRegistration {
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
             context,
             runtime_factory,
         })
@@ -1576,8 +1682,8 @@ async fn bridge_with_runtime_factory_at_root(
         supervisor,
         tenant_id,
         user_id,
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
         std::env::current_dir().unwrap(),
     );
     bridge.session_store_path = Some(session_store_path);
@@ -1586,14 +1692,15 @@ async fn bridge_with_runtime_factory_at_root(
 
 #[derive(Clone, Default)]
 struct RuntimeBuildGateProbe {
-    blocked_coordinates: std::sync::Arc<std::sync::Mutex<Option<crate::ThreadCoordinates>>>,
+    blocked_coordinates:
+        std::sync::Arc<std::sync::Mutex<Option<verlet_runtime_contracts::ThreadCoordinates>>>,
     matching_builds: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     build_started: std::sync::Arc<tokio::sync::Notify>,
     release_first_build: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl RuntimeBuildGateProbe {
-    fn block_first_build(&self, coordinates: crate::ThreadCoordinates) {
+    fn block_first_build(&self, coordinates: verlet_runtime_contracts::ThreadCoordinates) {
         *self.blocked_coordinates.lock().unwrap() = Some(coordinates);
     }
 
@@ -1622,16 +1729,18 @@ impl RuntimeBuildGateProbe {
 }
 
 struct GatedRuntimeFactory {
-    inner: crate::AgentLoopFactory,
+    inner: crate::adapters::agent_loop::AgentLoopFactory,
     probe: RuntimeBuildGateProbe,
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntimeFactory for GatedRuntimeFactory {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for GatedRuntimeFactory {
     async fn build(
         &self,
-        context: &crate::ThreadContext,
-    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
+        context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
         let matches = self
             .probe
             .blocked_coordinates
@@ -1661,22 +1770,24 @@ async fn bridge_with_runtime_build_gate(
 ) {
     let tenant_id = format!("tenant-{}", uuid::Uuid::now_v7());
     let user_id = format!("user-{}", uuid::Uuid::now_v7());
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let client: std::sync::Arc<dyn crate::ProviderClient> =
+    let client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
         std::sync::Arc::new(RecordingRouteProviderClient::default());
     let probe = RuntimeBuildGateProbe::default();
     let runtime_factory = std::sync::Arc::new(GatedRuntimeFactory {
-        inner: crate::AgentLoopFactory::new(runtime_config, client),
+        inner: crate::adapters::agent_loop::AgentLoopFactory::new(runtime_config, client),
         probe: probe.clone(),
     });
-    let supervisor = crate::VerletSupervisor::new();
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(crate::TenantRegistration {
-            context: crate::TenantRuntimeContext::local(
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: crate::kernel::supervisor::TenantRuntimeContext::local(
                 tenant_id.clone(),
                 fixture_root.join("runtime"),
                 fixture_root.join("state"),
@@ -1690,8 +1801,8 @@ async fn bridge_with_runtime_build_gate(
             supervisor,
             tenant_id,
             user_id,
-            crate::APP_SERVER_LOCAL_PROVIDER,
-            crate::APP_SERVER_LOCAL_MODEL,
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+            crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
             std::env::current_dir().unwrap(),
         ),
         probe,
@@ -1714,22 +1825,24 @@ async fn wait_for_provider_requests(client: &RecordingRouteProviderClient, count
 
 async fn publish_route_test_operation(
     registry_root: &std::path::Path,
-) -> crate::PublishedOperationRecord {
+) -> verlet_operations::operation_store::PublishedOperationRecord {
     std::fs::create_dir_all(registry_root).unwrap();
     let wasm = wat::parse_str(route_test_operation_guest()).unwrap();
     let artifact_path = registry_root.join("lookup.wasm");
     std::fs::write(&artifact_path, wasm).unwrap();
-    crate::LocalOperationRegistry::new(registry_root)
-        .publish_artifact(crate::PublishOperationRequest {
-            name: "lookup".to_string(),
-            artifact_path: artifact_path.clone(),
-            source: crate::PublishedOperationSource::Wasm {
-                bin_path: artifact_path,
+    verlet_operations::operation_store::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "lookup".to_string(),
+                artifact_path: artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact_path,
+                },
+                interface: None,
+                capability_grants: Default::default(),
+                metadata: Default::default(),
             },
-            interface: None,
-            capability_grants: Default::default(),
-            metadata: Default::default(),
-        })
+        )
         .await
         .unwrap()
 }
@@ -1739,7 +1852,7 @@ fn publish_route_agent_manifest(
     agent_registry_root: &std::path::Path,
     operation_registry_root: &std::path::Path,
     operation_hash: &str,
-) -> crate::PublishedAgentRecord {
+) -> crate::agent::manifest::PublishedAgentRecord {
     let project = root.join("daemon-route-runner");
     std::fs::create_dir_all(project.join("prompts")).unwrap();
     std::fs::write(
@@ -1776,7 +1889,7 @@ operation_ref = "op://lookup/lookup@sha256:{operation_hash}"
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, operation_registry_root)
         .unwrap()
 }
@@ -1784,7 +1897,7 @@ operation_ref = "op://lookup/lookup@sha256:{operation_hash}"
 fn publish_route_agent_manifest_with_missing_blob(
     root: &std::path::Path,
     agent_registry_root: &std::path::Path,
-) -> crate::PublishedAgentRecord {
+) -> crate::agent::manifest::PublishedAgentRecord {
     let project = root.join("daemon-missing-blob");
     std::fs::create_dir_all(&project).unwrap();
     let manifest_path = project.join("verlet.agent.toml");
@@ -1826,7 +1939,7 @@ pinned = true
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap()
 }
@@ -1927,7 +2040,7 @@ fn wat_bytes(bytes: &[u8]) -> String {
 
 async fn register_route_state(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
-    route: &crate::VerletIoRouteConfig,
+    route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     db: &std::path::Path,
 ) {
     let source = test_envelope("").source;
@@ -1962,7 +2075,7 @@ async fn route_bindings(
 fn insert_route_binding(
     state: &crate::daemon::daemon_io::DaemonEgressState,
     scope_key: &str,
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     updated_at_ms: i64,
 ) {
     let connection = state.lock_connection().unwrap();
@@ -1988,14 +2101,14 @@ fn insert_route_binding(
 async fn start_thread_for_target(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
     target: &verlet_io_core::ResolvedIoTarget,
-) -> crate::ThreadCoordinates {
+) -> verlet_runtime_contracts::ThreadCoordinates {
     bridge
         .supervisor
-        .start_thread(crate::ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: target.address.tenant_id.clone(),
             user_id: target.address.user_id.clone(),
             session_id: target.address.session_id.clone(),
-            topology: crate::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: std::collections::BTreeMap::new(),
         })
         .await
@@ -2023,8 +2136,8 @@ async fn append_requested_sticker(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
     thread_id: &str,
     file_id: &str,
-) -> crate::EventRecord {
-    let parsed = crate::ThreadId::parse_str(thread_id).unwrap();
+) -> verlet_history::EventRecord {
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id).unwrap();
     let handle = bridge
         .supervisor
         .get_thread(&bridge.tenant_id, parsed)
@@ -2036,7 +2149,7 @@ async fn append_requested_sticker(
         .unwrap()
         .into_iter()
         .find(|event| {
-            event.kind == crate::EventKind::TurnSubmitted
+            event.kind == verlet_history::EventKind::TurnSubmitted
                 && event.payload["turn_id"].as_str().is_some()
         })
         .expect("ingress turn submission");
@@ -2044,7 +2157,7 @@ async fn append_requested_sticker(
         crate::daemon::daemon_io::ingress_context_from_event(&ingress_event).unwrap();
     let mut target = ingress_context.target.clone();
     target.metadata = ingress_context.metadata;
-    let mut payload = serde_json::to_value(crate::IoEgressRequestedPayload {
+    let mut payload = serde_json::to_value(verlet_history::IoEgressRequestedPayload {
         egress_kind: serde_json::to_value(verlet_io_core::EgressKind::PlatformAction {
             action: "sticker".to_string(),
             payload: serde_json::json!({ "file_id": file_id }),
@@ -2058,21 +2171,21 @@ async fn append_requested_sticker(
     .unwrap();
     payload.as_object_mut().unwrap().insert(
         "schema".to_string(),
-        serde_json::json!(crate::EventKind::IoEgressRequested.payload_schema_id()),
+        serde_json::json!(verlet_history::EventKind::IoEgressRequested.payload_schema_id()),
     );
     handle
-        .append_thread_event_record(crate::NewEventRecord::discharged(
+        .append_thread_event_record(verlet_history::NewEventRecord::discharged(
             handle.context().coordinates.clone(),
-            crate::EventKind::IoEgressRequested,
+            verlet_history::EventKind::IoEgressRequested,
             payload,
-            crate::EventProvenance {
-                source_streams: vec![crate::EventStreamId::for_thread(
+            verlet_history::EventProvenance {
+                source_streams: vec![verlet_history::EventStreamId::for_thread(
                     &handle.context().coordinates,
                 )],
                 source_event_ids: vec![ingress_event.id],
                 discharged_by: Some("rpc:append_events".to_string()),
                 function: Some("io_egress_requested/v1".to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         ))
         .await
@@ -2084,7 +2197,7 @@ async fn wait_for_assistant_text(
     thread_id: &str,
     expected: &str,
 ) {
-    let parsed = crate::ThreadId::parse_str(thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id).unwrap();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let handle = bridge
@@ -2113,10 +2226,10 @@ async fn completed_thread_handle_fixture(
     name: &str,
 ) -> (
     std::path::PathBuf,
-    crate::VerletAppServer,
+    crate::adapters::app_server::VerletAppServer,
     crate::daemon::daemon_io::VerletDaemonIoBridge,
-    crate::ThreadCoordinates,
-    crate::AgentProcessSpawnReceipt,
+    verlet_runtime_contracts::ThreadCoordinates,
+    crate::kernel::runtime_host::kernel_control::AgentProcessSpawnReceipt,
 ) {
     thread_handle_fixture(
         name,
@@ -2128,25 +2241,25 @@ async fn completed_thread_handle_fixture(
 
 async fn thread_handle_fixture(
     name: &str,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     await_joined: bool,
 ) -> (
     std::path::PathBuf,
-    crate::VerletAppServer,
+    crate::adapters::app_server::VerletAppServer,
     crate::daemon::daemon_io::VerletDaemonIoBridge,
-    crate::ThreadCoordinates,
-    crate::AgentProcessSpawnReceipt,
+    verlet_runtime_contracts::ThreadCoordinates,
+    crate::kernel::runtime_host::kernel_control::AgentProcessSpawnReceipt,
 ) {
     let fixture_root = test_root(name);
     let server = test_server_with_provider_at_root(&fixture_root, client).await;
     let bridge = crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(&server);
     let parent = server
         .supervisor()
-        .start_thread(crate::ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: server.tenant_id().to_string(),
             user_id: server.user_id().to_string(),
             session_id: format!("handle-settlement-{}", uuid::Uuid::now_v7()),
-            topology: crate::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: std::collections::BTreeMap::new(),
         })
         .await
@@ -2160,7 +2273,7 @@ async fn thread_handle_fixture(
     let dispatch = control
         .dispatch_thread_spawn(
             parent.context(),
-            verlet_runtime_contracts::DispatchId::new(format!("{name}-dispatch")),
+            verlet_runtime_contracts::handle::DispatchId::new(format!("{name}-dispatch")),
             "worker".to_string(),
             "finish the child task".to_string(),
             None,
@@ -2169,7 +2282,7 @@ async fn thread_handle_fixture(
         .await
         .unwrap();
     if await_joined {
-        let store = crate::SqliteSessionStore::open(server.session_store_path())
+        let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
             .await
             .unwrap();
         wait_for_thread_joined(&store, &parent_coordinates).await;
@@ -2178,24 +2291,24 @@ async fn thread_handle_fixture(
 }
 
 async fn wait_for_thread_joined(
-    store: &crate::SqliteSessionStore,
-    parent: &crate::ThreadCoordinates,
+    store: &verlet_history_sqlite::SqliteSessionStore,
+    parent: &verlet_runtime_contracts::ThreadCoordinates,
 ) {
     wait_for_thread_joined_count(store, parent, 1).await;
 }
 
 async fn wait_for_thread_joined_count(
-    store: &crate::SqliteSessionStore,
-    parent: &crate::ThreadCoordinates,
+    store: &verlet_history_sqlite::SqliteSessionStore,
+    parent: &verlet_runtime_contracts::ThreadCoordinates,
     expected: usize,
 ) {
-    let control_stream = crate::control_stream_id(parent);
+    let control_stream = crate::kernel::control_decision::control_stream_id(parent);
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let events = store.read_events(&control_stream, None).await.unwrap();
             if events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::ThreadJoined)
+                .filter(|event| event.kind == verlet_history::EventKind::ThreadJoined)
                 .count()
                 >= expected
             {
@@ -2209,8 +2322,8 @@ async fn wait_for_thread_joined_count(
 }
 
 async fn handle_outcome_parent_inputs(
-    store: &crate::SqliteSessionStore,
-    coordinates: &crate::ThreadCoordinates,
+    store: &verlet_history_sqlite::SqliteSessionStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
 ) -> Vec<String> {
     store
         .build_context(coordinates)
@@ -2219,11 +2332,11 @@ async fn handle_outcome_parent_inputs(
         .messages
         .into_iter()
         .filter_map(|message| match message {
-            crate::CanonicalMessage::User { content, .. } => Some(
+            verlet_history::CanonicalMessage::User { content, .. } => Some(
                 content
                     .into_iter()
                     .filter_map(|content| match content {
-                        crate::CanonicalContent::Text { text, .. } => Some(text),
+                        verlet_history::CanonicalContent::Text { text, .. } => Some(text),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -2231,7 +2344,7 @@ async fn handle_outcome_parent_inputs(
             ),
             _ => None,
         })
-        .filter(|text| text.contains(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND))
+        .filter(|text| text.contains(verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND))
         .collect()
 }
 
@@ -2239,7 +2352,7 @@ async fn handle_outcome_parent_inputs(
 async fn completed_child_is_pushed_once_to_parent_with_dispatch_result_and_usage() {
     let (fixture_root, server, bridge, parent_coordinates, dispatch) =
         completed_thread_handle_fixture("handle-outcome-complete").await;
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
         .unwrap();
     let capture = std::sync::Arc::new(CaptureSink {
@@ -2259,21 +2372,24 @@ async fn completed_child_is_pushed_once_to_parent_with_dispatch_result_and_usage
     assert_eq!(
         envelope.dedupe_key,
         Some(verlet_io_core::IoDedupeKey::new(
-            verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+            verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
             dispatch.dispatch_id.to_string(),
         ))
     );
     let verlet_io_core::IngressContent::Event { kind, payload } = &envelope.content else {
         panic!("handle outcome must use event ingress content");
     };
-    assert_eq!(kind, verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND);
-    let terminal: verlet_runtime_contracts::HandleTerminalEnvelope =
+    assert_eq!(
+        kind,
+        verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND
+    );
+    let terminal: verlet_runtime_contracts::handle::HandleTerminalEnvelope =
         serde_json::from_value(payload.clone()).unwrap();
     assert_eq!(terminal.dispatch_id, dispatch.dispatch_id);
     assert_eq!(terminal.handle, dispatch.handle);
     assert_eq!(
         terminal.outcome,
-        verlet_runtime_contracts::HandleTerminalOutcome::Completed
+        verlet_runtime_contracts::handle::HandleTerminalOutcome::Completed
     );
     assert_eq!(terminal.result, Some(serde_json::json!("daemon route ok")));
     assert_eq!(
@@ -2342,20 +2458,23 @@ async fn completed_child_is_pushed_once_to_parent_with_dispatch_result_and_usage
         1
     );
     let control_events = store
-        .read_events(&crate::control_stream_id(&parent_coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&parent_coordinates),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1
     );
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
             .count(),
         1
     );
@@ -2367,16 +2486,16 @@ async fn completed_child_is_pushed_once_to_parent_with_dispatch_result_and_usage
 async fn poisoned_control_stream_does_not_block_healthy_handle_settlement() {
     let (fixture_root, server, bridge, healthy_parent, healthy_dispatch) =
         completed_thread_handle_fixture("handle-outcome-poison-isolation").await;
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
         .unwrap();
     let poisoned = server
         .supervisor()
-        .start_thread(crate::ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: server.tenant_id().to_string(),
             user_id: server.user_id().to_string(),
             session_id: format!("poisoned-handle-stream-{}", uuid::Uuid::now_v7()),
-            topology: crate::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: std::collections::BTreeMap::new(),
         })
         .await
@@ -2384,20 +2503,20 @@ async fn poisoned_control_stream_does_not_block_healthy_handle_settlement() {
     let poisoned_coordinates = poisoned.context().coordinates.clone();
     store
         .append_events(
-            &crate::control_stream_id(&poisoned_coordinates),
-            vec![crate::NewEventRecord::discharged(
+            &crate::kernel::control_decision::control_stream_id(&poisoned_coordinates),
+            vec![verlet_history::NewEventRecord::discharged(
                 poisoned_coordinates.clone(),
-                crate::EventKind::ThreadSpawned,
+                verlet_history::EventKind::ThreadSpawned,
                 serde_json::json!({
-                    "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
+                    "schema": verlet_history::EventKind::ThreadSpawned.payload_schema_id(),
                     "correlation_id": "poisoned-spawn-payload",
                     "parent_thread_id": poisoned_coordinates.thread_id.to_string()
                 }),
-                crate::EventProvenance {
-                    source_event_ids: vec![crate::EventRecordId::new()],
+                verlet_history::EventProvenance {
+                    source_event_ids: vec![verlet_history::EventRecordId::new()],
                     discharged_by: Some("test:poisoned-handle-stream".to_string()),
                     function: Some("poisoned_handle_stream/v1".to_string()),
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             )],
         )
@@ -2420,7 +2539,7 @@ async fn poisoned_control_stream_does_not_block_healthy_handle_settlement() {
     let verlet_io_core::IngressContent::Event { payload, .. } = &captured[0].content else {
         panic!("healthy settlement must use event ingress content");
     };
-    let terminal: verlet_runtime_contracts::HandleTerminalEnvelope =
+    let terminal: verlet_runtime_contracts::handle::HandleTerminalEnvelope =
         serde_json::from_value(payload.clone()).unwrap();
     assert_eq!(terminal.dispatch_id, healthy_dispatch.dispatch_id);
 
@@ -2436,7 +2555,7 @@ async fn poisoned_control_stream_does_not_block_healthy_handle_settlement() {
         .unwrap(),
     );
     let queue_adapter = crate::daemon::handle_ingress::ThreadHandleIngressAdapter::new(
-        crate::SqliteSessionStore::open(server.session_store_path())
+        verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
             .await
             .unwrap(),
         queue.clone() as std::sync::Arc<dyn verlet_io_core::IngressSink>,
@@ -2451,9 +2570,10 @@ async fn poisoned_control_stream_does_not_block_healthy_handle_settlement() {
         30,
     );
     assert_eq!(worker.drain_once().await.unwrap(), 1);
-    let delivery_store = crate::SqliteSessionStore::open(server.session_store_path())
-        .await
-        .unwrap();
+    let delivery_store =
+        verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
+            .await
+            .unwrap();
     assert_eq!(
         handle_outcome_parent_inputs(&delivery_store, &healthy_parent)
             .await
@@ -2480,7 +2600,9 @@ async fn failed_settlement_submit_does_not_block_or_repeat_healthy_peer() {
     let second_dispatch = control
         .dispatch_thread_spawn(
             parent.context(),
-            verlet_runtime_contracts::DispatchId::new("handle-outcome-submit-isolation-second"),
+            verlet_runtime_contracts::handle::DispatchId::new(
+                "handle-outcome-submit-isolation-second",
+            ),
             "worker-two".to_string(),
             "finish the second child task".to_string(),
             None,
@@ -2488,7 +2610,7 @@ async fn failed_settlement_submit_does_not_block_or_repeat_healthy_peer() {
         )
         .await
         .unwrap();
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
         .unwrap();
     wait_for_thread_joined_count(&store, &parent_coordinates, 2).await;
@@ -2514,7 +2636,7 @@ async fn failed_settlement_submit_does_not_block_or_repeat_healthy_peer() {
             let verlet_io_core::IngressContent::Event { payload, .. } = &envelope.content else {
                 panic!("handle outcome must use event ingress content");
             };
-            serde_json::from_value::<verlet_runtime_contracts::HandleTerminalEnvelope>(
+            serde_json::from_value::<verlet_runtime_contracts::handle::HandleTerminalEnvelope>(
                 payload.clone(),
             )
             .unwrap()
@@ -2543,9 +2665,10 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
             true,
         )
         .await;
-    let failed_store = crate::SqliteSessionStore::open(failed_server.session_store_path())
-        .await
-        .unwrap();
+    let failed_store =
+        verlet_history_sqlite::SqliteSessionStore::open(failed_server.session_store_path())
+            .await
+            .unwrap();
     let failed_capture = std::sync::Arc::new(CaptureSink {
         envelopes: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
     });
@@ -2564,12 +2687,12 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
     else {
         panic!("failed handle outcome must be event content");
     };
-    let failed: verlet_runtime_contracts::HandleTerminalEnvelope =
+    let failed: verlet_runtime_contracts::handle::HandleTerminalEnvelope =
         serde_json::from_value(failed_payload.clone()).unwrap();
     assert_eq!(failed.dispatch_id, failed_dispatch.dispatch_id);
     assert_eq!(
         failed.outcome,
-        verlet_runtime_contracts::HandleTerminalOutcome::Failed
+        verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed
     );
     assert!(
         failed
@@ -2585,7 +2708,7 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
     let (_fixture_root, cancelled_server, _bridge, cancelled_parent, cancelled_dispatch) =
         thread_handle_fixture(
             "handle-outcome-cancelled",
-            blocking.clone() as std::sync::Arc<dyn crate::ProviderClient>,
+            blocking.clone() as std::sync::Arc<dyn verlet_provider::ProviderClient>,
             false,
         )
         .await;
@@ -2597,9 +2720,10 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
         .await
         .unwrap();
     let mut cancelled_events = cancelled_child.subscribe_events();
-    let cancelled_store = crate::SqliteSessionStore::open(cancelled_server.session_store_path())
-        .await
-        .unwrap();
+    let cancelled_store =
+        verlet_history_sqlite::SqliteSessionStore::open(cancelled_server.session_store_path())
+            .await
+            .unwrap();
     let cancel = supervisor.cancel(
         cancelled_server.tenant_id(),
         cancelled_dispatch.thread_id,
@@ -2609,18 +2733,21 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
         loop {
             if matches!(
                 cancelled_events.recv().await.unwrap(),
-                crate::ThreadEvent::Cancelled { .. }
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled { .. }
             ) {
                 break;
             }
         }
         assert!(
             cancelled_store
-                .read_events(&crate::control_stream_id(&cancelled_parent), None)
+                .read_events(
+                    &crate::kernel::control_decision::control_stream_id(&cancelled_parent),
+                    None
+                )
                 .await
                 .unwrap()
                 .iter()
-                .any(|event| event.kind == crate::EventKind::ThreadJoined),
+                .any(|event| event.kind == verlet_history::EventKind::ThreadJoined),
             "a visible child cancellation must already have a durable terminal join"
         );
     });
@@ -2646,12 +2773,12 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
     else {
         panic!("cancelled handle outcome must be event content");
     };
-    let cancelled: verlet_runtime_contracts::HandleTerminalEnvelope =
+    let cancelled: verlet_runtime_contracts::handle::HandleTerminalEnvelope =
         serde_json::from_value(cancelled_payload.clone()).unwrap();
     assert_eq!(cancelled.dispatch_id, cancelled_dispatch.dispatch_id);
     assert_eq!(
         cancelled.outcome,
-        verlet_runtime_contracts::HandleTerminalOutcome::Cancelled
+        verlet_runtime_contracts::handle::HandleTerminalOutcome::Cancelled
     );
     assert_eq!(
         cancelled.outcome_reason.as_deref(),
@@ -2667,7 +2794,7 @@ async fn failed_and_cancelled_children_project_detailed_handle_outcomes() {
 async fn terminal_before_emission_fault_recovers_to_one_parent_turn() {
     let (fixture_root, server, bridge, parent_coordinates, _dispatch) =
         completed_thread_handle_fixture("handle-outcome-crash-window").await;
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
         .unwrap();
     let queue = std::sync::Arc::new(
@@ -2681,7 +2808,7 @@ async fn terminal_before_emission_fault_recovers_to_one_parent_turn() {
         .unwrap(),
     );
     let faulting = std::sync::Arc::new(
-        crate::test_support::FaultingIngressQueue::new(queue.clone()).fail_nth(
+        crate::support::fault::FaultingIngressQueue::new(queue.clone()).fail_nth(
             "submit",
             1,
             "process cut after terminal observation before ingress emission",
@@ -2725,9 +2852,9 @@ async fn terminal_before_emission_fault_recovers_to_one_parent_turn() {
 async fn egress_receipts(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
     thread_id: &str,
-    kind: crate::EventKind,
-) -> Vec<crate::EventRecord> {
-    let parsed = crate::ThreadId::parse_str(thread_id).unwrap();
+    kind: verlet_history::EventKind,
+) -> Vec<verlet_history::EventRecord> {
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id).unwrap();
     let handle = bridge
         .supervisor
         .get_thread(&bridge.tenant_id, parsed)
@@ -2745,7 +2872,7 @@ async fn egress_receipts(
 async fn egress_cursor(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
     thread_id: &str,
-) -> Option<crate::StreamCursorV1> {
+) -> Option<verlet_history::StreamCursorV1> {
     bridge
         .egress_cursor_for_thread("telegram.bot", "main", thread_id)
         .await
@@ -2754,7 +2881,7 @@ async fn egress_cursor(
 
 async fn only_thread_coordinates(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
-) -> crate::ThreadCoordinates {
+) -> verlet_runtime_contracts::ThreadCoordinates {
     bridge
         .threads
         .lock()
@@ -2767,33 +2894,39 @@ async fn only_thread_coordinates(
 
 async fn control_events_for(
     session_store_path: &std::path::Path,
-    coordinates: &crate::ThreadCoordinates,
-) -> Vec<crate::EventRecord> {
-    let session_store = crate::SqliteSessionStore::open(session_store_path)
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> Vec<verlet_history::EventRecord> {
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
         .await
         .unwrap();
     session_store
-        .read_events(&crate::control_stream_id(coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(coordinates),
+            None,
+        )
         .await
         .unwrap()
 }
 
 async fn thread_events_for(
     session_store_path: &std::path::Path,
-    coordinates: &crate::ThreadCoordinates,
-) -> Vec<crate::EventRecord> {
-    let session_store = crate::SqliteSessionStore::open(session_store_path)
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> Vec<verlet_history::EventRecord> {
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
         .await
         .unwrap();
     session_store
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
         .unwrap()
 }
 
 async fn assert_single_durable_ingress_turn(
     session_store_path: &std::path::Path,
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     message_id: &str,
 ) {
     let control_events = control_events_for(session_store_path, coordinates).await;
@@ -2801,7 +2934,7 @@ async fn assert_single_durable_ingress_turn(
     for _ in 0..100 {
         if thread_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .any(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
         {
             break;
         }
@@ -2812,7 +2945,7 @@ async fn assert_single_durable_ingress_turn(
         control_events
             .iter()
             .chain(&thread_events)
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
             .count(),
         1,
         "durable ingress redelivery must leave one receipt across all streams"
@@ -2820,7 +2953,7 @@ async fn assert_single_durable_ingress_turn(
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1,
         "durable ingress redelivery must not submit a second turn"
@@ -2828,7 +2961,7 @@ async fn assert_single_durable_ingress_turn(
     let claims = control_events
         .iter()
         .filter(|event| {
-            event.kind == crate::EventKind::IoIngressClaimed
+            event.kind == verlet_history::EventKind::IoIngressClaimed
                 && event.payload["ingress_envelope_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(message_id)))
@@ -2838,7 +2971,7 @@ async fn assert_single_durable_ingress_turn(
     let settles = control_events
         .iter()
         .filter(|event| {
-            event.kind == crate::EventKind::IoIngressSettled
+            event.kind == verlet_history::EventKind::IoIngressSettled
                 && event.payload["claim_event_id"].as_str()
                     == Some(claims[0].id.to_string().as_str())
         })
@@ -2849,7 +2982,7 @@ async fn assert_single_durable_ingress_turn(
 
 async fn user_texts_for(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
 ) -> Vec<String> {
     let handle = bridge.supervisor.get_thread_at(coordinates).await.unwrap();
     handle
@@ -2859,11 +2992,11 @@ async fn user_texts_for(
         .entries
         .iter()
         .filter_map(|entry| match &entry.kind {
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::User { content, .. },
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::User { content, .. },
             }
-            | crate::SessionEntryKind::CustomContextMessage {
-                message: crate::CanonicalMessage::User { content, .. },
+            | verlet_history::SessionEntryKind::CustomContextMessage {
+                message: verlet_history::CanonicalMessage::User { content, .. },
             } => Some(crate::daemon::daemon_io::text_from_canonical_content(
                 content,
             )),
@@ -2874,7 +3007,7 @@ async fn user_texts_for(
 
 async fn wait_for_user_text(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     expected: &str,
 ) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -2895,7 +3028,7 @@ async fn wait_for_user_text(
 
 async fn wait_for_user_text_containing(
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     expected: &str,
 ) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -2915,7 +3048,7 @@ async fn wait_for_user_text_containing(
     }
 }
 
-fn admission_source_ids(event: &crate::EventRecord) -> Vec<String> {
+fn admission_source_ids(event: &verlet_history::EventRecord) -> Vec<String> {
     event.payload["source_ingress_event_ids"]
         .as_array()
         .unwrap()
@@ -2951,10 +3084,12 @@ async fn drain_until_egress(
 #[tokio::test]
 async fn egress_projection_strips_platform_action_tag_and_preserves_order() {
     let route = route_with_egress(
-        vec![crate::VerletEgressProjectionRuleConfig {
-            pattern: r"\[sticker:(?P<file_id>[^\]]+)\]".to_string(),
-            action: "sticker".to_string(),
-        }],
+        vec![
+            crate::daemon::daemon_config::VerletEgressProjectionRuleConfig {
+                pattern: r"\[sticker:(?P<file_id>[^\]]+)\]".to_string(),
+                action: "sticker".to_string(),
+            },
+        ],
         None,
     );
     let config = crate::daemon::daemon_io::RouteEgressConfig::from_route(&route).unwrap();
@@ -2978,10 +3113,12 @@ async fn egress_projection_strips_platform_action_tag_and_preserves_order() {
 #[tokio::test]
 async fn egress_projection_turns_no_response_tag_into_silence() {
     let route = route_with_egress(
-        vec![crate::VerletEgressProjectionRuleConfig {
-            pattern: r"\[no_response\]".to_string(),
-            action: "silence".to_string(),
-        }],
+        vec![
+            crate::daemon::daemon_config::VerletEgressProjectionRuleConfig {
+                pattern: r"\[no_response\]".to_string(),
+                action: "silence".to_string(),
+            },
+        ],
         None,
     );
     let config = crate::daemon::daemon_io::RouteEgressConfig::from_route(&route).unwrap();
@@ -2998,10 +3135,12 @@ async fn egress_projection_turns_no_response_tag_into_silence() {
 #[tokio::test]
 async fn egress_projection_leaves_text_without_tags_unchanged() {
     let route = route_with_egress(
-        vec![crate::VerletEgressProjectionRuleConfig {
-            pattern: r"\[sticker:(?P<file_id>[^\]]+)\]".to_string(),
-            action: "sticker".to_string(),
-        }],
+        vec![
+            crate::daemon::daemon_config::VerletEgressProjectionRuleConfig {
+                pattern: r"\[sticker:(?P<file_id>[^\]]+)\]".to_string(),
+                action: "sticker".to_string(),
+            },
+        ],
         None,
     );
     let config = crate::daemon::daemon_io::RouteEgressConfig::from_route(&route).unwrap();
@@ -3029,7 +3168,7 @@ async fn typing_simulation_sends_typing_action_and_delays_text() {
     let (bridge, mut rx, _) = test_bridge().await;
     let route = route_with_egress(
         Vec::new(),
-        Some(crate::VerletTypingSimulationConfig {
+        Some(crate::daemon::daemon_config::VerletTypingSimulationConfig {
             chars_per_second: 2,
         }),
     );
@@ -3096,40 +3235,42 @@ impl FakeClock {
     }
 }
 
-impl crate::DaemonClock for FakeClock {
+impl crate::daemon::clock_route::DaemonClock for FakeClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
         *self.now.lock().unwrap()
     }
 }
 
 async fn start_clock_thread_with_mandate(
-    server: &crate::VerletAppServer,
-    catch_up: crate::MandateCatchUpPolicy,
+    server: &crate::adapters::app_server::VerletAppServer,
+    catch_up: crate::kernel::control_decision::MandateCatchUpPolicy,
 ) -> (
-    crate::SqliteSessionStore,
-    crate::ThreadCoordinates,
-    crate::MandateStartReceipt,
+    verlet_history_sqlite::SqliteSessionStore,
+    verlet_runtime_contracts::ThreadCoordinates,
+    crate::kernel::mandate_lifecycle::MandateStartReceipt,
 ) {
     let handle = server
         .supervisor()
-        .start_thread(crate::ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: server.tenant_id().to_string(),
             user_id: server.user_id().to_string(),
             session_id: format!("clock-{}", uuid::Uuid::now_v7()),
-            topology: crate::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: std::collections::BTreeMap::new(),
         })
         .await
         .unwrap();
     let coordinates = handle.context().coordinates.clone();
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
         .unwrap();
-    let receipt = crate::start_mandate(
+    let receipt = crate::kernel::mandate_lifecycle::start_mandate(
         &store,
         &coordinates,
-        crate::MandateStartRequest {
-            schedule: crate::MandateSchedulePayload::Interval { every_ms: 60_000 },
+        crate::kernel::mandate_lifecycle::MandateStartRequest {
+            schedule: crate::kernel::control_decision::MandateSchedulePayload::Interval {
+                every_ms: 60_000,
+            },
             max_occurrences: Some(3),
             catch_up: Some(catch_up),
             input_template: Some("wake".to_string()),
@@ -3151,15 +3292,18 @@ fn event_time(event_ms: i64, offset_ms: i64) -> chrono::DateTime<chrono::Utc> {
 }
 
 async fn timer_payloads(
-    store: &crate::SqliteSessionStore,
-    coordinates: &crate::ThreadCoordinates,
-) -> Vec<crate::TimerFiredPayload> {
+    store: &verlet_history_sqlite::SqliteSessionStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> Vec<verlet_history::TimerFiredPayload> {
     store
-        .read_events(&crate::control_stream_id(coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(coordinates),
+            None,
+        )
         .await
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == crate::EventKind::TimerFired)
+        .filter(|event| event.kind == verlet_history::EventKind::TimerFired)
         .map(|event| serde_json::from_value(event.payload).unwrap())
         .collect()
 }
@@ -3245,12 +3389,12 @@ async fn route_agent_ref_binds_manifest_prompt_metadata_and_receipts() {
     );
     assert_eq!(
         metadata
-            .get(crate::THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
             .map(String::as_str),
         Some(agent.manifest_hash.as_str())
     );
     let static_segments = metadata
-        .get(crate::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+        .get(crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
         .expect("static context segment metadata should be stamped");
     let static_segments: Vec<serde_json::Value> = serde_json::from_str(static_segments).unwrap();
     assert_eq!(static_segments[0]["id"].as_str(), Some("identity"));
@@ -3264,7 +3408,7 @@ async fn route_agent_ref_binds_manifest_prompt_metadata_and_receipts() {
     assert!(
         thread_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::ManifestBindCompleted)
+            .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3322,7 +3466,7 @@ async fn route_agent_identity_survives_true_runtime_restart() {
     register_route_state(&restarted, &route, &db).await;
     assert!(matches!(
         restarted.supervisor.get_thread_at(&coordinates).await,
-        Err(crate::VerletError::ThreadNotFound(_))
+        Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_))
     ));
 
     route_sink_for_bridge(restarted.direct_sink(), &route, &restarted)
@@ -3343,10 +3487,9 @@ async fn route_agent_identity_survives_true_runtime_restart() {
         .await
         .unwrap();
     assert!(
-        reloaded
-            .context()
-            .metadata
-            .contains_key(crate::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+        reloaded.context().metadata.contains_key(
+            crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA
+        )
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3432,11 +3575,11 @@ async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
     let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
     let envelope = test_envelope("legacy reload");
     let target = bridge.resolve_target(&envelope).await.unwrap();
-    let coordinates = crate::ThreadCoordinates {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: target.address.tenant_id,
         user_id: target.address.user_id,
         session_id: target.address.session_id,
-        thread_id: crate::ThreadId::new(),
+        thread_id: verlet_runtime_contracts::ThreadId::new(),
     };
 
     for expected_witnesses in 1..=2 {
@@ -3445,7 +3588,10 @@ async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
             .await
             .unwrap();
         assert_eq!(handle.context().parent_thread_id, None);
-        assert_eq!(handle.context().topology, crate::ThreadTopology::root());
+        assert_eq!(
+            handle.context().topology,
+            verlet_runtime_contracts::ThreadTopology::root()
+        );
         assert!(handle.context().metadata.is_empty());
         bridge
             .supervisor
@@ -3457,10 +3603,10 @@ async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
             thread_events_for(bridge.session_store_path.as_ref().unwrap(), &coordinates).await;
         let degraded = events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ThreadReloadDegraded)
+            .filter(|event| event.kind == verlet_history::EventKind::ThreadReloadDegraded)
             .collect::<Vec<_>>();
         assert_eq!(degraded.len(), expected_witnesses);
-        let payload: crate::ThreadReloadDegradedPayload =
+        let payload: verlet_history::ThreadReloadDegradedPayload =
             serde_json::from_value(degraded.last().unwrap().payload.clone()).unwrap();
         assert_eq!(payload.thread_id, coordinates.thread_id);
         assert_eq!(
@@ -3502,7 +3648,7 @@ async fn route_without_agent_ref_stays_unbound() {
         !handle
             .context()
             .metadata
-            .contains_key(crate::THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .contains_key(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3611,7 +3757,7 @@ async fn fork_on_new_dm_child_inherits_route_agent_binding() {
         child
             .context()
             .metadata
-            .get(crate::THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
             .map(String::as_str),
         Some(agent.manifest_hash.as_str())
     );
@@ -3628,7 +3774,7 @@ async fn fork_on_new_dm_child_inherits_route_agent_binding() {
         parent
             .context()
             .metadata
-            .get(crate::THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
             .map(String::as_str),
         Some(agent.manifest_hash.as_str())
     );
@@ -3647,7 +3793,7 @@ async fn queue_worker_redelivery_after_complete_failure_does_not_duplicate_turn(
     let queue =
         ScriptedIngressQueue::new("message-redelivery", envelope, std::iter::empty::<&str>());
     let faulting_queue = std::sync::Arc::new(
-        crate::test_support::FaultingIngressQueue::new(std::sync::Arc::new(queue.clone()))
+        crate::support::fault::FaultingIngressQueue::new(std::sync::Arc::new(queue.clone()))
             .fail_nth("complete_ingress", 1, "scripted complete failure"),
     );
     let worker = crate::daemon::daemon_io::VerletDaemonQueueWorker::new(
@@ -3730,7 +3876,7 @@ async fn racing_fork_applies_create_one_child_behind_one_parent_claim() {
             .await
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::TurnSubmitted
+                event.kind == verlet_history::EventKind::TurnSubmitted
                     && event.payload["ingress_envelope_id"].as_str() == Some(&envelope.id)
             })
             .count();
@@ -3738,14 +3884,14 @@ async fn racing_fork_applies_create_one_child_behind_one_parent_claim() {
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1
     );
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+            .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
             .count(),
         1
     );
@@ -3808,14 +3954,14 @@ async fn durable_ingress_witness_and_admission_are_single_under_racing_applies()
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
             .count(),
         1
     );
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+            .filter(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
             .count(),
         1
     );
@@ -3858,7 +4004,7 @@ async fn racing_initial_applies_share_the_durable_conversation_binding() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1
     );
@@ -3983,7 +4129,7 @@ async fn settled_fork_redelivery_repeats_no_control_effects() {
         std::iter::empty::<&str>(),
     );
     let faulting_queue = std::sync::Arc::new(
-        crate::test_support::FaultingIngressQueue::new(std::sync::Arc::new(queue.clone()))
+        crate::support::fault::FaultingIngressQueue::new(std::sync::Arc::new(queue.clone()))
             .fail_nth("complete_ingress", 1, "scripted complete failure"),
     );
     let worker = crate::daemon::daemon_io::VerletDaemonQueueWorker::new(
@@ -4011,27 +4157,27 @@ async fn settled_fork_redelivery_repeats_no_control_effects() {
         submitted += thread_events_for(&session_store_path, &binding.coordinates)
             .await
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count();
     }
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1
     );
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
             .count(),
         1
     );
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+            .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
             .count(),
         1
     );
@@ -4071,19 +4217,19 @@ async fn fork_claim_before_fork_recovers_one_child_after_restart() {
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1
     );
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::ThreadSpawned)
+            .any(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
     );
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
     assert!(
         bridge
@@ -4119,18 +4265,18 @@ async fn fork_claim_before_fork_recovers_one_child_after_restart() {
     let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .unwrap();
     let spawned = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::ThreadSpawned)
+        .find(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
         .expect("recovery should create and witness one child");
-    let spawned_payload: crate::ThreadSpawnedPayload =
+    let spawned_payload: verlet_history::ThreadSpawnedPayload =
         serde_json::from_value(spawned.payload.clone()).unwrap();
     assert_eq!(spawned_payload.fork.unwrap().claim_event_id, Some(claim.id));
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .expect("recovery should settle the fork claim");
     assert_eq!(settle.payload["settled_by"], "recovery");
     assert_eq!(
@@ -4138,7 +4284,7 @@ async fn fork_claim_before_fork_recovers_one_child_after_restart() {
         Some(spawned.id.to_string().as_str())
     );
     assert_eq!(route_bindings(&restarted_bridge).await.len(), 2);
-    let child_coordinates = crate::ThreadCoordinates {
+    let child_coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: parent_coordinates.tenant_id.clone(),
         user_id: parent_coordinates.user_id.clone(),
         session_id: parent_coordinates.session_id.clone(),
@@ -4148,7 +4294,7 @@ async fn fork_claim_before_fork_recovers_one_child_after_restart() {
         thread_events_for(&session_store_path, &child_coordinates)
             .await
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1
     );
@@ -4158,19 +4304,19 @@ async fn fork_claim_before_fork_recovers_one_child_after_restart() {
 
 async fn append_raw_legacy_fork_claim(
     session_store_path: &std::path::Path,
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ingress_envelope_id: &str,
     settled: bool,
-) -> crate::EventRecord {
-    let store = crate::SqliteSessionStore::open(session_store_path)
+) -> verlet_history::EventRecord {
+    let store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
         .await
         .unwrap();
-    let control_stream = crate::control_stream_id(coordinates);
-    let ingress_witness_event_id = crate::EventRecordId::new();
-    let admission_event_id = crate::EventRecordId::new();
-    let claim = crate::NewEventRecord::discharged(
+    let control_stream = crate::kernel::control_decision::control_stream_id(coordinates);
+    let ingress_witness_event_id = verlet_history::EventRecordId::new();
+    let admission_event_id = verlet_history::EventRecordId::new();
+    let claim = verlet_history::NewEventRecord::discharged(
         coordinates.clone(),
-        crate::EventKind::IoIngressClaimed,
+        verlet_history::EventKind::IoIngressClaimed,
         serde_json::json!({
             "ingress_envelope_ids": [ingress_envelope_id],
             "ingress_witness_event_ids": [ingress_witness_event_id],
@@ -4190,9 +4336,9 @@ async fn append_raw_legacy_fork_claim(
     let claim_id = claim.id;
     let mut records = vec![claim];
     if settled {
-        records.push(crate::NewEventRecord::discharged(
+        records.push(verlet_history::NewEventRecord::discharged(
             coordinates.clone(),
-            crate::EventKind::IoIngressSettled,
+            verlet_history::EventKind::IoIngressSettled,
             serde_json::json!({
                 "claim_event_id": claim_id,
                 "ingress_envelope_ids": [ingress_envelope_id],
@@ -4256,14 +4402,14 @@ async fn settled_legacy_fork_claim_does_not_poison_new_scope_envelopes() {
     let new_claim = events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::IoIngressClaimed
+            event.kind == verlet_history::EventKind::IoIngressClaimed
                 && event.payload["ingress_envelope_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
         })
         .expect("the new envelope should claim normally beside legacy history");
     assert!(events.iter().any(|event| {
-        event.kind == crate::EventKind::IoIngressSettled
+        event.kind == verlet_history::EventKind::IoIngressSettled
             && event.payload["claim_event_id"].as_str() == Some(new_claim.id.to_string().as_str())
     }));
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -4333,14 +4479,14 @@ async fn unsettled_legacy_fork_claim_errors_only_its_own_envelope() {
     let fresh_claim = events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::IoIngressClaimed
+            event.kind == verlet_history::EventKind::IoIngressClaimed
                 && event.payload["ingress_envelope_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&fresh_ingress_id)))
         })
         .expect("a different envelope should not be poisoned by the legacy claim");
     assert!(events.iter().any(|event| {
-        event.kind == crate::EventKind::IoIngressSettled
+        event.kind == verlet_history::EventKind::IoIngressSettled
             && event.payload["claim_event_id"].as_str() == Some(fresh_claim.id.to_string().as_str())
     }));
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -4377,12 +4523,12 @@ async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() 
     let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .expect("the reservation claim must precede creation");
-    let claim_payload: crate::IoIngressClaimedPayload =
+    let claim_payload: verlet_history::IoIngressClaimedPayload =
         serde_json::from_value(claim.payload.clone()).unwrap();
     let reserved_child_thread_id = match claim_payload.intent {
-        crate::IngressOutcomeIntent::Fork {
+        verlet_history::IngressOutcomeIntent::Fork {
             child_thread_id, ..
         } => child_thread_id.expect("new fork claims must reserve their child id"),
         other => panic!("unexpected claim intent: {other:?}"),
@@ -4390,10 +4536,10 @@ async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() 
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::ThreadSpawned),
+            .any(|event| event.kind == verlet_history::EventKind::ThreadSpawned),
         "the cut must land before thread.spawned"
     );
-    let child_coordinates = crate::ThreadCoordinates {
+    let child_coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: parent_coordinates.tenant_id.clone(),
         user_id: parent_coordinates.user_id.clone(),
         session_id: parent_coordinates.session_id.clone(),
@@ -4404,7 +4550,7 @@ async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() 
         child_events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::SessionEntryAppended
+                event.kind == verlet_history::EventKind::SessionEntryAppended
                     && event.payload["runtime_kind"].as_str() == Some("thread_started")
                     && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
                         .as_str()
@@ -4439,10 +4585,10 @@ async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() 
     let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
     let spawned = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+        .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
         .collect::<Vec<_>>();
     assert_eq!(spawned.len(), 1, "recovery must join the topology once");
-    let spawned_payload: crate::ThreadSpawnedPayload =
+    let spawned_payload: verlet_history::ThreadSpawnedPayload =
         serde_json::from_value(spawned[0].payload.clone()).unwrap();
     assert_eq!(spawned_payload.child_thread_id, reserved_child_thread_id);
     assert_eq!(spawned_payload.fork.unwrap().claim_event_id, Some(claim.id));
@@ -4451,7 +4597,7 @@ async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() 
             .await
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::SessionEntryAppended
+                event.kind == verlet_history::EventKind::SessionEntryAppended
                     && event.payload["runtime_kind"].as_str() == Some("thread_started")
                     && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
                         .as_str()
@@ -4469,14 +4615,16 @@ async fn fork_creation_before_spawn_recovers_the_reserved_child_after_restart() 
 async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
     let fixture_root = test_root("fork-spawn-before-settle-cut");
     let egress_db = fixture_root.join("io.sqlite");
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
     let bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
-        std::sync::Arc::new(crate::AgentLoopFactory::new(
+        std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
             runtime_config.clone(),
             std::sync::Arc::new(RecordingRouteProviderClient::default()),
         )),
@@ -4508,13 +4656,13 @@ async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
     let control_events = control_events_for(&session_store_path, &parent_coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .expect("claim should exist before the fork effects");
     let spawned = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::ThreadSpawned)
+        .find(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
         .expect("the cut should land after thread.spawned");
-    let spawned_payload: crate::ThreadSpawnedPayload =
+    let spawned_payload: verlet_history::ThreadSpawnedPayload =
         serde_json::from_value(spawned.payload.clone()).unwrap();
     assert_eq!(
         spawned_payload.fork.as_ref().unwrap().claim_event_id,
@@ -4523,7 +4671,7 @@ async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
     let children = bridge
         .supervisor
@@ -4537,7 +4685,7 @@ async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
         !thread_events_for(&session_store_path, &child_coordinates)
             .await
             .iter()
-            .any(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .any(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
     );
     assert_eq!(route_bindings(&bridge).await.len(), 1);
 
@@ -4548,7 +4696,7 @@ async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
 
     let restarted_bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
-        std::sync::Arc::new(crate::AgentLoopFactory::new(
+        std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
             runtime_config,
             std::sync::Arc::new(RecordingRouteProviderClient::default()),
         )),
@@ -4572,14 +4720,14 @@ async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+            .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
             .count(),
         1,
         "recovery must reuse the child named by thread.spawned"
     );
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .expect("recovery should settle the existing spawned child");
     assert_eq!(settle.payload["settled_by"], "recovery");
     assert_eq!(
@@ -4604,7 +4752,7 @@ async fn fork_spawn_before_settle_recovers_binding_and_submit_after_restart() {
         thread_events_for(&session_store_path, &child_coordinates)
             .await
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1
     );
@@ -4640,12 +4788,13 @@ async fn queued_interrupt_claims_before_cancel_and_settles_replacement() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .unwrap();
     let claim_payload =
-        serde_json::from_value::<crate::IoIngressClaimedPayload>(claim.payload.clone()).unwrap();
+        serde_json::from_value::<verlet_history::IoIngressClaimedPayload>(claim.payload.clone())
+            .unwrap();
     let replacement_turn_id = match claim_payload.intent {
-        crate::IngressOutcomeIntent::Interrupt {
+        verlet_history::IngressOutcomeIntent::Interrupt {
             replacement_turn_id: Some(turn_id),
             ..
         } => turn_id,
@@ -4654,10 +4803,11 @@ async fn queued_interrupt_claims_before_cancel_and_settles_replacement() {
     assert_eq!(claim_payload.ingress_envelope_ids, vec![ingress_id]);
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .unwrap();
     let settle_payload =
-        serde_json::from_value::<crate::IoIngressSettledPayload>(settle.payload.clone()).unwrap();
+        serde_json::from_value::<verlet_history::IoIngressSettledPayload>(settle.payload.clone())
+            .unwrap();
     assert_eq!(settle_payload.claim_event_id, claim.id);
     assert!(settle_payload.evidence_event_id.is_some());
     assert!(
@@ -4665,7 +4815,7 @@ async fn queued_interrupt_claims_before_cancel_and_settles_replacement() {
             .await
             .iter()
             .any(|event| {
-                event.kind == crate::EventKind::SessionEntryAppended
+                event.kind == verlet_history::EventKind::SessionEntryAppended
                     && event.payload["turn_id"].as_str() == Some(&replacement_turn_id)
             })
     );
@@ -4677,7 +4827,8 @@ async fn queue_worker_rejection_before_submission_does_not_mark_ingress_applied(
     let fixture_root = test_root("queue-submit-rejection");
     let bridge = bridge_with_execution_policy(
         &fixture_root,
-        crate::RuntimeExecutionPolicy::default().with_max_pending_inputs(0),
+        crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy::default()
+            .with_max_pending_inputs(0),
     )
     .await;
     let session_store_path = bridge.session_store_path.clone().unwrap();
@@ -4706,7 +4857,7 @@ async fn queue_worker_rejection_before_submission_does_not_mark_ingress_applied(
             .await
             .iter()
             .any(|event| {
-                event.kind == crate::EventKind::IoIngressClaimed
+                event.kind == verlet_history::EventKind::IoIngressClaimed
                     && event.payload["ingress_envelope_ids"]
                         .as_array()
                         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
@@ -4731,7 +4882,8 @@ async fn fork_worker_rejection_keeps_one_claimed_child_for_recovery() {
     let fixture_root = test_root("fork-submit-rejection");
     let bridge = bridge_with_execution_policy(
         &fixture_root,
-        crate::RuntimeExecutionPolicy::default().with_max_pending_inputs(0),
+        crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy::default()
+            .with_max_pending_inputs(0),
     )
     .await;
     let session_store_path = bridge.session_store_path.clone().unwrap();
@@ -4760,7 +4912,7 @@ async fn fork_worker_rejection_keeps_one_claimed_child_for_recovery() {
             .await
             .iter()
             .any(|event| {
-                event.kind == crate::EventKind::TurnSubmitted
+                event.kind == verlet_history::EventKind::TurnSubmitted
                     && event.payload["ingress_envelope_id"].as_str() == Some(&ingress_id)
             })
     );
@@ -4770,7 +4922,7 @@ async fn fork_worker_rejection_keeps_one_claimed_child_for_recovery() {
         .get_thread_at(&child_coordinates)
         .await
         .unwrap();
-    let parent_coordinates = crate::ThreadCoordinates {
+    let parent_coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: child_coordinates.tenant_id.clone(),
         user_id: child_coordinates.user_id.clone(),
         session_id: child_coordinates.session_id.clone(),
@@ -4780,21 +4932,21 @@ async fn fork_worker_rejection_keeps_one_claimed_child_for_recovery() {
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1
     );
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+            .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
             .count(),
         1
     );
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
     assert!(
         bridge.active_turns.lock().unwrap().is_empty(),
@@ -4861,21 +5013,21 @@ async fn interrupt_cancel_wait_does_not_hold_active_turn_state_lock() {
 
 #[test]
 fn ingress_outcome_fold_rejects_conflicting_claims() {
-    let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-    let stream_id = crate::control_stream_id(&coordinates);
-    let admission_event_id = crate::EventRecordId::new();
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+    let stream_id = crate::kernel::control_decision::control_stream_id(&coordinates);
+    let admission_event_id = verlet_history::EventRecordId::new();
     let claim = |sequence: i64, turn_id: &str, envelope_ids: &[&str]| {
-        crate::EventRecord::from_new(
+        verlet_history::EventRecord::from_new(
             stream_id.clone(),
-            crate::EventSequence::new(sequence),
-            crate::NewEventRecord::witnessed(
+            verlet_history::EventSequence::new(sequence),
+            verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                crate::EventKind::IoIngressClaimed,
-                serde_json::to_value(crate::IoIngressClaimedPayload {
+                verlet_history::EventKind::IoIngressClaimed,
+                serde_json::to_value(verlet_history::IoIngressClaimedPayload {
                     ingress_envelope_ids: envelope_ids.iter().map(|id| id.to_string()).collect(),
-                    ingress_witness_event_ids: vec![crate::EventRecordId::new()],
+                    ingress_witness_event_ids: vec![verlet_history::EventRecordId::new()],
                     admission_event_id,
-                    intent: crate::IngressOutcomeIntent::Turn {
+                    intent: verlet_history::IngressOutcomeIntent::Turn {
                         turn_id: turn_id.to_string(),
                         submission_mode: "queue".to_string(),
                         input_digest: "sha256:input".to_string(),
@@ -4912,31 +5064,31 @@ async fn lone_effect_free_claims_fail_closed_during_recovery() {
     bridge.submit_envelope(envelope.clone()).await.unwrap();
     let target = bridge.resolve_target(&envelope).await.unwrap();
     let coordinates = only_thread_coordinates(&bridge).await;
-    let stream_id = crate::control_stream_id(&coordinates);
+    let stream_id = crate::kernel::control_decision::control_stream_id(&coordinates);
 
     for (index, intent) in [
-        crate::IngressOutcomeIntent::Observe {
+        verlet_history::IngressOutcomeIntent::Observe {
             reason: "observe corruption".to_string(),
         },
-        crate::IngressOutcomeIntent::Reject {
+        verlet_history::IngressOutcomeIntent::Reject {
             reason: "reject corruption".to_string(),
         },
     ]
     .into_iter()
     .enumerate()
     {
-        let payload = crate::IoIngressClaimedPayload {
+        let payload = verlet_history::IoIngressClaimedPayload {
             ingress_envelope_ids: vec![envelope.id.clone()],
-            ingress_witness_event_ids: vec![crate::EventRecordId::new()],
-            admission_event_id: crate::EventRecordId::new(),
+            ingress_witness_event_ids: vec![verlet_history::EventRecordId::new()],
+            admission_event_id: verlet_history::EventRecordId::new(),
             intent,
         };
-        let claim = crate::EventRecord::from_new(
+        let claim = verlet_history::EventRecord::from_new(
             stream_id.clone(),
-            crate::EventSequence::new(index as i64 + 1),
-            crate::NewEventRecord::witnessed(
+            verlet_history::EventSequence::new(index as i64 + 1),
+            verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                crate::EventKind::IoIngressClaimed,
+                verlet_history::EventKind::IoIngressClaimed,
                 serde_json::to_value(&payload).unwrap(),
             ),
         );
@@ -4998,7 +5150,7 @@ async fn non_fork_claim_owner_survives_fork_rebind_before_redelivery() {
     let claim = parent_events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::IoIngressClaimed
+            event.kind == verlet_history::EventKind::IoIngressClaimed
                 && event.payload["ingress_envelope_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
@@ -5006,7 +5158,7 @@ async fn non_fork_claim_owner_survives_fork_rebind_before_redelivery() {
         .expect("the parent must own the claim before the process-death cut")
         .clone();
     assert!(!parent_events.iter().any(|event| {
-        event.kind == crate::EventKind::IoIngressSettled
+        event.kind == verlet_history::EventKind::IoIngressSettled
             && event.payload["claim_event_id"].as_str() == Some(claim.id.to_string().as_str())
     }));
 
@@ -5042,14 +5194,14 @@ async fn non_fork_claim_owner_survives_fork_rebind_before_redelivery() {
     let settle = parent_events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::IoIngressSettled
+            event.kind == verlet_history::EventKind::IoIngressSettled
                 && event.payload["claim_event_id"].as_str() == Some(claim.id.to_string().as_str())
         })
         .expect("redelivery must settle the claim on its owning parent stream");
     assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
     let child_control = control_events_for(&session_store_path, &child).await;
     assert!(!child_control.iter().any(|event| {
-        event.kind == crate::EventKind::IoIngressClaimed
+        event.kind == verlet_history::EventKind::IoIngressClaimed
             && event.payload["ingress_envelope_ids"]
                 .as_array()
                 .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
@@ -5059,7 +5211,7 @@ async fn non_fork_claim_owner_survives_fork_rebind_before_redelivery() {
             .await
             .iter()
             .any(|event| {
-                event.kind == crate::EventKind::TurnSubmitted
+                event.kind == verlet_history::EventKind::TurnSubmitted
                     && event.payload["ingress_envelope_id"].as_str() == Some(&ingress_id)
             })
     );
@@ -5109,7 +5261,7 @@ async fn ownership_tombstone_is_superseded_after_rebind_before_any_claim() {
             .await
             .iter()
             .any(|event| {
-                event.kind == crate::EventKind::IoIngressClaimed
+                event.kind == verlet_history::EventKind::IoIngressClaimed
                     && event.payload["ingress_envelope_ids"]
                         .as_array()
                         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&ingress_id)))
@@ -5123,7 +5275,10 @@ async fn ownership_tombstone_is_superseded_after_rebind_before_any_claim() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(owner_stream, crate::control_stream_id(&parent).to_string());
+    assert_eq!(
+        owner_stream,
+        crate::kernel::control_decision::control_stream_id(&parent).to_string()
+    );
     drop(connection);
 
     drain.abort();
@@ -5162,7 +5317,7 @@ async fn ownership_tombstone_is_superseded_after_rebind_before_any_claim() {
                 .await
                 .into_iter()
                 .filter(|event| {
-                    event.kind == crate::EventKind::IoIngressClaimed
+                    event.kind == verlet_history::EventKind::IoIngressClaimed
                         && event.payload["ingress_envelope_ids"]
                             .as_array()
                             .is_some_and(|ids| {
@@ -5189,7 +5344,10 @@ async fn ownership_tombstone_is_superseded_after_rebind_before_any_claim() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(owners, vec![crate::control_stream_id(&child).to_string()]);
+    assert_eq!(
+        owners,
+        vec![crate::kernel::control_decision::control_stream_id(&child).to_string()]
+    );
     assert!(queue.completed().await);
     let _ = std::fs::remove_dir_all(fixture_root);
 }
@@ -5225,7 +5383,7 @@ async fn claim_committed_before_submit_recovers_original_turn_once_after_restart
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .expect("claim should commit before the injected process-death cut");
     let claimed_turn_id = claim.payload["intent"]["turn_id"]
         .as_str()
@@ -5234,13 +5392,13 @@ async fn claim_committed_before_submit_recovers_original_turn_once_after_restart
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
     assert!(
         !thread_events_for(&session_store_path, &coordinates)
             .await
             .iter()
-            .any(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .any(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
     );
 
     drain.abort();
@@ -5269,19 +5427,19 @@ async fn claim_committed_before_submit_recovers_original_turn_once_after_restart
     assert_eq!(
         control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
             .count(),
         1
     );
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .expect("redelivery should settle the claim");
     assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
     let thread_events = thread_events_for(&session_store_path, &coordinates).await;
     let submitted = thread_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+        .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
         .collect::<Vec<_>>();
     assert_eq!(submitted.len(), 1);
     assert_eq!(
@@ -5292,7 +5450,7 @@ async fn claim_committed_before_submit_recovers_original_turn_once_after_restart
         thread_events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::SessionEntryAppended
+                event.kind == verlet_history::EventKind::SessionEntryAppended
                     && event.payload["turn_id"].as_str() == Some(claimed_turn_id.as_str())
             })
             .count(),
@@ -5339,7 +5497,7 @@ async fn input_persisted_before_compile_recovery_resubmits_and_adopts_entry() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .expect("claim should precede input persistence");
     let claimed_turn_id = claim.payload["intent"]["turn_id"]
         .as_str()
@@ -5349,7 +5507,7 @@ async fn input_persisted_before_compile_recovery_resubmits_and_adopts_entry() {
     let input_event = thread_events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
         })
         .expect("executing side should persist the claimed input");
@@ -5357,12 +5515,12 @@ async fn input_persisted_before_compile_recovery_resubmits_and_adopts_entry() {
     assert!(
         !thread_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::ContextCompileCompleted)
+            .any(|event| event.kind == verlet_history::EventKind::ContextCompileCompleted)
     );
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
 
     drain.abort();
@@ -5393,7 +5551,7 @@ async fn input_persisted_before_compile_recovery_resubmits_and_adopts_entry() {
         thread_events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::SessionEntryAppended
+                event.kind == verlet_history::EventKind::SessionEntryAppended
                     && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
             })
             .count(),
@@ -5401,24 +5559,24 @@ async fn input_persisted_before_compile_recovery_resubmits_and_adopts_entry() {
         "recovery must adopt the persisted turn input"
     );
     assert!(thread_events.iter().any(|event| {
-        event.kind == crate::EventKind::ContextCompileCompleted
+        event.kind == verlet_history::EventKind::ContextCompileCompleted
             && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
     }));
     assert!(thread_events.iter().any(|event| {
-        event.kind == crate::EventKind::TurnCompleted
+        event.kind == verlet_history::EventKind::TurnCompleted
             && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
     }));
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .expect("recovery should settle after turn-trace evidence");
     assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
     let evidence_id = settle.payload["evidence_event_id"].as_str().unwrap();
     assert_ne!(evidence_id, input_event_id.to_string());
     assert!(thread_events.iter().any(|event| {
         event.id.to_string() == evidence_id
-            && event.kind == crate::EventKind::ContextCompileCompleted
+            && event.kind == verlet_history::EventKind::ContextCompileCompleted
     }));
     assert!(queue.completed().await);
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -5429,19 +5587,24 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
     let fixture_root = test_root("queue-runtime-failure-reservation");
     let egress_db = fixture_root.join("io.sqlite");
     let state = std::sync::Arc::new(FailOnceRuntimeState::default());
-    let runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-        crate::APP_SERVER_LOCAL_PROVIDER,
-        crate::APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> =
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
         std::sync::Arc::new(RecordingRouteProviderClient::default());
     let bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
         std::sync::Arc::new(FailOnceThenAgentLoopFactory {
             builds: std::sync::atomic::AtomicUsize::new(0),
             state: std::sync::Arc::clone(&state),
-            provider: crate::AgentLoopFactory::new(runtime_config, provider_client),
+            provider: crate::adapters::agent_loop::AgentLoopFactory::new(
+                runtime_config,
+                provider_client,
+            ),
         }),
     )
     .await;
@@ -5468,7 +5631,7 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .unwrap();
     let claimed_turn_id = claim.payload["intent"]["turn_id"]
         .as_str()
@@ -5477,7 +5640,7 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
     assert!(
         !control_events
             .iter()
-            .any(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
     drain.abort();
     assert!(drain.await.unwrap_err().is_cancelled());
@@ -5488,7 +5651,7 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
             .await
             .unwrap()
             .status(),
-        crate::ThreadStatus::Failed,
+        verlet_runtime_contracts::ThreadStatus::Failed,
         "the failed runtime must still be resident at redelivery"
     );
     queue
@@ -5507,7 +5670,7 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .expect("replacement runtime should settle the claim");
     assert_eq!(settle.payload["settled_by"].as_str(), Some("recovery"));
     assert!(
@@ -5515,7 +5678,7 @@ async fn failed_runtime_replacement_sheds_turn_reservation_for_recovery() {
             .await
             .iter()
             .any(|event| {
-                event.kind == crate::EventKind::ContextCompileCompleted
+                event.kind == verlet_history::EventKind::ContextCompileCompleted
                     && event.payload["turn_id"].as_str() == Some(&claimed_turn_id)
             })
     );
@@ -5528,27 +5691,31 @@ async fn concurrent_lazy_load_of_cyclic_topology_fails_closed_without_lock_deadl
     let fixture_root = test_root("lazy-load-cyclic-topology");
     let bridge = bridge_with_runtime_factory_at_root(
         &fixture_root,
-        std::sync::Arc::new(crate::AgentLoopFactory::new(
-            crate::AgentLoopConfig::new(
-                crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-                crate::APP_SERVER_LOCAL_PROVIDER,
-                crate::APP_SERVER_LOCAL_MODEL,
+        std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::Other(
+                    crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+                ),
+                crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+                crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
             ),
             std::sync::Arc::new(RecordingRouteProviderClient::default()),
         )),
     )
     .await;
-    let store = crate::SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap())
-        .await
-        .unwrap();
-    let first = crate::ThreadCoordinates {
+    let store = verlet_history_sqlite::SqliteSessionStore::open(
+        bridge.session_store_path.as_ref().unwrap(),
+    )
+    .await
+    .unwrap();
+    let first = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: bridge.tenant_id.clone(),
         user_id: bridge.user_id.clone(),
         session_id: "cyclic-session".to_string(),
-        thread_id: crate::ThreadId::new(),
+        thread_id: verlet_runtime_contracts::ThreadId::new(),
     };
-    let second = crate::ThreadCoordinates {
-        thread_id: crate::ThreadId::new(),
+    let second = verlet_runtime_contracts::ThreadCoordinates {
+        thread_id: verlet_runtime_contracts::ThreadId::new(),
         ..first.clone()
     };
     for (coordinates, parent_thread_id) in [(&first, second.thread_id), (&second, first.thread_id)]
@@ -5557,11 +5724,11 @@ async fn concurrent_lazy_load_of_cyclic_topology_fails_closed_without_lock_deadl
             .append(
                 coordinates,
                 None,
-                crate::SessionEntryKind::Runtime {
+                verlet_history::SessionEntryKind::Runtime {
                     kind: "thread_started".to_string(),
                     payload: serde_json::json!({
                         "parent_thread_id": parent_thread_id,
-                        "topology": crate::ThreadTopology::branch_from(parent_thread_id, None),
+                        "topology": verlet_runtime_contracts::ThreadTopology::branch_from(parent_thread_id, None),
                         "metadata": {},
                     }),
                 },
@@ -5657,7 +5824,7 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
                 .supervisor
                 .get_thread_at(&original_coordinates)
                 .await,
-            Err(crate::VerletError::ThreadNotFound(thread_id))
+            Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(thread_id))
                 if thread_id == original_coordinates.thread_id
         ),
         "cold-seeded binding must remain nonresident before redelivery"
@@ -5682,7 +5849,7 @@ async fn queue_worker_restart_after_apply_before_complete_does_not_duplicate_tur
                 .supervisor
                 .get_thread_at(&original_coordinates)
                 .await,
-            Err(crate::VerletError::ThreadNotFound(thread_id))
+            Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(thread_id))
                 if thread_id == original_coordinates.thread_id
         ),
         "dedupe lookup must complete redelivery without loading a runtime"
@@ -5721,7 +5888,7 @@ async fn observe_settled_before_complete_redelivery_appends_nothing() {
     assert_eq!(
         before
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
             .count(),
         1,
         "the ingress witness must exist before the process-death cut"
@@ -5729,19 +5896,19 @@ async fn observe_settled_before_complete_redelivery_appends_nothing() {
     assert_eq!(
         before
             .iter()
-            .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+            .filter(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
             .count(),
         1,
         "the observe decision must exist before the process-death cut"
     );
     let claim = before
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .expect("the observe claim must exist before the process-death cut");
     assert_eq!(claim.payload["intent"]["outcome"].as_str(), Some("observe"));
     let settle = before
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .expect("the observe settle must exist before the process-death cut");
     assert_eq!(
         settle.payload["claim_event_id"].as_str(),
@@ -5753,7 +5920,7 @@ async fn observe_settled_before_complete_redelivery_appends_nothing() {
         thread_events_for(&session_store_path, &coordinates)
             .await
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         0
     );
@@ -5892,17 +6059,17 @@ async fn unattributed_queued_ingress_is_witnessed_rejected_and_completed() {
     let control = control_events_for(&session_store_path, &coordinates).await;
     let admission = control
         .iter()
-        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .find(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .unwrap();
     assert_eq!(admission.payload["decision"], "reject");
     let claim = control
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .unwrap();
     assert_eq!(claim.payload["intent"]["outcome"], "reject");
     assert!(claim.payload.to_string().contains("principal is required"));
     assert!(control.iter().any(|event| {
-        event.kind == crate::EventKind::IoIngressSettled
+        event.kind == verlet_history::EventKind::IoIngressSettled
             && event.payload["ingress_envelope_ids"]
                 .as_array()
                 .is_some_and(|ids| ids.iter().any(|id| id == &ingress_id))
@@ -5938,7 +6105,7 @@ async fn principal_tenant_mismatch_is_witnessed_rejected_and_completed() {
     let control = control_events_for(&session_store_path, &coordinates).await;
     let claim = control
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .unwrap();
     assert_eq!(claim.payload["intent"]["outcome"], "reject");
     assert!(
@@ -5950,7 +6117,7 @@ async fn principal_tenant_mismatch_is_witnessed_rejected_and_completed() {
     assert!(
         control
             .iter()
-            .any(|event| event.kind == crate::EventKind::IoIngressSettled)
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
     let _ = std::fs::remove_dir_all(fixture_root);
 }
@@ -5993,7 +6160,7 @@ async fn legacy_leased_delivery_derivation_is_stable_across_lost_ack_redelivery(
     assert_eq!(
         control
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
             .count(),
         1
     );
@@ -6003,7 +6170,7 @@ async fn legacy_leased_delivery_derivation_is_stable_across_lost_ack_redelivery(
     ));
     let received = control
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
         .unwrap();
     assert_eq!(
         received.payload["dedupe_key"],
@@ -6016,7 +6183,7 @@ async fn legacy_leased_delivery_derivation_is_stable_across_lost_ack_redelivery(
 async fn unresolved_handle_target_remains_retryable_and_is_not_witnessed_rejected() {
     let fixture_root = test_root("queue-resolver-retry");
     let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
-    let dispatch_id = verlet_runtime_contracts::DispatchId::new("missing-handle-binding");
+    let dispatch_id = verlet_runtime_contracts::handle::DispatchId::new("missing-handle-binding");
     let source = verlet_io_core::IoSource::new("cooldis.handle", "thread");
     let envelope = verlet_io_core::IngressEnvelope::new(
         source,
@@ -6025,24 +6192,28 @@ async fn unresolved_handle_target_remains_retryable_and_is_not_witnessed_rejecte
             verlet_io_core::ConversationKind::System,
         ),
         verlet_io_core::IngressContent::Event {
-            kind: verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
-            payload: serde_json::to_value(verlet_runtime_contracts::HandleTerminalEnvelope {
-                dispatch_id: dispatch_id.clone(),
-                handle: verlet_runtime_contracts::HandleId::thread(crate::ThreadId::new()),
-                outcome: verlet_runtime_contracts::HandleTerminalOutcome::Completed,
-                outcome_reason: None,
-                result: None,
-                result_schema_id: None,
-                artifact_refs: Vec::new(),
-                usage: None,
-                retryable: false,
-            })
+            kind: verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
+            payload: serde_json::to_value(
+                verlet_runtime_contracts::handle::HandleTerminalEnvelope {
+                    dispatch_id: dispatch_id.clone(),
+                    handle: verlet_runtime_contracts::handle::HandleId::thread(
+                        verlet_runtime_contracts::ThreadId::new(),
+                    ),
+                    outcome: verlet_runtime_contracts::handle::HandleTerminalOutcome::Completed,
+                    outcome_reason: None,
+                    result: None,
+                    result_schema_id: None,
+                    artifact_refs: Vec::new(),
+                    usage: None,
+                    retryable: false,
+                },
+            )
             .unwrap(),
         },
         crate::daemon::daemon_io::now_ms(),
     )
     .with_dedupe_key(verlet_io_core::IoDedupeKey::new(
-        verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+        verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
         dispatch_id.to_string(),
     ))
     .with_delivery(verlet_io_core::IoDelivery::new(dispatch_id.to_string()))
@@ -6067,7 +6238,7 @@ async fn unresolved_handle_target_remains_retryable_and_is_not_witnessed_rejecte
     assert!(err.to_string().contains("has no durable spawn binding"));
     assert_eq!(queue.retry_calls().await, 1);
     assert!(!queue.completed().await);
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
         .unwrap();
     assert!(
@@ -6110,25 +6281,25 @@ async fn reject_settled_before_complete_redelivery_dedupes_and_completes() {
     assert_eq!(
         before
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
             .count(),
         1
     );
     assert_eq!(
         before
             .iter()
-            .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+            .filter(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
             .count(),
         1
     );
     let claim = before
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .expect("the reject claim must exist before the process-death cut");
     assert_eq!(claim.payload["intent"]["outcome"].as_str(), Some("reject"));
     let settle = before
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .expect("the reject settle must exist before the process-death cut");
     assert!(settle.payload["evidence_event_id"].is_null());
     assert_eq!(settle.payload["settled_by"].as_str(), Some("execution"));
@@ -6195,7 +6366,7 @@ async fn queue_worker_fresh_envelope_marks_applied_and_completes_once() {
     assert_single_durable_ingress_turn(&session_store_path, &coordinates, &ingress_id).await;
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     assert!(!control_events.iter().any(|event| {
-        event.kind == crate::EventKind::IoIngressReceived
+        event.kind == verlet_history::EventKind::IoIngressReceived
             && event.payload["dedupe_seen"].as_bool() == Some(true)
     }));
     let _ = std::fs::remove_dir_all(fixture_root);
@@ -6257,19 +6428,19 @@ async fn content_policy_observe_only_event_does_not_start_turn() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let ingress = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
         .unwrap();
     assert_eq!(ingress.payload["external_message_id"].as_str(), Some("556"));
     let admission = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .find(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .unwrap();
     assert_eq!(admission.payload["decision"].as_str(), Some("observe"));
     let thread_events = thread_events_for(&session_store_path, &coordinates).await;
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         0
     );
@@ -6296,7 +6467,7 @@ async fn content_policy_queue_starts_turn_with_event_payload() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let admission = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .find(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .unwrap();
     assert_eq!(admission.payload["decision"].as_str(), Some("queue"));
     wait_for_user_text_containing(&bridge, &coordinates, "external.event").await;
@@ -6373,7 +6544,7 @@ async fn content_policy_observe_only_bypasses_route_coalesce_metadata() {
         "external.event".to_string(),
         "observe_only".to_string(),
     )]));
-    route.coalesce_bursts = Some(crate::VerletCoalesceBurstsConfig {
+    route.coalesce_bursts = Some(crate::daemon::daemon_config::VerletCoalesceBurstsConfig {
         window_ms: 60_000,
         max_batch: 8,
     });
@@ -6414,7 +6585,7 @@ async fn content_policy_coalesce_stamps_metadata_for_matching_event() {
         "external.event".to_string(),
         "coalesce_bursts".to_string(),
     )]));
-    route.coalesce_bursts = Some(crate::VerletCoalesceBurstsConfig {
+    route.coalesce_bursts = Some(crate::daemon::daemon_config::VerletCoalesceBurstsConfig {
         window_ms: 60_000,
         max_batch: 8,
     });
@@ -6485,7 +6656,7 @@ async fn content_policy_observe_only_bypasses_route_coalesce_in_queued_lane() {
         "external.event".to_string(),
         "observe_only".to_string(),
     )]));
-    route.coalesce_bursts = Some(crate::VerletCoalesceBurstsConfig {
+    route.coalesce_bursts = Some(crate::daemon::daemon_config::VerletCoalesceBurstsConfig {
         window_ms: 60_000,
         max_batch: 8,
     });
@@ -6514,11 +6685,11 @@ async fn content_policy_observe_only_bypasses_route_coalesce_in_queued_lane() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let ingress_index = control_events
         .iter()
-        .position(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .position(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
         .unwrap();
     let admission_index = control_events
         .iter()
-        .position(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .position(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .unwrap();
     assert!(ingress_index < admission_index);
     let admission = &control_events[admission_index];
@@ -6540,7 +6711,7 @@ async fn content_policy_observe_only_bypasses_route_coalesce_in_queued_lane() {
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         0
     );
@@ -6630,11 +6801,11 @@ async fn queue_worker_coalesces_window_expired_batch_into_one_turn_and_source_li
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let ingress_events: Vec<_> = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
         .collect();
     let admission_events: Vec<_> = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .filter(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .collect();
     assert_eq!(ingress_events.len(), 3);
     assert_eq!(admission_events.len(), 1);
@@ -6654,14 +6825,14 @@ async fn queue_worker_coalesces_window_expired_batch_into_one_turn_and_source_li
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
             .count(),
         0
     );
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1
     );
@@ -6710,7 +6881,7 @@ async fn queue_worker_flushes_coalesce_batch_when_max_batch_is_reached() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let admission = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .find(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .unwrap();
     assert_eq!(admission.payload["decision"].as_str(), Some("coalesce"));
     assert_eq!(admission_source_ids(admission).len(), 2);
@@ -6798,7 +6969,7 @@ async fn queue_worker_admits_cross_drain_burst_as_separate_recovery_batches() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let admissions = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .filter(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .collect::<Vec<_>>();
     assert_eq!(admissions.len(), 2);
     assert!(admissions.iter().all(|admission| {
@@ -6879,7 +7050,7 @@ async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
         control_events_for(restarted_server.session_store_path(), &coordinates).await;
     let admission = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .find(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .unwrap();
     assert_eq!(admission.payload["decision"].as_str(), Some("coalesce"));
     assert_eq!(admission_source_ids(admission).len(), 2);
@@ -6900,11 +7071,11 @@ async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
         .entries
         .iter()
         .filter_map(|entry| match &entry.kind {
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::User { content, .. },
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::User { content, .. },
             }
-            | crate::SessionEntryKind::CustomContextMessage {
-                message: crate::CanonicalMessage::User { content, .. },
+            | verlet_history::SessionEntryKind::CustomContextMessage {
+                message: verlet_history::CanonicalMessage::User { content, .. },
             } => Some(crate::daemon::daemon_io::text_from_canonical_content(
                 content,
             )),
@@ -6971,7 +7142,7 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let latest_admission = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .filter(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .next_back()
         .unwrap();
     assert_eq!(
@@ -6989,13 +7160,13 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         2
     );
     let latest_ingress_context = thread_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+        .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
         .next_back()
         .unwrap();
     assert_eq!(
@@ -7005,13 +7176,14 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     assert_eq!(admission_source_ids(latest_admission).len(), 2);
     let claim = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .filter(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .next_back()
         .unwrap();
     let claim_payload =
-        serde_json::from_value::<crate::IoIngressClaimedPayload>(claim.payload.clone()).unwrap();
+        serde_json::from_value::<verlet_history::IoIngressClaimedPayload>(claim.payload.clone())
+            .unwrap();
     let steer_turn_id = match &claim_payload.intent {
-        crate::IngressOutcomeIntent::Turn {
+        verlet_history::IngressOutcomeIntent::Turn {
             turn_id,
             submission_mode,
             ..
@@ -7020,17 +7192,18 @@ async fn coalesce_composes_with_steer_when_active_as_one_merged_turn() {
     };
     let settle_payload = control_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .filter(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .next_back()
         .map(|event| {
-            serde_json::from_value::<crate::IoIngressSettledPayload>(event.payload.clone()).unwrap()
+            serde_json::from_value::<verlet_history::IoIngressSettledPayload>(event.payload.clone())
+                .unwrap()
         })
         .unwrap();
     assert_eq!(settle_payload.claim_event_id, claim.id);
     let steer_input = thread_events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.payload["turn_id"].as_str() == Some(steer_turn_id)
         })
         .expect("steer consumption should persist its input");
@@ -7043,7 +7216,7 @@ async fn active_steer_settles_on_persisted_input_evidence() {
     let fixture_root = test_root("active-steer-evidence");
     let egress_db = fixture_root.join("io.sqlite");
     let client = std::sync::Arc::new(BlockingRouteProviderClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
     let server = test_server_with_provider_at_root(&fixture_root, provider_client).await;
     let bridge = crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(&server);
     let session_store_path = server.session_store_path().to_path_buf();
@@ -7059,7 +7232,10 @@ async fn active_steer_settles_on_persisted_input_evidence() {
     client.wait_for_requests(1).await;
     let coordinates = only_thread_coordinates(&bridge).await;
     let handle = bridge.supervisor.get_thread_at(&coordinates).await.unwrap();
-    assert_eq!(handle.status(), crate::ThreadStatus::Running);
+    assert_eq!(
+        handle.status(),
+        verlet_runtime_contracts::ThreadStatus::Running
+    );
 
     let queue = std::sync::Arc::new(ScriptedIngressQueue::new(
         "message-active-steer",
@@ -7078,7 +7254,7 @@ async fn active_steer_settles_on_persisted_input_evidence() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .unwrap();
     let steer_turn_id = claim.payload["intent"]["turn_id"].as_str().unwrap();
     assert_eq!(claim.payload["intent"]["submission_mode"], "steer");
@@ -7086,13 +7262,13 @@ async fn active_steer_settles_on_persisted_input_evidence() {
     let steer_input = thread_events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.payload["turn_id"].as_str() == Some(steer_turn_id)
         })
         .unwrap();
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .unwrap();
     assert_eq!(
         settle.payload["evidence_event_id"].as_str(),
@@ -7125,10 +7301,10 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let events = thread_events_for(&session_store_path, &coordinates).await;
-        if handle.status() == crate::ThreadStatus::Idle
+        if handle.status() == verlet_runtime_contracts::ThreadStatus::Idle
             && events
                 .iter()
-                .any(|event| event.kind == crate::EventKind::TurnCompleted)
+                .any(|event| event.kind == verlet_history::EventKind::TurnCompleted)
         {
             break;
         }
@@ -7153,10 +7329,10 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
 
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let Ok(crate::ThreadEvent::Runtime { event, .. }) = runtime_events.recv().await
+            if let Ok(crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. }) = runtime_events.recv().await
                 && matches!(
                     event.kind,
-                    crate::RuntimeEventKind::PolicyRejected { ref code, .. }
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected { ref code, .. }
                         if code == "no_active_turn"
                 )
             {
@@ -7170,7 +7346,7 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
     let control_events = control_events_for(&session_store_path, &coordinates).await;
     let claim = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressClaimed)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
         .unwrap();
     let steer_turn_id = claim.payload["intent"]["turn_id"].as_str().unwrap();
     assert_eq!(claim.payload["intent"]["submission_mode"], "steer");
@@ -7178,13 +7354,13 @@ async fn idle_rejected_steer_persists_input_and_settles_on_it() {
     let steer_input = thread_events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.payload["turn_id"].as_str() == Some(steer_turn_id)
         })
         .unwrap();
     let settle = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::IoIngressSettled)
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
         .unwrap();
     assert_eq!(
         settle.payload["evidence_event_id"].as_str(),
@@ -7225,13 +7401,13 @@ async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
     assert_eq!(
         child_thread_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         1
     );
     wait_for_user_text(&bridge, &child_coordinates, "fork me").await;
 
-    let session_store = crate::SqliteSessionStore::open(&session_store_path)
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(&session_store_path)
         .await
         .unwrap();
     let child_handle = bridge
@@ -7243,22 +7419,25 @@ async fn fork_on_new_dm_invokes_thread_fork_and_witnesses_spawn_lineage() {
         .context()
         .parent_thread_id
         .expect("fork child should record parent thread id");
-    let parent_coordinates = crate::ThreadCoordinates {
+    let parent_coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: child_coordinates.tenant_id.clone(),
         user_id: child_coordinates.user_id.clone(),
         session_id: child_coordinates.session_id.clone(),
         thread_id: parent_thread_id,
     };
     let spawned_events = session_store
-        .read_events(&crate::control_stream_id(&parent_coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&parent_coordinates),
+            None,
+        )
         .await
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+        .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
         .collect::<Vec<_>>();
     assert_eq!(spawned_events.len(), 1);
     let spawned = &spawned_events[0];
-    let spawned_payload: crate::ThreadSpawnedPayload =
+    let spawned_payload: verlet_history::ThreadSpawnedPayload =
         serde_json::from_value(spawned.payload.clone()).unwrap();
     assert_eq!(
         spawned.payload["child_thread_id"].as_str(),
@@ -7341,22 +7520,23 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         .next()
         .cloned()
         .expect("queue admission should create a target thread");
-    let session_store = crate::SqliteSessionStore::open(&session_store_path)
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(&session_store_path)
         .await
         .unwrap();
-    let control_stream = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+    let control_stream =
+        verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
     let control_events = session_store
         .read_events(&control_stream, None)
         .await
         .unwrap();
     let ingress_pos = control_events
         .iter()
-        .position(|event| event.kind == crate::EventKind::IoIngressReceived)
+        .position(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
         .unwrap();
     let admission_pos = control_events
         .iter()
-        .position(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .position(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .unwrap();
     assert!(ingress_pos < admission_pos);
     assert_eq!(
@@ -7386,7 +7566,7 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
     );
     let policy_bound = control_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::PolicyBound)
+        .find(|event| event.kind == verlet_history::EventKind::PolicyBound)
         .unwrap();
     assert_eq!(
         control_events[admission_pos].payload["decision"].as_str(),
@@ -7419,14 +7599,14 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
     );
     let turn_submitted_count = thread_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+        .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
         .count();
     assert_eq!(turn_submitted_count, 1);
     let submitted = thread_events
         .iter()
-        .find(|event| event.kind == crate::EventKind::TurnSubmitted)
+        .find(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
         .unwrap();
-    assert_eq!(submitted.origin, crate::EventOrigin::Discharged);
+    assert_eq!(submitted.origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(
         submitted.provenance.source_streams,
         vec![control_stream.clone()]
@@ -7452,7 +7632,7 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
         .unwrap();
     let observe_admission = control_events_after
         .iter()
-        .filter(|event| event.kind == crate::EventKind::AdmissionDecided)
+        .filter(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .next_back()
         .unwrap();
     assert_eq!(
@@ -7471,7 +7651,7 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
     assert_eq!(
         thread_events_after
             .iter()
-            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         turn_submitted_count
     );
@@ -7481,8 +7661,11 @@ async fn queue_worker_processes_envelope_after_queue_and_bridge_restart() {
 #[tokio::test]
 async fn clock_route_restarts_after_due_coalesces_one_missed_tick() {
     let server = test_server().await;
-    let (store, coordinates, mandate) =
-        start_clock_thread_with_mandate(&server, crate::MandateCatchUpPolicy::CoalesceMissed).await;
+    let (store, coordinates, mandate) = start_clock_thread_with_mandate(
+        &server,
+        crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed,
+    )
+    .await;
     let after_due = event_time(mandate.event.created_at_ms, 90_000);
     let clock = std::sync::Arc::new(FakeClock::new(after_due));
     let db = std::env::temp_dir()
@@ -7495,7 +7678,7 @@ async fn clock_route_restarts_after_due_coalesces_one_missed_tick() {
         .await
         .unwrap(),
     );
-    let route = crate::VerletDaemonClockRoute::new(
+    let route = crate::daemon::clock_route::VerletDaemonClockRoute::new(
         "clock-main",
         store.clone(),
         queue.clone(),
@@ -7524,8 +7707,11 @@ async fn clock_route_restarts_after_due_coalesces_one_missed_tick() {
 #[tokio::test]
 async fn clock_route_restarts_after_due_skips_missed_until_next_occurrence() {
     let server = test_server().await;
-    let (store, coordinates, mandate) =
-        start_clock_thread_with_mandate(&server, crate::MandateCatchUpPolicy::SkipMissed).await;
+    let (store, coordinates, mandate) = start_clock_thread_with_mandate(
+        &server,
+        crate::kernel::control_decision::MandateCatchUpPolicy::SkipMissed,
+    )
+    .await;
     let after_first_due = event_time(mandate.event.created_at_ms, 90_000);
     let second_due = event_time(mandate.event.created_at_ms, 120_000);
     let clock = std::sync::Arc::new(FakeClock::new(after_first_due));
@@ -7539,7 +7725,7 @@ async fn clock_route_restarts_after_due_skips_missed_until_next_occurrence() {
         .await
         .unwrap(),
     );
-    let route = crate::VerletDaemonClockRoute::new(
+    let route = crate::daemon::clock_route::VerletDaemonClockRoute::new(
         "clock-main",
         store.clone(),
         queue.clone(),
@@ -7570,8 +7756,11 @@ async fn clock_route_restarts_after_due_skips_missed_until_next_occurrence() {
 #[tokio::test]
 async fn clock_route_duplicate_enqueue_before_ack_does_not_double_fire() {
     let server = test_server().await;
-    let (store, coordinates, mandate) =
-        start_clock_thread_with_mandate(&server, crate::MandateCatchUpPolicy::CoalesceMissed).await;
+    let (store, coordinates, mandate) = start_clock_thread_with_mandate(
+        &server,
+        crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed,
+    )
+    .await;
     let after_due = event_time(mandate.event.created_at_ms, 90_000);
     let clock = std::sync::Arc::new(FakeClock::new(after_due));
     let db = std::env::temp_dir()
@@ -7584,7 +7773,7 @@ async fn clock_route_duplicate_enqueue_before_ack_does_not_double_fire() {
         .await
         .unwrap(),
     );
-    let route = crate::VerletDaemonClockRoute::new(
+    let route = crate::daemon::clock_route::VerletDaemonClockRoute::new(
         "clock-main",
         store.clone(),
         queue.clone(),
@@ -7601,7 +7790,7 @@ async fn clock_route_duplicate_enqueue_before_ack_does_not_double_fire() {
         .await
         .unwrap(),
     );
-    let restarted_route = crate::VerletDaemonClockRoute::new(
+    let restarted_route = crate::daemon::clock_route::VerletDaemonClockRoute::new(
         "clock-main",
         store.clone(),
         reopened.clone(),
@@ -7630,8 +7819,11 @@ async fn clock_route_duplicate_enqueue_before_ack_does_not_double_fire() {
 async fn clock_tick_apply_before_complete_redelivery_does_not_double_fire() {
     let root = test_root("clock-apply-complete-crash-cut");
     let server = test_server_at_root(&root).await;
-    let (store, coordinates, mandate) =
-        start_clock_thread_with_mandate(&server, crate::MandateCatchUpPolicy::CoalesceMissed).await;
+    let (store, coordinates, mandate) = start_clock_thread_with_mandate(
+        &server,
+        crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed,
+    )
+    .await;
     let after_due = event_time(mandate.event.created_at_ms, 90_000);
     let clock = std::sync::Arc::new(FakeClock::new(after_due));
     let placeholder = telegram_queue_envelope("clock placeholder");
@@ -7640,8 +7832,12 @@ async fn clock_tick_apply_before_complete_redelivery_does_not_double_fire() {
         placeholder,
         std::iter::empty::<&str>(),
     ));
-    let route =
-        crate::VerletDaemonClockRoute::new("clock-main", store.clone(), queue.clone(), clock);
+    let route = crate::daemon::clock_route::VerletDaemonClockRoute::new(
+        "clock-main",
+        store.clone(),
+        queue.clone(),
+        clock,
+    );
     assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
 
     queue.block_next_complete();
@@ -7687,9 +7883,12 @@ async fn clock_tick_apply_before_complete_redelivery_does_not_double_fire() {
 #[tokio::test]
 async fn clock_route_revoke_prevents_further_ticks() {
     let server = test_server().await;
-    let (store, coordinates, mandate) =
-        start_clock_thread_with_mandate(&server, crate::MandateCatchUpPolicy::CoalesceMissed).await;
-    crate::revoke_mandate(&store, &coordinates, mandate.event.id)
+    let (store, coordinates, mandate) = start_clock_thread_with_mandate(
+        &server,
+        crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed,
+    )
+    .await;
+    crate::kernel::mandate_lifecycle::revoke_mandate(&store, &coordinates, mandate.event.id)
         .await
         .unwrap();
     let after_due = event_time(mandate.event.created_at_ms, 90_000);
@@ -7704,7 +7903,7 @@ async fn clock_route_revoke_prevents_further_ticks() {
         .await
         .unwrap(),
     );
-    let route = crate::VerletDaemonClockRoute::new(
+    let route = crate::daemon::clock_route::VerletDaemonClockRoute::new(
         "clock-main",
         store.clone(),
         queue.clone(),
@@ -7733,7 +7932,7 @@ async fn await_ingress_outcome_initial_snapshot_obeys_timeout() {
     let wait = tokio::spawn(async move {
         crate::daemon::daemon_io::await_ingress_outcome_on_store(
             waiting_store.as_ref(),
-            &[crate::EventStreamId::new("control:missing")],
+            &[verlet_history::EventStreamId::new("control:missing")],
             &["missing-ingress".to_string()],
         )
         .await
@@ -7831,7 +8030,7 @@ async fn egress_drain_replays_once_then_reads_only_after_view_cursor() {
         .as_mut()
         .and_then(|view| view.fold_position.as_mut())
         .expect("view fold cursor")
-        .event_id = crate::EventRecordId::new();
+        .event_id = verlet_history::EventRecordId::new();
     assert_eq!(
         bridge
             .drain_egress_once("telegram.bot", "main")
@@ -7865,7 +8064,7 @@ async fn egress_drain_view_incremental_fold_equals_full_replay_fold() {
         .supervisor
         .get_thread(
             &bridge.tenant_id,
-            crate::ThreadId::parse_str(&thread_id).unwrap(),
+            verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap(),
         )
         .await
         .unwrap();
@@ -7907,7 +8106,7 @@ async fn egress_drain_view_incremental_fold_equals_full_replay_fold() {
     let user_event_index = events
         .iter()
         .position(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event
                     .payload
                     .get("entry_id")
@@ -7958,15 +8157,15 @@ async fn egress_drain_view_incremental_fold_equals_full_replay_fold() {
 
 #[test]
 fn egress_drain_view_compacts_advances_behind_blocked_work() {
-    let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let event = |sequence| {
-        crate::EventRecord::from_new(
+        verlet_history::EventRecord::from_new(
             stream_id.clone(),
-            crate::EventSequence::new(sequence),
-            crate::NewEventRecord::witnessed(
+            verlet_history::EventSequence::new(sequence),
+            verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                crate::EventKind::TurnWaiting,
+                verlet_history::EventKind::TurnWaiting,
                 serde_json::json!({}),
             ),
         )
@@ -8147,8 +8346,12 @@ async fn egress_drain_rebuild_after_restart_does_not_duplicate_delivery() {
         0
     );
     assert!(restarted_rx.try_recv().is_err());
-    let delivered =
-        egress_receipts(&restarted, &thread_id, crate::EventKind::IoEgressDelivered).await;
+    let delivered = egress_receipts(
+        &restarted,
+        &thread_id,
+        verlet_history::EventKind::IoEgressDelivered,
+    )
+    .await;
     assert_eq!(delivered.len(), 1);
 
     let state = restarted
@@ -8163,7 +8366,7 @@ async fn egress_drain_rebuild_after_restart_does_not_duplicate_delivery() {
         .unwrap();
     let valid_cursor = state.cursor("main", &thread_id).unwrap().unwrap();
     let mut mismatched_cursor = valid_cursor.clone();
-    mismatched_cursor.event_id = crate::EventRecordId::new();
+    mismatched_cursor.event_id = verlet_history::EventRecordId::new();
     state
         .lock_connection()
         .unwrap()
@@ -8337,7 +8540,7 @@ async fn egress_drain_late_receipt_completes_queued_work_without_redelivery() {
         .supervisor
         .get_thread(
             &bridge.tenant_id,
-            crate::ThreadId::parse_str(&thread_id).unwrap(),
+            verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap(),
         )
         .await
         .unwrap();
@@ -8442,8 +8645,12 @@ async fn egress_projector_delivers_after_bridge_restart_from_persisted_cursor() 
         0
     );
 
-    let delivered =
-        egress_receipts(&restarted, &thread_id, crate::EventKind::IoEgressDelivered).await;
+    let delivered = egress_receipts(
+        &restarted,
+        &thread_id,
+        verlet_history::EventKind::IoEgressDelivered,
+    )
+    .await;
     assert_eq!(delivered.len(), 1);
     assert_eq!(
         delivered[0]
@@ -8519,7 +8726,7 @@ async fn per_conversation_binding_survives_true_runtime_restart() {
     assert!(restarted.threads.lock().await.is_empty());
     assert!(matches!(
         restarted.supervisor.get_thread_at(&coordinates).await,
-        Err(crate::VerletError::ThreadNotFound(_))
+        Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_))
     ));
     register_route_state(&restarted, &route, &db).await;
     assert_eq!(
@@ -8528,7 +8735,7 @@ async fn per_conversation_binding_survives_true_runtime_restart() {
     );
     assert!(matches!(
         restarted.supervisor.get_thread_at(&coordinates).await,
-        Err(crate::VerletError::ThreadNotFound(_))
+        Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_))
     ));
     let (resumed_thread_id, _) =
         submit_and_wait_for_assistant_event(&restarted, "after restart").await;
@@ -8557,7 +8764,7 @@ async fn new_thread_is_durably_bound_before_first_turn_submission() {
     assert!(
         thread_events
             .iter()
-            .all(|event| event.kind != crate::EventKind::TurnSubmitted)
+            .all(|event| event.kind != verlet_history::EventKind::TurnSubmitted)
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -8686,11 +8893,11 @@ async fn reserved_root_start_failure_retries_the_same_durable_binding() {
     let (bridge, failure_probe) = bridge_with_runtime_build_failure(&root).await;
     let envelope = with_bridge_principal(&bridge, test_envelope("fresh thread"));
     let target = bridge.resolve_target(&envelope).await.unwrap();
-    let stale_coordinates = crate::ThreadCoordinates {
+    let stale_coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: target.address.tenant_id.clone(),
         user_id: target.address.user_id.clone(),
         session_id: target.address.session_id.clone(),
-        thread_id: crate::ThreadId::new(),
+        thread_id: verlet_runtime_contracts::ThreadId::new(),
     };
     failure_probe.reject_once(stale_coordinates.thread_id);
     let state =
@@ -8782,34 +8989,38 @@ async fn daemon_lazy_reload_recovers_unwitnessed_workspace_metadata_as_unbound()
     let root = test_root("daemon-lazy-workspace-witness");
     let bridge = bridge_with_runtime_factory_at_root(
         &root,
-        std::sync::Arc::new(crate::AgentLoopFactory::new(
-            crate::AgentLoopConfig::new(
-                crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-                crate::APP_SERVER_LOCAL_PROVIDER,
-                crate::APP_SERVER_LOCAL_MODEL,
+        std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::Other(
+                    crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+                ),
+                crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+                crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
             ),
             std::sync::Arc::new(RecordingRouteProviderClient::default()),
         )),
     )
     .await;
-    let coordinates = crate::ThreadCoordinates {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: bridge.tenant_id.clone(),
         user_id: bridge.user_id.clone(),
         session_id: "workspace-reload".to_string(),
-        thread_id: crate::ThreadId::new(),
+        thread_id: verlet_runtime_contracts::ThreadId::new(),
     };
-    let store = crate::SqliteSessionStore::open(bridge.session_store_path.as_ref().unwrap())
-        .await
-        .unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(
+        bridge.session_store_path.as_ref().unwrap(),
+    )
+    .await
+    .unwrap();
     store
         .append(
             &coordinates,
             None,
-            crate::SessionEntryKind::Runtime {
+            verlet_history::SessionEntryKind::Runtime {
                 kind: "thread_started".to_string(),
                 payload: serde_json::json!({
                     "parent_thread_id": null,
-                    "topology": crate::ThreadTopology::root(),
+                    "topology": verlet_runtime_contracts::ThreadTopology::root(),
                     "metadata": {
                         "cooldis.agent.workspace": serde_json::to_string(&serde_json::json!({
                             "guest_path": "/work",
@@ -8850,20 +9061,22 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
     std::fs::create_dir_all(&workspace).unwrap();
     let bridge = bridge_with_runtime_factory_at_root(
         &root,
-        std::sync::Arc::new(crate::AgentLoopFactory::new(
-            crate::AgentLoopConfig::new(
-                crate::ProviderApi::Other(crate::APP_SERVER_LOCAL_PROVIDER.to_string()),
-                crate::APP_SERVER_LOCAL_PROVIDER,
-                crate::APP_SERVER_LOCAL_MODEL,
+        std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::Other(
+                    crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+                ),
+                crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+                crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
             ),
             std::sync::Arc::new(RecordingRouteProviderClient::default()),
         )),
     )
     .await;
-    let resolved_workspace = crate::AgentManifestResolvedWorkspaceMount {
+    let resolved_workspace = crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount {
         guest_path: std::path::PathBuf::from("/work"),
         host_path: std::fs::canonicalize(&workspace).unwrap(),
-        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
     let mut metadata = std::collections::BTreeMap::new();
     metadata.insert(
@@ -8872,11 +9085,11 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
     );
     let parent = bridge
         .supervisor
-        .start_thread(crate::ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: bridge.tenant_id.clone(),
             user_id: bridge.user_id.clone(),
             session_id: "workspace-fork".to_string(),
-            topology: crate::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata,
         })
         .await
@@ -8886,30 +9099,32 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
         "manifest_hash": "sha256:workspace",
         "source_hash": "sha256:source"
     });
-    let bind_payload = serde_json::to_value(crate::AgentManifestBindReceipt {
-        ref_uri: "agent://workspace@0.1.0".to_string(),
-        manifest_hash: "sha256:workspace".to_string(),
-        model_profile_id: "default".to_string(),
-        model_profile_origin: None,
-        provider_id: crate::APP_SERVER_LOCAL_PROVIDER.to_string(),
-        model_id: crate::APP_SERVER_LOCAL_MODEL.to_string(),
-        tool_ids: Vec::new(),
-        operation_bindings: Vec::new(),
-        skill_packages: Vec::new(),
-        skill_discovery: None,
-        static_context_segments: Vec::new(),
-        tool_universes: Vec::new(),
-        couplings: Vec::new(),
-        granted: Vec::new(),
-        grant_bindings: Vec::new(),
-        effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
-        overridden_keys: Vec::new(),
-        placement: Some(crate::AgentManifestPlacementBinding::default()),
-        placement_origin: None,
-        workspace: Some(resolved_workspace),
-        workspace_origin: None,
-    })
-    .unwrap();
+    let bind_payload =
+        serde_json::to_value(crate::agent::manifest_bind::AgentManifestBindReceipt {
+            ref_uri: "agent://workspace@0.1.0".to_string(),
+            manifest_hash: "sha256:workspace".to_string(),
+            model_profile_id: "default".to_string(),
+            model_profile_origin: None,
+            provider_id: crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+            model_id: crate::adapters::app_server::APP_SERVER_LOCAL_MODEL.to_string(),
+            tool_ids: Vec::new(),
+            operation_bindings: Vec::new(),
+            skill_packages: Vec::new(),
+            skill_discovery: None,
+            static_context_segments: Vec::new(),
+            tool_universes: Vec::new(),
+            couplings: Vec::new(),
+            granted: Vec::new(),
+            grant_bindings: Vec::new(),
+            effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(
+            ),
+            overridden_keys: Vec::new(),
+            placement: Some(crate::agent::manifest_bind::AgentManifestPlacementBinding::default()),
+            placement_origin: None,
+            workspace: Some(resolved_workspace),
+            workspace_origin: None,
+        })
+        .unwrap();
     parent
         .record_manifest_receipts(compile_payload, bind_payload)
         .await
@@ -8929,7 +9144,11 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
         .await
         .unwrap();
     let child = bridge
-        .fork_thread_with_manifest_witness(checkpoint, crate::ThreadId::new(), inherited)
+        .fork_thread_with_manifest_witness(
+            checkpoint,
+            verlet_runtime_contracts::ThreadId::new(),
+            inherited,
+        )
         .await
         .unwrap();
 
@@ -8939,7 +9158,7 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
             .await
             .unwrap()
             .iter()
-            .any(|event| event.kind == crate::EventKind::ManifestBindCompleted),
+            .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted),
         "daemon fork children must have a child-local workspace bind witness"
     );
     bridge.supervisor.shutdown_all().await.unwrap();
@@ -8950,8 +9169,8 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
 async fn cancelled_daemon_start_finishes_the_workspace_bind_witness() {
     let root = test_root("daemon-start-workspace-cancel");
     let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;
-    let thread_id = crate::ThreadId::new();
-    let coordinates = crate::ThreadCoordinates {
+    let thread_id = verlet_runtime_contracts::ThreadId::new();
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: bridge.tenant_id.clone(),
         user_id: bridge.user_id.clone(),
         session_id: "workspace-cancel".to_string(),
@@ -8968,7 +9187,7 @@ async fn cancelled_daemon_start_finishes_the_workspace_bind_witness() {
         "cooldis.agent.workspace".to_string(),
         serde_json::to_string(&workspace).unwrap(),
     );
-    let binding = crate::KernelThreadSpawnAgentBinding {
+    let binding = crate::agent::agent_process::KernelThreadSpawnAgentBinding {
         metadata: metadata.clone(),
         compile_receipt: serde_json::json!({
             "manifest_hash": "sha256:cancelled-daemon-start"
@@ -8979,11 +9198,11 @@ async fn cancelled_daemon_start_finishes_the_workspace_bind_witness() {
             "workspace": workspace
         }),
     };
-    let request = crate::ThreadStartRequest {
+    let request = crate::kernel::supervisor::ThreadStartRequest {
         tenant_id: coordinates.tenant_id.clone(),
         user_id: coordinates.user_id.clone(),
         session_id: coordinates.session_id.clone(),
-        topology: crate::ThreadTopology::root(),
+        topology: verlet_runtime_contracts::ThreadTopology::root(),
         metadata,
     };
     let caller_bridge = bridge.clone();
@@ -9009,7 +9228,7 @@ async fn cancelled_daemon_start_finishes_the_workspace_bind_witness() {
                     .await
                     .unwrap()
                     .iter()
-                    .any(|event| event.kind == crate::EventKind::ManifestBindCompleted)
+                    .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
             {
                 break handle;
             }
@@ -9034,11 +9253,11 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
     let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;
     let envelope = test_envelope("concurrent reload");
     let target = bridge.resolve_target(&envelope).await.unwrap();
-    let coordinates = crate::ThreadCoordinates {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: target.address.tenant_id,
         user_id: target.address.user_id,
         session_id: target.address.session_id,
-        thread_id: crate::ThreadId::new(),
+        thread_id: verlet_runtime_contracts::ThreadId::new(),
     };
     gate.block_first_build(coordinates.clone());
 
@@ -9082,11 +9301,14 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
         .unwrap();
     assert_eq!(
         store
-            .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+            .read_events(
+                &verlet_history::EventStreamId::for_thread(&coordinates),
+                None
+            )
             .await
             .unwrap()
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ThreadReloadDegraded)
+            .filter(|event| event.kind == verlet_history::EventKind::ThreadReloadDegraded)
             .count(),
         1,
         "racing lazy loads must share one degraded-reload witness"
@@ -9105,14 +9327,14 @@ async fn thread_already_exists_retry_keeps_scope_mismatch_fail_closed() {
     let (bridge, gate) = bridge_with_runtime_build_gate(&root).await;
     let envelope = test_envelope("scope mismatch");
     let target = bridge.resolve_target(&envelope).await.unwrap();
-    let thread_id = crate::ThreadId::new();
-    let requested = crate::ThreadCoordinates {
+    let thread_id = verlet_runtime_contracts::ThreadId::new();
+    let requested = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: target.address.tenant_id.clone(),
         user_id: target.address.user_id,
         session_id: target.address.session_id,
         thread_id,
     };
-    let conflicting = crate::ThreadCoordinates {
+    let conflicting = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: target.address.tenant_id,
         user_id: "other-user".to_string(),
         session_id: "other-session".to_string(),
@@ -9124,11 +9346,11 @@ async fn thread_already_exists_retry_keeps_scope_mismatch_fail_closed() {
     let conflicting_coordinates = conflicting.clone();
     let conflicting_load = tokio::spawn(async move {
         conflicting_supervisor
-            .load_thread_from_lifecycle(crate::ThreadLifecycleRecord {
+            .load_thread_from_lifecycle(verlet_runtime_contracts::ThreadLifecycleRecord {
                 coordinates: conflicting_coordinates,
                 parent_thread_id: None,
-                topology: crate::ThreadTopology::root(),
-                status: crate::ThreadLifecycleStatus::Idle,
+                topology: verlet_runtime_contracts::ThreadTopology::root(),
+                status: verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
                 latest_signal_id: None,
                 latest_checkpoint_id: None,
                 created_at_ms: crate::daemon::daemon_io::now_ms(),
@@ -9161,7 +9383,7 @@ async fn thread_already_exists_retry_keeps_scope_mismatch_fail_closed() {
         loading.await.unwrap(),
         Err(
             crate::daemon::daemon_io::ThreadHandleResolutionError::Lookup(
-                crate::VerletError::ThreadScopeMismatch { .. }
+                crate::kernel::runtime_host::VerletError::ThreadScopeMismatch { .. }
             )
         )
     ));
@@ -9331,14 +9553,20 @@ async fn equal_timestamp_ingress_bindings_seed_the_last_committed_thread() {
     let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
     let envelope = test_envelope("latest equal-time binding");
     let target = bridge.resolve_target(&envelope).await.unwrap();
-    let older = crate::ThreadCoordinates {
+    let older = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: target.address.tenant_id.clone(),
         user_id: target.address.user_id.clone(),
         session_id: target.address.session_id.clone(),
-        thread_id: crate::ThreadId::parse_str("ffffffff-ffff-7fff-bfff-ffffffffffff").unwrap(),
+        thread_id: verlet_runtime_contracts::ThreadId::parse_str(
+            "ffffffff-ffff-7fff-bfff-ffffffffffff",
+        )
+        .unwrap(),
     };
-    let latest = crate::ThreadCoordinates {
-        thread_id: crate::ThreadId::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
+    let latest = verlet_runtime_contracts::ThreadCoordinates {
+        thread_id: verlet_runtime_contracts::ThreadId::parse_str(
+            "00000000-0000-7000-8000-000000000001",
+        )
+        .unwrap(),
         ..older.clone()
     };
     let state =
@@ -9365,9 +9593,9 @@ fn egress_refresh_does_not_roll_back_the_active_ingress_rebind() {
         crate::daemon::daemon_io::DaemonEgressState::connect(verlet_io_pgqrs::sqlite_dsn(&db))
             .unwrap();
     let scope_key = "test.protocol:main:conversation:123";
-    let parent = crate::ThreadCoordinates::new("tenant", "user", "session");
-    let child = crate::ThreadCoordinates {
-        thread_id: crate::ThreadId::new(),
+    let parent = verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+    let child = verlet_runtime_contracts::ThreadCoordinates {
+        thread_id: verlet_runtime_contracts::ThreadId::new(),
         ..parent.clone()
     };
     assert_eq!(
@@ -9428,7 +9656,7 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
         .await
         .expect("assistant delivery cursor");
 
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let handle = bridge
         .supervisor
         .get_thread(&bridge.tenant_id, parsed)
@@ -9440,7 +9668,7 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
         .unwrap()
         .into_iter()
         .find(|event| {
-            event.kind == crate::EventKind::TurnSubmitted
+            event.kind == verlet_history::EventKind::TurnSubmitted
                 && event.payload["turn_id"].as_str().is_some()
         })
         .expect("ingress turn submission");
@@ -9448,7 +9676,7 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
         crate::daemon::daemon_io::ingress_context_from_event(&ingress_event).unwrap();
     let mut target = ingress_context.target.clone();
     target.metadata = ingress_context.metadata.clone();
-    let mut payload = serde_json::to_value(crate::IoEgressRequestedPayload {
+    let mut payload = serde_json::to_value(verlet_history::IoEgressRequestedPayload {
         egress_kind: serde_json::to_value(verlet_io_core::EgressKind::PlatformAction {
             action: "sticker".to_string(),
             payload: serde_json::json!({
@@ -9464,21 +9692,21 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
     .unwrap();
     payload.as_object_mut().unwrap().insert(
         "schema".to_string(),
-        serde_json::json!(crate::EventKind::IoEgressRequested.payload_schema_id()),
+        serde_json::json!(verlet_history::EventKind::IoEgressRequested.payload_schema_id()),
     );
     let requested_event = handle
-        .append_thread_event_record(crate::NewEventRecord::discharged(
+        .append_thread_event_record(verlet_history::NewEventRecord::discharged(
             handle.context().coordinates.clone(),
-            crate::EventKind::IoEgressRequested,
+            verlet_history::EventKind::IoEgressRequested,
             payload,
-            crate::EventProvenance {
-                source_streams: vec![crate::EventStreamId::for_thread(
+            verlet_history::EventProvenance {
+                source_streams: vec![verlet_history::EventStreamId::for_thread(
                     &handle.context().coordinates,
                 )],
                 source_event_ids: vec![ingress_event.id],
                 discharged_by: Some("rpc:append_events".to_string()),
                 function: Some("io_egress_requested/v1".to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         ))
         .await
@@ -9532,8 +9760,12 @@ async fn egress_projector_delivers_requested_platform_action_after_bridge_restar
         0
     );
 
-    let delivered =
-        egress_receipts(&restarted, &thread_id, crate::EventKind::IoEgressDelivered).await;
+    let delivered = egress_receipts(
+        &restarted,
+        &thread_id,
+        verlet_history::EventKind::IoEgressDelivered,
+    )
+    .await;
     assert_eq!(
         delivered
             .iter()
@@ -9579,7 +9811,7 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
         verlet_io_core::EgressKind::AssistantMessage { ref text } if text == "local:poison skip"
     ));
 
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let handle = bridge
         .supervisor
         .get_thread(&bridge.tenant_id, parsed)
@@ -9591,7 +9823,7 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
         .unwrap()
         .into_iter()
         .find(|event| {
-            event.kind == crate::EventKind::TurnSubmitted
+            event.kind == verlet_history::EventKind::TurnSubmitted
                 && event.payload["turn_id"].as_str().is_some()
         })
         .expect("ingress turn submission");
@@ -9600,7 +9832,7 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
     let mut target = ingress_context.target.clone();
     target.metadata = ingress_context.metadata.clone();
 
-    let mut invalid_payload = serde_json::to_value(crate::IoEgressRequestedPayload {
+    let mut invalid_payload = serde_json::to_value(verlet_history::IoEgressRequestedPayload {
         egress_kind: serde_json::to_value(verlet_io_core::EgressKind::PlatformAction {
             action: "sticker".to_string(),
             payload: serde_json::json!({
@@ -9616,27 +9848,27 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
     .unwrap();
     invalid_payload.as_object_mut().unwrap().insert(
         "schema".to_string(),
-        serde_json::json!(crate::EventKind::IoEgressRequested.payload_schema_id()),
+        serde_json::json!(verlet_history::EventKind::IoEgressRequested.payload_schema_id()),
     );
     handle
-        .append_thread_event_record(crate::NewEventRecord::discharged(
+        .append_thread_event_record(verlet_history::NewEventRecord::discharged(
             handle.context().coordinates.clone(),
-            crate::EventKind::IoEgressRequested,
+            verlet_history::EventKind::IoEgressRequested,
             invalid_payload,
-            crate::EventProvenance {
-                source_streams: vec![crate::EventStreamId::for_thread(
+            verlet_history::EventProvenance {
+                source_streams: vec![verlet_history::EventStreamId::for_thread(
                     &handle.context().coordinates,
                 )],
                 source_event_ids: vec![ingress_event.id],
                 discharged_by: Some("rpc:append_events".to_string()),
                 function: Some("io_egress_requested/v1".to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         ))
         .await
         .unwrap();
 
-    let mut valid_payload = serde_json::to_value(crate::IoEgressRequestedPayload {
+    let mut valid_payload = serde_json::to_value(verlet_history::IoEgressRequestedPayload {
         egress_kind: serde_json::to_value(verlet_io_core::EgressKind::PlatformAction {
             action: "sticker".to_string(),
             payload: serde_json::json!({
@@ -9652,21 +9884,21 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
     .unwrap();
     valid_payload.as_object_mut().unwrap().insert(
         "schema".to_string(),
-        serde_json::json!(crate::EventKind::IoEgressRequested.payload_schema_id()),
+        serde_json::json!(verlet_history::EventKind::IoEgressRequested.payload_schema_id()),
     );
     let valid_event = handle
-        .append_thread_event_record(crate::NewEventRecord::discharged(
+        .append_thread_event_record(verlet_history::NewEventRecord::discharged(
             handle.context().coordinates.clone(),
-            crate::EventKind::IoEgressRequested,
+            verlet_history::EventKind::IoEgressRequested,
             valid_payload,
-            crate::EventProvenance {
-                source_streams: vec![crate::EventStreamId::for_thread(
+            verlet_history::EventProvenance {
+                source_streams: vec![verlet_history::EventStreamId::for_thread(
                     &handle.context().coordinates,
                 )],
                 source_event_ids: vec![ingress_event.id],
                 discharged_by: Some("rpc:append_events".to_string()),
                 function: Some("io_egress_requested/v1".to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         ))
         .await
@@ -9690,7 +9922,12 @@ async fn egress_projector_skips_invalid_requested_egress_and_continues() {
             if action == "sticker"
                 && payload["file_id"].as_str() == Some("file-777")
     ));
-    let delivered = egress_receipts(&bridge, &thread_id, crate::EventKind::IoEgressDelivered).await;
+    let delivered = egress_receipts(
+        &bridge,
+        &thread_id,
+        verlet_history::EventKind::IoEgressDelivered,
+    )
+    .await;
     assert!(delivered.iter().any(|event| {
         event.payload["source_event_id"].as_str() == Some(valid_event_id.as_str())
             && event.payload["egress_kind"].as_str() == Some("platform_action:sticker")
@@ -9703,7 +9940,7 @@ async fn egress_projector_recovers_missing_projection_after_partial_receipt_curs
     let db = root.join("io.sqlite");
     let route = route_with_egress(
         Vec::new(),
-        Some(crate::VerletTypingSimulationConfig {
+        Some(crate::daemon::daemon_config::VerletTypingSimulationConfig {
             chars_per_second: 0,
         }),
     );
@@ -9713,7 +9950,7 @@ async fn egress_projector_recovers_missing_projection_after_partial_receipt_curs
     let (thread_id, expected) =
         submit_and_wait_for_assistant_event(&bridge, "partial cursor").await;
 
-    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
     let handle = bridge
         .supervisor
         .get_thread(&bridge.tenant_id, parsed)
@@ -9799,7 +10036,12 @@ async fn egress_projector_recovers_missing_projection_after_partial_receipt_curs
     ));
     assert!(rx.try_recv().is_err());
 
-    let delivered = egress_receipts(&bridge, &thread_id, crate::EventKind::IoEgressDelivered).await;
+    let delivered = egress_receipts(
+        &bridge,
+        &thread_id,
+        verlet_history::EventKind::IoEgressDelivered,
+    )
+    .await;
     assert_eq!(delivered.len(), 2);
     let assistant_dedupe_key = crate::daemon::daemon_io::egress_dedupe_key(source_event.id, 1);
     assert!(delivered.iter().any(|event| {
@@ -9827,7 +10069,7 @@ async fn egress_projector_retries_transient_failures_and_records_attempts() {
     let route = route_with_egress_and_retry(
         Vec::new(),
         None,
-        crate::VerletEgressRetryConfig {
+        crate::daemon::daemon_config::VerletEgressRetryConfig {
             max_attempts: 5,
             base_backoff_ms: 0,
         },
@@ -9844,7 +10086,12 @@ async fn egress_projector_retries_transient_failures_and_records_attempts() {
     );
 
     assert_eq!(adapter.calls().await.len(), 3);
-    let delivered = egress_receipts(&bridge, &thread_id, crate::EventKind::IoEgressDelivered).await;
+    let delivered = egress_receipts(
+        &bridge,
+        &thread_id,
+        verlet_history::EventKind::IoEgressDelivered,
+    )
+    .await;
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].payload["attempts"].as_u64(), Some(3));
     assert_eq!(
@@ -9868,7 +10115,7 @@ async fn egress_projector_dead_letters_after_max_attempts() {
     let route = route_with_egress_and_retry(
         Vec::new(),
         None,
-        crate::VerletEgressRetryConfig {
+        crate::daemon::daemon_config::VerletEgressRetryConfig {
             max_attempts: 3,
             base_backoff_ms: 0,
         },
@@ -9885,7 +10132,12 @@ async fn egress_projector_dead_letters_after_max_attempts() {
     );
 
     assert_eq!(adapter.calls().await.len(), 3);
-    let failed = egress_receipts(&bridge, &thread_id, crate::EventKind::IoEgressFailed).await;
+    let failed = egress_receipts(
+        &bridge,
+        &thread_id,
+        verlet_history::EventKind::IoEgressFailed,
+    )
+    .await;
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0].payload["attempts"].as_u64(), Some(3));
     assert_eq!(failed[0].payload["dead_lettered"].as_bool(), Some(true));
@@ -9908,12 +10160,14 @@ async fn egress_projector_witnesses_silence_without_wire_call() {
         .register_egress_adapter("telegram.bot", "main", adapter.clone())
         .await;
     let route = route_with_egress_and_retry(
-        vec![crate::VerletEgressProjectionRuleConfig {
-            pattern: r"local:\[no_response\]".to_string(),
-            action: "silence".to_string(),
-        }],
+        vec![
+            crate::daemon::daemon_config::VerletEgressProjectionRuleConfig {
+                pattern: r"local:\[no_response\]".to_string(),
+                action: "silence".to_string(),
+            },
+        ],
         None,
-        crate::VerletEgressRetryConfig {
+        crate::daemon::daemon_config::VerletEgressRetryConfig {
             max_attempts: 5,
             base_backoff_ms: 0,
         },
@@ -9930,7 +10184,12 @@ async fn egress_projector_witnesses_silence_without_wire_call() {
     );
 
     assert!(adapter.calls().await.is_empty());
-    let delivered = egress_receipts(&bridge, &thread_id, crate::EventKind::IoEgressDelivered).await;
+    let delivered = egress_receipts(
+        &bridge,
+        &thread_id,
+        verlet_history::EventKind::IoEgressDelivered,
+    )
+    .await;
     assert_eq!(delivered.len(), 1);
     assert_eq!(
         delivered[0].payload["egress_kind"].as_str(),
@@ -9989,16 +10248,22 @@ async fn telegram_webhook_accepts_update_and_uses_sink() {
         .unwrap();
     let thread_id = receipt.thread_id.unwrap();
     wait_for_assistant_text(&bridge, &thread_id, "local:hello webhook").await;
-    let store = crate::SqliteSessionStore::open(session_store_path)
+    let store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
         .await
         .unwrap();
     let coordinates = only_thread_coordinates(&bridge).await;
     let control_events = store
-        .read_events(&crate::control_stream_id(&coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let thread_events = store
-        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let admission = crate::kernel::admission::assert_admission_precedes_turn_records(

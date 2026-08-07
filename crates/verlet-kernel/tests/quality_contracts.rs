@@ -98,7 +98,7 @@ fn github_workflow_stays_a_light_remote_sentinel() {
 
 #[test]
 fn public_domain_namespaces_and_flat_exports_stay_usable() {
-    let _flat_supervisor = verlet::VerletSupervisor::new();
+    let _flat_supervisor = verlet::kernel::supervisor::VerletSupervisor::new();
     let _namespaced_supervisor = verlet::kernel::supervisor::VerletSupervisor::new();
     let _tenant_context = verlet::kernel::supervisor::TenantRuntimeContext::local(
         "tenant",
@@ -107,7 +107,7 @@ fn public_domain_namespaces_and_flat_exports_stay_usable() {
     );
 
     let registry =
-        std::sync::Arc::new(verlet::operations::operation_registry::OperationRegistry::new());
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
     let _router = verlet::agent::agent_tool_router::AgentToolRouter::new(registry);
 
     let daemon_config = verlet::daemon::daemon_config::VerletDaemonConfig::default();
@@ -115,12 +115,12 @@ fn public_domain_namespaces_and_flat_exports_stay_usable() {
         .validate()
         .expect("default daemon config should validate");
 
-    let _artifact = verlet::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(Vec::new());
+    let _artifact = verlet_wasm::WasmRuntimeArtifact::bytes(Vec::new());
     let _coordinates =
-        verlet::kernel::runtime_host::ThreadCoordinates::new("tenant", "user", "session");
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
 
     assert!(!verlet::adapters::mcp_server::MCP_PROTOCOL_VERSION.is_empty());
-    assert_eq!(verlet::capabilities::bridge::UNIX_NAMESPACE, "unix");
+    assert_eq!(verlet_process::bridge::UNIX_NAMESPACE, "unix");
 }
 
 #[test]

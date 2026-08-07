@@ -16,7 +16,7 @@ async fn append_thread_spawned_event(
     caller: &verlet_runtime_contracts::ThreadContext,
     child: &verlet_runtime_contracts::ThreadContext,
     witness: ThreadSpawnWitness,
-) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     let metadata = &child.metadata;
     let child_manifest_hash = metadata
         .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
@@ -39,7 +39,7 @@ async fn append_thread_spawned_event(
         .unwrap_or_else(|| {
             format!(
                 "sha256:{}",
-                crate::agent::contracts::sha256_hex(
+                verlet_agent::contracts::sha256_hex(
                     child.coordinates.thread_id.to_string().as_bytes()
                 )
             )
@@ -58,7 +58,7 @@ async fn append_thread_spawned_event(
                 })
         })
         .transpose()?;
-    let payload = crate::kernel::history::ThreadSpawnedPayload {
+    let payload = verlet_history::ThreadSpawnedPayload {
         parent_thread_id: caller.coordinates.thread_id,
         parent_turn_id: witness.parent_turn_id.clone(),
         child_thread_id: child.coordinates.thread_id,
@@ -76,7 +76,7 @@ async fn append_thread_spawned_event(
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::kernel::history::EventKind::ThreadSpawned.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::ThreadSpawned.payload_schema_id()),
         );
         if let Some(correlation_id) = &witness.correlation_id {
             object.insert(
@@ -85,17 +85,17 @@ async fn append_thread_spawned_event(
             );
         }
     }
-    let mut record = crate::kernel::history::NewEventRecord::witnessed(
+    let mut record = verlet_history::NewEventRecord::witnessed(
         caller.coordinates.clone(),
-        crate::kernel::history::EventKind::ThreadSpawned,
+        verlet_history::EventKind::ThreadSpawned,
         value,
     );
     if let (Some(stream_id), Some(event_id)) = (witness.request_stream_id, witness.request_event_id)
     {
-        record.provenance = crate::kernel::history::EventProvenance {
+        record.provenance = verlet_history::EventProvenance {
             source_streams: vec![stream_id],
             source_event_ids: vec![event_id],
-            ..crate::kernel::history::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         };
     }
     parent.append_control_event(record).await
@@ -105,8 +105,8 @@ async fn append_thread_spawned_event(
 pub struct ThreadSpawnWitness {
     pub parent_turn_id: Option<String>,
     pub correlation_id: Option<String>,
-    pub request_stream_id: Option<crate::kernel::history::EventStreamId>,
-    pub request_event_id: Option<crate::kernel::history::EventRecordId>,
+    pub request_stream_id: Option<verlet_history::EventStreamId>,
+    pub request_event_id: Option<verlet_history::EventRecordId>,
     pub submitted_turn_id: Option<String>,
 }
 
@@ -119,8 +119,8 @@ pub struct AgentProcessSpawnReceipt {
     pub status: verlet_runtime_contracts::ThreadStatus,
     pub task_name: Option<String>,
     pub submitted_turn_id: String,
-    pub handle: verlet_runtime_contracts::HandleId,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
+    pub handle: verlet_runtime_contracts::handle::HandleId,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -131,7 +131,7 @@ pub struct AgentProcessSubmitReceipt {
     pub interaction_id: verlet_runtime_contracts::RuntimeEventId,
     pub status: verlet_runtime_contracts::ThreadStatus,
     pub turn_id: String,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -191,15 +191,15 @@ pub struct AgentProcessChildrenReceipt {
 }
 
 fn compile_declaration_contract(
-    reference: &crate::agent::contracts::ThreadContractReference,
-) -> crate::kernel::runtime_host::VerletResult<crate::agent::contracts::CompiledThreadContract> {
+    reference: &verlet_agent::contracts::ThreadContractReference,
+) -> crate::kernel::runtime_host::VerletResult<verlet_agent::contracts::CompiledThreadContract> {
     if let Some(compiled) = &reference.compiled {
         compiled.validate()?;
         return Ok(compiled.clone());
     }
     if let Some(source) = &reference.inline {
-        return Ok(crate::agent::contracts::ThreadContractCompiler::compile(
-            &crate::agent::contracts::ThreadContractSource::markdown(source.clone()),
+        return Ok(verlet_agent::contracts::ThreadContractCompiler::compile(
+            &verlet_agent::contracts::ThreadContractSource::markdown(source.clone()),
         )?);
     }
     if let Some(ref_path) = &reference.ref_path {
@@ -215,17 +215,18 @@ fn compile_declaration_contract(
 }
 
 fn declaration_turn_input(
-    contract: &crate::agent::contracts::CompiledThreadContract,
-    initial_turn: &crate::agent::contracts::ThreadInitialTurn,
+    contract: &verlet_agent::contracts::CompiledThreadContract,
+    initial_turn: &verlet_agent::contracts::ThreadInitialTurn,
     inputs: &serde_json::Value,
-) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::TurnInput> {
-    let mut input = crate::kernel::runtime_host::TurnInput::text(initial_turn.content.clone())
-        .with_metadata("thread_contract_name", contract.name.clone())
-        .with_metadata("thread_contract_hash", contract.contract_hash()?)
-        .with_metadata("thread_contract_source_hash", contract.source_hash.clone())
-        .with_metadata("agent_contract_name", contract.name.clone())
-        .with_metadata("agent_contract_hash", contract.contract_hash()?)
-        .with_metadata("agent_contract_source_hash", contract.source_hash.clone());
+) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::turn::TurnInput> {
+    let mut input =
+        crate::kernel::runtime_host::turn::TurnInput::text(initial_turn.content.clone())
+            .with_metadata("thread_contract_name", contract.name.clone())
+            .with_metadata("thread_contract_hash", contract.contract_hash()?)
+            .with_metadata("thread_contract_source_hash", contract.source_hash.clone())
+            .with_metadata("agent_contract_name", contract.name.clone())
+            .with_metadata("agent_contract_hash", contract.contract_hash()?)
+            .with_metadata("agent_contract_source_hash", contract.source_hash.clone());
     if !inputs.as_object().is_some_and(|object| object.is_empty()) {
         let input_json = serde_json::to_string(inputs).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
@@ -255,7 +256,7 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
         metadata: std::collections::BTreeMap<String, String>,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         self.spawn_child_with_witness(
@@ -271,11 +272,13 @@ impl RuntimeKernelControl {
     pub async fn dispatch_thread_spawn(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
-        dispatch_id: verlet_runtime_contracts::DispatchId,
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId,
         task_name: String,
         message: String,
         agent_ref: Option<String>,
-        agent_resolver: Option<std::sync::Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
+        agent_resolver: Option<
+            std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>,
+        >,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
         let child_agent_ref = agent_ref
@@ -285,7 +288,7 @@ impl RuntimeKernelControl {
                     .and_then(|resolver| resolver.default_agent_ref(caller))
             })
             .unwrap_or_else(|| "unbound".to_string());
-        let mut projector = crate::ThreadSpawnProjector::new(host);
+        let mut projector = crate::kernel::thread_spawn_projector::ThreadSpawnProjector::new(host);
         if let Some(agent_resolver) = agent_resolver {
             projector = projector.with_agent_resolver(agent_resolver);
         }
@@ -293,7 +296,7 @@ impl RuntimeKernelControl {
         let dispatched = projector
             .dispatch_request_with_authority(
                 &caller.coordinates,
-                crate::ThreadSpawnRequestedPayload {
+                verlet_history::ThreadSpawnRequestedPayload {
                     parent_thread_id: caller.coordinates.thread_id,
                     parent_turn_id: None,
                     task_name: Some(task_name.clone()),
@@ -372,7 +375,7 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
         metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
@@ -384,7 +387,7 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
         metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         compile_payload: serde_json::Value,
@@ -405,7 +408,7 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
         metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
@@ -436,7 +439,7 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
         mut metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
@@ -468,7 +471,7 @@ impl RuntimeKernelControl {
             .await?;
         let child_thread_id = child.context().coordinates.thread_id;
         let parent = host.get_thread(caller.coordinates.thread_id).await?;
-        let dispatch_id = verlet_runtime_contracts::DispatchId::new(
+        let dispatch_id = verlet_runtime_contracts::handle::DispatchId::new(
             witness.correlation_id.clone().unwrap_or_else(|| {
                 format!(
                     "thread-spawn-{}",
@@ -516,7 +519,7 @@ impl RuntimeKernelControl {
             status: child.status(),
             task_name,
             submitted_turn_id: turn_id,
-            handle: verlet_runtime_contracts::HandleId::thread(child_thread_id),
+            handle: verlet_runtime_contracts::handle::HandleId::thread(child_thread_id),
             dispatch_id,
         })
     }
@@ -526,7 +529,7 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
         mut metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         compile_payload: Option<serde_json::Value>,
@@ -558,7 +561,7 @@ impl RuntimeKernelControl {
             metadata,
         );
         let parent = host.get_thread(caller.coordinates.thread_id).await?;
-        let dispatch_id = verlet_runtime_contracts::DispatchId::new(
+        let dispatch_id = verlet_runtime_contracts::handle::DispatchId::new(
             witness.correlation_id.clone().unwrap_or_else(|| {
                 format!(
                     "thread-spawn-{}",
@@ -588,12 +591,12 @@ impl RuntimeKernelControl {
             bind_payload,
         };
         if let Err(error) = executor.spawn(request).await {
-            let _ = crate::kernel::runtime_host::append_thread_joined_first_wins(
+            let _ = crate::kernel::runtime_host::runtime_services::append_thread_joined_first_wins(
                 host.runtime_store().as_ref(),
                 caller.coordinates.clone(),
                 child.coordinates.clone(),
                 spawned.id,
-                crate::ThreadTerminalState::Failed,
+                verlet_history::ThreadTerminalState::Failed,
                 Some(error.to_string()),
                 Some("remote child process failed to start".to_string()),
                 None,
@@ -611,7 +614,7 @@ impl RuntimeKernelControl {
             status: verlet_runtime_contracts::ThreadStatus::Starting,
             task_name,
             submitted_turn_id: turn_id,
-            handle: verlet_runtime_contracts::HandleId::thread(child.coordinates.thread_id),
+            handle: verlet_runtime_contracts::handle::HandleId::thread(child.coordinates.thread_id),
             dispatch_id,
         })
     }
@@ -619,8 +622,8 @@ impl RuntimeKernelControl {
     pub async fn declare_thread(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
-        declaration: crate::agent::contracts::ThreadDeclaration,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::agent::contracts::ThreadHandle> {
+        declaration: verlet_agent::contracts::ThreadDeclaration,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_agent::contracts::ThreadHandle> {
         declaration.validate()?;
         let contract = compile_declaration_contract(&declaration.contract)?;
         let contract_hash = contract.contract_hash()?;
@@ -641,7 +644,7 @@ impl RuntimeKernelControl {
         }
         let topology = verlet_runtime_contracts::ThreadTopology::spawned_from(parent_thread_id);
         let propagator = declaration.propagator.clone().unwrap_or_else(|| {
-            crate::agent::contracts::ThreadPropagatorSelection::from_runtime_hint(
+            verlet_agent::contracts::ThreadPropagatorSelection::from_runtime_hint(
                 contract.runtime.get("propagator"),
             )
         });
@@ -689,7 +692,7 @@ impl RuntimeKernelControl {
             let _ = host.shutdown_thread(child_thread_id).await;
             return Err(err);
         }
-        let spawn_receipt = crate::agent::contracts::sha256_hex(
+        let spawn_receipt = verlet_agent::contracts::sha256_hex(
             serde_json::json!({
                 "kind": "cooldis.thread-spawn-receipt",
                 "version": 0,
@@ -704,15 +707,15 @@ impl RuntimeKernelControl {
             .as_bytes(),
         );
 
-        Ok(crate::agent::contracts::ThreadHandle {
-            kind: crate::agent::contracts::THREAD_HANDLE_KIND.to_string(),
+        Ok(verlet_agent::contracts::ThreadHandle {
+            kind: verlet_agent::contracts::THREAD_HANDLE_KIND.to_string(),
             version: 0,
             thread_id: child_thread_id,
             status: child.status(),
             propagator,
             contract_hash,
             submitted_turn_id: turn_id,
-            receipts: crate::agent::contracts::ThreadReceiptSet {
+            receipts: verlet_agent::contracts::ThreadReceiptSet {
                 compile: compile_receipt,
                 spawn: spawn_receipt,
             },
@@ -722,8 +725,8 @@ impl RuntimeKernelControl {
     pub async fn declare_agent_thread(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
-        declaration: crate::agent::contracts::ThreadDeclaration,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::agent::contracts::ThreadHandle> {
+        declaration: verlet_agent::contracts::ThreadDeclaration,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_agent::contracts::ThreadHandle> {
         self.declare_thread(caller, declaration).await
     }
 
@@ -732,7 +735,7 @@ impl RuntimeKernelControl {
         caller: &verlet_runtime_contracts::ThreadContext,
         target_thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: Option<String>,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSubmitReceipt> {
         let turn_id = turn_id
             .filter(|turn_id| !turn_id.trim().is_empty())
@@ -745,7 +748,7 @@ impl RuntimeKernelControl {
         self.submit_to_thread_with_identities(
             caller,
             target_thread_id,
-            verlet_runtime_contracts::DispatchId::new(format!(
+            verlet_runtime_contracts::handle::DispatchId::new(format!(
                 "thread-submit-{}",
                 verlet_runtime_contracts::ThreadSignalId::new()
             )),
@@ -763,8 +766,8 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         target_thread_id: verlet_runtime_contracts::ThreadId,
-        dispatch_id: verlet_runtime_contracts::DispatchId,
-        input: crate::kernel::runtime_host::TurnInput,
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId,
+        input: crate::kernel::runtime_host::turn::TurnInput,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSubmitReceipt> {
         let turn_id = format!("thread-submit-{dispatch_id}");
         let interaction_id = submit_dispatch_interaction_id(target_thread_id, &dispatch_id);
@@ -783,10 +786,10 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         target_thread_id: verlet_runtime_contracts::ThreadId,
-        dispatch_id: verlet_runtime_contracts::DispatchId,
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId,
         turn_id: String,
         interaction_id: verlet_runtime_contracts::RuntimeEventId,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSubmitReceipt> {
         let host = self.host()?;
         let caller_thread = self
@@ -1200,8 +1203,8 @@ impl RuntimeKernelControl {
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
     ) -> crate::kernel::runtime_host::VerletResult<(
-        crate::kernel::history::EventRecord,
-        crate::kernel::history::EventRecord,
+        verlet_history::EventRecord,
+        verlet_history::EventRecord,
     )> {
         let target = self.scoped_thread(caller, target_thread_id).await?;
         target
@@ -1239,7 +1242,7 @@ impl RuntimeKernelControl {
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
         target_thread_id: verlet_runtime_contracts::ThreadId,
-        mandate_event_id: crate::kernel::history::EventRecordId,
+        mandate_event_id: verlet_history::EventRecordId,
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::kernel::mandate_lifecycle::MandateRevokeReceipt,
     > {
@@ -1272,7 +1275,7 @@ impl RuntimeKernelControl {
     pub async fn caller_session_context(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionContext> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::SessionContext> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1282,8 +1285,8 @@ impl RuntimeKernelControl {
     pub async fn caller_thread_events(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
-        from_sequence: Option<crate::kernel::history::EventSequence>,
-    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
+        from_sequence: Option<verlet_history::EventSequence>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1293,7 +1296,7 @@ impl RuntimeKernelControl {
     pub async fn caller_control_events(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
-    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1303,8 +1306,8 @@ impl RuntimeKernelControl {
     pub async fn append_caller_thread_event(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,
-        record: crate::kernel::history::NewEventRecord,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+        record: verlet_history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1367,10 +1370,10 @@ fn ensure_thread_scope(
 /// runtime event ids, which are generated as UUIDv7.
 fn submit_dispatch_interaction_id(
     target_thread_id: verlet_runtime_contracts::ThreadId,
-    dispatch_id: &verlet_runtime_contracts::DispatchId,
+    dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
 ) -> verlet_runtime_contracts::RuntimeEventId {
     let digest =
-        crate::agent::contracts::sha256_hex(format!("{target_thread_id}:{dispatch_id}").as_bytes());
+        verlet_agent::contracts::sha256_hex(format!("{target_thread_id}:{dispatch_id}").as_bytes());
     let digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
     let mut value =
         u128::from_str_radix(&digest[..32], 16).expect("sha256 hex prefix is always a valid u128");

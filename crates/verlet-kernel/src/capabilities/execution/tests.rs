@@ -1,13 +1,19 @@
-use crate::AgentKernelToolProvider as _;
+use crate::agent::agent_tool_router::AgentKernelToolProvider as _;
 use object_store::ObjectStoreExt as _;
 
 async fn expect_output(
-    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<
+        crate::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
 ) -> String {
     loop {
         match events.recv().await.unwrap() {
-            crate::ThreadEvent::Output { text, .. } => return text,
-            crate::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } => {
+                return text;
+            }
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. } => {
+                panic!("thread failed: {message}")
+            }
             _ => {}
         }
     }
@@ -34,19 +40,20 @@ fn wat_guest(wat: impl AsRef<str>) -> Vec<u8> {
 
 fn process_test_provider() -> (
     crate::capabilities::execution::BashToolProvider,
-    crate::TurnContextSnapshot,
+    crate::kernel::runtime_host::turn::TurnContextSnapshot,
 ) {
-    let store: std::sync::Arc<dyn crate::RuntimeStore> =
-        std::sync::Arc::new(crate::InMemorySessionStore::new());
-    let coordinates = crate::ThreadCoordinates::new("tenant", "user", "process-tool-session");
+    let store: std::sync::Arc<dyn verlet_history::RuntimeStore> =
+        std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "process-tool-session");
     let dispatcher = crate::kernel::process_handle_dispatch::test_process_dispatcher(
         std::sync::Arc::clone(&store),
         coordinates.clone(),
     );
-    let context = crate::TurnContext::new(
-        crate::ThreadContext::root(coordinates),
+    let context = crate::kernel::runtime_host::turn::TurnContext::new(
+        verlet_runtime_contracts::ThreadContext::root(coordinates),
         "process-tool-turn",
-        &crate::TurnInput::text("process tool test"),
+        &crate::kernel::runtime_host::turn::TurnInput::text("process tool test"),
         tokio_util::sync::CancellationToken::new(),
     )
     .snapshot();
@@ -59,8 +66,8 @@ fn process_test_provider() -> (
     )
 }
 
-fn tool_result_json(message: crate::CanonicalMessage) -> (serde_json::Value, bool) {
-    let crate::CanonicalMessage::ToolResult {
+fn tool_result_json(message: verlet_history::CanonicalMessage) -> (serde_json::Value, bool) {
+    let verlet_history::CanonicalMessage::ToolResult {
         content, is_error, ..
     } = message
     else {
@@ -69,7 +76,7 @@ fn tool_result_json(message: crate::CanonicalMessage) -> (serde_json::Value, boo
     let text = content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -77,8 +84,8 @@ fn tool_result_json(message: crate::CanonicalMessage) -> (serde_json::Value, boo
     (serde_json::from_str(&text).unwrap(), is_error)
 }
 
-fn tool_result_text(message: crate::CanonicalMessage) -> (String, bool) {
-    let crate::CanonicalMessage::ToolResult {
+fn tool_result_text(message: verlet_history::CanonicalMessage) -> (String, bool) {
+    let verlet_history::CanonicalMessage::ToolResult {
         content, is_error, ..
     } = message
     else {
@@ -87,7 +94,7 @@ fn tool_result_text(message: crate::CanonicalMessage) -> (String, bool) {
     let text = content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -99,11 +106,11 @@ async fn invoke_bash(
     provider: &crate::capabilities::execution::BashToolProvider,
     call_id: &str,
     command: &str,
-) -> crate::CanonicalMessage {
+) -> verlet_history::CanonicalMessage {
     provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: call_id.to_string(),
-            tool_name: crate::capabilities::execution::BASH_TOOL.to_string(),
+            tool_name: verlet_vbash::BASH_TOOL.to_string(),
             arguments: serde_json::json!({ "command": command }),
             turn_context: None,
         })
@@ -205,13 +212,17 @@ fn echo_operation_guest() -> String {
     )
 }
 
-async fn echo_operation_registry() -> std::sync::Arc<crate::OperationRegistry> {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+async fn echo_operation_registry()
+-> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
     registry
-        .register(crate::OperationRegistration::new(
-            "echoer",
-            crate::WasmRuntimeArtifact::bytes(wat_guest(echo_operation_guest())),
-        ))
+        .register(
+            verlet_operations::operation_registry::OperationRegistration::new(
+                "echoer",
+                verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(echo_operation_guest())),
+            ),
+        )
         .await
         .unwrap();
     registry
@@ -306,15 +317,18 @@ fn named_echo_operation_guest_with_required(
 async fn named_echo_operation_registry(
     registered_name: &str,
     operation_name: &str,
-) -> std::sync::Arc<crate::OperationRegistry> {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+) -> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
     registry
-        .register(crate::OperationRegistration::new(
-            registered_name,
-            crate::WasmRuntimeArtifact::bytes(wat_guest(named_echo_operation_guest(
-                operation_name,
-            ))),
-        ))
+        .register(
+            verlet_operations::operation_registry::OperationRegistration::new(
+                registered_name,
+                verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(named_echo_operation_guest(
+                    operation_name,
+                ))),
+            ),
+        )
         .await
         .unwrap();
     registry
@@ -324,14 +338,14 @@ async fn named_echo_operation_registry_with_required(
     registered_name: &str,
     operation_name: &str,
     required_capabilities: Vec<&str>,
-) -> std::sync::Arc<crate::OperationRegistry> {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
-    let mut registration = crate::OperationRegistration::new(
+) -> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    let mut registration = verlet_operations::operation_registry::OperationRegistration::new(
         registered_name,
-        crate::WasmRuntimeArtifact::bytes(wat_guest(named_echo_operation_guest_with_required(
-            operation_name,
-            required_capabilities.clone(),
-        ))),
+        verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            named_echo_operation_guest_with_required(operation_name, required_capabilities.clone()),
+        )),
     );
     registration =
         registration.with_capability_grants(required_capabilities.into_iter().map(String::from));
@@ -341,7 +355,7 @@ async fn named_echo_operation_registry_with_required(
 
 #[tokio::test]
 async fn harness_runs_virtual_file_commands_pipes_and_patch() {
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default(),
     )
     .await
@@ -425,7 +439,7 @@ PATCH"#;
 async fn virtual_bash_verlet_run_invokes_registered_operation_from_pipe() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(echo_operation_registry().await);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -443,7 +457,7 @@ async fn virtual_bash_verlet_run_invokes_registered_operation_from_pipe() {
 async fn virtual_bash_projects_registry_operations_as_host_builtins() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(named_echo_operation_registry("search", "search").await);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -462,7 +476,7 @@ async fn virtual_bash_projects_registry_operations_as_host_builtins() {
 async fn virtual_bash_man_describes_projected_operation_command() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(named_echo_operation_registry("search", "search").await);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -479,10 +493,11 @@ async fn virtual_bash_man_describes_projected_operation_command() {
 
 #[tokio::test]
 async fn virtual_bash_host_builtins_reflect_registry_add_and_remove_without_rebuild() {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry.clone());
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -490,10 +505,14 @@ async fn virtual_bash_host_builtins_reflect_registry_add_and_remove_without_rebu
     assert_ne!(before.exit_code, 0, "{before:?}");
 
     registry
-        .register(crate::OperationRegistration::new(
-            "search",
-            crate::WasmRuntimeArtifact::bytes(wat_guest(named_echo_operation_guest("search"))),
-        ))
+        .register(
+            verlet_operations::operation_registry::OperationRegistration::new(
+                "search",
+                verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(named_echo_operation_guest(
+                    "search",
+                ))),
+            ),
+        )
         .await
         .unwrap();
     let after_register = harness
@@ -519,16 +538,16 @@ async fn virtual_bash_reserved_operation_names_are_not_projected_as_shell_comman
     let registry_adapter = crate::capabilities::execution::KernelVbashOperationRegistry::new(
         std::sync::Arc::clone(&registry),
     );
-    let shell_commands = crate::capabilities::execution::operation_shell_command_names(
+    let shell_commands = verlet_vbash::harness::operation_shell_command_names(
         &registry_adapter,
-        &crate::capabilities::execution::reserved_operation_shell_commands(),
+        &verlet_vbash::reserved_operation_shell_commands(),
     )
     .await;
     assert!(!shell_commands.contains("type"));
 
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -548,7 +567,7 @@ async fn virtual_bash_operation_shell_commands_enforce_capability_grants() {
     .await;
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry.clone());
-    let mut denied = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut denied = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -564,7 +583,7 @@ async fn virtual_bash_operation_shell_commands_enforce_capability_grants() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry)
         .with_capability_grant("secret:EXAMPLE_API_KEY");
-    let mut granted = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut granted = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
     let output = granted.execute("printf verlet | search").await.unwrap();
@@ -578,7 +597,7 @@ async fn virtual_bash_verlet_run_works_with_vfs_redirection() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(echo_operation_registry().await)
         .with_writable_mount("/work");
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
     harness
@@ -609,7 +628,7 @@ async fn virtual_bash_verlet_run_works_with_vfs_redirection() {
 async fn virtual_bash_execute_process_runs_verlet_operation_with_stdin() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(echo_operation_registry().await);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -619,7 +638,10 @@ async fn virtual_bash_execute_process_runs_verlet_operation_with_stdin() {
         .unwrap();
     let output = process.output();
 
-    assert_eq!(process.backend(), &crate::VerletProcessBackend::VirtualBash);
+    assert_eq!(
+        process.backend(),
+        &verlet_process::process::VerletProcessBackend::VirtualBash
+    );
     assert_eq!(output.stdout_text_lossy(), "op:hello\n");
     assert!(output.stderr_text_lossy().contains(r#""operation":"echo""#));
     assert_eq!(output.exit_code(), Some(0));
@@ -628,7 +650,7 @@ async fn virtual_bash_execute_process_runs_verlet_operation_with_stdin() {
 
 #[tokio::test]
 async fn harness_execute_process_replays_virtual_output_and_exit() {
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default(),
     )
     .await
@@ -639,9 +661,12 @@ async fn harness_execute_process_replays_virtual_output_and_exit() {
         .await
         .unwrap();
     let output = process.output();
-    let replay = crate::capabilities::execution::VirtualCommandOutput::from(&output);
+    let replay = verlet_process::execution::VirtualCommandOutput::from(&output);
 
-    assert_eq!(process.backend(), &crate::VerletProcessBackend::VirtualBash);
+    assert_eq!(
+        process.backend(),
+        &verlet_process::process::VerletProcessBackend::VirtualBash
+    );
     assert!(output.stdout_text_lossy().contains("hi"));
     assert!(output.stderr_text_lossy().contains("missing"));
     assert_ne!(output.exit_code(), Some(0));
@@ -652,7 +677,7 @@ async fn harness_execute_process_replays_virtual_output_and_exit() {
 
 #[tokio::test]
 async fn harness_rejects_readonly_mount_and_native_command() {
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default(),
     )
     .await
@@ -681,22 +706,20 @@ async fn harness_rejects_readonly_mount_and_native_command() {
 
 #[derive(Default)]
 struct RecordingExternalExecutor {
-    requests: tokio::sync::Mutex<Vec<crate::capabilities::execution::ExternalCommandRequest>>,
+    requests: tokio::sync::Mutex<Vec<verlet_process::execution::ExternalCommandRequest>>,
 }
 
 #[async_trait::async_trait]
-impl crate::capabilities::execution::ExternalCommandExecutor for RecordingExternalExecutor {
+impl verlet_process::execution::ExternalCommandExecutor for RecordingExternalExecutor {
     async fn exec(
         &self,
-        request: crate::capabilities::execution::ExternalCommandRequest,
-    ) -> crate::capabilities::execution::VerletProcessResult<
-        crate::capabilities::execution::ExternalCommandResult,
-    > {
+        request: verlet_process::execution::ExternalCommandRequest,
+    ) -> verlet_process::VerletProcessResult<verlet_process::execution::ExternalCommandResult> {
         self.requests.lock().await.push(request.clone());
         match &request.invocation {
-            crate::capabilities::execution::ExternalCommandInvocation::Argv { command, args } => {
-                Ok(crate::capabilities::execution::ExternalCommandResult::new(
-                    crate::capabilities::execution::VirtualCommandOutput {
+            verlet_process::execution::ExternalCommandInvocation::Argv { command, args } => {
+                Ok(verlet_process::execution::ExternalCommandResult::new(
+                    verlet_process::execution::VirtualCommandOutput {
                         stdout: format!(
                             "{command} args={} stdin={}",
                             args.join(" "),
@@ -709,13 +732,13 @@ impl crate::capabilities::execution::ExternalCommandExecutor for RecordingExtern
                     },
                 ))
             }
-            crate::capabilities::execution::ExternalCommandInvocation::Script(_) => {
+            verlet_process::execution::ExternalCommandInvocation::Script(_) => {
                 let prefix = match request.executor {
-                    crate::capabilities::execution::ExternalExecutorKind::HostBash => "host",
-                    crate::capabilities::execution::ExternalExecutorKind::RemoteLinux => "remote",
+                    verlet_process::execution::ExternalExecutorKind::HostBash => "host",
+                    verlet_process::execution::ExternalExecutorKind::RemoteLinux => "remote",
                 };
-                Ok(crate::capabilities::execution::ExternalCommandResult::new(
-                    crate::capabilities::execution::VirtualCommandOutput {
+                Ok(verlet_process::execution::ExternalCommandResult::new(
+                    verlet_process::execution::VirtualCommandOutput {
                         stdout: format!("{prefix} stdout\n"),
                         stderr: format!("{prefix} stderr\n"),
                         exit_code: 7,
@@ -724,7 +747,7 @@ impl crate::capabilities::execution::ExternalCommandExecutor for RecordingExtern
                     },
                 )
                 .with_file_write(
-                    crate::capabilities::execution::ExternalFileWrite::new(
+                    verlet_process::execution::ExternalFileWrite::new(
                         "/workspace/generated.txt",
                         format!("from {prefix}\n"),
                     ),
@@ -744,9 +767,9 @@ async fn host_always_bypasses_bashkit_and_runs_in_host_cwd() {
         .await
         .unwrap();
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-        .with_execution_policy(crate::capabilities::execution::BashExecutionPolicy::host_always())
+        .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
         .with_host_bash_executor(&host_root);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -756,7 +779,10 @@ async fn host_always_bypasses_bashkit_and_runs_in_host_cwd() {
         .unwrap();
     let output = process.output();
 
-    assert_eq!(process.backend(), &crate::VerletProcessBackend::HostBash);
+    assert_eq!(
+        process.backend(),
+        &verlet_process::process::VerletProcessBackend::HostBash
+    );
     assert!(
         output
             .stdout_text_lossy()
@@ -772,16 +798,19 @@ async fn host_always_bypasses_bashkit_and_runs_in_host_cwd() {
 async fn host_always_can_list_real_repo_bin_dir() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-        .with_execution_policy(crate::capabilities::execution::BashExecutionPolicy::host_always())
+        .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
         .with_host_bash_executor(&repo_root);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
     let process = harness.execute_process("ls src/bin").await.unwrap();
     let output = process.output();
 
-    assert_eq!(process.backend(), &crate::VerletProcessBackend::HostBash);
+    assert_eq!(
+        process.backend(),
+        &verlet_process::process::VerletProcessBackend::HostBash
+    );
     assert!(output.success(), "{output:?}");
     assert!(output.stdout_text_lossy().contains("verlet.rs"));
     assert!(!output.stdout_text_lossy().contains("verlet-vbash-smoke.rs"));
@@ -790,11 +819,11 @@ async fn host_always_can_list_real_repo_bin_dir() {
 #[tokio::test]
 async fn selective_proxy_routes_named_command_through_executor() {
     let executor = std::sync::Arc::new(RecordingExternalExecutor::default());
-    let policy = crate::capabilities::execution::BashExecutionPolicy::selective([(
+    let policy = verlet_vbash::BashExecutionPolicy::selective([(
         "cargo",
-        crate::capabilities::execution::CommandRoute::RemoteLinux,
+        verlet_vbash::CommandRoute::RemoteLinux,
     )]);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default()
             .with_execution_policy(policy)
             .with_external_executor(executor.clone()),
@@ -816,17 +845,17 @@ async fn selective_proxy_routes_named_command_through_executor() {
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].executor,
-        crate::capabilities::execution::ExternalExecutorKind::RemoteLinux
+        verlet_process::execution::ExternalExecutorKind::RemoteLinux
     );
     assert_eq!(requests[0].cwd, std::path::PathBuf::from("/workspace"));
     assert_eq!(requests[0].stdin.as_deref(), Some("hi\n"));
     assert_eq!(
         requests[0].max_output_bytes,
-        crate::capabilities::execution::SPILL_RETENTION_MAX_BYTES
+        verlet_vbash::SPILL_RETENTION_MAX_BYTES
     );
     assert_eq!(
         requests[0].invocation,
-        crate::capabilities::execution::ExternalCommandInvocation::Argv {
+        verlet_process::execution::ExternalCommandInvocation::Argv {
             command: "cargo".to_string(),
             args: vec!["test".to_string()]
         }
@@ -836,11 +865,11 @@ async fn selective_proxy_routes_named_command_through_executor() {
 #[tokio::test]
 async fn selective_proxy_sub_cap_pipeline_matches_the_legacy_result() {
     let executor = std::sync::Arc::new(RecordingExternalExecutor::default());
-    let policy = crate::capabilities::execution::BashExecutionPolicy::selective([(
+    let policy = verlet_vbash::BashExecutionPolicy::selective([(
         "cargo",
-        crate::capabilities::execution::CommandRoute::RemoteLinux,
+        verlet_vbash::CommandRoute::RemoteLinux,
     )]);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default()
             .with_execution_policy(policy)
             .with_external_executor(executor),
@@ -863,11 +892,9 @@ async fn selective_proxy_sub_cap_pipeline_matches_the_legacy_result() {
 #[tokio::test]
 async fn selective_proxy_deny_does_not_invoke_executor() {
     let executor = std::sync::Arc::new(RecordingExternalExecutor::default());
-    let policy = crate::capabilities::execution::BashExecutionPolicy::selective([(
-        "cargo",
-        crate::capabilities::execution::CommandRoute::Deny,
-    )]);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let policy =
+        verlet_vbash::BashExecutionPolicy::selective([("cargo", verlet_vbash::CommandRoute::Deny)]);
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default()
             .with_execution_policy(policy)
             .with_external_executor(executor.clone()),
@@ -885,11 +912,9 @@ async fn selective_proxy_deny_does_not_invoke_executor() {
 #[tokio::test]
 async fn harness_execute_process_records_host_external_result_and_file_deltas() {
     let executor = std::sync::Arc::new(RecordingExternalExecutor::default());
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-            .with_execution_policy(
-                crate::capabilities::execution::BashExecutionPolicy::host_always(),
-            )
+            .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
             .with_external_executor(executor),
     )
     .await
@@ -898,7 +923,10 @@ async fn harness_execute_process_records_host_external_result_and_file_deltas() 
     let process = harness.execute_process("cargo test --lib").await.unwrap();
     let output = process.output();
 
-    assert_eq!(process.backend(), &crate::VerletProcessBackend::HostBash);
+    assert_eq!(
+        process.backend(),
+        &verlet_process::process::VerletProcessBackend::HostBash
+    );
     assert_eq!(output.stdout_text_lossy(), "host stdout\n");
     assert_eq!(output.stderr_text_lossy(), "host stderr\n");
     assert_eq!(output.exit_code(), Some(7));
@@ -916,11 +944,9 @@ async fn harness_execute_process_records_host_external_result_and_file_deltas() 
 #[tokio::test]
 async fn harness_execute_process_records_remote_linux_backend() {
     let executor = std::sync::Arc::new(RecordingExternalExecutor::default());
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-            .with_execution_policy(
-                crate::capabilities::execution::BashExecutionPolicy::remote_always(),
-            )
+            .with_execution_policy(verlet_vbash::BashExecutionPolicy::remote_always())
             .with_external_executor(executor.clone()),
     )
     .await
@@ -929,39 +955,40 @@ async fn harness_execute_process_records_remote_linux_backend() {
     let process = harness.execute_process("uname -a").await.unwrap();
     let output = process.output();
 
-    assert_eq!(process.backend(), &crate::VerletProcessBackend::RemoteLinux);
+    assert_eq!(
+        process.backend(),
+        &verlet_process::process::VerletProcessBackend::RemoteLinux
+    );
     assert_eq!(output.stdout_text_lossy(), "remote stdout\n");
     let requests = executor.requests.lock().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].executor,
-        crate::capabilities::execution::ExternalExecutorKind::RemoteLinux
+        verlet_process::execution::ExternalExecutorKind::RemoteLinux
     );
     assert_eq!(
         requests[0].max_output_bytes,
-        crate::capabilities::execution::SPILL_RETENTION_MAX_BYTES
+        verlet_vbash::SPILL_RETENTION_MAX_BYTES
     );
     assert_eq!(
         requests[0].invocation,
-        crate::capabilities::execution::ExternalCommandInvocation::Script("uname -a".to_string())
+        verlet_process::execution::ExternalCommandInvocation::Script("uname -a".to_string())
     );
 }
 
 struct SlowDeadlineExecutor;
 
 #[async_trait::async_trait]
-impl crate::capabilities::execution::ExternalCommandExecutor for SlowDeadlineExecutor {
+impl verlet_process::execution::ExternalCommandExecutor for SlowDeadlineExecutor {
     async fn exec(
         &self,
-        request: crate::capabilities::execution::ExternalCommandRequest,
-    ) -> crate::capabilities::execution::VerletProcessResult<
-        crate::capabilities::execution::ExternalCommandResult,
-    > {
+        request: verlet_process::execution::ExternalCommandRequest,
+    ) -> verlet_process::VerletProcessResult<verlet_process::execution::ExternalCommandResult> {
         let slow = tokio::time::sleep(std::time::Duration::from_secs(60));
         match tokio::time::timeout(request.deadline.remaining(), slow).await {
             Ok(_) => unreachable!("slow executor should outlive the deadline"),
-            Err(_) => Ok(crate::capabilities::execution::ExternalCommandResult::new(
-                crate::capabilities::execution::VirtualCommandOutput {
+            Err(_) => Ok(verlet_process::execution::ExternalCommandResult::new(
+                verlet_process::execution::VirtualCommandOutput {
                     stdout: String::new(),
                     stderr: "host bash exec timed out\n".to_string(),
                     exit_code: 124,
@@ -995,15 +1022,11 @@ impl SerialNonObservingExternalExecutor {
 }
 
 #[async_trait::async_trait]
-impl crate::capabilities::execution::ExternalCommandExecutor
-    for SerialNonObservingExternalExecutor
-{
+impl verlet_process::execution::ExternalCommandExecutor for SerialNonObservingExternalExecutor {
     async fn exec(
         &self,
-        request: crate::capabilities::execution::ExternalCommandRequest,
-    ) -> crate::capabilities::execution::VerletProcessResult<
-        crate::capabilities::execution::ExternalCommandResult,
-    > {
+        request: verlet_process::execution::ExternalCommandRequest,
+    ) -> verlet_process::VerletProcessResult<verlet_process::execution::ExternalCommandResult> {
         let order = self
             .started
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1017,8 +1040,8 @@ impl crate::capabilities::execution::ExternalCommandExecutor
             }
         }
         let label = request.label();
-        Ok(crate::capabilities::execution::ExternalCommandResult::new(
-            crate::capabilities::execution::VirtualCommandOutput {
+        Ok(verlet_process::execution::ExternalCommandResult::new(
+            verlet_process::execution::VirtualCommandOutput {
                 stdout: format!("{label}\n").repeat(4_000),
                 stderr: String::new(),
                 exit_code: 0,
@@ -1042,7 +1065,7 @@ async fn abandoned_bash_invocation_keeps_the_harness_mutex_and_serializes_the_ne
             max_output_bytes: 64,
             ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         }
-        .with_execution_policy(crate::capabilities::execution::BashExecutionPolicy::host_always())
+        .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
         .with_external_executor(executor.clone()),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
@@ -1052,13 +1075,13 @@ async fn abandoned_bash_invocation_keeps_the_harness_mutex_and_serializes_the_ne
         async move {
             provider
                 .invoke_tool_call_cancellable(
-                    crate::AgentKernelToolCall {
+                    crate::agent::agent_tool_router::AgentKernelToolCall {
                         call_id: "call-abandoned".to_string(),
-                        tool_name: crate::capabilities::execution::BASH_TOOL.to_string(),
+                        tool_name: verlet_vbash::BASH_TOOL.to_string(),
                         arguments: serde_json::json!({"command": "first"}),
                         turn_context: None,
                     },
-                    crate::ToolInvocationCancellation::new(
+                    crate::agent::agent_tool_router::ToolInvocationCancellation::new(
                         cancellation,
                         std::time::Duration::from_millis(10),
                     ),
@@ -1071,12 +1094,14 @@ async fn abandoned_bash_invocation_keeps_the_harness_mutex_and_serializes_the_ne
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
     tokio::task::yield_now().await;
 
-    let mut second = std::pin::pin!(provider.invoke_tool_call(crate::AgentKernelToolCall {
-        call_id: "call-abandoned".to_string(),
-        tool_name: crate::capabilities::execution::BASH_TOOL.to_string(),
-        arguments: serde_json::json!({"command": "second"}),
-        turn_context: None,
-    }));
+    let mut second = std::pin::pin!(provider.invoke_tool_call(
+        crate::agent::agent_tool_router::AgentKernelToolCall {
+            call_id: "call-abandoned".to_string(),
+            tool_name: verlet_vbash::BASH_TOOL.to_string(),
+            arguments: serde_json::json!({"command": "second"}),
+            turn_context: None,
+        }
+    ));
     assert!(matches!(
         futures_util::poll!(&mut second),
         std::task::Poll::Pending
@@ -1107,42 +1132,47 @@ async fn abandoned_bash_invocation_keeps_the_harness_mutex_and_serializes_the_ne
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn harness_execute_process_marks_external_timeout_from_shared_deadline() {
     let mut config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-        .with_execution_policy(crate::capabilities::execution::BashExecutionPolicy::host_always())
+        .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
         .with_external_executor(std::sync::Arc::new(SlowDeadlineExecutor));
     config.execution_timeout = std::time::Duration::from_millis(10);
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
     let process = harness.execute_process("sleep 60").await.unwrap();
     let output = process.output();
 
-    assert_eq!(process.backend(), &crate::VerletProcessBackend::HostBash);
+    assert_eq!(
+        process.backend(),
+        &verlet_process::process::VerletProcessBackend::HostBash
+    );
     assert_eq!(output.exit_code(), Some(124));
     assert!(matches!(
         output.terminal,
-        Some(crate::VerletProcessTerminalState::TimedOut { .. })
+        Some(verlet_process::process::VerletProcessTerminalState::TimedOut { .. })
     ));
 }
 
 #[tokio::test]
 async fn async_manager_wraps_bashkit_backend_without_stdin_sink() {
-    let manager = crate::AsyncExecutionManager::default();
-    let backend: std::sync::Arc<dyn crate::LiveProcessBackend> =
-        std::sync::Arc::new(crate::capabilities::execution::BashkitLiveBackend::new(
+    let manager = verlet_process::live::AsyncExecutionManager::default();
+    let backend: std::sync::Arc<dyn verlet_process::live::LiveProcessBackend> =
+        std::sync::Arc::new(verlet_vbash::harness::BashkitLiveBackend::new(
             crate::capabilities::execution::VirtualBashRuntimeConfig::default(),
         ));
-    let request = crate::AsyncProcessStartRequest::virtual_bash_script("sleep 0.05; echo done")
-        .with_deadline(crate::capabilities::execution::ExecutionDeadline::from_now(
-            std::time::Duration::from_secs(1),
-        ))
-        .with_yield_time(std::time::Duration::from_millis(5))
-        .with_output_cap_bytes(1024);
+    let request = verlet_process::live::AsyncProcessStartRequest::virtual_bash_script(
+        "sleep 0.05; echo done",
+    )
+    .with_deadline(verlet_process::execution::ExecutionDeadline::from_now(
+        std::time::Duration::from_secs(1),
+    ))
+    .with_yield_time(std::time::Duration::from_millis(5))
+    .with_output_cap_bytes(1024);
 
     let started = manager.start(backend, request).await.unwrap();
     assert_eq!(
         started.snapshot.status,
-        crate::ProcessSnapshotStatus::Running
+        verlet_process::live::ProcessSnapshotStatus::Running
     );
     let process_id = started.snapshot.process_id.unwrap();
 
@@ -1163,7 +1193,7 @@ async fn async_manager_wraps_bashkit_backend_without_stdin_sink() {
         .unwrap();
     assert_eq!(
         completed.snapshot.status,
-        crate::ProcessSnapshotStatus::Completed
+        verlet_process::live::ProcessSnapshotStatus::Completed
     );
     assert!(String::from_utf8_lossy(&completed.snapshot.stdout).contains("done"));
 }
@@ -1181,7 +1211,7 @@ async fn bash_tool_provider_exposes_process_handle_tools() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
 
-    assert!(names.contains(&crate::capabilities::execution::BASH_TOOL.to_string()));
+    assert!(names.contains(&verlet_vbash::BASH_TOOL.to_string()));
     assert!(names.contains(&crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string()));
     assert!(names.contains(&crate::capabilities::execution::WRITE_STDIN_TOOL.to_string()));
 }
@@ -1204,7 +1234,7 @@ async fn bash_tool_inline_result_keeps_the_legacy_wire_bytes() {
 
 #[tokio::test]
 async fn inline_stream_keeps_the_legacy_lossy_utf8_conversion() {
-    let harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default(),
     )
     .await
@@ -1276,17 +1306,19 @@ async fn bash_tool_spills_complete_stdout_and_cat_round_trips_it() {
 async fn bash_tool_checks_manifest_grant_expiry_before_execution() {
     let provider = crate::capabilities::execution::BashToolProvider::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-            .with_capability_grant_expiries([crate::AgentManifestGrantExpiry {
-                capability: "fs.read:/workspace".to_string(),
-                expires_at: "1970-01-01T00:00:01Z".to_string(),
-            }]),
+            .with_capability_grant_expiries([
+                verlet_agent::manifest_schema::AgentManifestGrantExpiry {
+                    capability: "fs.read:/workspace".to_string(),
+                    expires_at: "1970-01-01T00:00:01Z".to_string(),
+                },
+            ]),
     );
 
     let err = provider
         .invoke_tool_call_at(
-            crate::AgentKernelToolCall {
+            crate::agent::agent_tool_router::AgentKernelToolCall {
                 call_id: "call_expired".to_string(),
-                tool_name: crate::capabilities::execution::BASH_TOOL.to_string(),
+                tool_name: verlet_vbash::BASH_TOOL.to_string(),
                 arguments: serde_json::json!({"command": "echo should-not-run"}),
                 turn_context: None,
             },
@@ -1332,10 +1364,10 @@ async fn bash_tool_spills_stderr_independently() {
 
 #[tokio::test]
 async fn bash_tool_spill_failure_returns_emergency_stub_without_failing_call() {
-    let root: std::sync::Arc<dyn crate::VerletVfsBackend> = std::sync::Arc::new(
-        crate::ReadOnlyFileSystem::new(std::sync::Arc::new(bashkit::InMemoryFs::new())),
+    let root: std::sync::Arc<dyn verlet_vfs::VerletVfsBackend> = std::sync::Arc::new(
+        verlet_vfs::ReadOnlyFileSystem::new(std::sync::Arc::new(bashkit::InMemoryFs::new())),
     );
-    let workspace_vfs = std::sync::Arc::new(crate::capabilities::vfs::VerletVfs::new(root));
+    let workspace_vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(root));
     let provider = crate::capabilities::execution::BashToolProvider::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig {
             max_output_bytes: 64,
@@ -1507,19 +1539,17 @@ struct RetentionCeilingExternalExecutor {
 }
 
 #[async_trait::async_trait]
-impl crate::capabilities::execution::ExternalCommandExecutor for RetentionCeilingExternalExecutor {
+impl verlet_process::execution::ExternalCommandExecutor for RetentionCeilingExternalExecutor {
     async fn exec(
         &self,
-        request: crate::capabilities::execution::ExternalCommandRequest,
-    ) -> crate::capabilities::execution::VerletProcessResult<
-        crate::capabilities::execution::ExternalCommandResult,
-    > {
+        request: verlet_process::execution::ExternalCommandRequest,
+    ) -> verlet_process::VerletProcessResult<verlet_process::execution::ExternalCommandResult> {
         self.requested_cap.store(
             request.max_output_bytes,
             std::sync::atomic::Ordering::SeqCst,
         );
-        Ok(crate::capabilities::execution::ExternalCommandResult::new(
-            crate::capabilities::execution::VirtualCommandOutput {
+        Ok(verlet_process::execution::ExternalCommandResult::new(
+            verlet_process::execution::VirtualCommandOutput {
                 stdout: "x".repeat(request.max_output_bytes),
                 stderr: String::new(),
                 exit_code: 0,
@@ -1540,7 +1570,7 @@ async fn retention_ceiling_truncation_still_spills_and_succeeds() {
             max_output_bytes: usize::MAX,
             ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         }
-        .with_execution_policy(crate::capabilities::execution::BashExecutionPolicy::host_always())
+        .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
         .with_external_executor(executor.clone()),
     );
 
@@ -1552,12 +1582,12 @@ async fn retention_ceiling_truncation_still_spills_and_succeeds() {
         executor
             .requested_cap
             .load(std::sync::atomic::Ordering::SeqCst),
-        crate::capabilities::execution::SPILL_RETENTION_MAX_BYTES
+        verlet_vbash::SPILL_RETENTION_MAX_BYTES
     );
     assert_eq!(result["stdout_truncated"], true);
     assert_eq!(
         result["spill"]["stdout"]["total_bytes"],
-        crate::capabilities::execution::SPILL_RETENTION_MAX_BYTES
+        verlet_vbash::SPILL_RETENTION_MAX_BYTES
     );
     assert_eq!(result["spill"]["stdout"]["retention_truncated"], true);
     assert!(
@@ -1575,7 +1605,7 @@ async fn retention_ceiling_truncation_still_spills_and_succeeds() {
             .await
             .unwrap()
             .len(),
-        crate::capabilities::execution::SPILL_RETENTION_MAX_BYTES
+        verlet_vbash::SPILL_RETENTION_MAX_BYTES
     );
 }
 
@@ -1622,7 +1652,7 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
     let (provider, turn_context) = process_test_provider();
 
     let started = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_process_start".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1642,7 +1672,7 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
     let process_id = started["process_id"].as_str().unwrap().to_string();
 
     let completed = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_process_poll".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1665,32 +1695,31 @@ async fn process_exec_tool_starts_and_polls_virtual_bash_handle() {
 #[cfg(unix)]
 #[tokio::test]
 async fn cancelling_a_process_poll_terminates_the_live_handle_and_returns_its_snapshot() {
-    let store: std::sync::Arc<dyn crate::RuntimeStore> =
-        std::sync::Arc::new(crate::InMemorySessionStore::new());
-    let coordinates = crate::ThreadCoordinates::new("tenant", "user", "process-cancel");
+    let store: std::sync::Arc<dyn verlet_history::RuntimeStore> =
+        std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "process-cancel");
     let dispatcher = crate::kernel::process_handle_dispatch::test_process_dispatcher(
         std::sync::Arc::clone(&store),
         coordinates.clone(),
     );
-    let turn_context = crate::TurnContext::new(
-        crate::ThreadContext::root(coordinates),
+    let turn_context = crate::kernel::runtime_host::turn::TurnContext::new(
+        verlet_runtime_contracts::ThreadContext::root(coordinates),
         "process-cancel-turn",
-        &crate::TurnInput::text("process cancellation test"),
+        &crate::kernel::runtime_host::turn::TurnInput::text("process cancellation test"),
         tokio_util::sync::CancellationToken::new(),
     )
     .snapshot();
     let provider = std::sync::Arc::new(
         crate::capabilities::execution::BashToolProvider::new(
             crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-                .with_execution_policy(
-                    crate::capabilities::execution::BashExecutionPolicy::host_always(),
-                )
+                .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
                 .with_host_bash_executor("/"),
         )
         .with_process_dispatcher(dispatcher),
     );
     let started = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_process_start_for_cancel".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1714,7 +1743,7 @@ async fn cancelling_a_process_poll_terminates_the_live_handle_and_returns_its_sn
         async move {
             provider
                 .invoke_tool_call_cancellable(
-                    crate::AgentKernelToolCall {
+                    crate::agent::agent_tool_router::AgentKernelToolCall {
                         call_id: "call_process_cancel_poll".to_string(),
                         tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
                         arguments: serde_json::json!({
@@ -1724,7 +1753,7 @@ async fn cancelling_a_process_poll_terminates_the_live_handle_and_returns_its_sn
                         }),
                         turn_context: None,
                     },
-                    crate::ToolInvocationCancellation::new(
+                    crate::agent::agent_tool_router::ToolInvocationCancellation::new(
                         cancellation,
                         std::time::Duration::from_secs(1),
                     ),
@@ -1735,7 +1764,7 @@ async fn cancelling_a_process_poll_terminates_the_live_handle_and_returns_its_sn
     tokio::task::yield_now().await;
     cancellation.cancel();
 
-    let crate::AgentKernelToolOutcome::Completed(Some(cancelled)) =
+    let crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed(Some(cancelled)) =
         tokio::time::timeout(std::time::Duration::from_secs(30), poll)
             .await
             .expect("cancelled process poll did not return promptly")
@@ -1755,7 +1784,7 @@ async fn process_exec_tool_spills_a_completed_initial_snapshot() {
     let (provider, turn_context) = process_test_provider();
 
     let completed = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_process_exec_spill".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1796,7 +1825,7 @@ async fn process_exec_tool_spills_a_completed_initial_snapshot() {
 async fn process_poll_tool_spills_the_complete_later_snapshot() {
     let (provider, turn_context) = process_test_provider();
     let started = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_process_start_for_spill".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1816,7 +1845,7 @@ async fn process_poll_tool_spills_the_complete_later_snapshot() {
     let process_id = started["process_id"].as_str().unwrap().to_string();
 
     let completed = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_process_poll_spill".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1854,7 +1883,7 @@ async fn process_poll_tool_spills_the_complete_later_snapshot() {
 async fn write_stdin_tool_reports_unsupported_for_virtual_bash_handle() {
     let (provider, turn_context) = process_test_provider();
     let started = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_process_start".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1872,7 +1901,7 @@ async fn write_stdin_tool_reports_unsupported_for_virtual_bash_handle() {
     let process_id = started["process_id"].as_str().unwrap().to_string();
 
     let unsupported = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_stdin".to_string(),
             tool_name: crate::capabilities::execution::WRITE_STDIN_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1897,22 +1926,22 @@ struct StdinOutputBackend {
 }
 
 #[async_trait::async_trait]
-impl crate::LiveProcessBackend for StdinOutputBackend {
-    fn backend_kind(&self) -> crate::VerletProcessBackend {
-        crate::VerletProcessBackend::VirtualBash
+impl verlet_process::live::LiveProcessBackend for StdinOutputBackend {
+    fn backend_kind(&self) -> verlet_process::process::VerletProcessBackend {
+        verlet_process::process::VerletProcessBackend::VirtualBash
     }
 
     async fn start(
         &self,
-        request: crate::LiveProcessStartRequest,
-        process: crate::VerletProcessHandle,
+        request: verlet_process::live::LiveProcessStartRequest,
+        process: verlet_process::process::VerletProcessHandle,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> crate::capabilities::execution::VerletProcessResult<crate::LiveProcessSpawn> {
+    ) -> verlet_process::VerletProcessResult<verlet_process::live::LiveProcessSpawn> {
         self.requested_cap.store(
             request.output_cap_bytes,
             std::sync::atomic::Ordering::SeqCst,
         );
-        process.record(crate::VerletProcessEventKind::Started {
+        process.record(verlet_process::process::VerletProcessEventKind::Started {
             command: Some("stdin-output-test".to_string()),
         });
         let (stdin, mut input) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
@@ -1920,23 +1949,23 @@ impl crate::LiveProcessBackend for StdinOutputBackend {
             tokio::select! {
                 delta = input.recv() => {
                     if delta.is_some() {
-                        process.record(crate::VerletProcessEventKind::Stdout {
+                        process.record(verlet_process::process::VerletProcessEventKind::Stdout {
                             bytes: vec![b'w'; 20_000],
                         });
-                        process.record(crate::VerletProcessEventKind::Completed {
-                            status: crate::VerletProcessExitStatus::exited(0),
+                        process.record(verlet_process::process::VerletProcessEventKind::Completed {
+                            status: verlet_process::process::VerletProcessExitStatus::exited(0),
                         });
                     }
                 }
                 _ = cancellation.cancelled() => {
-                    process.record(crate::VerletProcessEventKind::Cancelled {
+                    process.record(verlet_process::process::VerletProcessEventKind::Cancelled {
                         reason: "cancelled".to_string(),
                     });
                 }
             }
             Ok(())
         });
-        Ok(crate::LiveProcessSpawn {
+        Ok(verlet_process::live::LiveProcessSpawn {
             stdin: Some(stdin),
             join,
         })
@@ -1952,7 +1981,7 @@ async fn write_stdin_snapshot_uses_the_shared_spill_and_retention_bounds() {
     });
 
     let started = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_stdin_start".to_string(),
             tool_name: crate::capabilities::execution::PROCESS_EXEC_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1971,7 +2000,7 @@ async fn write_stdin_snapshot_uses_the_shared_spill_and_retention_bounds() {
     let process_id = started["process_id"].as_str().unwrap();
 
     let written = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_stdin_spill".to_string(),
             tool_name: crate::capabilities::execution::WRITE_STDIN_TOOL.to_string(),
             arguments: serde_json::json!({
@@ -1990,7 +2019,7 @@ async fn write_stdin_snapshot_uses_the_shared_spill_and_retention_bounds() {
     assert!(!is_error, "{written}");
     assert_eq!(
         requested_cap.load(std::sync::atomic::Ordering::SeqCst),
-        crate::capabilities::execution::SPILL_RETENTION_MAX_BYTES
+        verlet_vbash::SPILL_RETENTION_MAX_BYTES
     );
     assert_eq!(written["status"], "completed");
     assert_eq!(
@@ -2008,15 +2037,13 @@ async fn write_stdin_snapshot_uses_the_shared_spill_and_retention_bounds() {
 struct EscapingExternalExecutor;
 
 #[async_trait::async_trait]
-impl crate::capabilities::execution::ExternalCommandExecutor for EscapingExternalExecutor {
+impl verlet_process::execution::ExternalCommandExecutor for EscapingExternalExecutor {
     async fn exec(
         &self,
-        _request: crate::capabilities::execution::ExternalCommandRequest,
-    ) -> crate::capabilities::execution::VerletProcessResult<
-        crate::capabilities::execution::ExternalCommandResult,
-    > {
-        Ok(crate::capabilities::execution::ExternalCommandResult::new(
-            crate::capabilities::execution::VirtualCommandOutput {
+        _request: verlet_process::execution::ExternalCommandRequest,
+    ) -> verlet_process::VerletProcessResult<verlet_process::execution::ExternalCommandResult> {
+        Ok(verlet_process::execution::ExternalCommandResult::new(
+            verlet_process::execution::VirtualCommandOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
@@ -2024,7 +2051,7 @@ impl crate::capabilities::execution::ExternalCommandExecutor for EscapingExterna
                 stderr_truncated: false,
             },
         )
-        .with_file_write(crate::capabilities::execution::ExternalFileWrite::new(
+        .with_file_write(verlet_process::execution::ExternalFileWrite::new(
             "/workspace/../escape.txt",
             "bad\n",
         )))
@@ -2033,11 +2060,9 @@ impl crate::capabilities::execution::ExternalCommandExecutor for EscapingExterna
 
 #[tokio::test]
 async fn harness_rejects_external_file_writes_outside_normalized_vfs_paths() {
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-            .with_execution_policy(
-                crate::capabilities::execution::BashExecutionPolicy::host_always(),
-            )
+            .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
             .with_external_executor(std::sync::Arc::new(EscapingExternalExecutor)),
     )
     .await
@@ -2053,19 +2078,15 @@ async fn harness_uses_configured_mounts_instead_of_hardcoded_mounts() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/work"),
         mounts: vec![
-            crate::capabilities::execution::VirtualMount::writable("/work")
-                .with_file("seed.txt", "seed\n"),
-            crate::capabilities::execution::VirtualMount::readonly(
+            verlet_vbash::VirtualMount::writable("/work").with_file("seed.txt", "seed\n"),
+            verlet_vbash::VirtualMount::readonly(
                 "/docs",
-                vec![crate::capabilities::execution::VirtualFile::new(
-                    "guide.txt",
-                    "read me\n",
-                )],
+                vec![verlet_vbash::VirtualFile::new("guide.txt", "read me\n")],
             ),
         ],
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -2099,13 +2120,13 @@ async fn object_store_mount_has_read_your_writes_and_persists_final_state() {
     let prefix = "tenant-a/session-a";
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/s3"),
-        mounts: vec![crate::capabilities::execution::VirtualMount::object_store(
+        mounts: vec![verlet_vbash::VirtualMount::object_store(
             "/s3",
-            crate::capabilities::vfs::ObjectStoreMountConfig::shared(store.clone(), prefix),
+            verlet_vfs::ObjectStoreMountConfig::shared(store.clone(), prefix),
         )],
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -2129,7 +2150,7 @@ async fn object_store_mount_has_read_your_writes_and_persists_final_state() {
     assert!(output.stdout.contains("a.txt"));
     assert!(!output.stdout.contains("c.txt"));
     assert!(harness.mutations().iter().any(|mutation| {
-        mutation.kind == crate::VfsMutationKind::Write
+        mutation.kind == verlet_vfs::VfsMutationKind::Write
             && mutation.path == std::path::Path::new("/s3/docs/a.txt")
     }));
 
@@ -2154,13 +2175,13 @@ async fn object_store_mount_has_read_your_writes_and_persists_final_state() {
 
     let reload_config = crate::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/s3"),
-        mounts: vec![crate::capabilities::execution::VirtualMount::object_store(
+        mounts: vec![verlet_vbash::VirtualMount::object_store(
             "/s3",
-            crate::capabilities::vfs::ObjectStoreMountConfig::shared(store.clone(), prefix),
+            verlet_vfs::ObjectStoreMountConfig::shared(store.clone(), prefix),
         )],
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let mut reloaded = crate::capabilities::execution::BashkitExecutionHarness::new(reload_config)
+    let mut reloaded = verlet_vbash::harness::BashkitExecutionHarness::new(reload_config)
         .await
         .unwrap();
     let output = reloaded
@@ -2186,22 +2207,22 @@ async fn object_store_mounts_are_prefix_isolated_and_can_be_readonly() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/a"),
         mounts: vec![
-            crate::capabilities::execution::VirtualMount::object_store(
+            verlet_vbash::VirtualMount::object_store(
                 "/a",
-                crate::capabilities::vfs::ObjectStoreMountConfig::shared(store.clone(), "tenant-a"),
+                verlet_vfs::ObjectStoreMountConfig::shared(store.clone(), "tenant-a"),
             ),
-            crate::capabilities::execution::VirtualMount::object_store(
+            verlet_vbash::VirtualMount::object_store(
                 "/b",
-                crate::capabilities::vfs::ObjectStoreMountConfig::shared(store.clone(), "tenant-b"),
+                verlet_vfs::ObjectStoreMountConfig::shared(store.clone(), "tenant-b"),
             ),
-            crate::capabilities::execution::VirtualMount::readonly_object_store(
+            verlet_vbash::VirtualMount::readonly_object_store(
                 "/docs",
-                crate::capabilities::vfs::ObjectStoreMountConfig::shared(store.clone(), "readonly"),
+                verlet_vfs::ObjectStoreMountConfig::shared(store.clone(), "readonly"),
             ),
         ],
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let mut harness = crate::capabilities::execution::BashkitExecutionHarness::new(config)
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
         .await
         .unwrap();
 
@@ -2239,24 +2260,22 @@ async fn object_store_mounts_are_prefix_isolated_and_can_be_readonly() {
 async fn harness_rejects_bad_mount_config() {
     let duplicate = crate::capabilities::execution::VirtualBashRuntimeConfig {
         mounts: vec![
-            crate::capabilities::execution::VirtualMount::writable("/work"),
-            crate::capabilities::execution::VirtualMount::readonly("/work", Vec::new()),
+            verlet_vbash::VirtualMount::writable("/work"),
+            verlet_vbash::VirtualMount::readonly("/work", Vec::new()),
         ],
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let err = match crate::capabilities::execution::BashkitExecutionHarness::new(duplicate).await {
+    let err = match verlet_vbash::harness::BashkitExecutionHarness::new(duplicate).await {
         Ok(_) => panic!("duplicate mount config should fail"),
         Err(err) => err,
     };
     assert!(err.to_string().contains("duplicate virtual mount path"));
 
     let relative = crate::capabilities::execution::VirtualBashRuntimeConfig {
-        mounts: vec![crate::capabilities::execution::VirtualMount::writable(
-            "relative",
-        )],
+        mounts: vec![verlet_vbash::VirtualMount::writable("relative")],
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let err = match crate::capabilities::execution::BashkitExecutionHarness::new(relative).await {
+    let err = match verlet_vbash::harness::BashkitExecutionHarness::new(relative).await {
         Ok(_) => panic!("relative mount config should fail"),
         Err(err) => err,
     };
@@ -2265,20 +2284,20 @@ async fn harness_rejects_bad_mount_config() {
 
 #[tokio::test]
 async fn runtime_isolates_virtual_filesystems_by_thread() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
         crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let first = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant-a", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let second = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant-b", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant-b", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2286,19 +2305,27 @@ async fn runtime_isolates_virtual_filesystems_by_thread() {
     let mut second_events = second.subscribe_events();
 
     first
-        .send(crate::ThreadCommand::Submit {
-            turn_id: "one".to_string(),
-            input: crate::TurnInput::text("echo tenant-a > marker && cat marker"),
-            mode: crate::TurnSubmissionMode::Queue,
-        })
+        .send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                turn_id: "one".to_string(),
+                input: crate::kernel::runtime_host::turn::TurnInput::text(
+                    "echo tenant-a > marker && cat marker",
+                ),
+                mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+            },
+        )
         .await
         .unwrap();
     second
-        .send(crate::ThreadCommand::Submit {
-            turn_id: "two".to_string(),
-            input: crate::TurnInput::text("test ! -e marker && echo isolated"),
-            mode: crate::TurnSubmissionMode::Queue,
-        })
+        .send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                turn_id: "two".to_string(),
+                input: crate::kernel::runtime_host::turn::TurnInput::text(
+                    "test ! -e marker && echo isolated",
+                ),
+                mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+            },
+        )
         .await
         .unwrap();
 
@@ -2313,31 +2340,36 @@ async fn runtime_cancels_busy_virtual_bash_without_poisoning_thread() {
         max_output_bytes: 1024,
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
         crate::capabilities::execution::VirtualBashRuntimeFactory::new(config),
     ));
     let thread = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
 
     thread
-        .send(crate::ThreadCommand::Submit {
-            turn_id: "loop".to_string(),
-            input: crate::TurnInput::text("while true; do :; done"),
-            mode: crate::TurnSubmissionMode::Queue,
-        })
+        .send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                turn_id: "loop".to_string(),
+                input: crate::kernel::runtime_host::turn::TurnInput::text("while true; do :; done"),
+                mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+            },
+        )
         .await
         .unwrap();
     thread.cancel("stop loop").await.unwrap();
 
     let cancelled = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let crate::ThreadEvent::Cancelled { reason, .. } = events.recv().await.unwrap() {
+            if let crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                reason, ..
+            } = events.recv().await.unwrap()
+            {
                 break reason;
             }
         }
@@ -2347,11 +2379,15 @@ async fn runtime_cancels_busy_virtual_bash_without_poisoning_thread() {
     assert_eq!(cancelled, "stop loop");
 
     thread
-        .send(crate::ThreadCommand::Submit {
-            turn_id: "after".to_string(),
-            input: crate::TurnInput::text("echo ok > after.txt && cat after.txt"),
-            mode: crate::TurnSubmissionMode::Queue,
-        })
+        .send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                turn_id: "after".to_string(),
+                input: crate::kernel::runtime_host::turn::TurnInput::text(
+                    "echo ok > after.txt && cat after.txt",
+                ),
+                mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+            },
+        )
         .await
         .unwrap();
     assert!(expect_output(&mut events).await.contains("ok"));
@@ -2365,33 +2401,38 @@ async fn runtime_cancels_busy_virtual_bash_with_operation_registry_and_recovers(
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
             .with_operation_registry(echo_operation_registry().await)
     };
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
         crate::capabilities::execution::VirtualBashRuntimeFactory::new(config),
     ));
     let thread = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
 
     thread
-        .send(crate::ThreadCommand::Submit {
-            turn_id: "loop-after-op".to_string(),
-            input: crate::TurnInput::text(
-                "echo before | verlet run echoer echo && while true; do :; done",
-            ),
-            mode: crate::TurnSubmissionMode::Queue,
-        })
+        .send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                turn_id: "loop-after-op".to_string(),
+                input: crate::kernel::runtime_host::turn::TurnInput::text(
+                    "echo before | verlet run echoer echo && while true; do :; done",
+                ),
+                mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+            },
+        )
         .await
         .unwrap();
     thread.cancel("stop projected process").await.unwrap();
 
     let cancelled = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let crate::ThreadEvent::Cancelled { reason, .. } = events.recv().await.unwrap() {
+            if let crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                reason, ..
+            } = events.recv().await.unwrap()
+            {
                 break reason;
             }
         }
@@ -2401,11 +2442,15 @@ async fn runtime_cancels_busy_virtual_bash_with_operation_registry_and_recovers(
     assert_eq!(cancelled, "stop projected process");
 
     thread
-        .send(crate::ThreadCommand::Submit {
-            turn_id: "after-projected-cancel".to_string(),
-            input: crate::TurnInput::text("echo after | verlet run echoer echo"),
-            mode: crate::TurnSubmissionMode::Queue,
-        })
+        .send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                turn_id: "after-projected-cancel".to_string(),
+                input: crate::kernel::runtime_host::turn::TurnInput::text(
+                    "echo after | verlet run echoer echo",
+                ),
+                mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+            },
+        )
         .await
         .unwrap();
     assert!(expect_output(&mut events).await.contains("op:after"));
@@ -2418,13 +2463,13 @@ async fn runtime_does_not_project_agent_process_as_virtual_bash_processes() {
         max_output_bytes: 4096,
         ..crate::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
         crate::capabilities::execution::VirtualBashRuntimeFactory::new(config),
     ));
     let thread = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();

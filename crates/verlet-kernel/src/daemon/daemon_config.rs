@@ -63,16 +63,15 @@ impl Default for VerletDaemonConfig {
 }
 
 impl VerletDaemonConfig {
-    pub fn validate(&self) -> crate::VerletResult<()> {
+    pub fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         let errors = self.validation_errors();
         if errors.is_empty() {
             return Ok(());
         }
 
-        Err(crate::VerletError::RuntimeFactory(format!(
-            "invalid Verlet daemon config:\n- {}",
-            errors.join("\n- ")
-        )))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("invalid Verlet daemon config:\n- {}", errors.join("\n- ")),
+        ))
     }
 
     pub fn validation_errors(&self) -> Vec<String> {
@@ -124,8 +123,8 @@ impl VerletDaemonConfig {
     fn resolve_paths(&mut self, base: &std::path::Path) {
         self.app_server.resolve_paths(base);
         if let Some(listen) = self.sync.listen.as_deref()
-            && let Ok(crate::AppServerListenAddr::Unix(path)) =
-                crate::AppServerListenAddr::parse(listen)
+            && let Ok(crate::adapters::app_server::AppServerListenAddr::Unix(path)) =
+                crate::adapters::app_server::AppServerListenAddr::parse(listen)
             && path.is_relative()
         {
             self.sync.listen = Some(unix_listen_url(resolve_config_path(base, path)));
@@ -170,11 +169,11 @@ pub struct VerletRuntimeConfig {
     /// Default placement applied to manifest binds unless an operator bind
     /// surface supplies an override. Absent means local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placement: Option<crate::AgentManifestPlacementBinding>,
+    pub placement: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
     /// Default host workspace binding applied to a manifest that declares a
     /// workspace requirement. Bind-time RPC input may override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<crate::AgentManifestWorkspaceBinding>,
+    pub workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -223,12 +222,16 @@ impl Default for VerletDaemonAppServerConfig {
 }
 
 impl VerletDaemonAppServerConfig {
-    pub fn listen_addr(&self) -> crate::VerletResult<crate::AppServerListenAddr> {
-        crate::AppServerListenAddr::parse(&self.listen)
+    pub fn listen_addr(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::app_server::AppServerListenAddr>
+    {
+        crate::adapters::app_server::AppServerListenAddr::parse(&self.listen)
     }
 
     fn resolve_paths(&mut self, base: &std::path::Path) {
-        let Ok(crate::AppServerListenAddr::Unix(path)) = self.listen_addr() else {
+        let Ok(crate::adapters::app_server::AppServerListenAddr::Unix(path)) = self.listen_addr()
+        else {
             return;
         };
         if path.is_relative() {
@@ -448,7 +451,7 @@ impl VerletIoRouteConfig {
                     "io.routes.{}.agent_ref must be an agent:// ref",
                     self.id
                 ));
-            } else if let Err(err) = crate::AgentRecordRef::parse(agent_ref) {
+            } else if let Err(err) = crate::agent::manifest::AgentRecordRef::parse(agent_ref) {
                 errors.push(format!(
                     "io.routes.{}.agent_ref must be an agent:// ref: {err}",
                     self.id
@@ -694,7 +697,7 @@ impl VerletTelegramRouteConfig {
         }
     }
 
-    pub fn secret_token_value(&self) -> crate::VerletResult<Option<String>> {
+    pub fn secret_token_value(&self) -> crate::kernel::runtime_host::VerletResult<Option<String>> {
         resolve_optional_secret(
             "telegram secret_token",
             &self.secret_token,
@@ -702,7 +705,7 @@ impl VerletTelegramRouteConfig {
         )
     }
 
-    pub fn bot_token_value(&self) -> crate::VerletResult<Option<String>> {
+    pub fn bot_token_value(&self) -> crate::kernel::runtime_host::VerletResult<Option<String>> {
         resolve_optional_secret("telegram bot_token", &self.bot_token, &self.bot_token_env)
     }
 }
@@ -714,13 +717,13 @@ pub enum VerletDaemonServiceTarget {
 }
 
 impl VerletDaemonServiceTarget {
-    pub fn parse(value: &str) -> crate::VerletResult<Self> {
+    pub fn parse(value: &str) -> crate::kernel::runtime_host::VerletResult<Self> {
         match value {
             "launchd" | "macos" | "darwin" => Ok(Self::Launchd),
             "systemd" | "linux" => Ok(Self::Systemd),
-            other => Err(crate::VerletError::RuntimeFactory(format!(
-                "unknown daemon service target {other:?}; expected launchd or systemd"
-            ))),
+            other => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("unknown daemon service target {other:?}; expected launchd or systemd"),
+            )),
         }
     }
 }
@@ -756,7 +759,7 @@ impl VerletDaemonServiceSpec {
 
 pub fn load_verlet_daemon_config(
     path: Option<&std::path::Path>,
-) -> crate::VerletResult<LoadedVerletDaemonConfig> {
+) -> crate::kernel::runtime_host::VerletResult<LoadedVerletDaemonConfig> {
     match path {
         Some(path) => load_verlet_daemon_config_layers(
             &[path.to_path_buf()],
@@ -766,7 +769,7 @@ pub fn load_verlet_daemon_config(
         ),
         None => {
             let cwd = std::env::current_dir().map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to read current working directory: {err}"
                 ))
             })?;
@@ -786,7 +789,7 @@ pub fn load_verlet_daemon_config(
 pub fn load_verlet_daemon_config_layers(
     paths: &[std::path::PathBuf],
     fallback_base_dir: std::path::PathBuf,
-) -> crate::VerletResult<LoadedVerletDaemonConfig> {
+) -> crate::kernel::runtime_host::VerletResult<LoadedVerletDaemonConfig> {
     let mut config = VerletDaemonConfig::default();
     let mut loaded_path = None;
     let mut loaded_base_dir = fallback_base_dir;
@@ -815,12 +818,13 @@ pub fn load_verlet_daemon_config_layers(
 }
 
 pub fn default_verlet_daemon_socket_path() -> std::path::PathBuf {
-    default_daemon_socket_path_from_env(|key| crate::env_compat::var_os(key))
+    default_daemon_socket_path_from_env(|key| verlet_runtime_contracts::env_compat::var_os(key))
 }
 
-pub fn discover_verlet_daemon_config_path() -> crate::VerletResult<Option<std::path::PathBuf>> {
+pub fn discover_verlet_daemon_config_path()
+-> crate::kernel::runtime_host::VerletResult<Option<std::path::PathBuf>> {
     let cwd = std::env::current_dir().map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to read current working directory: {err}"
         ))
     })?;
@@ -829,20 +833,20 @@ pub fn discover_verlet_daemon_config_path() -> crate::VerletResult<Option<std::p
 
 pub fn discover_verlet_project(
     start: &std::path::Path,
-) -> crate::VerletResult<VerletProjectDiscovery> {
+) -> crate::kernel::runtime_host::VerletResult<VerletProjectDiscovery> {
     discover_verlet_project_with_warning(start, |warning| eprintln!("{warning}"))
 }
 
 fn discover_verlet_project_with_warning(
     start: &std::path::Path,
     mut warn: impl FnMut(&str),
-) -> crate::VerletResult<VerletProjectDiscovery> {
+) -> crate::kernel::runtime_host::VerletResult<VerletProjectDiscovery> {
     let mut start = if start.is_absolute() {
         start.to_path_buf()
     } else {
         std::env::current_dir()
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to read current working directory: {err}"
                 ))
             })?
@@ -966,9 +970,13 @@ struct ProviderPresence {
     env_file: bool,
 }
 
-fn daemon_config_presence(text: &str) -> crate::VerletResult<DaemonConfigPresence> {
+fn daemon_config_presence(
+    text: &str,
+) -> crate::kernel::runtime_host::VerletResult<DaemonConfigPresence> {
     let root: toml::Table = toml::from_str(text).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to parse Verlet daemon config: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to parse Verlet daemon config: {err}"
+        ))
     })?;
     let table = root
         .get("daemon")
@@ -1136,7 +1144,7 @@ pub fn render_verlet_daemon_service(
 pub fn verlet_daemon_service_file_name(
     target: VerletDaemonServiceTarget,
     label: &str,
-) -> crate::VerletResult<String> {
+) -> crate::kernel::runtime_host::VerletResult<String> {
     validate_service_label(label)?;
     Ok(match target {
         VerletDaemonServiceTarget::Launchd => format!("{label}.plist"),
@@ -1147,10 +1155,12 @@ pub fn verlet_daemon_service_file_name(
 pub fn verlet_daemon_service_install_path(
     target: VerletDaemonServiceTarget,
     label: &str,
-) -> crate::VerletResult<std::path::PathBuf> {
-    let home = crate::env_compat::var_os("HOME")
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
+    let home = verlet_runtime_contracts::env_compat::var_os("HOME")
         .map(std::path::PathBuf::from)
-        .ok_or_else(|| crate::VerletError::RuntimeFactory("HOME is not set".to_string()))?;
+        .ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory("HOME is not set".to_string())
+        })?;
     verlet_daemon_service_install_path_for_home(target, label, &home)
 }
 
@@ -1158,14 +1168,16 @@ pub fn verlet_daemon_service_install_path_for_home(
     target: VerletDaemonServiceTarget,
     label: &str,
     home: &std::path::Path,
-) -> crate::VerletResult<std::path::PathBuf> {
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     let file_name = verlet_daemon_service_file_name(target, label)?;
     let dir = match target {
         VerletDaemonServiceTarget::Launchd => home.join("Library/LaunchAgents"),
-        VerletDaemonServiceTarget::Systemd => crate::env_compat::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"))
-            .join("systemd/user"),
+        VerletDaemonServiceTarget::Systemd => {
+            verlet_runtime_contracts::env_compat::var_os("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"))
+                .join("systemd/user")
+        }
     };
     Ok(dir.join(file_name))
 }
@@ -1173,18 +1185,18 @@ pub fn verlet_daemon_service_install_path_for_home(
 pub fn install_verlet_daemon_service(
     target: VerletDaemonServiceTarget,
     spec: &VerletDaemonServiceSpec,
-) -> crate::VerletResult<std::path::PathBuf> {
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     let path = verlet_daemon_service_install_path(target, &spec.label)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to create service directory {}: {err}",
                 parent.display()
             ))
         })?;
     }
     std::fs::write(&path, render_verlet_daemon_service(target, spec)).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to write service file {}: {err}",
             path.display()
         ))
@@ -1195,13 +1207,13 @@ pub fn install_verlet_daemon_service(
 pub fn uninstall_verlet_daemon_service(
     target: VerletDaemonServiceTarget,
     label: &str,
-) -> crate::VerletResult<Option<std::path::PathBuf>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<std::path::PathBuf>> {
     let path = verlet_daemon_service_install_path(target, label)?;
     if !path.exists() {
         return Ok(None);
     }
     std::fs::remove_file(&path).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to remove service file {}: {err}",
             path.display()
         ))
@@ -1209,7 +1221,9 @@ pub fn uninstall_verlet_daemon_service(
     Ok(Some(path))
 }
 
-fn decode_daemon_config(text: &str) -> crate::VerletResult<VerletDaemonConfig> {
+fn decode_daemon_config(
+    text: &str,
+) -> crate::kernel::runtime_host::VerletResult<VerletDaemonConfig> {
     #[derive(serde::Deserialize)]
     struct RootConfig {
         daemon: Option<VerletDaemonConfig>,
@@ -1223,29 +1237,36 @@ fn decode_daemon_config(text: &str) -> crate::VerletResult<VerletDaemonConfig> {
     decode_config::<VerletDaemonConfig>(text)
 }
 
-fn decode_config<T: serde::de::DeserializeOwned>(text: &str) -> crate::VerletResult<T> {
-    toml::from_str(text)
-        .map_err(|err| crate::VerletError::RuntimeFactory(format!("invalid TOML config: {err}")))
+fn decode_config<T: serde::de::DeserializeOwned>(
+    text: &str,
+) -> crate::kernel::runtime_host::VerletResult<T> {
+    toml::from_str(text).map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "invalid TOML config: {err}"
+        ))
+    })
 }
 
-fn read_config_text(path: &std::path::Path) -> crate::VerletResult<String> {
+fn read_config_text(path: &std::path::Path) -> crate::kernel::runtime_host::VerletResult<String> {
     std::fs::read_to_string(path).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to read Verlet config {}: {err}",
             path.display()
         ))
     })
 }
 
-fn validate_config_extension(path: Option<&std::path::Path>) -> crate::VerletResult<()> {
+fn validate_config_extension(
+    path: Option<&std::path::Path>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     match path
         .and_then(std::path::Path::extension)
         .and_then(|extension| extension.to_str())
     {
         Some("toml") | None => Ok(()),
-        Some(other) => Err(crate::VerletError::RuntimeFactory(format!(
-            "unsupported Verlet config extension {other:?}; expected .toml"
-        ))),
+        Some(other) => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("unsupported Verlet config extension {other:?}; expected .toml"),
+        )),
     }
 }
 
@@ -1274,18 +1295,20 @@ fn resolve_optional_secret(
     label: &str,
     literal: &Option<String>,
     env_name: &Option<String>,
-) -> crate::VerletResult<Option<String>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<String>> {
     if let Some(value) = literal {
         return Ok(Some(value.clone()));
     }
     let Some(env_name) = env_name else {
         return Ok(None);
     };
-    crate::env_compat::var(env_name).map(Some).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
-            "failed to read {label} from env {env_name}: {err}"
-        ))
-    })
+    verlet_runtime_contracts::env_compat::var(env_name)
+        .map(Some)
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to read {label} from env {env_name}: {err}"
+            ))
+        })
 }
 
 fn render_launchd_service(spec: &VerletDaemonServiceSpec) -> String {
@@ -1405,7 +1428,10 @@ fn unix_listen_url(path: impl AsRef<std::path::Path>) -> String {
 fn default_daemon_socket_path_from_env(
     get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> std::path::PathBuf {
-    if let Some(path) = crate::env_compat::var_os_with("VERLET_DAEMON_SOCKET", |name| get_env(name))
+    if let Some(path) =
+        verlet_runtime_contracts::env_compat::var_os_with("VERLET_DAEMON_SOCKET", |name| {
+            get_env(name)
+        })
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
     {
@@ -1533,9 +1559,9 @@ fn quote_systemd(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn validate_service_label(label: &str) -> crate::VerletResult<()> {
+fn validate_service_label(label: &str) -> crate::kernel::runtime_host::VerletResult<()> {
     if label.trim().is_empty() {
-        return Err(crate::VerletError::RuntimeFactory(
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "daemon service label cannot be empty".to_string(),
         ));
     }
@@ -1543,9 +1569,11 @@ fn validate_service_label(label: &str) -> crate::VerletResult<()> {
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "daemon service label {label:?} may only contain ASCII letters, numbers, '.', '_', and '-'"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "daemon service label {label:?} may only contain ASCII letters, numbers, '.', '_', and '-'"
+            ),
+        ));
     }
     Ok(())
 }

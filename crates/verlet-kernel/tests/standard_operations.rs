@@ -58,9 +58,11 @@ async fn json_query_empty_pointer_returns_whole_document() {
 
 #[tokio::test]
 async fn file_read_reads_from_vfs() {
-    let factory = verlet::WasmRuntimeFactory::new(
-        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(file_read_wasm()))
-            .with_vfs(read_test_vfs().await),
+    let factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            file_read_wasm(),
+        ))
+        .with_vfs(read_test_vfs().await),
     )
     .unwrap();
 
@@ -84,9 +86,11 @@ async fn file_read_reads_from_vfs() {
 
 #[tokio::test]
 async fn file_read_missing_file_returns_structured_error() {
-    let factory = verlet::WasmRuntimeFactory::new(
-        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(file_read_wasm()))
-            .with_vfs(read_test_vfs().await),
+    let factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            file_read_wasm(),
+        ))
+        .with_vfs(read_test_vfs().await),
     )
     .unwrap();
 
@@ -107,9 +111,11 @@ async fn file_read_missing_file_returns_structured_error() {
 
 #[tokio::test]
 async fn file_read_handles_zero_max_and_offset_past_eof() {
-    let factory = verlet::WasmRuntimeFactory::new(
-        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(file_read_wasm()))
-            .with_vfs(read_test_vfs().await),
+    let factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            file_read_wasm(),
+        ))
+        .with_vfs(read_test_vfs().await),
     )
     .unwrap();
 
@@ -155,9 +161,11 @@ async fn http_fetch_reads_from_local_server() {
     .await;
     let url = format!("{base_url}/fetch");
     let grant = format!("net.http.private:GET:{base_url}");
-    let factory = verlet::WasmRuntimeFactory::new(
-        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(http_fetch_wasm()))
-            .with_capability_grant(grant),
+    let factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            http_fetch_wasm(),
+        ))
+        .with_capability_grant(grant),
     )
     .unwrap();
 
@@ -187,9 +195,11 @@ async fn http_fetch_reads_from_local_server() {
 async fn http_fetch_reports_cap_edge_truncation() {
     let (zero_base_url, zero_server) = spawn_http_server("abc", vec![]).await;
     let zero_grant = format!("net.http.private:GET:{zero_base_url}");
-    let zero_factory = verlet::WasmRuntimeFactory::new(
-        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(http_fetch_wasm()))
-            .with_capability_grant(zero_grant),
+    let zero_factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            http_fetch_wasm(),
+        ))
+        .with_capability_grant(zero_grant),
     )
     .unwrap();
     let zero = zero_factory
@@ -209,9 +219,11 @@ async fn http_fetch_reports_cap_edge_truncation() {
 
     let (exact_base_url, exact_server) = spawn_http_server("abcd", vec![]).await;
     let exact_grant = format!("net.http.private:GET:{exact_base_url}");
-    let exact_factory = verlet::WasmRuntimeFactory::new(
-        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(http_fetch_wasm()))
-            .with_capability_grant(exact_grant),
+    let exact_factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            http_fetch_wasm(),
+        ))
+        .with_capability_grant(exact_grant),
     )
     .unwrap();
     let exact = exact_factory
@@ -246,9 +258,11 @@ async fn http_fetch_denied_origin_fails_closed() {
     assert_eq!(value["error"]["code"], "capability_denied");
 }
 
-fn standard_operation_factory(wasm: Vec<u8>) -> verlet::WasmRuntimeFactory {
-    verlet::WasmRuntimeFactory::new(verlet::WasmRuntimeConfig::new(
-        verlet::WasmRuntimeArtifact::bytes(wasm),
+fn standard_operation_factory(
+    wasm: Vec<u8>,
+) -> verlet::capabilities::wasm_runner::WasmRuntimeFactory {
+    verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(verlet_wasm::WasmRuntimeConfig::new(
+        verlet_wasm::WasmRuntimeArtifact::bytes(wasm),
     ))
     .unwrap()
 }
@@ -270,9 +284,11 @@ fn json_query_wasm() -> Vec<u8> {
 
 fn build_tool_wasm(name: &str) -> Vec<u8> {
     let root = workspace_root();
-    let build = verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(
-        root.join("tools").join(name),
-    ))
+    let build = verlet::operations::operation_builder::build_rust_wasm_module(
+        verlet::operations::operation_builder::RustWasmBuildOptions::new(
+            root.join("tools").join(name),
+        ),
+    )
     .unwrap_or_else(|err| panic!("failed to build {name} tool wasm: {err}"));
     std::fs::read(build.artifact_path)
         .unwrap_or_else(|err| panic!("failed to read {name} tool wasm artifact: {err}"))
@@ -286,13 +302,13 @@ fn workspace_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-async fn read_test_vfs() -> std::sync::Arc<verlet::VerletVfs> {
+async fn read_test_vfs() -> std::sync::Arc<verlet_vfs::VerletVfs> {
     let workspace = std::sync::Arc::new(bashkit::InMemoryFs::new());
     workspace
         .write_file(std::path::Path::new("/input.txt"), b"alpha beta gamma")
         .await
         .unwrap();
-    let vfs = std::sync::Arc::new(verlet::VerletVfs::new(std::sync::Arc::new(
+    let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
         bashkit::InMemoryFs::new(),
     )));
     vfs.mount("/workspace", workspace).unwrap();

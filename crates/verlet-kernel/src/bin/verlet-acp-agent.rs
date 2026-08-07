@@ -6,25 +6,28 @@ async fn main() {
     }
 }
 
-async fn run() -> verlet::VerletResult<()> {
+async fn run() -> verlet::kernel::runtime_host::VerletResult<()> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let config = parse_args(args)?;
-    verlet::serve_acp_stdio(tokio::io::stdin(), tokio::io::stdout(), config).await
+    verlet::adapters::acp_agent::serve_acp_stdio(tokio::io::stdin(), tokio::io::stdout(), config)
+        .await
 }
 
-fn parse_args(args: Vec<std::ffi::OsString>) -> verlet::VerletResult<verlet::VerletAcpAgentConfig> {
-    let mut config = verlet::VerletAcpAgentConfig::default();
-    if let Ok(socket) = verlet::env_compat::var("VERLET_DAEMON_SOCKET") {
+fn parse_args(
+    args: Vec<std::ffi::OsString>,
+) -> verlet::kernel::runtime_host::VerletResult<verlet::adapters::acp_agent::VerletAcpAgentConfig> {
+    let mut config = verlet::adapters::acp_agent::VerletAcpAgentConfig::default();
+    if let Ok(socket) = verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_SOCKET") {
         if !socket.trim().is_empty() {
             config.daemon_socket = std::path::PathBuf::from(socket);
         }
     }
-    if let Ok(listen) = verlet::env_compat::var("VERLET_DAEMON_LISTEN") {
+    if let Ok(listen) = verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_LISTEN") {
         if !listen.trim().is_empty() {
             config.daemon_socket = parse_unix_listen(&listen)?;
         }
     }
-    if let Ok(agent_ref) = verlet::env_compat::var("VERLET_ACP_AGENT_REF") {
+    if let Ok(agent_ref) = verlet_runtime_contracts::env_compat::var("VERLET_ACP_AGENT_REF") {
         if !agent_ref.trim().is_empty() {
             config.agent_ref = Some(agent_ref);
         }
@@ -73,13 +76,15 @@ fn parse_args(args: Vec<std::ffi::OsString>) -> verlet::VerletResult<verlet::Ver
 fn required_value(
     iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &str,
-) -> verlet::VerletResult<String> {
+) -> verlet::kernel::runtime_host::VerletResult<String> {
     iter.next()
         .map(|value| value.to_string_lossy().into_owned())
         .ok_or_else(|| usage_error(format!("{flag} requires a value")))
 }
 
-fn parse_unix_listen(value: &str) -> verlet::VerletResult<std::path::PathBuf> {
+fn parse_unix_listen(
+    value: &str,
+) -> verlet::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     let Some(path) = value.strip_prefix("unix://") else {
         return Err(usage_error(format!(
             "unsupported daemon listen address {value:?}; expected unix://PATH"
@@ -91,8 +96,8 @@ fn parse_unix_listen(value: &str) -> verlet::VerletResult<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(path))
 }
 
-fn usage_error(message: impl Into<String>) -> verlet::VerletError {
-    verlet::VerletError::RuntimeFactory(message.into())
+fn usage_error(message: impl Into<String>) -> verlet::kernel::runtime_host::VerletError {
+    verlet::kernel::runtime_host::VerletError::RuntimeFactory(message.into())
 }
 
 fn print_help() {

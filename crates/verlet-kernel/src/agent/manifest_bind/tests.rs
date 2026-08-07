@@ -1,5 +1,5 @@
 struct StaticToolUniverseDiscoverer {
-    discovery: crate::ToolUniverseDiscovery,
+    discovery: crate::agent::tool_universe::ToolUniverseDiscovery,
 }
 
 #[async_trait::async_trait]
@@ -7,32 +7,33 @@ impl crate::agent::tool_universe::ToolUniverseDiscoverer for StaticToolUniverseD
     async fn discover(
         &self,
         _server_ref: &str,
-    ) -> crate::VerletResult<crate::ToolUniverseDiscovery> {
+    ) -> crate::kernel::runtime_host::VerletResult<crate::agent::tool_universe::ToolUniverseDiscovery>
+    {
         Ok(self.discovery.clone())
     }
 }
 
 fn defaults_with_allow(
-    allow: Vec<crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey>,
-) -> crate::agent::manifest_schema::AgentManifestRuntimeDefaults {
-    crate::agent::manifest_schema::AgentManifestRuntimeDefaults {
+    allow: Vec<verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey>,
+) -> verlet_agent::manifest_schema::AgentManifestRuntimeDefaults {
+    verlet_agent::manifest_schema::AgentManifestRuntimeDefaults {
         default_cwd: "workspace".to_string(),
         streaming: true,
         max_tool_rounds: Some(
-            crate::agent::manifest_schema::AgentManifestMaxToolRounds::Limited(8),
+            verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Limited(8),
         ),
         turn_timeout_ms: Some(1000),
         cancellation_grace_ms: None,
-        compaction: crate::AgentManifestCompactionDefaults {
+        compaction: verlet_agent::manifest_schema::AgentManifestCompactionDefaults {
             auto_at_text_bytes: Some(500),
         },
-        overrides: crate::AgentManifestRuntimeOverridePolicy { allow },
+        overrides: verlet_agent::manifest_schema::AgentManifestRuntimeOverridePolicy { allow },
     }
 }
 
 #[test]
 fn runtime_overrides_are_denied_by_default() {
-    let defaults = crate::agent::manifest_schema::AgentManifestRuntimeDefaults::default();
+    let defaults = verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default();
     let overrides = crate::agent::manifest_bind::AgentManifestBindOverrides {
         streaming: Some(false),
         ..crate::agent::manifest_bind::AgentManifestBindOverrides::default()
@@ -48,15 +49,15 @@ fn runtime_overrides_are_denied_by_default() {
 #[test]
 fn runtime_overrides_apply_when_allowlisted() {
     let defaults = defaults_with_allow(vec![
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd,
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming,
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds,
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes,
+        verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd,
+        verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming,
+        verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds,
+        verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes,
     ]);
     let overrides = crate::agent::manifest_bind::AgentManifestBindOverrides {
         default_cwd: Some("repo".to_string()),
         streaming: Some(false),
-        max_tool_rounds: Some(crate::agent::manifest_schema::AgentManifestMaxToolRounds::Unlimited),
+        max_tool_rounds: Some(verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Unlimited),
         compaction_auto_at_text_bytes: Some(2048),
         ..crate::agent::manifest_bind::AgentManifestBindOverrides::default()
     };
@@ -68,7 +69,7 @@ fn runtime_overrides_apply_when_allowlisted() {
     assert!(!effective.streaming);
     assert_eq!(
         effective.max_tool_rounds,
-        Some(crate::agent::manifest_schema::AgentManifestMaxToolRounds::Unlimited)
+        Some(verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Unlimited)
     );
     assert_eq!(effective.compaction.auto_at_text_bytes, Some(2048));
     assert_eq!(
@@ -85,11 +86,11 @@ fn runtime_overrides_apply_when_allowlisted() {
 #[test]
 fn runtime_tool_round_override_is_allowlisted_and_validated() {
     let defaults = defaults_with_allow(vec![
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds,
+        verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds,
     ]);
     let finite = crate::agent::manifest_bind::AgentManifestBindOverrides {
         max_tool_rounds: Some(
-            crate::agent::manifest_schema::AgentManifestMaxToolRounds::Limited(64),
+            verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Limited(64),
         ),
         ..crate::agent::manifest_bind::AgentManifestBindOverrides::default()
     };
@@ -98,13 +99,13 @@ fn runtime_tool_round_override_is_allowlisted_and_validated() {
         crate::agent::manifest_bind::apply_runtime_overrides(&defaults, &finite).unwrap();
     assert_eq!(
         effective.max_tool_rounds,
-        Some(crate::agent::manifest_schema::AgentManifestMaxToolRounds::Limited(64))
+        Some(verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Limited(64))
     );
     assert_eq!(overridden_keys, vec!["max_tool_rounds".to_string()]);
 
     let invalid = crate::agent::manifest_bind::AgentManifestBindOverrides {
         max_tool_rounds: Some(
-            crate::agent::manifest_schema::AgentManifestMaxToolRounds::Limited(0),
+            verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Limited(0),
         ),
         ..crate::agent::manifest_bind::AgentManifestBindOverrides::default()
     };
@@ -117,15 +118,15 @@ fn runtime_tool_round_override_is_allowlisted_and_validated() {
         serde_json::from_value(serde_json::json!({"maxToolRounds": "unlimited"})).unwrap();
     assert_eq!(
         camel_case.max_tool_rounds,
-        Some(crate::agent::manifest_schema::AgentManifestMaxToolRounds::Unlimited)
+        Some(verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Unlimited)
     );
 }
 
 #[test]
 fn runtime_overrides_report_only_keys_that_changed() {
     let defaults = defaults_with_allow(vec![
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd,
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming,
+        verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd,
+        verlet_agent::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming,
     ]);
     let overrides = crate::agent::manifest_bind::AgentManifestBindOverrides {
         default_cwd: Some("repo".to_string()),
@@ -145,17 +146,17 @@ fn workspace_binding_resolution_is_declared_fail_closed_and_override_first() {
     let override_host = root.join("override");
     std::fs::create_dir_all(&default_host).unwrap();
     std::fs::create_dir_all(&override_host).unwrap();
-    let requirement = crate::agent::manifest_schema::AgentManifestWorkspaceRequirement {
+    let requirement = verlet_agent::manifest_schema::AgentManifestWorkspaceRequirement {
         guest_path: "/workspace".to_string(),
-        min_mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        min_mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
     let default_binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: default_host.clone(),
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
     let override_binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: override_host.clone(),
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
 
     let missing =
@@ -182,7 +183,7 @@ fn workspace_binding_resolution_is_declared_fail_closed_and_override_first() {
     );
     assert_eq!(
         resolved.mode,
-        crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite
+        verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite
     );
     let default_origin = crate::agent::manifest_bind::resolve_manifest_workspace_with_origin(
         Some(&requirement),
@@ -214,13 +215,13 @@ fn workspace_binding_resolution_is_declared_fail_closed_and_override_first() {
 fn workspace_binding_enforces_the_manifest_mode_floor() {
     let root = temp_dir("manifest-workspace-mode-floor");
     std::fs::create_dir_all(&root).unwrap();
-    let requirement = crate::agent::manifest_schema::AgentManifestWorkspaceRequirement {
+    let requirement = verlet_agent::manifest_schema::AgentManifestWorkspaceRequirement {
         guest_path: "/app".to_string(),
-        min_mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        min_mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
     let binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: root.clone(),
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadOnly,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadOnly,
     };
 
     let err = crate::agent::manifest_bind::resolve_manifest_workspace(
@@ -252,7 +253,7 @@ fn provider_and_model_refs_fail_closed() {
                 if provider == surface.provider_id {
                     Ok(())
                 } else {
-                    Err(crate::VerletError::RuntimeFactory(
+                    Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                         "unknown provider".to_string(),
                     ))
                 }
@@ -328,7 +329,7 @@ streaming = true
 "#,
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+    let record = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let surface =
@@ -361,7 +362,7 @@ async fn blob_static_source_binds_prompt_text_and_hash() {
     let blob_root = root.join("blobs");
     let prompt_path = root.join("system.md");
     std::fs::write(&prompt_path, "You are the release verifier.\n").unwrap();
-    let blob = crate::LocalBlobRegistry::new(&blob_root)
+    let blob = verlet_operations::blob_store::LocalBlobRegistry::new(&blob_root)
         .publish_file(&prompt_path, Some("system_prompt"))
         .unwrap();
     let manifest_path = root.join("blob.verlet.agent.toml");
@@ -396,11 +397,11 @@ input = "system_prompt"
 pinned = true
 "#,
             blob.ref_uri,
-            KERNEL_ASSEMBLER_STATIC = crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
+            KERNEL_ASSEMBLER_STATIC = verlet_agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
         ),
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+    let record = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let surface =
@@ -472,11 +473,11 @@ assembler = "{KERNEL_ASSEMBLER_STATIC}"
 input = "system_prompt"
 pinned = true
 "#,
-            KERNEL_ASSEMBLER_STATIC = crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
+            KERNEL_ASSEMBLER_STATIC = verlet_agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
         ),
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+    let record = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let surface =
@@ -522,7 +523,7 @@ async fn protocol_tool_import_requires_discovery_path() {
 
 #[tokio::test]
 async fn protocol_tool_import_binds_filtered_discovery() {
-    let discovery = crate::ToolUniverseDiscovery::witness(
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
         "mcp://arcade",
         vec![
             witnessed_tool("verlet_mcp_echo", "string"),
@@ -562,33 +563,41 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
         publish_multi_operation_record(&root, "direct-ops", &[("lookup", vec![])]).await;
     let witnessed = witnessed_tool("remote.lookup", "string");
     let pin = format!("mcptool://arcade/remote.lookup@{}", witnessed.schema_hash);
-    let discovery =
-        crate::ToolUniverseDiscovery::witness("mcp://arcade", vec![witnessed], 1).unwrap();
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
+        "mcp://arcade",
+        vec![witnessed],
+        1,
+    )
+    .unwrap();
     let discoverer = StaticToolUniverseDiscoverer { discovery };
     let tools = vec![
-        crate::agent::manifest_schema::AgentManifestTool::Bash(crate::AgentManifestBashTool {
-            id: "inspect".to_string(),
-            command: "inspect".to_string(),
-            operation_ref: format!(
-                "op://bash-ops/inspect@sha256:{}",
-                bash_record.active_artifact_hash
-            ),
-            effect_class: crate::agent::manifest_schema::EffectClass::Pure,
-            grants: Vec::new(),
-        }),
-        crate::agent::manifest_schema::AgentManifestTool::Direct(crate::AgentManifestDirectTool {
-            id: "lookup".to_string(),
-            tool_name: "lookup".to_string(),
-            operation_ref: format!(
-                "op://direct-ops/lookup@sha256:{}",
-                direct_record.active_artifact_hash
-            ),
-            effect_class: crate::agent::manifest_schema::EffectClass::Idempotent,
-            grants: Vec::new(),
-        }),
-        crate::agent::manifest_schema::AgentManifestTool::ProtocolImport(
-            crate::agent::manifest_schema::AgentManifestProtocolToolImport {
-                effect_class: crate::agent::manifest_schema::EffectClass::Pure,
+        verlet_agent::manifest_schema::AgentManifestTool::Bash(
+            verlet_agent::manifest_schema::AgentManifestBashTool {
+                id: "inspect".to_string(),
+                command: "inspect".to_string(),
+                operation_ref: format!(
+                    "op://bash-ops/inspect@sha256:{}",
+                    bash_record.active_artifact_hash
+                ),
+                effect_class: verlet_agent::manifest_schema::EffectClass::Pure,
+                grants: Vec::new(),
+            },
+        ),
+        verlet_agent::manifest_schema::AgentManifestTool::Direct(
+            verlet_agent::manifest_schema::AgentManifestDirectTool {
+                id: "lookup".to_string(),
+                tool_name: "lookup".to_string(),
+                operation_ref: format!(
+                    "op://direct-ops/lookup@sha256:{}",
+                    direct_record.active_artifact_hash
+                ),
+                effect_class: verlet_agent::manifest_schema::EffectClass::Idempotent,
+                grants: Vec::new(),
+            },
+        ),
+        verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(
+            verlet_agent::manifest_schema::AgentManifestProtocolToolImport {
+                effect_class: verlet_agent::manifest_schema::EffectClass::Pure,
                 ..protocol_import("mcp://arcade", None, Some(pin))
             },
         ),
@@ -611,7 +620,7 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
         .unwrap();
     assert_eq!(
         bash.effect_class,
-        crate::agent::manifest_schema::EffectClass::Pure
+        verlet_agent::manifest_schema::EffectClass::Pure
     );
     let direct = bound
         .operation_bindings
@@ -620,18 +629,18 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
         .unwrap();
     assert_eq!(
         direct.effect_class,
-        crate::agent::manifest_schema::EffectClass::Idempotent
+        verlet_agent::manifest_schema::EffectClass::Idempotent
     );
     assert_eq!(
         direct.direct_tools[0].effect_class,
-        crate::agent::manifest_schema::EffectClass::Idempotent
+        verlet_agent::manifest_schema::EffectClass::Idempotent
     );
     let universe = crate::agent::tool_universe::ToolUniverseBindReceipt::from_binding(
         &bound.tool_universes[0],
     );
     assert_eq!(
         universe.tools[0].effect_class,
-        crate::agent::manifest_schema::EffectClass::Pure
+        verlet_agent::manifest_schema::EffectClass::Pure
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -641,8 +650,12 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
 async fn protocol_tool_import_pin_drift_fails_bind_with_both_hashes() {
     let witnessed = witnessed_tool("verlet_mcp_echo", "string");
     let expected_hash = format!("sha256:{}", "f".repeat(64));
-    let discovery =
-        crate::ToolUniverseDiscovery::witness("mcp://arcade", vec![witnessed.clone()], 1).unwrap();
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
+        "mcp://arcade",
+        vec![witnessed.clone()],
+        1,
+    )
+    .unwrap();
     let discoverer = StaticToolUniverseDiscoverer { discovery };
     let tool = protocol_import(
         "mcp://arcade",
@@ -670,8 +683,12 @@ async fn protocol_tool_import_pin_missing_after_filter_is_drift() {
         .schema_hash
         .trim_start_matches("sha256:")
         .to_string();
-    let discovery =
-        crate::ToolUniverseDiscovery::witness("mcp://arcade", vec![witnessed], 1).unwrap();
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
+        "mcp://arcade",
+        vec![witnessed],
+        1,
+    )
+    .unwrap();
     let discoverer = StaticToolUniverseDiscoverer { discovery };
     let tool = protocol_import(
         "mcp://arcade",
@@ -698,8 +715,12 @@ async fn protocol_tool_import_rejects_pin_without_direct_exposure() {
         .schema_hash
         .trim_start_matches("sha256:")
         .to_string();
-    let discovery =
-        crate::ToolUniverseDiscovery::witness("mcp://arcade", vec![witnessed], 1).unwrap();
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
+        "mcp://arcade",
+        vec![witnessed],
+        1,
+    )
+    .unwrap();
     let discoverer = StaticToolUniverseDiscoverer { discovery };
     let mut tool = protocol_import(
         "mcp://arcade",
@@ -719,7 +740,7 @@ async fn protocol_tool_import_rejects_pin_without_direct_exposure() {
 
 #[tokio::test]
 async fn protocol_tool_import_rejects_discovery_server_ref_mismatch() {
-    let discovery = crate::ToolUniverseDiscovery::witness(
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
         "mcp://wrong",
         vec![witnessed_tool("verlet_mcp_echo", "string")],
         1,
@@ -742,18 +763,22 @@ async fn protocol_tool_import_direct_pins_must_not_duplicate_tool_rows() {
         .schema_hash
         .trim_start_matches("sha256:")
         .to_string();
-    let discovery =
-        crate::ToolUniverseDiscovery::witness("mcp://arcade", vec![witnessed], 1).unwrap();
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
+        "mcp://arcade",
+        vec![witnessed],
+        1,
+    )
+    .unwrap();
     let discoverer = StaticToolUniverseDiscoverer { discovery };
     let pin = format!("mcptool://arcade/verlet_mcp_echo@sha256:{pin_hash}");
-    let first = crate::agent::manifest_schema::AgentManifestTool::ProtocolImport(protocol_import(
+    let first = verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(protocol_import(
         "mcp://arcade",
         None,
         Some(pin.clone()),
     ));
     let mut second = protocol_import("mcp://arcade", None, Some(pin));
     second.id = "mcp_echo_two".to_string();
-    let second = crate::agent::manifest_schema::AgentManifestTool::ProtocolImport(second);
+    let second = verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(second);
 
     let result = crate::agent::manifest_bind::bind_tools(
         &[first, second],
@@ -788,9 +813,12 @@ async fn bind_receipt_keeps_each_pinned_universe_import_correspondence() {
         "mcptool://arcade/{}@{}",
         second_tool.tool_name, second_tool.schema_hash
     );
-    let discovery =
-        crate::ToolUniverseDiscovery::witness("mcp://arcade", vec![first_tool, second_tool], 1)
-            .unwrap();
+    let discovery = crate::agent::tool_universe::ToolUniverseDiscovery::witness(
+        "mcp://arcade",
+        vec![first_tool, second_tool],
+        1,
+    )
+    .unwrap();
     let discoverer = StaticToolUniverseDiscoverer { discovery };
     let record = publish_agent_manifest(
         &root,
@@ -910,7 +938,7 @@ streaming = false
         ),
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+    let record = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_root)
         .unwrap();
     let surface =
@@ -984,7 +1012,7 @@ streaming = false
 "#,
     )
     .unwrap();
-    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+    let record = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let surface =
@@ -1067,17 +1095,20 @@ async fn manifest_coupling_binds_controller_receipt() {
         coupling.role,
         crate::agent::manifest_bind::CouplingRole::Controller
     );
-    assert_eq!(coupling.trigger_kind, crate::EventKind::ToolCallRequested);
+    assert_eq!(
+        coupling.trigger_kind,
+        verlet_history::EventKind::ToolCallRequested
+    );
     assert_eq!(
         coupling.source_selectors[0].kinds,
-        vec![crate::EventKind::ToolCallRequested]
+        vec![verlet_history::EventKind::ToolCallRequested]
     );
     assert_eq!(coupling.sink.stream, "control");
     assert_eq!(
         coupling.sink.kinds,
         vec![
-            crate::EventKind::ToolCallSuspended,
-            crate::EventKind::ApprovalRequested
+            verlet_history::EventKind::ToolCallSuspended,
+            verlet_history::EventKind::ApprovalRequested
         ]
     );
     assert_eq!(
@@ -1125,7 +1156,7 @@ async fn manifest_coupling_binds_controller_receipt() {
             operation_name: Some("pre_tool_gate".to_string()),
             grants: vec!["thread.pause".to_string()],
             grant_expiries: Vec::new(),
-            budget: crate::agent::manifest_schema::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_ms: Some(250),
                 max_discharge_events: Some(4),
             },
@@ -1347,18 +1378,18 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
 #[test]
 fn manifest_coupling_source_sink_identity_fails_closed_at_bind() {
     let root = temp_dir("manifest-bind-coupling-identity");
-    let coupling = crate::agent::manifest_schema::AgentManifestCoupling {
+    let coupling = verlet_agent::manifest_schema::AgentManifestCoupling {
         id: "std::prompt.steer".to_string(),
         function_ref: format!("op://gate/check@sha256:{}", "a".repeat(64)),
         grants: Vec::new(),
-        trigger: crate::agent::manifest_schema::AgentManifestCouplingTrigger {
+        trigger: verlet_agent::manifest_schema::AgentManifestCouplingTrigger {
             kind: "turn.completed".to_string(),
             match_fields: std::collections::BTreeMap::new(),
-            quota: crate::agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
         },
-        source: crate::agent::manifest_schema::AgentManifestCouplingSource {
+        source: verlet_agent::manifest_schema::AgentManifestCouplingSource {
             selectors: vec![
-                crate::agent::manifest_schema::AgentManifestCouplingSelector {
+                verlet_agent::manifest_schema::AgentManifestCouplingSelector {
                     stream: "thread".to_string(),
                     kind: vec!["turn.completed".to_string()],
                     scope: None,
@@ -1366,11 +1397,11 @@ fn manifest_coupling_source_sink_identity_fails_closed_at_bind() {
                 },
             ],
         },
-        sink: crate::agent::manifest_schema::AgentManifestCouplingSink {
+        sink: verlet_agent::manifest_schema::AgentManifestCouplingSink {
             stream: "thread".to_string(),
             kind: vec!["loop.completed".to_string()],
         },
-        budget: crate::agent::manifest_schema::AgentManifestCouplingBudget::default(),
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget::default(),
         config: serde_json::Value::Null,
     };
 
@@ -1457,14 +1488,17 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
     let spawn_operation = publish_multi_operation_record(
         &operation_root,
         "stdlib_supervisor_spawn",
-        &[("run", vec![crate::THREADS_SPAWN_CAPABILITY])],
+        &[(
+            "run",
+            vec![crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY],
+        )],
     )
     .await;
     let surface =
         crate::agent::manifest_bind::AgentManifestProviderSurface::single("local_offline", "echo")
             .with_supports_streaming(false);
 
-    for template in crate::coupling_template_catalog_v1()
+    for template in crate::agent::coupling_templates::coupling_template_catalog_v1()
         .templates
         .into_iter()
         .filter(|template| template.runtime_executable)
@@ -1475,13 +1509,13 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
             &template.source.stream
         };
         let (function_ref, grant, policy) =
-            if template.id == crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID {
+            if template.id == crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID {
                 (
                     format!(
                         "op://stdlib_supervisor_spawn/run@sha256:{}",
                         spawn_operation.active_artifact_hash
                     ),
-                    crate::THREADS_SPAWN_CAPABILITY,
+                    crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY,
                     "\n[policies]\nallow_child_agents = true\n",
                 )
             } else {
@@ -1553,7 +1587,7 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
         crate::agent::manifest_bind::AgentManifestProviderSurface::single("local_offline", "echo")
             .with_supports_streaming(false);
 
-    let non_executable = crate::coupling_template_catalog_v1()
+    let non_executable = crate::agent::coupling_templates::coupling_template_catalog_v1()
         .templates
         .into_iter()
         .filter(|template| !template.runtime_executable)
@@ -1629,7 +1663,10 @@ async fn manifest_supervisor_spawn_coupling_honors_child_agent_policy() {
     let operation = publish_multi_operation_record(
         &operation_root,
         "stdlib_supervisor_spawn",
-        &[("run", vec![crate::THREADS_SPAWN_CAPABILITY])],
+        &[(
+            "run",
+            vec![crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY],
+        )],
     )
     .await;
     let surface =
@@ -1637,12 +1674,12 @@ async fn manifest_supervisor_spawn_coupling_honors_child_agent_policy() {
             .with_supports_streaming(false);
     let manifest = manifest_with_coupling(
         "blocked_supervisor_spawn",
-        crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
         &format!(
             "op://stdlib_supervisor_spawn/run@sha256:{}",
             operation.active_artifact_hash
         ),
-        crate::THREADS_SPAWN_CAPABILITY,
+        crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY,
         "turn.submitted",
         "thread",
         "turn.submitted",
@@ -1729,11 +1766,13 @@ Unicode description.
 Unicode body.
 "#,
     );
-    let package = crate::LocalSkillRegistry::new(&skill_root)
-        .publish_directory(crate::PublishSkillPackageRequest {
-            package_dir,
-            name: None,
-        })
+    let package = verlet_operations::skill_package::LocalSkillRegistry::new(&skill_root)
+        .publish_directory(
+            verlet_operations::skill_package::PublishSkillPackageRequest {
+                package_dir,
+                name: None,
+            },
+        )
         .unwrap();
     let record = publish_agent_manifest(
         &root,
@@ -1799,7 +1838,7 @@ ref = "{}"
     assert_eq!(segment.id, "skill-index:karl_skills");
     assert_eq!(
         segment.assembler,
-        crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
+        verlet_agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
     );
     assert_eq!(segment.input, "karl_skills");
     assert!(segment.pinned);
@@ -1829,11 +1868,12 @@ async fn imported_skill_omission_is_model_visible_at_bind() {
     .unwrap();
     std::fs::write(skill_dir.join("scripts/check.py"), "print('check')\n").unwrap();
     let skill_root = root.join("skills");
-    let plan = crate::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
+    let plan =
+        verlet_operations::skill_import::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
     let imported = plan
         .publish(
-            &crate::LocalSkillRegistry::new(&skill_root),
-            &crate::LocalBlobRegistry::new(root.join("blobs")),
+            &verlet_operations::skill_package::LocalSkillRegistry::new(&skill_root),
+            &verlet_operations::blob_store::LocalBlobRegistry::new(root.join("blobs")),
         )
         .unwrap();
     let record = publish_agent_manifest(
@@ -1885,12 +1925,14 @@ async fn floating_skill_resource_pins_latest_at_each_bind_and_preserves_prior_bi
         "alpha",
         "# Alpha\n\nFirst description.\n\nFirst body.\n",
     );
-    let registry = crate::LocalSkillRegistry::new(&skill_root);
+    let registry = verlet_operations::skill_package::LocalSkillRegistry::new(&skill_root);
     let first_package = registry
-        .publish_directory(crate::PublishSkillPackageRequest {
-            package_dir: package_dir.clone(),
-            name: None,
-        })
+        .publish_directory(
+            verlet_operations::skill_package::PublishSkillPackageRequest {
+                package_dir: package_dir.clone(),
+                name: None,
+            },
+        )
         .unwrap();
     let record = publish_agent_manifest(
         &root,
@@ -1941,10 +1983,12 @@ ref = "skill://karl-skills"
     )
     .unwrap();
     let second_package = registry
-        .publish_directory(crate::PublishSkillPackageRequest {
-            package_dir,
-            name: None,
-        })
+        .publish_directory(
+            verlet_operations::skill_package::PublishSkillPackageRequest {
+                package_dir,
+                name: None,
+            },
+        )
         .unwrap();
     assert_ne!(
         first_package.active_artifact_hash,
@@ -2068,11 +2112,13 @@ ref = "skill://missing-skills@sha256:{missing_hash}"
             "shared",
             &format!("# Shared\n\nDescription from {package_name}.\n"),
         );
-        crate::LocalSkillRegistry::new(&skill_root)
-            .publish_directory(crate::PublishSkillPackageRequest {
-                package_dir,
-                name: None,
-            })
+        verlet_operations::skill_package::LocalSkillRegistry::new(&skill_root)
+            .publish_directory(
+                verlet_operations::skill_package::PublishSkillPackageRequest {
+                    package_dir,
+                    name: None,
+                },
+            )
             .unwrap();
     }
     let duplicate = publish_agent_manifest(
@@ -2153,7 +2199,7 @@ discover = true
             .with_supports_streaming(false);
     let workspace_binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: workspace.clone(),
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
 
     let bound = crate::agent::manifest_bind::bind_published_agent_record_with_placement(
@@ -2198,7 +2244,7 @@ discover = true
     assert_eq!(segment.id, "skill-discovery-index");
     assert_eq!(
         segment.assembler,
-        crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
+        verlet_agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
     );
     assert_eq!(segment.input, ".agents/skills");
     assert!(segment.pinned);
@@ -2243,7 +2289,7 @@ path = "custom-skills"
         .with_supports_streaming(false);
         let workspace_binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
             host_path: workspace,
-            mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+            mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
         };
 
         let bound = crate::agent::manifest_bind::bind_published_agent_record_with_placement(
@@ -2309,7 +2355,7 @@ discover = true
             .with_supports_streaming(false);
     let workspace_binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: workspace.clone(),
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
 
     let err = crate::agent::manifest_bind::bind_published_agent_record_with_placement(
@@ -2342,11 +2388,13 @@ discover = true
         "shared",
         "# Shared\n\nRegistry-bound description.\n",
     );
-    crate::LocalSkillRegistry::new(&skill_registry_root)
-        .publish_directory(crate::PublishSkillPackageRequest {
-            package_dir,
-            name: None,
-        })
+    verlet_operations::skill_package::LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(
+            verlet_operations::skill_package::PublishSkillPackageRequest {
+                package_dir,
+                name: None,
+            },
+        )
         .unwrap();
     let record = publish_agent_manifest(
         &root,
@@ -2405,11 +2453,13 @@ async fn workspace_skill_discovery_rehydrate_rejects_a_registry_duplicate() {
         "shared",
         "# Shared\n\nRegistry-bound description.\n",
     );
-    crate::LocalSkillRegistry::new(&skill_registry_root)
-        .publish_directory(crate::PublishSkillPackageRequest {
-            package_dir,
-            name: None,
-        })
+    verlet_operations::skill_package::LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(
+            verlet_operations::skill_package::PublishSkillPackageRequest {
+                package_dir,
+                name: None,
+            },
+        )
         .unwrap();
     let record = publish_agent_manifest(
         &root,
@@ -2436,7 +2486,7 @@ ref = "skill://registry-package"
             .with_supports_streaming(false);
     let workspace_binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: workspace,
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
     let initial = crate::agent::manifest_bind::bind_published_agent_record_with_placement(
         &record,
@@ -2487,7 +2537,7 @@ ref = "skill://registry-package"
             Some(&initial.skill_packages),
             Some(&forged_discovery),
             true,
-            crate::kernel::history::now_ms(),
+            verlet_history::now_ms(),
         )
         .await
         .unwrap_err()
@@ -2641,7 +2691,7 @@ path = "."
             .with_supports_streaming(false);
     let workspace_binding = crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
         host_path: workspace,
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
 
     let bound = crate::agent::manifest_bind::bind_published_agent_record_with_placement(
@@ -2737,7 +2787,7 @@ fn workspace_skill_discovery_confines_each_symlink_layer() {
     let resolved_workspace = crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount {
         guest_path: std::path::PathBuf::from("/workspace"),
         host_path: std::fs::canonicalize(&workspace).unwrap(),
-        mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
     };
 
     let err = crate::agent::manifest_bind::discover_workspace_skills(
@@ -2829,21 +2879,25 @@ fn skill_binding_witness_comparison_is_order_independent_but_exact() {
 #[tokio::test]
 async fn operation_bind_requires_declared_grants() {
     let root = temp_dir("manifest-bind-grants");
-    let registry = crate::LocalOperationRegistry::new(&root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&root);
     let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
     let artifact = root.join("search.wasm");
     std::fs::write(&artifact, wasm).unwrap();
     let record = registry
-        .publish_artifact(crate::PublishOperationRequest {
-            name: "search".to_string(),
-            artifact_path: artifact.clone(),
-            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
-            interface: None,
-            capability_grants: std::collections::BTreeSet::from([
-                "net:https://example.com".to_string()
-            ]),
-            metadata: Default::default(),
-        })
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "search".to_string(),
+                artifact_path: artifact.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact,
+                },
+                interface: None,
+                capability_grants: std::collections::BTreeSet::from([
+                    "net:https://example.com".to_string()
+                ]),
+                metadata: Default::default(),
+            },
+        )
         .await
         .unwrap();
 
@@ -2879,7 +2933,7 @@ async fn operation_bind_requires_declared_grants() {
         vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
             name: "search".to_string(),
             artifact_hash: record.active_artifact_hash,
-            effect_class: crate::agent::manifest_schema::EffectClass::AtMostOnce,
+            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
             grant_expiries: Vec::new(),
             operations: Vec::new(),
@@ -2893,22 +2947,26 @@ async fn operation_bind_requires_declared_grants() {
 async fn bind_receipt_carries_future_expiry_and_excludes_expired_tool_rows() {
     let root = temp_dir("manifest-bind-grant-expiry");
     let operation_root = root.join("operations");
-    let registry = crate::LocalOperationRegistry::new(&operation_root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&operation_root);
     std::fs::create_dir_all(&operation_root).unwrap();
     let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
     let artifact = operation_root.join("search.wasm");
     std::fs::write(&artifact, wasm).unwrap();
     let operation = registry
-        .publish_artifact(crate::PublishOperationRequest {
-            name: "search".to_string(),
-            artifact_path: artifact.clone(),
-            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
-            interface: None,
-            capability_grants: std::collections::BTreeSet::from([
-                "net:https://example.com".to_string()
-            ]),
-            metadata: Default::default(),
-        })
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "search".to_string(),
+                artifact_path: artifact.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact,
+                },
+                interface: None,
+                capability_grants: std::collections::BTreeSet::from([
+                    "net:https://example.com".to_string()
+                ]),
+                metadata: Default::default(),
+            },
+        )
         .await
         .unwrap();
     let manifest = format!(
@@ -2929,7 +2987,7 @@ grants = [
     );
     let manifest_path = root.join("grant-expiry.verlet.agent.toml");
     std::fs::write(&manifest_path, manifest).unwrap();
-    let record = crate::LocalAgentRegistry::new(root.join("agents"))
+    let record = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_root)
         .unwrap();
     let surface =
@@ -3037,7 +3095,7 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
         vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
-            effect_class: crate::agent::manifest_schema::EffectClass::AtMostOnce,
+            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec!["net:https://profile.example".to_string()],
             grant_expiries: Vec::new(),
             operations: vec!["profile".to_string()],
@@ -3117,21 +3175,25 @@ async fn two_segment_operation_ref_fails_closed_for_unknown_operation() {
 #[tokio::test]
 async fn operation_bindings_merge_grants_for_shared_artifact() {
     let root = temp_dir("manifest-bind-merge-grants");
-    let registry = crate::LocalOperationRegistry::new(&root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&root);
     let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
     let artifact = root.join("search.wasm");
     std::fs::write(&artifact, wasm).unwrap();
     let record = registry
-        .publish_artifact(crate::PublishOperationRequest {
-            name: "search".to_string(),
-            artifact_path: artifact.clone(),
-            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
-            interface: None,
-            capability_grants: std::collections::BTreeSet::from([
-                "net:https://example.com".to_string()
-            ]),
-            metadata: Default::default(),
-        })
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "search".to_string(),
+                artifact_path: artifact.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact,
+                },
+                interface: None,
+                capability_grants: std::collections::BTreeSet::from([
+                    "net:https://example.com".to_string()
+                ]),
+                metadata: Default::default(),
+            },
+        )
         .await
         .unwrap();
 
@@ -3169,7 +3231,7 @@ async fn operation_bindings_merge_grants_for_shared_artifact() {
         vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
             name: "search".to_string(),
             artifact_hash: record.active_artifact_hash,
-            effect_class: crate::agent::manifest_schema::EffectClass::AtMostOnce,
+            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec![
                 "fs.read:/workspace".to_string(),
                 "net:https://example.com".to_string(),
@@ -3231,7 +3293,7 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
         vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
-            effect_class: crate::agent::manifest_schema::EffectClass::AtMostOnce,
+            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec![
                 "net:https://profile.example".to_string(),
                 "net:https://summary.example".to_string(),
@@ -3311,7 +3373,7 @@ fn operation_binding_accepts_legacy_metadata_without_grants_or_operations() {
             name: "search".to_string(),
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
-            effect_class: crate::agent::manifest_schema::EffectClass::AtMostOnce,
+            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: Vec::new(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
@@ -3370,10 +3432,13 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
     path
 }
 
-fn publish_agent_manifest(root: &std::path::Path, manifest: &str) -> crate::PublishedAgentRecord {
+fn publish_agent_manifest(
+    root: &std::path::Path,
+    manifest: &str,
+) -> crate::agent::manifest::PublishedAgentRecord {
     let manifest_path = root.join("agent.verlet.agent.toml");
     std::fs::write(&manifest_path, manifest).unwrap();
-    crate::LocalAgentRegistry::new(root.join("agents"))
+    crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
         .publish_manifest_path(&manifest_path)
         .unwrap()
 }
@@ -3470,17 +3535,17 @@ fn protocol_import(
     server_ref: &str,
     include_tools: Option<Vec<String>>,
     pin: Option<String>,
-) -> crate::agent::manifest_schema::AgentManifestProtocolToolImport {
+) -> verlet_agent::manifest_schema::AgentManifestProtocolToolImport {
     let expose = if pin.is_some() {
-        vec![crate::agent::manifest_schema::AgentManifestToolSurface::DirectTool]
+        vec![verlet_agent::manifest_schema::AgentManifestToolSurface::DirectTool]
     } else {
         Vec::new()
     };
-    crate::agent::manifest_schema::AgentManifestProtocolToolImport {
+    verlet_agent::manifest_schema::AgentManifestProtocolToolImport {
         id: "mcp_echo".to_string(),
-        protocol: crate::AgentManifestToolProtocol::Mcp,
+        protocol: verlet_agent::manifest_schema::AgentManifestToolProtocol::Mcp,
         server_ref: server_ref.to_string(),
-        effect_class: crate::agent::manifest_schema::EffectClass::AtMostOnce,
+        effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
         expose,
         pin,
         include_tools,
@@ -3488,17 +3553,22 @@ fn protocol_import(
     }
 }
 
-fn witnessed_tool(tool_name: &str, message_type: &str) -> crate::WitnessedToolContract {
-    crate::WitnessedToolContract::witness(&crate::ToolDefinition::new(
-        tool_name,
-        format!("Description for {tool_name}."),
-        serde_json::json!({
-            "type": "object",
-            "required": ["message"],
-            "additionalProperties": false,
-            "properties": {"message": {"type": message_type}}
-        }),
-    ))
+fn witnessed_tool(
+    tool_name: &str,
+    message_type: &str,
+) -> crate::agent::tool_universe::WitnessedToolContract {
+    crate::agent::tool_universe::WitnessedToolContract::witness(
+        &verlet_provider::ToolDefinition::new(
+            tool_name,
+            format!("Description for {tool_name}."),
+            serde_json::json!({
+                "type": "object",
+                "required": ["message"],
+                "additionalProperties": false,
+                "properties": {"message": {"type": message_type}}
+            }),
+        ),
+    )
     .unwrap()
 }
 
@@ -3510,9 +3580,9 @@ async fn publish_multi_operation_record(
     root: &std::path::Path,
     record_name: &str,
     operations: &[(&str, Vec<&str>)],
-) -> crate::PublishedOperationRecord {
+) -> verlet_operations::operation_store::PublishedOperationRecord {
     std::fs::create_dir_all(root).unwrap();
-    let registry = crate::LocalOperationRegistry::new(root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(root);
     let wasm =
         wat::parse_str(multi_operation_guest_with_required_capabilities(operations)).unwrap();
     let artifact = root.join(format!("{record_name}.wasm"));
@@ -3526,14 +3596,18 @@ async fn publish_multi_operation_record(
         })
         .collect::<std::collections::BTreeSet<_>>();
     registry
-        .publish_artifact(crate::PublishOperationRequest {
-            name: record_name.to_string(),
-            artifact_path: artifact.clone(),
-            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
-            interface: None,
-            capability_grants,
-            metadata: Default::default(),
-        })
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: record_name.to_string(),
+                artifact_path: artifact.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact,
+                },
+                interface: None,
+                capability_grants,
+                metadata: Default::default(),
+            },
+        )
         .await
         .unwrap()
 }
@@ -3542,21 +3616,25 @@ async fn publish_json_operation_record(
     root: &std::path::Path,
     record_name: &str,
     operation_name: &str,
-) -> crate::PublishedOperationRecord {
+) -> verlet_operations::operation_store::PublishedOperationRecord {
     std::fs::create_dir_all(root).unwrap();
-    let registry = crate::LocalOperationRegistry::new(root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(root);
     let wasm = wat::parse_str(json_operation_guest(operation_name)).unwrap();
     let artifact = root.join(format!("{record_name}.wasm"));
     std::fs::write(&artifact, wasm).unwrap();
     registry
-        .publish_artifact(crate::PublishOperationRequest {
-            name: record_name.to_string(),
-            artifact_path: artifact.clone(),
-            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
-            interface: None,
-            capability_grants: Default::default(),
-            metadata: Default::default(),
-        })
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: record_name.to_string(),
+                artifact_path: artifact.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact,
+                },
+                interface: None,
+                capability_grants: Default::default(),
+                metadata: Default::default(),
+            },
+        )
         .await
         .unwrap()
 }
@@ -3696,7 +3774,7 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
             }},
             "overridden_keys":[]
         }}"#,
-        THREADS_SPAWN_CAPABILITY = crate::THREADS_SPAWN_CAPABILITY
+        THREADS_SPAWN_CAPABILITY = crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
     );
     let legacy_receipt: crate::agent::manifest_bind::AgentManifestBindReceipt =
         serde_json::from_str(&legacy_wire).unwrap();
@@ -3736,7 +3814,7 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
 
     let placed = crate::agent::manifest_bind::AgentManifestBindReceipt {
         placement: Some(crate::agent::manifest_bind::AgentManifestPlacementBinding {
-            target: crate::PlacementTarget::Sandbox,
+            target: crate::kernel::control_decision::PlacementTarget::Sandbox,
             executor_ref: Some("executors/pi-sandbox".to_string()),
             config: std::collections::BTreeMap::new(),
         }),
@@ -3774,7 +3852,7 @@ fn bind_receipt_placement_tolerates_future_wire_fields() {
     assert_eq!(
         decoded.placement,
         Some(crate::agent::manifest_bind::AgentManifestPlacementBinding {
-            target: crate::PlacementTarget::Sandbox,
+            target: crate::kernel::control_decision::PlacementTarget::Sandbox,
             executor_ref: Some("executors/pi-sandbox".to_string()),
             config: std::collections::BTreeMap::new(),
         })
@@ -3784,12 +3862,12 @@ fn bind_receipt_placement_tolerates_future_wire_fields() {
 #[test]
 fn placement_resolution_defaults_local_and_rpc_override_wins() {
     let default = crate::agent::manifest_bind::AgentManifestPlacementBinding {
-        target: crate::PlacementTarget::Sandbox,
+        target: crate::kernel::control_decision::PlacementTarget::Sandbox,
         executor_ref: Some("executor://sandbox/default".to_string()),
         config: std::collections::BTreeMap::from([("pool".to_string(), serde_json::json!("ci"))]),
     };
     let rpc_override = crate::agent::manifest_bind::AgentManifestPlacementBinding {
-        target: crate::PlacementTarget::Local,
+        target: crate::kernel::control_decision::PlacementTarget::Local,
         executor_ref: None,
         config: std::collections::BTreeMap::new(),
     };
@@ -3830,7 +3908,7 @@ fn placement_resolution_opens_remote_only_for_a_served_sync_backend() {
     let unconfigured_message = "runtime factory failed: placement target remote requires the remote EventStore backend capability, which is not available";
     for served in [false, true] {
         let requested = crate::agent::manifest_bind::AgentManifestPlacementBinding {
-            target: crate::PlacementTarget::Remote,
+            target: crate::kernel::control_decision::PlacementTarget::Remote,
             executor_ref: Some("executor://future".to_string()),
             config: std::collections::BTreeMap::new(),
         };
@@ -3858,7 +3936,7 @@ fn placement_resolution_opens_remote_only_for_a_served_sync_backend() {
     }
 
     let sandbox = crate::agent::manifest_bind::AgentManifestPlacementBinding {
-        target: crate::PlacementTarget::Sandbox,
+        target: crate::kernel::control_decision::PlacementTarget::Sandbox,
         executor_ref: Some("executor://future".to_string()),
         config: std::collections::BTreeMap::new(),
     };

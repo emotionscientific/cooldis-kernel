@@ -2,7 +2,7 @@
 pub struct PluginMount {
     pub guest_path: std::path::PathBuf,
     pub host_path: std::path::PathBuf,
-    pub mode: crate::HostFileSystemMode,
+    pub mode: verlet_vfs::HostFileSystemMode,
     expected_host_root: Option<std::path::PathBuf>,
 }
 
@@ -14,7 +14,7 @@ impl PluginMount {
         Self {
             guest_path: guest_path.into(),
             host_path: host_path.into(),
-            mode: crate::HostFileSystemMode::ReadOnly,
+            mode: verlet_vfs::HostFileSystemMode::ReadOnly,
             expected_host_root: None,
         }
     }
@@ -26,7 +26,7 @@ impl PluginMount {
         Self {
             guest_path: guest_path.into(),
             host_path: host_path.into(),
-            mode: crate::HostFileSystemMode::ReadWrite,
+            mode: verlet_vfs::HostFileSystemMode::ReadWrite,
             expected_host_root: None,
         }
     }
@@ -39,7 +39,7 @@ impl PluginMount {
         Self {
             guest_path: guest_path.into(),
             host_path: host_path.clone(),
-            mode: crate::HostFileSystemMode::ReadOnly,
+            mode: verlet_vfs::HostFileSystemMode::ReadOnly,
             expected_host_root: Some(host_path),
         }
     }
@@ -52,7 +52,7 @@ impl PluginMount {
         Self {
             guest_path: guest_path.into(),
             host_path: host_path.clone(),
-            mode: crate::HostFileSystemMode::ReadWrite,
+            mode: verlet_vfs::HostFileSystemMode::ReadWrite,
             expected_host_root: Some(host_path),
         }
     }
@@ -87,12 +87,14 @@ impl LocalPluginCatalogConfig {
 
 #[derive(Clone, Debug)]
 pub struct LocalPluginCatalogRecord {
-    pub record: crate::PublishedOperationRecord,
+    pub record: verlet_operations::operation_store::PublishedOperationRecord,
     pub operation_names: std::collections::BTreeSet<String>,
 }
 
 impl LocalPluginCatalogRecord {
-    pub fn whole_record(record: crate::PublishedOperationRecord) -> Self {
+    pub fn whole_record(
+        record: verlet_operations::operation_store::PublishedOperationRecord,
+    ) -> Self {
         Self {
             record,
             operation_names: std::collections::BTreeSet::new(),
@@ -100,7 +102,7 @@ impl LocalPluginCatalogRecord {
     }
 
     pub fn selected_operations<I, S>(
-        record: crate::PublishedOperationRecord,
+        record: verlet_operations::operation_store::PublishedOperationRecord,
         operation_names: I,
     ) -> Self
     where
@@ -115,15 +117,18 @@ impl LocalPluginCatalogRecord {
 }
 
 pub struct LocalPluginCatalog {
-    operation_registry: std::sync::Arc<crate::OperationRegistry>,
-    vfs: std::sync::Arc<crate::VerletVfs>,
-    operations: Vec<crate::RegisteredOperation>,
+    operation_registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
+    vfs: std::sync::Arc<verlet_vfs::VerletVfs>,
+    operations: Vec<verlet_operations::RegisteredOperation>,
 }
 
 impl LocalPluginCatalog {
-    pub async fn load(config: LocalPluginCatalogConfig) -> crate::VerletResult<Self> {
+    pub async fn load(
+        config: LocalPluginCatalogConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let registry_root = config.registry_root;
-        let local_registry = crate::LocalOperationRegistry::new(registry_root.clone());
+        let local_registry =
+            verlet_operations::operation_store::LocalOperationRegistry::new(registry_root.clone());
 
         let records = if config.operation_names.is_empty() {
             local_registry.list_records()?
@@ -144,9 +149,9 @@ impl LocalPluginCatalog {
 
     pub async fn load_records(
         registry_root: impl Into<std::path::PathBuf>,
-        records: Vec<crate::PublishedOperationRecord>,
+        records: Vec<verlet_operations::operation_store::PublishedOperationRecord>,
         mounts: Vec<PluginMount>,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let records = records
             .into_iter()
             .map(LocalPluginCatalogRecord::whole_record)
@@ -156,10 +161,10 @@ impl LocalPluginCatalog {
 
     pub async fn load_records_with_secret_resolver(
         registry_root: impl Into<std::path::PathBuf>,
-        records: Vec<crate::PublishedOperationRecord>,
+        records: Vec<verlet_operations::operation_store::PublishedOperationRecord>,
         mounts: Vec<PluginMount>,
-        secret_resolver: std::sync::Arc<dyn crate::SecretResolver>,
-    ) -> crate::VerletResult<Self> {
+        secret_resolver: std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let records = records
             .into_iter()
             .map(LocalPluginCatalogRecord::whole_record)
@@ -171,7 +176,7 @@ impl LocalPluginCatalog {
         registry_root: impl Into<std::path::PathBuf>,
         records: Vec<LocalPluginCatalogRecord>,
         mounts: Vec<PluginMount>,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         Self::load_catalog_records(registry_root, records, mounts, None).await
     }
 
@@ -179,8 +184,8 @@ impl LocalPluginCatalog {
         registry_root: impl Into<std::path::PathBuf>,
         records: Vec<LocalPluginCatalogRecord>,
         mounts: Vec<PluginMount>,
-        secret_resolver: std::sync::Arc<dyn crate::SecretResolver>,
-    ) -> crate::VerletResult<Self> {
+        secret_resolver: std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         Self::load_catalog_records(registry_root, records, mounts, Some(secret_resolver)).await
     }
 
@@ -188,13 +193,14 @@ impl LocalPluginCatalog {
         registry_root: impl Into<std::path::PathBuf>,
         records: Vec<LocalPluginCatalogRecord>,
         mounts: Vec<PluginMount>,
-        secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
-    ) -> crate::VerletResult<Self> {
-        let local_registry = crate::LocalOperationRegistry::new(registry_root);
+        secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let local_registry =
+            verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
         let limits = bashkit::FsLimits::default()
             .max_file_size(verlet_vbash::SPILL_RETENTION_MAX_BYTES as u64)
             .max_total_bytes(verlet_vbash::SPILL_VFS_MAX_BYTES as u64);
-        let vfs = std::sync::Arc::new(crate::VerletVfs::new(std::sync::Arc::new(
+        let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
             bashkit::InMemoryFs::with_limits(limits),
         )));
         mount_plugin_filesystems(&vfs, mounts)?;
@@ -202,12 +208,13 @@ impl LocalPluginCatalog {
     }
 
     async fn from_records(
-        local_registry: crate::LocalOperationRegistry,
-        vfs: std::sync::Arc<crate::VerletVfs>,
+        local_registry: verlet_operations::operation_store::LocalOperationRegistry,
+        vfs: std::sync::Arc<verlet_vfs::VerletVfs>,
         records: Vec<LocalPluginCatalogRecord>,
-        secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
-    ) -> crate::VerletResult<Self> {
-        let operation_registry = std::sync::Arc::new(crate::OperationRegistry::new());
+        secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let operation_registry =
+            std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
         let mut operations = Vec::with_capacity(records.len());
         for selected_record in records {
             let LocalPluginCatalogRecord {
@@ -216,14 +223,15 @@ impl LocalPluginCatalog {
             } = selected_record;
             if matches!(
                 &record.source,
-                crate::PublishedOperationSource::Kernel { .. }
+                verlet_operations::operation_store::PublishedOperationSource::Kernel { .. }
             ) {
-                let mut registration = crate::KernelOperationRegistration::new(
-                    record.name.clone(),
-                    record.manifest.clone(),
-                )
-                .with_capability_grants(record.capability_grants.clone())
-                .with_operation_names(operation_names);
+                let mut registration =
+                    verlet_operations::operation_registry::KernelOperationRegistration::new(
+                        record.name.clone(),
+                        record.manifest.clone(),
+                    )
+                    .with_capability_grants(record.capability_grants.clone())
+                    .with_operation_names(operation_names);
                 registration.metadata = record.metadata;
                 operations.push(operation_registry.register_kernel(registration).await?);
                 continue;
@@ -231,7 +239,7 @@ impl LocalPluginCatalog {
             let selected_manifest = if operation_names.is_empty() {
                 record.manifest.clone()
             } else {
-                crate::operations::operation_registry::filter_manifest_operations(
+                verlet_operations::operation_registry::filter_manifest_operations(
                     &record.name,
                     record.manifest.clone(),
                     &operation_names,
@@ -240,30 +248,37 @@ impl LocalPluginCatalog {
             let mut runtime_config =
                 local_registry.load_runtime_config_for_published_record(&record)?;
             if let Some(secret_resolver) = &secret_resolver {
-                let resolution = crate::resolve_manifest_secret_resolution(
+                let resolution = verlet_metadata::secret_store::resolve_manifest_secret_resolution(
                     secret_resolver.as_ref(),
                     &selected_manifest,
                 )
                 .await
                 .map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!("secret store failed: {err}"))
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "secret store failed: {err}"
+                    ))
                 })?;
                 if !resolution.is_ready() {
-                    return Err(crate::VerletError::RuntimeFactory(format!(
-                        "missing required operation secrets: {}; import with `verlet secret import <name> --from-env <ENV>` or `verlet secret set <name> --value-stdin`",
-                        resolution
-                            .missing
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        format!(
+                            "missing required operation secrets: {}; import with `verlet secret import <name> --from-env <ENV>` or `verlet secret set <name> --value-stdin`",
+                            resolution
+                                .missing
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
                 }
                 runtime_config = runtime_config.with_secrets(resolution.values);
             };
             runtime_config = runtime_config.with_vfs(std::sync::Arc::clone(&vfs));
             let mut registration =
-                crate::OperationRegistration::from_config(record.name.clone(), runtime_config);
+                verlet_operations::operation_registry::OperationRegistration::from_config(
+                    record.name.clone(),
+                    runtime_config,
+                );
             registration.metadata = record.metadata;
             operations.push(
                 operation_registry
@@ -279,39 +294,43 @@ impl LocalPluginCatalog {
         })
     }
 
-    pub fn operation_registry(&self) -> std::sync::Arc<crate::OperationRegistry> {
+    pub fn operation_registry(
+        &self,
+    ) -> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
         std::sync::Arc::clone(&self.operation_registry)
     }
 
-    pub fn vfs(&self) -> std::sync::Arc<crate::VerletVfs> {
+    pub fn vfs(&self) -> std::sync::Arc<verlet_vfs::VerletVfs> {
         std::sync::Arc::clone(&self.vfs)
     }
 
-    pub fn operations(&self) -> &[crate::RegisteredOperation] {
+    pub fn operations(&self) -> &[verlet_operations::RegisteredOperation] {
         &self.operations
     }
 }
 
 fn mount_plugin_filesystems(
-    vfs: &crate::VerletVfs,
+    vfs: &verlet_vfs::VerletVfs,
     mounts: Vec<PluginMount>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     for mount in mounts {
         if !mount.guest_path.has_root() {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "plugin mount guest path must be absolute: {}",
-                mount.guest_path.display()
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "plugin mount guest path must be absolute: {}",
+                    mount.guest_path.display()
+                ),
+            ));
         }
         let normalized_guest_path = bashkit::normalize_path(&mount.guest_path);
         if normalized_guest_path.starts_with(std::path::Path::new("/spill")) {
-            return Err(crate::VerletError::RuntimeFactory(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "plugin mount guest path /spill and its descendants are reserved for tool output spill"
                     .to_string(),
             ));
         }
-        let fs = crate::HostFileSystem::new(&mount.host_path, mount.mode).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+        let fs = verlet_vfs::HostFileSystem::new(&mount.host_path, mount.mode).map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to open host plugin mount {}: {err}",
                 mount.host_path.display()
             ))
@@ -319,15 +338,17 @@ fn mount_plugin_filesystems(
         if let Some(expected) = &mount.expected_host_root
             && fs.root() != expected
         {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "host plugin mount {} resolved to {}, not its witnessed canonical root",
-                mount.host_path.display(),
-                fs.root().display()
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "host plugin mount {} resolved to {}, not its witnessed canonical root",
+                    mount.host_path.display(),
+                    fs.root().display()
+                ),
+            ));
         }
         let fs = std::sync::Arc::new(fs);
         vfs.mount(&mount.guest_path, fs).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to mount host path {} at {}: {err}",
                 mount.host_path.display(),
                 mount.guest_path.display()

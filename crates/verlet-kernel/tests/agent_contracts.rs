@@ -38,26 +38,30 @@ Run the declared checks and print the verdict.
 
 #[tokio::test]
 async fn kernel_declaration_runs_thread_contract_and_records_child_history() {
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(
-        verlet::VirtualBashRuntimeFactory::default(),
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        verlet::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            verlet::ThreadCoordinates::new("tenant", "user", "session"),
-            verlet::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
 
-    let mut declaration = verlet::ThreadDeclaration::new(
-        verlet::ThreadContractReference::inline_markdown(RELEASE_VERIFIER_CONTRACT),
-        verlet::ThreadInitialTurn::user("printf 'verdict=ship\\nreport=direct-run\\n'"),
+    let mut declaration = verlet_agent::contracts::ThreadDeclaration::new(
+        verlet_agent::contracts::ThreadContractReference::inline_markdown(
+            RELEASE_VERIFIER_CONTRACT,
+        ),
+        verlet_agent::contracts::ThreadInitialTurn::user(
+            "printf 'verdict=ship\\nreport=direct-run\\n'",
+        ),
     );
     declaration.inputs = serde_json::json!({
         "branch": "main",
         "checks": ["printf ok"],
     });
-    declaration.propagator = Some(verlet::ThreadPropagatorSelection::named(
+    declaration.propagator = Some(verlet_agent::contracts::ThreadPropagatorSelection::named(
         "llm",
         "virtual-bash",
     ));
@@ -71,7 +75,7 @@ async fn kernel_declaration_runs_thread_contract_and_records_child_history() {
         .await
         .unwrap();
 
-    assert_eq!(handle.kind, verlet::THREAD_HANDLE_KIND);
+    assert_eq!(handle.kind, verlet_agent::contracts::THREAD_HANDLE_KIND);
     assert_eq!(handle.propagator.kind, "llm");
     assert_eq!(handle.propagator.name.as_deref(), Some("virtual-bash"));
     assert!(handle.contract_hash.starts_with("sha256:"));
@@ -141,7 +145,7 @@ async fn kernel_declaration_runs_thread_contract_and_records_child_history() {
     let messages = context
         .messages
         .iter()
-        .map(crate::support::text_from_message)
+        .map(crate::support::event_trace::text_from_message)
         .collect::<Vec<_>>();
     assert_eq!(messages[0], "printf 'verdict=ship\\nreport=direct-run\\n'");
     assert!(messages[1].contains("verdict=ship"));

@@ -7,7 +7,7 @@ fn temp_root(name: &str) -> std::path::PathBuf {
 
 fn merge_daemon_identity_layers(
     layers: &[&str],
-) -> crate::VerletResult<crate::daemon::daemon_config::VerletDaemonConfig> {
+) -> crate::kernel::runtime_host::VerletResult<crate::daemon::daemon_config::VerletDaemonConfig> {
     let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     for text in layers {
         let presence = crate::daemon::daemon_config::daemon_config_presence(text)?;
@@ -410,7 +410,10 @@ agent_ref = "agent://karl-dev@latest"
         Some(root.join(".verlet/runtime"))
     );
     let placement = loaded.config.runtime.placement.as_ref().unwrap();
-    assert_eq!(placement.target, crate::PlacementTarget::Remote);
+    assert_eq!(
+        placement.target,
+        crate::kernel::control_decision::PlacementTarget::Remote
+    );
     assert_eq!(
         placement.executor_ref.as_deref(),
         Some("executor://cluster/default")
@@ -418,9 +421,9 @@ agent_ref = "agent://karl-dev@latest"
     assert_eq!(placement.config["region"], serde_json::json!("us-west"));
     assert_eq!(
         loaded.config.runtime.workspace,
-        Some(crate::AgentManifestWorkspaceBinding {
+        Some(crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
             host_path: root.join("host-workspace"),
-            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+            mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
         })
     );
     assert_eq!(loaded.config.provider.env_file, Some(root.join(".env")));
@@ -810,7 +813,7 @@ stream = true
     );
     assert_eq!(
         loaded.config.runtime.placement,
-        Some(crate::AgentManifestPlacementBinding::default())
+        Some(crate::agent::manifest_bind::AgentManifestPlacementBinding::default())
     );
     assert_eq!(
         loaded.config.registries.agents,
@@ -864,8 +867,8 @@ cwd = "workspace"
 
     assert_eq!(
         loaded.config.runtime.placement,
-        Some(crate::AgentManifestPlacementBinding {
-            target: crate::PlacementTarget::Sandbox,
+        Some(crate::agent::manifest_bind::AgentManifestPlacementBinding {
+            target: crate::kernel::control_decision::PlacementTarget::Sandbox,
             executor_ref: None,
             config: std::collections::BTreeMap::new(),
         })
@@ -914,9 +917,9 @@ mode = "rw"
 
     assert_eq!(
         loaded.config.runtime.workspace,
-        Some(crate::AgentManifestWorkspaceBinding {
+        Some(crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
             host_path: higher_root.join("writable"),
-            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+            mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
         })
     );
     let _ = std::fs::remove_dir_all(root);

@@ -1,35 +1,37 @@
 #[tokio::test]
 async fn supervisor_runs_virtual_bash_with_configured_mounts_and_canonical_history() {
-    let config = verlet::VirtualBashRuntimeConfig {
+    let config = verlet::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/work"),
         mounts: vec![
-            verlet::VirtualMount::writable("/work").with_file("seed.txt", "seed\n"),
-            verlet::VirtualMount::readonly(
+            verlet_vbash::VirtualMount::writable("/work").with_file("seed.txt", "seed\n"),
+            verlet_vbash::VirtualMount::readonly(
                 "/docs",
-                vec![verlet::VirtualFile::new("guide.txt", "read me\n")],
+                vec![verlet_vbash::VirtualFile::new("guide.txt", "read me\n")],
             ),
         ],
-        ..verlet::VirtualBashRuntimeConfig::default()
+        ..verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let supervisor = verlet::VerletSupervisor::new();
+    let supervisor = verlet::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(verlet::TenantRegistration {
-            context: verlet::TenantRuntimeContext::local(
+        .register_tenant(verlet::kernel::supervisor::TenantRegistration {
+            context: verlet::kernel::supervisor::TenantRuntimeContext::local(
                 "tenant-vbash",
                 "/tmp/verlet-e2e-runtime",
                 "/tmp/verlet-e2e-state",
             ),
-            runtime_factory: std::sync::Arc::new(verlet::VirtualBashRuntimeFactory::new(config)),
+            runtime_factory: std::sync::Arc::new(
+                verlet::capabilities::execution::VirtualBashRuntimeFactory::new(config),
+            ),
         })
         .await
         .unwrap();
 
     let thread = supervisor
-        .start_thread(verlet::ThreadStartRequest {
+        .start_thread(verlet::kernel::supervisor::ThreadStartRequest {
             tenant_id: "tenant-vbash".to_string(),
             user_id: "user-1".to_string(),
             session_id: "session-1".to_string(),
-            topology: verlet::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: Default::default(),
         })
         .await
@@ -72,7 +74,7 @@ async fn supervisor_runs_virtual_bash_with_configured_mounts_and_canonical_histo
     );
     assert_eq!(canonical_text(&context.messages[3]), second_output);
 
-    let verlet::CanonicalMessage::Assistant {
+    let verlet_history::CanonicalMessage::Assistant {
         provider,
         api,
         model,
@@ -83,27 +85,38 @@ async fn supervisor_runs_virtual_bash_with_configured_mounts_and_canonical_histo
         panic!("expected first assistant mirror");
     };
     assert_eq!(provider, "verlet");
-    assert_eq!(api, &verlet::ProviderApi::Other("virtual_bash".to_string()));
+    assert_eq!(
+        api,
+        &verlet_history::ProviderApi::Other("virtual_bash".to_string())
+    );
     assert_eq!(model, "bashkit");
-    assert_eq!(stop_reason, &verlet::CanonicalStopReason::EndTurn);
+    assert_eq!(stop_reason, &verlet_history::CanonicalStopReason::EndTurn);
 
     assert!(context.entries.iter().all(|entry| {
         matches!(
             &entry.kind,
-            verlet::SessionEntryKind::Message {
-                message: verlet::CanonicalMessage::User { .. }
-                    | verlet::CanonicalMessage::Assistant { .. }
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::User { .. }
+                    | verlet_history::CanonicalMessage::Assistant { .. }
             }
         )
     }));
 }
 
-async fn next_output(events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>) -> String {
+async fn next_output(
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+) -> String {
     tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             match events.recv().await.unwrap() {
-                verlet::ThreadEvent::Output { text, .. } => break text,
-                verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+                verlet::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } => {
+                    break text;
+                }
+                verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                    message, ..
+                } => panic!("thread failed: {message}"),
                 _ => {}
             }
         }
@@ -112,16 +125,16 @@ async fn next_output(events: &mut tokio::sync::broadcast::Receiver<verlet::Threa
     .unwrap()
 }
 
-fn canonical_text(message: &verlet::CanonicalMessage) -> String {
+fn canonical_text(message: &verlet_history::CanonicalMessage) -> String {
     let content = match message {
-        verlet::CanonicalMessage::User { content, .. }
-        | verlet::CanonicalMessage::Assistant { content, .. }
-        | verlet::CanonicalMessage::ToolResult { content, .. } => content,
+        verlet_history::CanonicalMessage::User { content, .. }
+        | verlet_history::CanonicalMessage::Assistant { content, .. }
+        | verlet_history::CanonicalMessage::ToolResult { content, .. } => content,
     };
     content
         .iter()
         .map(|content| match content {
-            verlet::CanonicalContent::Text { text, .. } => text.as_str(),
+            verlet_history::CanonicalContent::Text { text, .. } => text.as_str(),
             _ => "",
         })
         .collect::<Vec<_>>()

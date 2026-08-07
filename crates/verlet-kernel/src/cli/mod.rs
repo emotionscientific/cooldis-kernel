@@ -14,7 +14,7 @@ mod secret;
 mod skill;
 mod tool;
 
-pub async fn run() -> crate::VerletResult<()> {
+pub async fn run() -> crate::kernel::runtime_host::VerletResult<()> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|command| {
         crate::daemon::remote_store::process_executor::is_remote_child_command(command)
@@ -68,7 +68,7 @@ pub async fn run() -> crate::VerletResult<()> {
     }
 }
 
-fn run_help(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+fn run_help(args: Vec<std::ffi::OsString>) -> crate::kernel::runtime_host::VerletResult<()> {
     let path = args
         .into_iter()
         .filter(|arg| arg != "--help" && arg != "-h")
@@ -81,7 +81,7 @@ fn run_help(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     print_command_help(&path)
 }
 
-fn print_command_help(path: &[String]) -> crate::VerletResult<()> {
+fn print_command_help(path: &[String]) -> crate::kernel::runtime_host::VerletResult<()> {
     match path {
         [command] if command == "commands" => print_commands_help(),
         [command] if command == "help" => print_help_help(),
@@ -241,16 +241,16 @@ fn print_command_help(path: &[String]) -> crate::VerletResult<()> {
     Ok(())
 }
 
-async fn run_chat(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+async fn run_chat(args: Vec<std::ffi::OsString>) -> crate::kernel::runtime_host::VerletResult<()> {
     chat::run(args, chat::ChatInvocation::Chat).await
 }
 
-fn usage_error(message: impl Into<String>) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(message.into())
+fn usage_error(message: impl Into<String>) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(message.into())
 }
 
-fn io_error(err: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(err.to_string())
+fn io_error(err: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string())
 }
 
 const ROOT_HELP: &str = "verlet

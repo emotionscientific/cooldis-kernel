@@ -34,7 +34,7 @@ pub(super) enum ChatAttachTarget {
 pub(super) async fn run(
     args: Vec<std::ffi::OsString>,
     invocation: ChatInvocation,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = crate::cli::console::parse_chat_args(args)?;
     if options.help {
         invocation.print_help();
@@ -46,7 +46,7 @@ pub(super) async fn run(
 async fn run_chat_console(
     options: crate::cli::console::ChatArgs,
     invocation: ChatInvocation,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if let Some(raw_attach) = options.attach.clone() {
         let target = parse_attach_target(&raw_attach)?;
         return run_attached_chat(options, invocation, target).await;
@@ -57,7 +57,7 @@ async fn run_chat_console(
     let result = async {
         #[cfg(unix)]
         {
-            let client = crate::VerletOperatorClient::connect_unix(
+            let client = crate::adapters::codex_tui::VerletOperatorClient::connect_unix(
                 socket_path,
                 chat_connect_config(invocation),
             )
@@ -86,13 +86,13 @@ async fn run_attached_chat(
     options: crate::cli::console::ChatArgs,
     invocation: ChatInvocation,
     target: ChatAttachTarget,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     match target {
         ChatAttachTarget::Unix(path) => {
             #[cfg(unix)]
             {
                 let label = format!("attach unix://{}", path.display());
-                let client = crate::VerletOperatorClient::connect_unix(
+                let client = crate::adapters::codex_tui::VerletOperatorClient::connect_unix(
                     path,
                     chat_connect_config(invocation),
                 )
@@ -109,7 +109,7 @@ async fn run_attached_chat(
         }
         ChatAttachTarget::WebSocket(url) => {
             let label = format!("attach {url}");
-            let client = crate::VerletOperatorClient::<tokio::net::TcpStream>::connect_websocket(
+            let client = crate::adapters::codex_tui::VerletOperatorClient::<tokio::net::TcpStream>::connect_websocket(
                 &url,
                 chat_connect_config(invocation),
             )
@@ -119,18 +119,20 @@ async fn run_attached_chat(
     }
 }
 
-fn chat_connect_config(invocation: ChatInvocation) -> crate::CodexTuiConnectConfig {
-    crate::CodexTuiConnectConfig {
+fn chat_connect_config(
+    invocation: ChatInvocation,
+) -> crate::adapters::codex_tui::CodexTuiConnectConfig {
+    crate::adapters::codex_tui::CodexTuiConnectConfig {
         client_name: invocation.client_name().to_string(),
-        ..crate::CodexTuiConnectConfig::default()
+        ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
     }
 }
 
 async fn run_chat_client<S>(
-    mut client: crate::VerletOperatorClient<S>,
+    mut client: crate::adapters::codex_tui::VerletOperatorClient<S>,
     initial_prompt: Option<String>,
     connection_label: String,
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -144,9 +146,9 @@ where
 }
 
 async fn bootstrap_chat_client<S>(
-    client: &mut crate::VerletOperatorClient<S>,
+    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
     connection_label: String,
-) -> crate::VerletResult<ChatSessionInfo>
+) -> crate::kernel::runtime_host::VerletResult<ChatSessionInfo>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -181,7 +183,9 @@ where
     })
 }
 
-pub(super) fn parse_attach_target(raw: &str) -> crate::VerletResult<ChatAttachTarget> {
+pub(super) fn parse_attach_target(
+    raw: &str,
+) -> crate::kernel::runtime_host::VerletResult<ChatAttachTarget> {
     if let Some(path) = raw.strip_prefix("unix://") {
         if path.is_empty() {
             return Err(crate::cli::usage_error(
@@ -255,7 +259,7 @@ struct ChatTuiState {
 }
 
 impl ChatTuiState {
-    fn new(thread: crate::CodexTuiThread, session: ChatSessionInfo) -> Self {
+    fn new(thread: crate::adapters::codex_tui::CodexTuiThread, session: ChatSessionInfo) -> Self {
         let mut state = Self {
             thread_id: thread.id.clone(),
             thread_name: thread_name(&thread.raw),
@@ -271,7 +275,7 @@ impl ChatTuiState {
             active_thinking_index: None,
             turn_state: "idle".to_string(),
             scrollback: 0,
-            no_color: crate::env_compat::var_os("NO_COLOR").is_some(),
+            no_color: verlet_runtime_contracts::env_compat::var_os("NO_COLOR").is_some(),
         };
         state.push_lifecycle(format!(
             "started thread {} ({})",
@@ -348,7 +352,7 @@ impl ChatTuiState {
         self.turn_state = "idle".to_string();
     }
 
-    fn switch_thread(&mut self, thread: crate::CodexTuiThread, reason: &str) {
+    fn switch_thread(&mut self, thread: crate::adapters::codex_tui::CodexTuiThread, reason: &str) {
         self.thread_id = thread.id;
         self.thread_name = thread_name(&thread.raw);
         if let Some(cwd) = thread_cwd(&thread.raw) {
@@ -521,7 +525,7 @@ struct ChatTerminal {
 }
 
 impl ChatTerminal {
-    fn enter() -> crate::VerletResult<Self> {
+    fn enter() -> crate::kernel::runtime_host::VerletResult<Self> {
         crossterm::terminal::enable_raw_mode()
             .map_err(|err| crate::cli::usage_error(format!("failed to enable raw mode: {err}")))?;
         let mut stdout = std::io::stdout();
@@ -558,10 +562,10 @@ impl Drop for ChatTerminal {
 }
 
 async fn run_chat_tui<S>(
-    client: &mut crate::VerletOperatorClient<S>,
+    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     initial_prompt: Option<String>,
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -605,7 +609,7 @@ where
 fn draw_chat_tui(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     state: &ChatTuiState,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     terminal
         .draw(|frame| {
             let area = frame.area();
@@ -667,10 +671,10 @@ fn draw_chat_tui(
 }
 
 async fn handle_chat_key<S>(
-    client: &mut crate::VerletOperatorClient<S>,
+    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     key: crossterm::event::KeyEvent,
-) -> crate::VerletResult<bool>
+) -> crate::kernel::runtime_host::VerletResult<bool>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -774,10 +778,10 @@ where
 }
 
 async fn submit_or_handle_slash<S>(
-    client: &mut crate::VerletOperatorClient<S>,
+    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     input: String,
-) -> crate::VerletResult<bool>
+) -> crate::kernel::runtime_host::VerletResult<bool>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -795,10 +799,10 @@ where
 }
 
 async fn handle_slash_command<S>(
-    client: &mut crate::VerletOperatorClient<S>,
+    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     command: SlashCommand,
-) -> crate::VerletResult<bool>
+) -> crate::kernel::runtime_host::VerletResult<bool>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -867,10 +871,10 @@ where
 }
 
 async fn submit_chat_input<S>(
-    client: &mut crate::VerletOperatorClient<S>,
+    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     input: String,
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -891,9 +895,9 @@ where
 }
 
 async fn interrupt_active_turn<S>(
-    client: &mut crate::VerletOperatorClient<S>,
+    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
-) -> crate::VerletResult<bool>
+) -> crate::kernel::runtime_host::VerletResult<bool>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -908,25 +912,29 @@ where
 
 async fn handle_chat_app_event(
     state: &mut ChatTuiState,
-    event: crate::CodexTuiEvent,
-) -> crate::VerletResult<()> {
+    event: crate::adapters::codex_tui::CodexTuiEvent,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     match event {
-        crate::CodexTuiEvent::Notification(notification) => {
+        crate::adapters::codex_tui::CodexTuiEvent::Notification(notification) => {
             handle_chat_notification(state, notification);
         }
-        crate::CodexTuiEvent::Error(error) => {
+        crate::adapters::codex_tui::CodexTuiEvent::Error(error) => {
             state.push_error(format!(
                 "JSON-RPC error {}: {}",
                 error.error.code, error.error.message
             ));
             state.finish_turn();
         }
-        crate::CodexTuiEvent::Request(_) | crate::CodexTuiEvent::Response(_) => {}
+        crate::adapters::codex_tui::CodexTuiEvent::Request(_)
+        | crate::adapters::codex_tui::CodexTuiEvent::Response(_) => {}
     }
     Ok(())
 }
 
-fn handle_chat_notification(state: &mut ChatTuiState, notification: crate::JsonRpcNotification) {
+fn handle_chat_notification(
+    state: &mut ChatTuiState,
+    notification: crate::adapters::app_server::connection::JsonRpcNotification,
+) {
     let active_matches = state.active_turn_id.as_deref().is_some_and(|turn_id| {
         crate::cli::console::notification_matches_thread_turn(
             &notification,

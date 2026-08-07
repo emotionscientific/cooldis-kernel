@@ -30,9 +30,11 @@ async fn bootstrap_prints_one_secret_and_refuses_a_second_root() {
     assert!(first_stderr.contains("shown once"));
 
     let store_path = state_home.join("session_history.sqlite3");
-    let store = verlet::SqliteSessionStore::open(&store_path).await.unwrap();
-    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
-        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&store_path)
+        .await
+        .unwrap();
+    let clock: std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock> =
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock);
     let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .unwrap();
@@ -194,11 +196,12 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         stderr(&revoke_principal)
     );
 
-    let store = verlet::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
-        .await
-        .unwrap();
-    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
-        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let store =
+        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+            .await
+            .unwrap();
+    let clock: std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock> =
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock);
     let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .unwrap();
@@ -243,11 +246,12 @@ async fn locked_store_tells_the_user_to_stop_the_daemon() {
     let state_home = temp_state_home();
     std::fs::create_dir_all(&state_home).unwrap();
     let state_home_arg = state_home.to_string_lossy().to_string();
-    let store = verlet::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
-        .await
-        .unwrap();
-    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
-        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let store =
+        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+            .await
+            .unwrap();
+    let clock: std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock> =
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock);
     let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .unwrap();

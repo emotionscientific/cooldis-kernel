@@ -6,7 +6,7 @@ const THREAD_SPAWN_CLAIM_POLL_INTERVAL: std::time::Duration = std::time::Duratio
 const UNBOUND_CHILD_AGENT_REF: &str = "unbound";
 
 enum FencedDecisionAppend {
-    Appended(crate::EventRecordId),
+    Appended(verlet_history::EventRecordId),
     AlreadyProjected,
 }
 
@@ -52,8 +52,9 @@ enum FencedAppendReceiptOverride {
 
 #[derive(Clone)]
 pub struct ThreadSpawnProjector {
-    host: crate::RuntimeHost,
-    agent_resolver: Option<std::sync::Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
+    host: crate::kernel::runtime_host::RuntimeHost,
+    agent_resolver:
+        Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
     claimed_dispatch_wait_timeout: std::time::Duration,
     #[cfg(test)]
     snapshot_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
@@ -66,7 +67,7 @@ pub struct ThreadSpawnProjector {
 }
 
 impl ThreadSpawnProjector {
-    pub fn new(host: crate::RuntimeHost) -> Self {
+    pub fn new(host: crate::kernel::runtime_host::RuntimeHost) -> Self {
         Self {
             host,
             agent_resolver: None,
@@ -84,7 +85,7 @@ impl ThreadSpawnProjector {
 
     pub fn with_agent_resolver(
         mut self,
-        resolver: std::sync::Arc<dyn crate::KernelThreadSpawnAgentResolver>,
+        resolver: std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>,
     ) -> Self {
         self.agent_resolver = Some(resolver);
         self
@@ -97,27 +98,31 @@ impl ThreadSpawnProjector {
     /// spawned/failure decision instead of appending or executing again.
     pub async fn dispatch_request(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        payload: crate::ThreadSpawnRequestedPayload,
-    ) -> crate::VerletResult<ThreadSpawnDispatchReceipt> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        payload: verlet_history::ThreadSpawnRequestedPayload,
+    ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnDispatchReceipt> {
         self.dispatch_request_with_authority(coordinates, payload, true)
             .await
     }
 
     pub(crate) async fn dispatch_request_with_authority(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        payload: crate::ThreadSpawnRequestedPayload,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        payload: verlet_history::ThreadSpawnRequestedPayload,
         require_supervisor_grant: bool,
-    ) -> crate::VerletResult<ThreadSpawnDispatchReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnDispatchReceipt> {
         if payload.parent_thread_id != coordinates.thread_id {
-            return Err(crate::VerletError::RuntimeExecution(format!(
-                "thread spawn dispatch parent {} does not match control stream {}",
-                payload.parent_thread_id, coordinates.thread_id
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!(
+                    "thread spawn dispatch parent {} does not match control stream {}",
+                    payload.parent_thread_id, coordinates.thread_id
+                ),
+            ));
         }
-        let dispatch_id = verlet_runtime_contracts::DispatchId::new(payload.correlation_id.clone());
-        let stream_id = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let dispatch_id =
+            verlet_runtime_contracts::handle::DispatchId::new(payload.correlation_id.clone());
+        let stream_id =
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let mut claimed_wait_started_at = None;
         #[cfg(test)]
         let mut first_snapshot = true;
@@ -127,7 +132,9 @@ impl ThreadSpawnProjector {
                 .runtime_store()
                 .read_events(&stream_id, None)
                 .await
-                .map_err(|err| crate::VerletError::History(err.to_string()))?;
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(err.to_string())
+                })?;
             #[cfg(test)]
             if first_snapshot && let Some(barrier) = &self.snapshot_barrier {
                 barrier.wait().await;
@@ -142,27 +149,27 @@ impl ThreadSpawnProjector {
                     .iter()
                     .find(|event| event.id == folded.request_event_id)
                     .ok_or_else(|| {
-                        crate::VerletError::History(
+                        crate::kernel::runtime_host::VerletError::History(
                             "folded thread spawn request is absent from its event slice"
                                 .to_string(),
                         )
                     })?;
-                let folded_payload = serde_json::from_value::<crate::ThreadSpawnRequestedPayload>(
-                    request_event.payload.clone(),
-                )
+                let folded_payload = serde_json::from_value::<
+                    verlet_history::ThreadSpawnRequestedPayload,
+                >(request_event.payload.clone())
                 .map_err(|err| {
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "folded thread spawn request payload decode failed: {err}"
                     ))
                 })?;
                 if !spawn_request_belongs_to_parent(request_event, &folded_payload, coordinates) {
-                    return Err(crate::VerletError::History(
+                    return Err(crate::kernel::runtime_host::VerletError::History(
                         "thread spawn dispatch matched an out-of-scope request record".to_string(),
                     ));
                 }
                 if let Some(handle) = folded.handle {
-                    crate::ThreadId::parse_str(&handle.id).map_err(|err| {
-                        crate::VerletError::History(format!(
+                    verlet_runtime_contracts::ThreadId::parse_str(&handle.id).map_err(|err| {
+                        crate::kernel::runtime_host::VerletError::History(format!(
                             "thread spawn dispatch {} folded invalid child handle: {err}",
                             dispatch_id
                         ))
@@ -176,16 +183,20 @@ impl ThreadSpawnProjector {
                     });
                 }
                 if let Some(reason) = folded.failure_reason {
-                    return Err(crate::VerletError::RuntimeExecution(reason));
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                        reason,
+                    ));
                 }
                 if folded.claimed {
                     let started_at =
                         claimed_wait_started_at.get_or_insert_with(tokio::time::Instant::now);
                     let elapsed = started_at.elapsed();
                     if elapsed >= self.claimed_dispatch_wait_timeout {
-                        return Err(crate::VerletError::RuntimeExecution(format!(
-                            "thread spawn dispatch {dispatch_id} is claimed without a terminal decision; refusing to replay the child effect"
-                        )));
+                        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                            format!(
+                                "thread spawn dispatch {dispatch_id} is claimed without a terminal decision; refusing to replay the child effect"
+                            ),
+                        ));
                     }
                     tokio::time::sleep(
                         THREAD_SPAWN_CLAIM_POLL_INTERVAL
@@ -206,7 +217,7 @@ impl ThreadSpawnProjector {
                         let parent = self.host.get_thread(coordinates.thread_id).await?;
                         let request_payload = serde_json::from_value(request_event.payload.clone())
                             .map_err(|err| {
-                                crate::VerletError::History(format!(
+                                crate::kernel::runtime_host::VerletError::History(format!(
                                     "thread spawn dispatch payload decode failed: {err}"
                                 ))
                             })?;
@@ -234,7 +245,7 @@ impl ThreadSpawnProjector {
                         };
                         return Ok(ThreadSpawnDispatchReceipt {
                             request_event_id: projected.request_event_id,
-                            handle: verlet_runtime_contracts::HandleId::thread(
+                            handle: verlet_runtime_contracts::handle::HandleId::thread(
                                 projected.child_thread_id,
                             ),
                             dispatch_id,
@@ -247,17 +258,17 @@ impl ThreadSpawnProjector {
 
             if let Some(task_name) = payload.task_name.as_deref() {
                 if task_name.trim().is_empty() {
-                    return Err(crate::VerletError::RuntimeExecution(
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                         "thread_spawn task_name must not be empty".to_string(),
                     ));
                 }
                 let task_name_is_reserved = events.iter().any(|event| {
-                    if event.kind != crate::EventKind::ThreadSpawnRequested
+                    if event.kind != verlet_history::EventKind::ThreadSpawnRequested
                         || is_spawn_request_claim(event)
                     {
                         return false;
                     }
-                    serde_json::from_value::<crate::ThreadSpawnRequestedPayload>(
+                    serde_json::from_value::<verlet_history::ThreadSpawnRequestedPayload>(
                         event.payload.clone(),
                     )
                     .is_ok_and(|existing| {
@@ -267,41 +278,48 @@ impl ThreadSpawnProjector {
                     })
                 });
                 if task_name_is_reserved {
-                    return Err(crate::VerletError::RuntimeExecution(format!(
-                        "thread_spawn task_name {task_name:?} is already bound under this parent; retry with the original dispatch or choose a new task_name"
-                    )));
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                        format!(
+                            "thread_spawn task_name {task_name:?} is already bound under this parent; retry with the original dispatch or choose a new task_name"
+                        ),
+                    ));
                 }
             }
 
             let mut value = serde_json::to_value(&payload).map_err(|err| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "thread spawn dispatch payload encode failed: {err}"
                 ))
             })?;
-            value["schema"] =
-                serde_json::json!(crate::EventKind::ThreadSpawnRequested.payload_schema_id());
-            let request = crate::NewEventRecord::discharged(
+            value["schema"] = serde_json::json!(
+                verlet_history::EventKind::ThreadSpawnRequested.payload_schema_id()
+            );
+            let request = verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::EventKind::ThreadSpawnRequested,
+                verlet_history::EventKind::ThreadSpawnRequested,
                 value,
-                crate::EventProvenance {
+                verlet_history::EventProvenance {
                     discharged_by: Some("dispatcher:thread-spawn".to_string()),
                     function: Some(THREAD_SPAWN_DISPATCH_FUNCTION.to_string()),
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             );
             let expected_next_sequence = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
             match self
                 .host
                 .runtime_store()
                 .append_events_fenced(&stream_id, expected_next_sequence, vec![request])
                 .await
             {
-                Ok(_) | Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
-                Err(err) => return Err(crate::VerletError::History(err.to_string())),
+                Ok(_) | Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(err) => {
+                    return Err(crate::kernel::runtime_host::VerletError::History(
+                        err.to_string(),
+                    ));
+                }
             }
         }
     }
@@ -344,15 +362,16 @@ impl ThreadSpawnProjector {
 
     pub async fn project_control_stream(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> crate::VerletResult<ThreadSpawnProjectionReceipt> {
-        let stream_id = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnProjectionReceipt> {
+        let stream_id =
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let events = self
             .host
             .runtime_store()
             .read_events(&stream_id, None)
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         #[cfg(test)]
         if let Some(barrier) = &self.snapshot_barrier {
             barrier.wait().await;
@@ -363,7 +382,7 @@ impl ThreadSpawnProjector {
         }
         let requests = events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::ThreadSpawnRequested)
+            .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawnRequested)
             .filter(|event| !is_spawn_request_claim(event))
             .cloned()
             .collect::<Vec<_>>();
@@ -376,9 +395,11 @@ impl ThreadSpawnProjector {
                     .runtime_store()
                     .read_events(&stream_id, None)
                     .await
-                    .map_err(|err| crate::VerletError::History(err.to_string()))?;
+                    .map_err(|err| {
+                        crate::kernel::runtime_host::VerletError::History(err.to_string())
+                    })?;
             }
-            let payload = match serde_json::from_value::<crate::ThreadSpawnRequestedPayload>(
+            let payload = match serde_json::from_value::<verlet_history::ThreadSpawnRequestedPayload>(
                 event.payload.clone(),
             ) {
                 Ok(payload) => payload,
@@ -425,7 +446,7 @@ impl ThreadSpawnProjector {
                 continue;
             }
             if event.coordinates.scope() != coordinates.scope() {
-                let reason = crate::VerletError::ThreadScopeMismatch {
+                let reason = crate::kernel::runtime_host::VerletError::ThreadScopeMismatch {
                     thread_id: coordinates.thread_id,
                     requested: Box::new(coordinates.scope()),
                     actual: Box::new(event.coordinates.scope()),
@@ -475,7 +496,7 @@ impl ThreadSpawnProjector {
                 }
             };
             if parent.context().coordinates.scope() != coordinates.scope() {
-                let reason = crate::VerletError::ThreadScopeMismatch {
+                let reason = crate::kernel::runtime_host::VerletError::ThreadScopeMismatch {
                     thread_id: coordinates.thread_id,
                     requested: Box::new(coordinates.scope()),
                     actual: Box::new(parent.context().coordinates.scope()),
@@ -523,20 +544,20 @@ impl ThreadSpawnProjector {
 
     async fn claim_request(
         &self,
-        request_event: &crate::EventRecord,
+        request_event: &verlet_history::EventRecord,
         correlation_id: &str,
-        decision_events: &[crate::EventRecord],
-    ) -> crate::VerletResult<FencedDecisionAppend> {
-        let claim = crate::NewEventRecord::discharged(
+        decision_events: &[verlet_history::EventRecord],
+    ) -> crate::kernel::runtime_host::VerletResult<FencedDecisionAppend> {
+        let claim = verlet_history::NewEventRecord::discharged(
             request_event.coordinates.clone(),
-            crate::EventKind::ThreadSpawnRequested,
+            verlet_history::EventKind::ThreadSpawnRequested,
             request_event.payload.clone(),
-            crate::EventProvenance {
+            verlet_history::EventProvenance {
                 source_streams: vec![request_event.stream_id.clone()],
                 source_event_ids: vec![request_event.id],
                 discharged_by: Some(THREAD_SPAWN_PROJECTOR_DISCHARGED_BY.to_string()),
                 function: Some(THREAD_SPAWN_PROJECTOR_FUNCTION.to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         );
         let appended = self
@@ -553,18 +574,22 @@ impl ThreadSpawnProjector {
 
     async fn project_claimed(
         &self,
-        parent: crate::RuntimeThreadHandle,
-        request_event: &crate::EventRecord,
-        payload: crate::ThreadSpawnRequestedPayload,
+        parent: crate::kernel::runtime_host::RuntimeThreadHandle,
+        request_event: &verlet_history::EventRecord,
+        payload: verlet_history::ThreadSpawnRequestedPayload,
         require_supervisor_grant: bool,
-    ) -> crate::VerletResult<ThreadSpawnProjected> {
+    ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnProjected> {
         if require_supervisor_grant && !parent_allows_supervisor_spawn(&parent.context().metadata)?
         {
-            return Err(crate::VerletError::RuntimeExecution(format!(
-                "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} projector requires parent thread bound coupling grant {THREADS_SPAWN_CAPABILITY}",
-                STD_SUPERVISOR_SPAWN_TEMPLATE_ID = crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
-                THREADS_SPAWN_CAPABILITY = crate::THREADS_SPAWN_CAPABILITY
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!(
+                    "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} projector requires parent thread bound coupling grant {THREADS_SPAWN_CAPABILITY}",
+                    STD_SUPERVISOR_SPAWN_TEMPLATE_ID =
+                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+                    THREADS_SPAWN_CAPABILITY =
+                        crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
+                ),
+            ));
         }
 
         let arguments = if let Some(task_name) = &payload.task_name {
@@ -592,7 +617,7 @@ impl ThreadSpawnProjector {
         let (placement, has_workspace) = agent_binding
             .as_ref()
             .map(|binding| {
-                serde_json::from_value::<crate::AgentManifestBindReceipt>(
+                serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
                     binding.bind_receipt.clone(),
                 )
                 .map(|receipt| {
@@ -602,15 +627,18 @@ impl ThreadSpawnProjector {
                     )
                 })
                 .map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "thread spawn projector agent_ref bind receipt is invalid: {err}"
                     ))
                 })
             })
             .transpose()?
-            .unwrap_or((crate::PlacementTarget::Local, false));
-        if placement != crate::PlacementTarget::Local && has_workspace {
-            return Err(crate::VerletError::RuntimeFactory(
+            .unwrap_or((
+                crate::kernel::control_decision::PlacementTarget::Local,
+                false,
+            ));
+        if placement != crate::kernel::control_decision::PlacementTarget::Local && has_workspace {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "workspace bindings require local placement and cannot cross the remote child executor boundary"
                     .to_string(),
             ));
@@ -619,7 +647,7 @@ impl ThreadSpawnProjector {
             .task_name
             .clone()
             .or_else(|| Some(payload.correlation_id.clone()));
-        let witness = crate::ThreadSpawnWitness {
+        let witness = crate::kernel::runtime_host::kernel_control::ThreadSpawnWitness {
             parent_turn_id: payload.parent_turn_id.clone(),
             correlation_id: Some(payload.correlation_id.clone()),
             request_stream_id: Some(request_event.stream_id.clone()),
@@ -627,14 +655,16 @@ impl ThreadSpawnProjector {
             submitted_turn_id: Some(submitted_turn_id),
         };
         let receipt = match placement {
-            crate::PlacementTarget::Local => {
+            crate::kernel::control_decision::PlacementTarget::Local => {
                 if let Some(binding) = agent_binding {
                     self.host
                         .kernel_control()
                         .spawn_bound_child_with_witness(
                             parent.context(),
                             task_name,
-                            crate::TurnInput::text(payload.initial_submission.clone()),
+                            crate::kernel::runtime_host::turn::TurnInput::text(
+                                payload.initial_submission.clone(),
+                            ),
                             metadata,
                             witness,
                             binding.compile_receipt,
@@ -647,14 +677,16 @@ impl ThreadSpawnProjector {
                         .spawn_child_with_witness(
                             parent.context(),
                             task_name,
-                            crate::TurnInput::text(payload.initial_submission.clone()),
+                            crate::kernel::runtime_host::turn::TurnInput::text(
+                                payload.initial_submission.clone(),
+                            ),
                             metadata,
                             witness,
                         )
                         .await?
                 }
             }
-            crate::PlacementTarget::Remote => {
+            crate::kernel::control_decision::PlacementTarget::Remote => {
                 let (compile_payload, bind_payload) = agent_binding
                     .map(|binding| (Some(binding.compile_receipt), Some(binding.bind_receipt)))
                     .unwrap_or_default();
@@ -663,7 +695,9 @@ impl ThreadSpawnProjector {
                     .spawn_remote_child_with_witness(
                         parent.context(),
                         task_name,
-                        crate::TurnInput::text(payload.initial_submission.clone()),
+                        crate::kernel::runtime_host::turn::TurnInput::text(
+                            payload.initial_submission.clone(),
+                        ),
                         metadata,
                         witness,
                         compile_payload,
@@ -671,8 +705,8 @@ impl ThreadSpawnProjector {
                     )
                     .await?
             }
-            crate::PlacementTarget::Sandbox => {
-                return Err(crate::VerletError::RuntimeFactory(
+            crate::kernel::control_decision::PlacementTarget::Sandbox => {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "placement target sandbox requires the remote EventStore backend capability, which is not available"
                         .to_string(),
                 ));
@@ -689,11 +723,11 @@ impl ThreadSpawnProjector {
 
     async fn append_fenced_decision(
         &self,
-        request_event: &crate::EventRecord,
+        request_event: &verlet_history::EventRecord,
         correlation_id: Option<&str>,
-        decision_events: &[crate::EventRecord],
-        decision: crate::NewEventRecord,
-    ) -> crate::VerletResult<FencedDecisionAppend> {
+        decision_events: &[verlet_history::EventRecord],
+        decision: verlet_history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<FencedDecisionAppend> {
         let mut events = decision_events.to_vec();
         loop {
             if spawn_request_already_projected(&events, request_event.id, correlation_id) {
@@ -701,9 +735,9 @@ impl ThreadSpawnProjector {
             }
             let expected_next_sequence = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
-            let expected = crate::EventRecord::from_new(
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
+            let expected = verlet_history::EventRecord::from_new(
                 request_event.stream_id.clone(),
                 expected_next_sequence,
                 decision.clone(),
@@ -727,7 +761,7 @@ impl ThreadSpawnProjector {
                                 FencedAppendReceiptOverride::Empty => appended.clear(),
                                 FencedAppendReceiptOverride::WrongEventId => {
                                     if let Some(event) = appended.first_mut() {
-                                        event.id = crate::EventRecordId::new();
+                                        event.id = verlet_history::EventRecordId::new();
                                     }
                                 }
                                 FencedAppendReceiptOverride::WrongProvenance => {
@@ -740,18 +774,18 @@ impl ThreadSpawnProjector {
                         appended
                     };
                     if appended.len() != 1 {
-                        return Err(crate::VerletError::History(format!(
+                        return Err(crate::kernel::runtime_host::VerletError::History(format!(
                             "fenced thread spawn decision append returned {} record(s), expected 1",
                             appended.len()
                         )));
                     }
                     let appended = appended.into_iter().next().ok_or_else(|| {
-                        crate::VerletError::History(
+                        crate::kernel::runtime_host::VerletError::History(
                             "fenced thread spawn decision append returned no record".to_string(),
                         )
                     })?;
                     if appended != expected {
-                        return Err(crate::VerletError::History(format!(
+                        return Err(crate::kernel::runtime_host::VerletError::History(format!(
                             "fenced thread spawn decision append returned unexpected record {} at {} sequence {}",
                             appended.id,
                             appended.stream_id,
@@ -760,15 +794,21 @@ impl ThreadSpawnProjector {
                     }
                     return Ok(FencedDecisionAppend::Appended(appended.id));
                 }
-                Err(crate::HistoryError::AppendFenceConflict { .. }) => {
+                Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => {
                     events = self
                         .host
                         .runtime_store()
                         .read_events(&request_event.stream_id, None)
                         .await
-                        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+                        .map_err(|err| {
+                            crate::kernel::runtime_host::VerletError::History(err.to_string())
+                        })?;
                 }
-                Err(err) => return Err(crate::VerletError::History(err.to_string())),
+                Err(err) => {
+                    return Err(crate::kernel::runtime_host::VerletError::History(
+                        err.to_string(),
+                    ));
+                }
             }
         }
     }
@@ -776,12 +816,12 @@ impl ThreadSpawnProjector {
     async fn record_preclaim_failure(
         &self,
         receipt: &mut ThreadSpawnProjectionReceipt,
-        failure_coordinates: &crate::ThreadCoordinates,
-        request_event: &crate::EventRecord,
+        failure_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        request_event: &verlet_history::EventRecord,
         correlation_id: Option<&str>,
         reason: String,
-        decision_events: &[crate::EventRecord],
-    ) -> crate::VerletResult<()> {
+        decision_events: &[verlet_history::EventRecord],
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let failure =
             self.failure_record(failure_coordinates, request_event, correlation_id, &reason);
         match self
@@ -802,10 +842,10 @@ impl ThreadSpawnProjector {
 
     async fn spawn_metadata(
         &self,
-        caller: &crate::ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         arguments: &serde_json::Value,
-    ) -> crate::VerletResult<(
-        Option<crate::KernelThreadSpawnAgentBinding>,
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        Option<crate::agent::agent_process::KernelThreadSpawnAgentBinding>,
         std::collections::BTreeMap<String, String>,
     )> {
         let inputs_hash = crate::agent::manifest_bind::canonical_json_hash(arguments)?;
@@ -818,7 +858,7 @@ impl ThreadSpawnProjector {
             None
         } else {
             let resolver = self.agent_resolver.as_ref().ok_or_else(|| {
-                crate::VerletError::RuntimeExecution(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(
                     "thread spawn projector agent_ref requires a manifest resolver".to_string(),
                 )
             })?;
@@ -829,38 +869,41 @@ impl ThreadSpawnProjector {
             .map(|binding| binding.metadata.clone())
             .unwrap_or_default();
         metadata.insert(
-            crate::THREAD_SPAWN_INPUTS_HASH_METADATA.to_string(),
+            crate::kernel::runtime_host::THREAD_SPAWN_INPUTS_HASH_METADATA.to_string(),
             inputs_hash,
         );
         if let Some(binding) = &agent_binding {
-            let bind_receipt = serde_json::from_value::<crate::AgentManifestBindReceipt>(
-                binding.bind_receipt.clone(),
-            )
+            let bind_receipt = serde_json::from_value::<
+                crate::agent::manifest_bind::AgentManifestBindReceipt,
+            >(binding.bind_receipt.clone())
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "thread spawn projector agent_ref bind receipt is invalid: {err}"
                 ))
             })?;
             metadata
-                .entry(crate::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string())
+                .entry(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string())
                 .or_insert_with(|| bind_receipt.manifest_hash.clone());
             let granted = serde_json::to_string(&bind_receipt.granted).map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to encode thread spawn projector grants: {err}"
                 ))
             })?;
-            metadata.insert(crate::THREAD_SPAWN_GRANTED_METADATA.to_string(), granted);
+            metadata.insert(
+                crate::kernel::runtime_host::THREAD_SPAWN_GRANTED_METADATA.to_string(),
+                granted,
+            );
         }
         Ok((agent_binding, metadata))
     }
 
     async fn append_failure(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        request_event: &crate::EventRecord,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        request_event: &verlet_history::EventRecord,
         correlation_id: Option<&str>,
         reason: String,
-    ) -> crate::VerletResult<crate::EventRecord> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
         let failure = self.failure_record(coordinates, request_event, correlation_id, &reason);
         let expected_failure = failure.clone();
         let mut appended = self
@@ -868,25 +911,25 @@ impl ThreadSpawnProjector {
             .runtime_store()
             .append_events(&request_event.stream_id, vec![failure])
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         if appended.len() != 1 {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread spawn failure append returned {} record(s), expected 1",
                 appended.len()
             )));
         }
         let appended = appended.pop().ok_or_else(|| {
-            crate::VerletError::History(
+            crate::kernel::runtime_host::VerletError::History(
                 "thread spawn failure append returned no record".to_string(),
             )
         })?;
-        let expected = crate::EventRecord::from_new(
+        let expected = verlet_history::EventRecord::from_new(
             request_event.stream_id.clone(),
             appended.sequence,
             expected_failure,
         );
         if appended != expected {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread spawn failure append returned unexpected record {} on {}",
                 appended.id, appended.stream_id
             )));
@@ -896,14 +939,14 @@ impl ThreadSpawnProjector {
 
     fn failure_record(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        request_event: &crate::EventRecord,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        request_event: &verlet_history::EventRecord,
         correlation_id: Option<&str>,
         reason: &str,
-    ) -> crate::NewEventRecord {
+    ) -> verlet_history::NewEventRecord {
         let payload = serde_json::json!({
-            "schema": crate::EventKind::LoopDenied.payload_schema_id(),
-            "template_id": crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+            "schema": verlet_history::EventKind::LoopDenied.payload_schema_id(),
+            "template_id": crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
             "request_event_id": request_event.id.to_string(),
             "correlation_id": correlation_id
                 .map(ToString::to_string)
@@ -918,16 +961,16 @@ impl ThreadSpawnProjector {
             "error_class": "thread_spawn_failed",
             "reason": reason,
         });
-        crate::NewEventRecord::discharged(
+        verlet_history::NewEventRecord::discharged(
             coordinates.clone(),
-            crate::EventKind::LoopDenied,
+            verlet_history::EventKind::LoopDenied,
             payload,
-            crate::EventProvenance {
+            verlet_history::EventProvenance {
                 source_streams: vec![request_event.stream_id.clone()],
                 source_event_ids: vec![request_event.id],
                 discharged_by: Some(THREAD_SPAWN_PROJECTOR_DISCHARGED_BY.to_string()),
                 function: Some(THREAD_SPAWN_PROJECTOR_FUNCTION.to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         )
     }
@@ -936,14 +979,14 @@ impl ThreadSpawnProjector {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThreadSpawnProjectionReceipt {
     pub projected: Vec<ThreadSpawnProjected>,
-    pub skipped: Vec<crate::EventRecordId>,
+    pub skipped: Vec<verlet_history::EventRecordId>,
     pub failed: Vec<ThreadSpawnProjectionFailure>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadSpawnProjected {
-    pub request_event_id: crate::EventRecordId,
-    pub child_thread_id: crate::ThreadId,
+    pub request_event_id: verlet_history::EventRecordId,
+    pub child_thread_id: verlet_runtime_contracts::ThreadId,
     pub submitted_turn_id: String,
     pub correlation_id: String,
     pub task_name: Option<String>,
@@ -951,24 +994,24 @@ pub struct ThreadSpawnProjected {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadSpawnProjectionFailure {
-    pub request_event_id: crate::EventRecordId,
-    pub failure_event_id: crate::EventRecordId,
+    pub request_event_id: verlet_history::EventRecordId,
+    pub failure_event_id: verlet_history::EventRecordId,
     pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadSpawnDispatchReceipt {
-    pub request_event_id: crate::EventRecordId,
-    pub handle: verlet_runtime_contracts::HandleId,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
+    pub request_event_id: verlet_history::EventRecordId,
+    pub handle: verlet_runtime_contracts::handle::HandleId,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
     pub submitted_turn_id: Option<String>,
     pub task_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadSpawnDispatchFold {
-    pub request_event_id: crate::EventRecordId,
-    pub handle: Option<verlet_runtime_contracts::HandleId>,
+    pub request_event_id: verlet_history::EventRecordId,
+    pub handle: Option<verlet_runtime_contracts::handle::HandleId>,
     pub submitted_turn_id: Option<String>,
     pub task_name: Option<String>,
     pub failure_reason: Option<String>,
@@ -983,11 +1026,11 @@ pub struct ThreadSpawnDispatchFold {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadTaskNameResolutionReceipt {
     pub task_name: String,
-    pub parent_thread_id: crate::ThreadId,
-    pub request_event_id: crate::EventRecordId,
-    pub spawned_event_id: crate::EventRecordId,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
-    pub handle: verlet_runtime_contracts::HandleId,
+    pub parent_thread_id: verlet_runtime_contracts::ThreadId,
+    pub request_event_id: verlet_history::EventRecordId,
+    pub spawned_event_id: verlet_history::EventRecordId,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
+    pub handle: verlet_runtime_contracts::handle::HandleId,
 }
 
 /// Durable spawn-time binding for a thread handle.
@@ -999,12 +1042,12 @@ pub struct ThreadTaskNameResolutionReceipt {
 /// restart and never depends on a live subscription to the child.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ThreadHandleBinding {
-    pub request_event_id: crate::EventRecordId,
-    pub spawned_event_id: crate::EventRecordId,
+    pub request_event_id: verlet_history::EventRecordId,
+    pub spawned_event_id: verlet_history::EventRecordId,
     pub submitted_turn_id: String,
-    pub consumer: crate::ThreadCoordinates,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
-    pub handle: verlet_runtime_contracts::HandleId,
+    pub consumer: verlet_runtime_contracts::ThreadCoordinates,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
+    pub handle: verlet_runtime_contracts::handle::HandleId,
 }
 
 /// Folds the durable records for one dispatch identity. The original
@@ -1013,20 +1056,23 @@ pub(crate) struct ThreadHandleBinding {
 /// pre-handle-lane request payloads decode because every newer field is
 /// optional with a serde default.
 pub fn fold_thread_spawn_dispatch(
-    events: &[crate::EventRecord],
-    dispatch_id: &verlet_runtime_contracts::DispatchId,
+    events: &[verlet_history::EventRecord],
+    dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
 ) -> Option<ThreadSpawnDispatchFold> {
     let (request, payload) = events.iter().find_map(|event| {
-        if event.kind != crate::EventKind::ThreadSpawnRequested || is_spawn_request_claim(event) {
+        if event.kind != verlet_history::EventKind::ThreadSpawnRequested
+            || is_spawn_request_claim(event)
+        {
             return None;
         }
-        let payload =
-            serde_json::from_value::<crate::ThreadSpawnRequestedPayload>(event.payload.clone())
-                .ok()?;
+        let payload = serde_json::from_value::<verlet_history::ThreadSpawnRequestedPayload>(
+            event.payload.clone(),
+        )
+        .ok()?;
         (payload.correlation_id == dispatch_id.as_str()).then_some((event, payload))
     })?;
     let spawned = events.iter().find(|event| {
-        event.kind == crate::EventKind::ThreadSpawned
+        event.kind == verlet_history::EventKind::ThreadSpawned
             && event
                 .payload
                 .get("correlation_id")
@@ -1036,12 +1082,12 @@ pub fn fold_thread_spawn_dispatch(
     let handle = spawned
         .and_then(|event| event.payload.get("child_thread_id"))
         .and_then(serde_json::Value::as_str)
-        .and_then(|value| crate::ThreadId::parse_str(value).ok())
-        .map(verlet_runtime_contracts::HandleId::thread);
+        .and_then(|value| verlet_runtime_contracts::ThreadId::parse_str(value).ok())
+        .map(verlet_runtime_contracts::handle::HandleId::thread);
     let failure_reason = events
         .iter()
         .find(|event| {
-            event.kind == crate::EventKind::LoopDenied
+            event.kind == verlet_history::EventKind::LoopDenied
                 && event
                     .payload
                     .get("correlation_id")
@@ -1080,33 +1126,35 @@ pub fn fold_thread_spawn_dispatch(
 /// Multiple witnessed handles for one name are legacy/corrupt ambiguity and
 /// fail closed rather than preferring a live child over a completed child.
 pub fn fold_thread_task_name_resolution(
-    events: &[crate::EventRecord],
-    parent: &crate::ThreadCoordinates,
+    events: &[verlet_history::EventRecord],
+    parent: &verlet_runtime_contracts::ThreadCoordinates,
     task_name: &str,
-) -> crate::VerletResult<Option<ThreadTaskNameResolutionReceipt>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<ThreadTaskNameResolutionReceipt>> {
     let mut resolutions = Vec::new();
     for request in events.iter().filter(|event| {
-        event.kind == crate::EventKind::ThreadSpawnRequested && !is_spawn_request_claim(event)
+        event.kind == verlet_history::EventKind::ThreadSpawnRequested
+            && !is_spawn_request_claim(event)
     }) {
         if request.coordinates.thread_id != parent.thread_id
             || request.coordinates.scope() != parent.scope()
         {
             continue;
         }
-        let payload =
-            serde_json::from_value::<crate::ThreadSpawnRequestedPayload>(request.payload.clone())
-                .map_err(|err| {
-                crate::VerletError::History(format!(
-                    "thread task_name resolution spawn request decode failed: {err}"
-                ))
-            })?;
+        let payload = serde_json::from_value::<verlet_history::ThreadSpawnRequestedPayload>(
+            request.payload.clone(),
+        )
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "thread task_name resolution spawn request decode failed: {err}"
+            ))
+        })?;
         if payload.parent_thread_id != parent.thread_id
             || payload.task_name.as_deref() != Some(task_name)
         {
             continue;
         }
         for spawned in events.iter().filter(|event| {
-            event.kind == crate::EventKind::ThreadSpawned
+            event.kind == verlet_history::EventKind::ThreadSpawned
                 && event.coordinates.thread_id == parent.thread_id
                 && event.coordinates.scope() == parent.scope()
                 && event
@@ -1116,15 +1164,16 @@ pub fn fold_thread_task_name_resolution(
                     == Some(payload.correlation_id.as_str())
                 && event.provenance.source_event_ids.contains(&request.id)
         }) {
-            let spawned_payload =
-                serde_json::from_value::<crate::ThreadSpawnedPayload>(spawned.payload.clone())
-                    .map_err(|err| {
-                        crate::VerletError::History(format!(
-                            "thread task_name resolution spawned payload decode failed: {err}"
-                        ))
-                    })?;
+            let spawned_payload = serde_json::from_value::<verlet_history::ThreadSpawnedPayload>(
+                spawned.payload.clone(),
+            )
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "thread task_name resolution spawned payload decode failed: {err}"
+                ))
+            })?;
             if spawned_payload.parent_thread_id != parent.thread_id {
-                return Err(crate::VerletError::History(format!(
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "thread task_name {task_name:?} spawned receipt has the wrong parent"
                 )));
             }
@@ -1133,19 +1182,21 @@ pub fn fold_thread_task_name_resolution(
                 parent_thread_id: parent.thread_id,
                 request_event_id: request.id,
                 spawned_event_id: spawned.id,
-                dispatch_id: verlet_runtime_contracts::DispatchId::new(
+                dispatch_id: verlet_runtime_contracts::handle::DispatchId::new(
                     payload.correlation_id.clone(),
                 ),
-                handle: verlet_runtime_contracts::HandleId::thread(spawned_payload.child_thread_id),
+                handle: verlet_runtime_contracts::handle::HandleId::thread(
+                    spawned_payload.child_thread_id,
+                ),
             });
         }
     }
     match resolutions.len() {
         0 => Ok(None),
         1 => Ok(resolutions.pop()),
-        _ => Err(crate::VerletError::RuntimeExecution(format!(
-            "thread task_name {task_name:?} is ambiguous under this parent"
-        ))),
+        _ => Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!("thread task_name {task_name:?} is ambiguous under this parent"),
+        )),
     }
 }
 
@@ -1153,12 +1204,12 @@ pub fn fold_thread_task_name_resolution(
 /// stream. Conflicting records fail closed so settlement cannot be routed to
 /// an ambiguous consumer or handle.
 pub(crate) fn fold_thread_handle_bindings(
-    events: &[crate::EventRecord],
-) -> crate::VerletResult<Vec<ThreadHandleBinding>> {
+    events: &[verlet_history::EventRecord],
+) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadHandleBinding>> {
     let mut bindings = std::collections::BTreeMap::<String, ThreadHandleBinding>::new();
     for spawned in events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+        .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
     {
         let Some(correlation_id) = spawned
             .payload
@@ -1168,14 +1219,14 @@ pub(crate) fn fold_thread_handle_bindings(
             continue;
         };
         let spawned_payload =
-            serde_json::from_value::<crate::ThreadSpawnedPayload>(spawned.payload.clone())
+            serde_json::from_value::<verlet_history::ThreadSpawnedPayload>(spawned.payload.clone())
                 .map_err(|err| {
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "thread handle binding spawned payload decode failed: {err}"
                     ))
                 })?;
         if spawned_payload.parent_thread_id != spawned.coordinates.thread_id {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread handle binding parent {} does not match consumer stream {}",
                 spawned_payload.parent_thread_id, spawned.coordinates.thread_id
             )));
@@ -1183,29 +1234,30 @@ pub(crate) fn fold_thread_handle_bindings(
         let request = events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::ThreadSpawnRequested
+                event.kind == verlet_history::EventKind::ThreadSpawnRequested
                     && !is_spawn_request_claim(event)
             })
             .find_map(|event| {
-                let payload = serde_json::from_value::<crate::ThreadSpawnRequestedPayload>(
-                    event.payload.clone(),
-                )
-                .ok()?;
+                let payload =
+                    serde_json::from_value::<verlet_history::ThreadSpawnRequestedPayload>(
+                        event.payload.clone(),
+                    )
+                    .ok()?;
                 (payload.correlation_id == correlation_id).then_some((event, payload))
             })
             .ok_or_else(|| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "thread handle binding {correlation_id} is missing its spawn request"
                 ))
             })?;
         if request.1.parent_thread_id != spawned.coordinates.thread_id {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread handle binding request parent {} does not match consumer stream {}",
                 request.1.parent_thread_id, spawned.coordinates.thread_id
             )));
         }
         if !spawned.provenance.source_event_ids.contains(&request.0.id) {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread handle binding {correlation_id} spawned receipt is missing request provenance"
             )));
         }
@@ -1218,13 +1270,15 @@ pub(crate) fn fold_thread_handle_bindings(
                 .clone()
                 .unwrap_or_else(|| format!("thread-spawn-{}", request.0.id)),
             consumer: spawned.coordinates.clone(),
-            dispatch_id: verlet_runtime_contracts::DispatchId::new(correlation_id),
-            handle: verlet_runtime_contracts::HandleId::thread(spawned_payload.child_thread_id),
+            dispatch_id: verlet_runtime_contracts::handle::DispatchId::new(correlation_id),
+            handle: verlet_runtime_contracts::handle::HandleId::thread(
+                spawned_payload.child_thread_id,
+            ),
         };
         if let Some(existing) = bindings.insert(correlation_id.to_string(), binding.clone())
             && existing != binding
         {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread handle binding {correlation_id} has conflicting spawned receipts"
             )));
         }
@@ -1234,26 +1288,30 @@ pub(crate) fn fold_thread_handle_bindings(
 
 fn parent_allows_supervisor_spawn(
     metadata: &std::collections::BTreeMap<String, String>,
-) -> crate::VerletResult<bool> {
-    parent_allows_supervisor_spawn_at(metadata, crate::kernel::history::now_ms())
+) -> crate::kernel::runtime_host::VerletResult<bool> {
+    parent_allows_supervisor_spawn_at(metadata, verlet_history::now_ms())
 }
 
 fn parent_allows_supervisor_spawn_at(
     metadata: &std::collections::BTreeMap<String, String>,
     now_ms: i64,
-) -> crate::VerletResult<bool> {
-    let Some(raw) = metadata.get(crate::THREAD_BOUND_COUPLING_SET_METADATA) else {
+) -> crate::kernel::runtime_host::VerletResult<bool> {
+    let Some(raw) = metadata.get(crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA)
+    else {
         return Ok(false);
     };
-    let coupling_set = serde_json::from_str::<crate::BoundCouplingSet>(raw).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("thread bound coupling set is invalid: {err}"))
+    let coupling_set = serde_json::from_str::<crate::agent::manifest_bind::BoundCouplingSet>(raw)
+        .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "thread bound coupling set is invalid: {err}"
+        ))
     })?;
     let Some(coupling) = coupling_set.couplings.iter().find(|coupling| {
-        coupling.id == crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
+        coupling.id == crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
             && coupling
                 .grants
                 .iter()
-                .any(|grant| grant == crate::THREADS_SPAWN_CAPABILITY)
+                .any(|grant| grant == crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY)
     }) else {
         return Ok(false);
     };
@@ -1269,8 +1327,8 @@ fn parent_allows_supervisor_spawn_at(
 }
 
 fn spawn_request_already_projected(
-    events: &[crate::EventRecord],
-    request_event_id: crate::EventRecordId,
+    events: &[verlet_history::EventRecord],
+    request_event_id: verlet_history::EventRecordId,
     correlation_id: Option<&str>,
 ) -> bool {
     events.iter().any(|event| {
@@ -1288,7 +1346,7 @@ fn spawn_request_already_projected(
                 })))
             || (matches!(
                 event.kind,
-                crate::EventKind::ThreadSpawned | crate::EventKind::LoopDenied
+                verlet_history::EventKind::ThreadSpawned | verlet_history::EventKind::LoopDenied
             ) && (event
                 .provenance
                 .source_event_ids
@@ -1303,16 +1361,16 @@ fn spawn_request_already_projected(
     })
 }
 
-pub(crate) fn is_spawn_request_claim(event: &crate::EventRecord) -> bool {
-    event.kind == crate::EventKind::ThreadSpawnRequested
+pub(crate) fn is_spawn_request_claim(event: &verlet_history::EventRecord) -> bool {
+    event.kind == verlet_history::EventKind::ThreadSpawnRequested
         && event.provenance.discharged_by.as_deref() == Some(THREAD_SPAWN_PROJECTOR_DISCHARGED_BY)
         && event.provenance.function.as_deref() == Some(THREAD_SPAWN_PROJECTOR_FUNCTION)
 }
 
 fn spawn_request_belongs_to_parent(
-    event: &crate::EventRecord,
-    payload: &crate::ThreadSpawnRequestedPayload,
-    parent: &crate::ThreadCoordinates,
+    event: &verlet_history::EventRecord,
+    payload: &verlet_history::ThreadSpawnRequestedPayload,
+    parent: &verlet_runtime_contracts::ThreadCoordinates,
 ) -> bool {
     event.coordinates.thread_id == parent.thread_id
         && event.coordinates.scope() == parent.scope()
@@ -1321,20 +1379,23 @@ fn spawn_request_belongs_to_parent(
 
 #[cfg(test)]
 mod tests {
-    use crate::kernel::history::EventStore as _;
+    use verlet_history::EventStore as _;
 
     #[tokio::test]
     async fn thread_spawn_projector_spawns_child_and_witnesses_thread_spawned() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         let root = host
             .start_thread_with_topology_and_metadata(
                 coordinates.clone(),
-                crate::ThreadTopology::root(),
+                verlet_runtime_contracts::ThreadTopology::root(),
                 parent_metadata_with_spawn_grant(),
             )
             .await
@@ -1366,10 +1427,10 @@ mod tests {
         assert_eq!(claim.provenance.source_event_ids, vec![request.id]);
         let spawned = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ThreadSpawned)
+            .find(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
             .unwrap();
         assert!(claim.sequence.get() < spawned.sequence.get());
-        let payload: crate::ThreadSpawnedPayload =
+        let payload: verlet_history::ThreadSpawnedPayload =
             serde_json::from_value(spawned.payload.clone()).unwrap();
         assert_eq!(payload.parent_thread_id, coordinates.thread_id);
         assert_eq!(
@@ -1389,18 +1450,23 @@ mod tests {
             "initial_submission": "echo projected child",
         }));
         let metadata = std::collections::BTreeMap::from([(
-            crate::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
-            serde_json::to_string(&crate::BoundCouplingSet::new_with_grant_expiries(
-                "snapshot-a",
-                vec![coupling],
-                std::collections::BTreeMap::from([(
-                    crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID.to_string(),
-                    vec![crate::AgentManifestGrantExpiry {
-                        capability: crate::THREADS_SPAWN_CAPABILITY.to_string(),
-                        expires_at: "1970-01-01T00:00:01Z".to_string(),
-                    }],
-                )]),
-            ))
+            crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
+            serde_json::to_string(
+                &crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
+                    "snapshot-a",
+                    vec![coupling],
+                    std::collections::BTreeMap::from([(
+                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
+                            .to_string(),
+                        vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
+                            capability:
+                                crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
+                                    .to_string(),
+                            expires_at: "1970-01-01T00:00:01Z".to_string(),
+                        }],
+                    )]),
+                ),
+            )
             .unwrap(),
         )]);
 
@@ -1424,20 +1490,22 @@ mod tests {
     struct ForgedRemoteWorkspaceResolver;
 
     #[async_trait::async_trait]
-    impl crate::KernelThreadSpawnAgentResolver for ForgedRemoteWorkspaceResolver {
+    impl crate::agent::agent_process::KernelThreadSpawnAgentResolver for ForgedRemoteWorkspaceResolver {
         async fn resolve_agent_ref(
             &self,
-            _caller: &crate::ThreadContext,
+            _caller: &verlet_runtime_contracts::ThreadContext,
             agent_ref: &str,
-        ) -> crate::VerletResult<crate::KernelThreadSpawnAgentBinding> {
-            Ok(crate::KernelThreadSpawnAgentBinding {
+        ) -> crate::kernel::runtime_host::VerletResult<
+            crate::agent::agent_process::KernelThreadSpawnAgentBinding,
+        > {
+            Ok(crate::agent::agent_process::KernelThreadSpawnAgentBinding {
                 metadata: std::collections::BTreeMap::new(),
                 compile_receipt: serde_json::json!({
                     "ref_uri": agent_ref,
                     "manifest_hash": "sha256:forged-remote-workspace",
                     "source_hash": "sha256:source"
                 }),
-                bind_receipt: serde_json::to_value(crate::AgentManifestBindReceipt {
+                bind_receipt: serde_json::to_value(crate::agent::manifest_bind::AgentManifestBindReceipt {
                     ref_uri: agent_ref.to_string(),
                     manifest_hash: "sha256:forged-remote-workspace".to_string(),
                     model_profile_id: "default".to_string(),
@@ -1453,18 +1521,18 @@ mod tests {
                     couplings: Vec::new(),
                     granted: Vec::new(),
                     grant_bindings: Vec::new(),
-                    effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
+                    effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
                     overridden_keys: Vec::new(),
-                    placement: Some(crate::AgentManifestPlacementBinding {
-                        target: crate::PlacementTarget::Remote,
+                    placement: Some(crate::agent::manifest_bind::AgentManifestPlacementBinding {
+                        target: crate::kernel::control_decision::PlacementTarget::Remote,
                         executor_ref: Some("executor://cluster/default".to_string()),
                         config: std::collections::BTreeMap::new(),
                     }),
                     placement_origin: None,
-                    workspace: Some(crate::AgentManifestResolvedWorkspaceMount {
+                    workspace: Some(crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount {
                         guest_path: std::path::PathBuf::from("/work"),
                         host_path: std::path::PathBuf::from("/tmp/forged-remote-workspace"),
-                        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+                        mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
                     }),
                     workspace_origin: None,
                 })
@@ -1475,22 +1543,25 @@ mod tests {
 
     #[tokio::test]
     async fn thread_spawn_projector_rejects_forged_remote_workspace_binding() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "remote-workspace");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "remote-workspace");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
         .unwrap();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-        let payload = serde_json::to_value(crate::ThreadSpawnRequestedPayload {
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let payload = serde_json::to_value(verlet_history::ThreadSpawnRequestedPayload {
             parent_thread_id: coordinates.thread_id,
             parent_turn_id: Some("parent-turn-1".to_string()),
             task_name: None,
@@ -1503,20 +1574,22 @@ mod tests {
         .unwrap();
         let mut payload = payload;
         payload["schema"] =
-            serde_json::json!(crate::EventKind::ThreadSpawnRequested.payload_schema_id());
+            serde_json::json!(verlet_history::EventKind::ThreadSpawnRequested.payload_schema_id());
         store
             .append_events(
                 &control_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::ThreadSpawnRequested,
+                    verlet_history::EventKind::ThreadSpawnRequested,
                     payload,
-                    crate::EventProvenance {
-                        source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
-                        source_event_ids: vec![crate::EventRecordId::new()],
+                    verlet_history::EventProvenance {
+                        source_streams: vec![verlet_history::EventStreamId::for_thread(
+                            &coordinates,
+                        )],
+                        source_event_ids: vec![verlet_history::EventRecordId::new()],
                         discharged_by: Some("coupling:std::supervisor.spawn".to_string()),
                         function: Some("op://std-supervisor-spawn/run".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -1538,15 +1611,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn racing_thread_spawn_projectors_produce_exactly_one_spawn() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
@@ -1583,20 +1659,26 @@ mod tests {
         assert_eq!(
             store
                 .read_events(
-                    &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                    &verlet_history::EventStreamId::new(format!(
+                        "control:{}",
+                        coordinates.thread_id
+                    )),
                     None,
                 )
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+                .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
                 .count(),
             1
         );
         assert_eq!(
             store
                 .read_events(
-                    &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                    &verlet_history::EventStreamId::new(format!(
+                        "control:{}",
+                        coordinates.thread_id
+                    )),
                     None,
                 )
                 .await
@@ -1612,15 +1694,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn unrelated_control_append_does_not_strand_spawn_request() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
@@ -1640,15 +1725,15 @@ mod tests {
 
         pause.wait_until_paused().await;
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         store
             .append_events(
                 &control_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
                         "turn_id": "unrelated-control-writer",
                     }),
                 )],
@@ -1678,15 +1763,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn racing_requests_with_same_correlation_produce_one_child() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
@@ -1720,7 +1808,7 @@ mod tests {
         );
         assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         assert_eq!(
             control_events
@@ -1734,7 +1822,7 @@ mod tests {
         assert_eq!(
             control_events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+                .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
                 .count(),
             1
         );
@@ -1744,15 +1832,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn racing_dispatches_with_same_id_append_one_request_and_return_one_handle() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
@@ -1762,7 +1853,7 @@ mod tests {
             .with_snapshot_barrier(std::sync::Arc::clone(&barrier));
         let second = crate::kernel::thread_spawn_projector::ThreadSpawnProjector::new(host.clone())
             .with_snapshot_barrier(barrier);
-        let request = crate::ThreadSpawnRequestedPayload {
+        let request = verlet_history::ThreadSpawnRequestedPayload {
             parent_thread_id: coordinates.thread_id,
             parent_turn_id: Some("parent-turn-1".to_string()),
             task_name: Some("worker".to_string()),
@@ -1784,7 +1875,7 @@ mod tests {
         assert_eq!(first, second);
         let control_events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
@@ -1793,7 +1884,7 @@ mod tests {
             control_events
                 .iter()
                 .filter(|event| {
-                    event.kind == crate::EventKind::ThreadSpawnRequested
+                    event.kind == verlet_history::EventKind::ThreadSpawnRequested
                         && !crate::kernel::thread_spawn_projector::is_spawn_request_claim(event)
                 })
                 .count(),
@@ -1811,7 +1902,7 @@ mod tests {
         assert_eq!(
             control_events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+                .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
                 .count(),
             1
         );
@@ -1822,20 +1913,23 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_task_name_folds_same_dispatch_and_rejects_a_new_dispatch() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
         .unwrap();
-        let request = |dispatch_id: &str| crate::ThreadSpawnRequestedPayload {
+        let request = |dispatch_id: &str| verlet_history::ThreadSpawnRequestedPayload {
             parent_thread_id: coordinates.thread_id,
             parent_turn_id: Some("parent-turn-1".to_string()),
             task_name: Some("worker".to_string()),
@@ -1870,7 +1964,7 @@ mod tests {
         assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
         let events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
@@ -1878,7 +1972,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::ThreadSpawnRequested)
+                .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawnRequested)
                 .filter(
                     |event| !crate::kernel::thread_spawn_projector::is_spawn_request_claim(event)
                 )
@@ -1891,15 +1985,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn racing_new_dispatches_for_one_task_name_spawn_exactly_one_child() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
@@ -1909,7 +2006,7 @@ mod tests {
             .with_snapshot_barrier(barrier.clone());
         let second = crate::kernel::thread_spawn_projector::ThreadSpawnProjector::new(host.clone())
             .with_snapshot_barrier(barrier);
-        let request = |dispatch_id: &str| crate::ThreadSpawnRequestedPayload {
+        let request = |dispatch_id: &str| verlet_history::ThreadSpawnRequestedPayload {
             parent_thread_id: coordinates.thread_id,
             parent_turn_id: None,
             task_name: Some("worker".to_string()),
@@ -1942,7 +2039,7 @@ mod tests {
         assert_eq!(host.children_of(coordinates.thread_id).await.len(), 1);
         let events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
@@ -1950,7 +2047,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::ThreadSpawnRequested)
+                .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawnRequested)
                 .filter(
                     |event| !crate::kernel::thread_spawn_projector::is_spawn_request_claim(event)
                 )
@@ -1963,22 +2060,25 @@ mod tests {
 
     #[tokio::test]
     async fn task_name_reservations_are_scoped_to_the_parent_control_stream() {
-        let host = crate::RuntimeHost::new(std::sync::Arc::new(
-            crate::VirtualBashRuntimeFactory::default(),
+        let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+            crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
         ));
-        let first_parent = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let second_parent = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let first_parent =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let second_parent =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         for coordinates in [&first_parent, &second_parent] {
             host.start_thread_with_topology_and_metadata(
                 coordinates.clone(),
-                crate::ThreadTopology::root(),
+                verlet_runtime_contracts::ThreadTopology::root(),
                 parent_metadata_with_spawn_grant(),
             )
             .await
             .unwrap();
         }
-        let request = |coordinates: &crate::ThreadCoordinates, dispatch_id: &str| {
-            crate::ThreadSpawnRequestedPayload {
+        let request = |coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+                       dispatch_id: &str| {
+            verlet_history::ThreadSpawnRequestedPayload {
                 parent_thread_id: coordinates.thread_id,
                 parent_turn_id: None,
                 task_name: Some("worker".to_string()),
@@ -2008,22 +2108,26 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_spawn_request_cannot_fold_or_reserve_a_parent_task_name() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
         .unwrap();
-        let foreign = crate::ThreadCoordinates::new("other-tenant", "user", "session");
-        let request = |parent: &crate::ThreadCoordinates, dispatch_id: &str| {
-            crate::ThreadSpawnRequestedPayload {
+        let foreign =
+            verlet_runtime_contracts::ThreadCoordinates::new("other-tenant", "user", "session");
+        let request = |parent: &verlet_runtime_contracts::ThreadCoordinates, dispatch_id: &str| {
+            verlet_history::ThreadSpawnRequestedPayload {
                 parent_thread_id: parent.thread_id,
                 parent_turn_id: None,
                 task_name: Some("worker".to_string()),
@@ -2037,10 +2141,10 @@ mod tests {
         };
         store
             .append_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
-                vec![crate::NewEventRecord::witnessed(
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                vec![verlet_history::NewEventRecord::witnessed(
                     foreign.clone(),
-                    crate::EventKind::ThreadSpawnRequested,
+                    verlet_history::EventKind::ThreadSpawnRequested,
                     serde_json::to_value(request(&foreign, "dispatch-foreign")).unwrap(),
                 )],
             )
@@ -2054,7 +2158,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(fold_err, crate::VerletError::History(message) if message == "thread spawn dispatch matched an out-of-scope request record")
+            matches!(fold_err, crate::kernel::runtime_host::VerletError::History(message) if message == "thread spawn dispatch matched an out-of-scope request record")
         );
         let receipt = projector
             .dispatch_request(&coordinates, request(&coordinates, "dispatch-local"))
@@ -2068,16 +2172,18 @@ mod tests {
 
     #[test]
     fn task_name_resolution_receipt_fails_closed_between_completed_and_live_legacy_handles() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let stream_id = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let stream_id =
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let request = |sequence: i64, dispatch_id: &str| {
-            crate::EventRecord::from_new(
+            verlet_history::EventRecord::from_new(
                 stream_id.clone(),
-                crate::EventSequence::new(sequence),
-                crate::NewEventRecord::witnessed(
+                verlet_history::EventSequence::new(sequence),
+                verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::ThreadSpawnRequested,
-                    serde_json::to_value(crate::ThreadSpawnRequestedPayload {
+                    verlet_history::EventKind::ThreadSpawnRequested,
+                    serde_json::to_value(verlet_history::ThreadSpawnRequestedPayload {
                         parent_thread_id: coordinates.thread_id,
                         parent_turn_id: None,
                         task_name: Some("worker".to_string()),
@@ -2094,10 +2200,10 @@ mod tests {
             )
         };
         let first_request = request(1, "dispatch-1");
-        let first_child = crate::ThreadId::new();
-        let mut first_spawn = crate::NewEventRecord::witnessed(
+        let first_child = verlet_runtime_contracts::ThreadId::new();
+        let mut first_spawn = verlet_history::NewEventRecord::witnessed(
             coordinates.clone(),
-            crate::EventKind::ThreadSpawned,
+            verlet_history::EventKind::ThreadSpawned,
             serde_json::json!({
                 "parent_thread_id": coordinates.thread_id,
                 "child_thread_id": first_child,
@@ -2109,9 +2215,9 @@ mod tests {
         );
         first_spawn.provenance.source_event_ids = vec![first_request.id];
         first_spawn.provenance.source_streams = vec![stream_id.clone()];
-        let first_spawn = crate::EventRecord::from_new(
+        let first_spawn = verlet_history::EventRecord::from_new(
             stream_id.clone(),
-            crate::EventSequence::new(2),
+            verlet_history::EventSequence::new(2),
             first_spawn,
         );
 
@@ -2127,17 +2233,17 @@ mod tests {
         assert_eq!(receipt.spawned_event_id, first_spawn.id);
         assert_eq!(
             receipt.handle,
-            verlet_runtime_contracts::HandleId::thread(first_child)
+            verlet_runtime_contracts::handle::HandleId::thread(first_child)
         );
         assert_eq!(
             receipt.dispatch_id,
-            verlet_runtime_contracts::DispatchId::new("dispatch-1")
+            verlet_runtime_contracts::handle::DispatchId::new("dispatch-1")
         );
 
-        let conflicting_child = crate::ThreadId::new();
-        let mut conflicting_spawn = crate::NewEventRecord::witnessed(
+        let conflicting_child = verlet_runtime_contracts::ThreadId::new();
+        let mut conflicting_spawn = verlet_history::NewEventRecord::witnessed(
             coordinates.clone(),
-            crate::EventKind::ThreadSpawned,
+            verlet_history::EventKind::ThreadSpawned,
             serde_json::json!({
                 "parent_thread_id": coordinates.thread_id,
                 "child_thread_id": conflicting_child,
@@ -2149,9 +2255,9 @@ mod tests {
         );
         conflicting_spawn.provenance.source_event_ids = vec![first_request.id];
         conflicting_spawn.provenance.source_streams = vec![stream_id.clone()];
-        let conflicting_spawn = crate::EventRecord::from_new(
+        let conflicting_spawn = verlet_history::EventRecord::from_new(
             stream_id.clone(),
-            crate::EventSequence::new(3),
+            verlet_history::EventSequence::new(3),
             conflicting_spawn,
         );
         let err = crate::kernel::thread_spawn_projector::fold_thread_task_name_resolution(
@@ -2169,12 +2275,12 @@ mod tests {
             "runtime execution failed: thread task_name \"worker\" is ambiguous under this parent"
         );
 
-        let completed = crate::EventRecord::from_new(
+        let completed = verlet_history::EventRecord::from_new(
             stream_id.clone(),
-            crate::EventSequence::new(4),
-            crate::NewEventRecord::witnessed(
+            verlet_history::EventSequence::new(4),
+            verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                crate::EventKind::ThreadJoined,
+                verlet_history::EventKind::ThreadJoined,
                 serde_json::json!({
                     "child_thread_id": first_child,
                     "spawned_event_id": first_spawn.id,
@@ -2183,10 +2289,10 @@ mod tests {
             ),
         );
         let second_request = request(5, "dispatch-2");
-        let second_child = crate::ThreadId::new();
-        let mut second_spawn = crate::NewEventRecord::witnessed(
+        let second_child = verlet_runtime_contracts::ThreadId::new();
+        let mut second_spawn = verlet_history::NewEventRecord::witnessed(
             coordinates.clone(),
-            crate::EventKind::ThreadSpawned,
+            verlet_history::EventKind::ThreadSpawned,
             serde_json::json!({
                 "parent_thread_id": coordinates.thread_id,
                 "child_thread_id": second_child,
@@ -2198,8 +2304,11 @@ mod tests {
         );
         second_spawn.provenance.source_event_ids = vec![second_request.id];
         second_spawn.provenance.source_streams = vec![stream_id.clone()];
-        let second_spawn =
-            crate::EventRecord::from_new(stream_id, crate::EventSequence::new(6), second_spawn);
+        let second_spawn = verlet_history::EventRecord::from_new(
+            stream_id,
+            verlet_history::EventSequence::new(6),
+            second_spawn,
+        );
         let err = crate::kernel::thread_spawn_projector::fold_thread_task_name_resolution(
             &[
                 first_request,
@@ -2220,15 +2329,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn racing_dispatches_with_different_ids_append_two_requests_and_spawn_two_children() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
@@ -2238,17 +2350,18 @@ mod tests {
             .with_snapshot_barrier(std::sync::Arc::clone(&barrier));
         let second = crate::kernel::thread_spawn_projector::ThreadSpawnProjector::new(host.clone())
             .with_snapshot_barrier(barrier);
-        let request = |dispatch_id: &str, task_name: &str| crate::ThreadSpawnRequestedPayload {
-            parent_thread_id: coordinates.thread_id,
-            parent_turn_id: Some("parent-turn-1".to_string()),
-            task_name: Some(task_name.to_string()),
-            submitted_turn_id: Some(format!("thread-spawn-{dispatch_id}")),
-            child_agent_ref: crate::kernel::thread_spawn_projector::UNBOUND_CHILD_AGENT_REF
-                .to_string(),
-            initial_submission: format!("echo {task_name}"),
-            correlation_id: dispatch_id.to_string(),
-            block_parent: false,
-        };
+        let request =
+            |dispatch_id: &str, task_name: &str| verlet_history::ThreadSpawnRequestedPayload {
+                parent_thread_id: coordinates.thread_id,
+                parent_turn_id: Some("parent-turn-1".to_string()),
+                task_name: Some(task_name.to_string()),
+                submitted_turn_id: Some(format!("thread-spawn-{dispatch_id}")),
+                child_agent_ref: crate::kernel::thread_spawn_projector::UNBOUND_CHILD_AGENT_REF
+                    .to_string(),
+                initial_submission: format!("echo {task_name}"),
+                correlation_id: dispatch_id.to_string(),
+                block_parent: false,
+            };
 
         let (first, second) = tokio::join!(
             first.dispatch_request(
@@ -2266,7 +2379,7 @@ mod tests {
         assert_ne!(first.handle, second.handle);
         let control_events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
@@ -2275,7 +2388,7 @@ mod tests {
             control_events
                 .iter()
                 .filter(|event| {
-                    event.kind == crate::EventKind::ThreadSpawnRequested
+                    event.kind == verlet_history::EventKind::ThreadSpawnRequested
                         && !crate::kernel::thread_spawn_projector::is_spawn_request_claim(event)
                 })
                 .count(),
@@ -2293,7 +2406,7 @@ mod tests {
         assert_eq!(
             control_events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::ThreadSpawned)
+                .filter(|event| event.kind == verlet_history::EventKind::ThreadSpawned)
                 .count(),
             2
         );
@@ -2304,20 +2417,23 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn retry_after_dispatch_claim_without_decision_fails_closed_instead_of_spinning() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
         .unwrap();
-        let request = crate::ThreadSpawnRequestedPayload {
+        let request = verlet_history::ThreadSpawnRequestedPayload {
             parent_thread_id: coordinates.thread_id,
             parent_turn_id: Some("parent-turn-1".to_string()),
             task_name: Some("worker".to_string()),
@@ -2358,7 +2474,7 @@ mod tests {
         assert!(host.children_of(coordinates.thread_id).await.is_empty());
         let control_events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
@@ -2375,7 +2491,7 @@ mod tests {
         assert!(
             control_events
                 .iter()
-                .all(|event| event.kind != crate::EventKind::ThreadSpawned)
+                .all(|event| event.kind != verlet_history::EventKind::ThreadSpawned)
         );
 
         host.shutdown_all().await.unwrap();
@@ -2383,32 +2499,34 @@ mod tests {
 
     #[test]
     fn legacy_spawn_request_decodes_and_folds_to_original_handle() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let stream_id = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-        let request_id = crate::EventRecordId::new();
-        let mut legacy_request = crate::NewEventRecord::witnessed(
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let stream_id =
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let request_id = verlet_history::EventRecordId::new();
+        let mut legacy_request = verlet_history::NewEventRecord::witnessed(
             coordinates.clone(),
-            crate::EventKind::ThreadSpawnRequested,
+            verlet_history::EventKind::ThreadSpawnRequested,
             serde_json::from_str(
                 r#"{"schema":"cooldis.thread.spawn.requested/1","parent_thread_id":"018f0000-0000-7000-8000-000000000001","parent_turn_id":"parent-turn-1","child_agent_ref":"unbound","initial_submission":"legacy child","correlation_id":"legacy-dispatch-1","block_parent":false}"#,
             )
             .unwrap(),
         );
         legacy_request.id = request_id;
-        let request = crate::EventRecord::from_new(
+        let request = verlet_history::EventRecord::from_new(
             stream_id.clone(),
-            crate::EventSequence::new(1),
+            verlet_history::EventSequence::new(1),
             legacy_request,
         );
-        let child_thread_id = crate::ThreadId::new();
-        let spawned = crate::EventRecord::from_new(
+        let child_thread_id = verlet_runtime_contracts::ThreadId::new();
+        let spawned = verlet_history::EventRecord::from_new(
             stream_id,
-            crate::EventSequence::new(2),
-            crate::NewEventRecord::witnessed(
+            verlet_history::EventSequence::new(2),
+            verlet_history::NewEventRecord::witnessed(
                 coordinates,
-                crate::EventKind::ThreadSpawned,
+                verlet_history::EventKind::ThreadSpawned,
                 serde_json::json!({
-                    "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
+                    "schema": verlet_history::EventKind::ThreadSpawned.payload_schema_id(),
                     "parent_thread_id": "018f0000-0000-7000-8000-000000000001",
                     "child_thread_id": child_thread_id,
                     "child_manifest_hash": "unbound",
@@ -2421,13 +2539,15 @@ mod tests {
 
         let folded = crate::kernel::thread_spawn_projector::fold_thread_spawn_dispatch(
             &[request, spawned],
-            &verlet_runtime_contracts::DispatchId::new("legacy-dispatch-1"),
+            &verlet_runtime_contracts::handle::DispatchId::new("legacy-dispatch-1"),
         )
         .unwrap();
         assert_eq!(folded.request_event_id, request_id);
         assert_eq!(
             folded.handle,
-            Some(verlet_runtime_contracts::HandleId::thread(child_thread_id))
+            Some(verlet_runtime_contracts::handle::HandleId::thread(
+                child_thread_id
+            ))
         );
         assert_eq!(
             folded.submitted_turn_id.as_deref(),
@@ -2437,15 +2557,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn racing_rejections_emit_one_failure() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             std::collections::BTreeMap::new(),
         )
         .await
@@ -2481,7 +2604,7 @@ mod tests {
         assert!(host.children_of(coordinates.thread_id).await.is_empty());
         let control_events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
@@ -2498,7 +2621,7 @@ mod tests {
         assert_eq!(
             control_events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::LoopDenied)
+                .filter(|event| event.kind == verlet_history::EventKind::LoopDenied)
                 .count(),
             1
         );
@@ -2508,15 +2631,18 @@ mod tests {
 
     #[tokio::test]
     async fn forged_projection_coordinates_cannot_spawn_in_another_scope() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
@@ -2536,7 +2662,7 @@ mod tests {
         assert!(host.children_of(coordinates.thread_id).await.is_empty());
         let control_events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
@@ -2549,7 +2675,7 @@ mod tests {
         assert_eq!(
             control_events
                 .iter()
-                .filter(|event| event.kind == crate::EventKind::LoopDenied)
+                .filter(|event| event.kind == verlet_history::EventKind::LoopDenied)
                 .count(),
             1
         );
@@ -2564,15 +2690,18 @@ mod tests {
             crate::kernel::thread_spawn_projector::FencedAppendReceiptOverride::WrongEventId,
             crate::kernel::thread_spawn_projector::FencedAppendReceiptOverride::WrongProvenance,
         ] {
-            let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-            let host = crate::RuntimeHost::with_session_store(
-                std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+            let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+            let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+                std::sync::Arc::new(
+                    crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+                ),
                 store.clone(),
             );
-            let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+            let coordinates =
+                verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
             host.start_thread_with_topology_and_metadata(
                 coordinates.clone(),
-                crate::ThreadTopology::root(),
+                verlet_runtime_contracts::ThreadTopology::root(),
                 parent_metadata_with_spawn_grant(),
             )
             .await
@@ -2593,39 +2722,43 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_spawn_projector_then_child_completion_resumes_parent() {
-        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
-        let host = crate::RuntimeHost::with_session_store(
-            std::sync::Arc::new(crate::VirtualBashRuntimeFactory::default()),
+        let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(
+                crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
             store.clone(),
         );
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
         host.start_thread_with_topology_and_metadata(
             coordinates.clone(),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             parent_metadata_with_spawn_grant(),
         )
         .await
         .unwrap();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let submitted = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
                         "turn_id": "parent-turn-1",
                     }),
                 )],
             )
             .await
             .unwrap();
-        let executor = crate::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(store.as_ref(), &executor);
+        let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(store.as_ref(), &executor);
         let spawn_receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_supervisor_spawn_coupling(serde_json::json!({
                         "initial_submission": "echo child evidence",
@@ -2640,7 +2773,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             spawn_receipt.runs[0].status,
-            crate::CouplingRunStatus::Completed
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Completed
         );
 
         let projection =
@@ -2654,11 +2787,11 @@ mod tests {
                 .await;
         let completion = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_supervisor_child_completion_coupling(
                         serde_json::json!({
-                            "watch_coupling_id": crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
+                            "watch_coupling_id": crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
                             "on_completed": "request_continuation",
                             "loop_id": "supervisor-release",
                             "parent_turn_id": "parent-turn-1",
@@ -2675,18 +2808,18 @@ mod tests {
         assert_eq!(completion.runs.len(), 1);
         assert_eq!(
             completion.runs[0].status,
-            crate::CouplingRunStatus::Completed
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Completed
         );
         let control_events = store
             .read_events(
-                &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                 None,
             )
             .await
             .unwrap();
         let continued = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::TurnContinueRequested)
+            .find(|event| event.kind == verlet_history::EventKind::TurnContinueRequested)
             .unwrap();
         assert_eq!(
             continued.payload["subject"]["parent_turn_id"],
@@ -2701,13 +2834,13 @@ mod tests {
     }
 
     async fn append_spawn_requested(
-        store: &crate::InMemorySessionStore,
-        coordinates: &crate::ThreadCoordinates,
+        store: &verlet_history::InMemorySessionStore,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         correlation_id: &str,
-    ) -> crate::EventRecord {
+    ) -> verlet_history::EventRecord {
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-        let mut payload = serde_json::to_value(crate::ThreadSpawnRequestedPayload {
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let mut payload = serde_json::to_value(verlet_history::ThreadSpawnRequestedPayload {
             parent_thread_id: coordinates.thread_id,
             parent_turn_id: Some("parent-turn-1".to_string()),
             task_name: None,
@@ -2720,20 +2853,22 @@ mod tests {
         })
         .unwrap();
         payload["schema"] =
-            serde_json::json!(crate::EventKind::ThreadSpawnRequested.payload_schema_id());
+            serde_json::json!(verlet_history::EventKind::ThreadSpawnRequested.payload_schema_id());
         store
             .append_events(
                 &control_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::ThreadSpawnRequested,
+                    verlet_history::EventKind::ThreadSpawnRequested,
                     payload,
-                    crate::EventProvenance {
-                        source_streams: vec![crate::EventStreamId::for_thread(coordinates)],
-                        source_event_ids: vec![crate::EventRecordId::new()],
+                    verlet_history::EventProvenance {
+                        source_streams: vec![verlet_history::EventStreamId::for_thread(
+                            coordinates,
+                        )],
+                        source_event_ids: vec![verlet_history::EventRecordId::new()],
                         discharged_by: Some("coupling:std::supervisor.spawn".to_string()),
                         function: Some("op://std-supervisor-spawn/run".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -2744,34 +2879,34 @@ mod tests {
     }
 
     async fn append_routed_child_completion(
-        store: &crate::InMemorySessionStore,
-        coordinates: &crate::ThreadCoordinates,
-        child_thread_id: crate::ThreadId,
+        store: &verlet_history::InMemorySessionStore,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
         child_turn_id: &str,
-    ) -> Vec<crate::EventRecord> {
-        let thread_stream = crate::EventStreamId::for_thread(coordinates);
+    ) -> Vec<verlet_history::EventRecord> {
+        let thread_stream = verlet_history::EventStreamId::for_thread(coordinates);
         store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::TurnCompleted,
+                    verlet_history::EventKind::TurnCompleted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnCompleted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
                         "turn_id": child_turn_id,
                         "parent_thread_id": coordinates.thread_id.to_string(),
                         "child_thread_id": child_thread_id.to_string(),
                         "status": "completed",
                         "output_text": "child finished release evidence collection",
                     }),
-                    crate::EventProvenance {
-                        source_streams: vec![crate::EventStreamId::new(format!(
+                    verlet_history::EventProvenance {
+                        source_streams: vec![verlet_history::EventStreamId::new(format!(
                             "thread:{}",
                             child_thread_id
                         ))],
                         discharged_by: Some("runtime:child-thread".to_string()),
                         function: Some("child_turn_completion/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -2781,8 +2916,8 @@ mod tests {
 
     fn parent_metadata_with_spawn_grant() -> std::collections::BTreeMap<String, String> {
         std::collections::BTreeMap::from([(
-            crate::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
-            serde_json::to_string(&crate::BoundCouplingSet::new(
+            crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
+            serde_json::to_string(&crate::agent::manifest_bind::BoundCouplingSet::new(
                 "snapshot-a",
                 vec![std_supervisor_spawn_coupling(serde_json::json!({
                     "initial_submission": "echo projected child",
@@ -2792,28 +2927,30 @@ mod tests {
         )])
     }
 
-    fn std_supervisor_spawn_coupling(config: serde_json::Value) -> crate::BoundCoupling {
-        crate::BoundCoupling {
-            id: crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID.to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TurnSubmitted,
+    fn std_supervisor_spawn_coupling(
+        config: serde_json::Value,
+    ) -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
+            id: crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID.to_string(),
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TurnSubmitted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::TurnSubmitted],
+                kinds: vec![verlet_history::EventKind::TurnSubmitted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::ThreadSpawnRequested,
-                    crate::EventKind::TurnWaiting,
+                    verlet_history::EventKind::ThreadSpawnRequested,
+                    verlet_history::EventKind::TurnWaiting,
                 ],
             },
             function_ref: format!("op://std-supervisor-spawn/run@sha256:{}", "i".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-supervisor-spawn".to_string(),
                 artifact_hash: "i".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -2821,9 +2958,9 @@ mod tests {
             grants: vec![
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
-                crate::THREADS_SPAWN_CAPABILITY.to_string(),
+                crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY.to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
             },
@@ -2832,31 +2969,34 @@ mod tests {
         }
     }
 
-    fn std_supervisor_child_completion_coupling(config: serde_json::Value) -> crate::BoundCoupling {
-        crate::BoundCoupling {
-            id: crate::STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID.to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TurnCompleted,
+    fn std_supervisor_child_completion_coupling(
+        config: serde_json::Value,
+    ) -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
+            id: crate::kernel::stdlib_couplings::STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID
+                .to_string(),
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TurnCompleted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::TurnCompleted],
+                kinds: vec![verlet_history::EventKind::TurnCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::TurnContinueRequested,
-                    crate::EventKind::LoopCompleted,
+                    verlet_history::EventKind::TurnContinueRequested,
+                    verlet_history::EventKind::LoopCompleted,
                 ],
             },
             function_ref: format!(
                 "op://std-supervisor-child-completion/run@sha256:{}",
                 "j".repeat(64)
             ),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-supervisor-child-completion".to_string(),
                 artifact_hash: "j".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -2865,7 +3005,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },

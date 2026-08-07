@@ -180,7 +180,7 @@ fn legacy_string_grants_pin_all_four_positions_in_one_manifest_hash() {
 fn object_grant_manifest_hash_is_stable_across_toml_round_trip() {
     #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
     struct GrantEnvelope {
-        grants: Vec<crate::agent::manifest_schema::AgentManifestGrant>,
+        grants: Vec<verlet_agent::manifest_schema::AgentManifestGrant>,
     }
 
     let source = manifest_source_with_all_grant_positions(
@@ -189,13 +189,13 @@ fn object_grant_manifest_hash_is_stable_across_toml_round_trip() {
     );
     let first = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
     let value: toml::Value = toml::from_str(&source).unwrap();
-    crate::agent::manifest_schema::AgentManifestSchema::from_toml_value(&value).unwrap();
+    verlet_agent::manifest_schema::AgentManifestSchema::from_toml_value(&value).unwrap();
     let encoded = toml::to_string(&value).unwrap();
     let second = crate::agent::manifest::AgentPublishPlan::from_source(&encoded).unwrap();
 
     let grant_wire = GrantEnvelope {
-        grants: vec![crate::agent::manifest_schema::AgentManifestGrant::Expiring(
-            crate::agent::manifest_schema::AgentManifestGrantExpiry {
+        grants: vec![verlet_agent::manifest_schema::AgentManifestGrant::Expiring(
+            verlet_agent::manifest_schema::AgentManifestGrantExpiry {
                 capability: "stream.read:thread".to_string(),
                 expires_at: "2026-07-16T20:00:00Z".to_string(),
             },
@@ -244,18 +244,18 @@ fn seed_operation_record(
     artifact_hash: &str,
     operations: &[(&str, &[&str])],
 ) {
-    let registry = crate::LocalOperationRegistry::new(root);
-    let manifest = crate::WasmOperationManifest {
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(root);
+    let manifest = verlet_abi::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: operations
             .iter()
             .enumerate()
             .map(|(index, (operation_name, required_capabilities))| {
-                crate::WasmOperationDefinition {
+                verlet_abi::WasmOperationDefinition {
                     id: (index + 1) as u32,
                     name: (*operation_name).to_string(),
-                    input: crate::WasmOperationValueKind::Text,
-                    output: crate::WasmOperationValueKind::Text,
+                    input: verlet_abi::WasmOperationValueKind::Text,
+                    output: verlet_abi::WasmOperationValueKind::Text,
                     events: Default::default(),
                     mode: Default::default(),
                     required_capabilities: required_capabilities
@@ -274,13 +274,13 @@ fn seed_operation_record(
                 .map(|capability| (*capability).to_string())
         })
         .collect::<std::collections::BTreeSet<_>>();
-    let registered = crate::RegisteredOperation {
+    let registered = verlet_operations::RegisteredOperation {
         name: name.to_string(),
         manifest: manifest.clone(),
         capability_grants: capability_grants.clone(),
         metadata: Default::default(),
     };
-    let record = crate::PublishedOperationRecord {
+    let record = verlet_operations::operation_store::PublishedOperationRecord {
         schema_version: 1,
         name: name.to_string(),
         active_artifact_hash: artifact_hash.to_string(),
@@ -289,10 +289,10 @@ fn seed_operation_record(
         interface: None,
         capability_grants,
         metadata: Default::default(),
-        source: crate::PublishedOperationSource::Kernel {
+        source: verlet_operations::operation_store::PublishedOperationSource::Kernel {
             package: "test".to_string(),
         },
-        build: crate::PublishedOperationBuild {
+        build: verlet_operations::operation_store::PublishedOperationBuild {
             artifact_path: std::path::PathBuf::from("<test>"),
             published_at_ms: crate::agent::manifest::now_ms(),
         },
@@ -371,9 +371,10 @@ budget_share = 0.75
             .iter()
             .any(|resolved| resolved.declared == prompt_ref)
     );
-    let (_record, published_prompt) = crate::LocalBlobRegistry::new(blob_root)
-        .load_text_ref(prompt_ref)
-        .unwrap();
+    let (_record, published_prompt) =
+        verlet_operations::blob_store::LocalBlobRegistry::new(blob_root)
+            .load_text_ref(prompt_ref)
+            .unwrap();
     assert_eq!(published_prompt, prompt_text);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -571,7 +572,7 @@ fn plan_records_resolved_and_unresolved_refs_and_publish_rejects_unresolved() {
     assert_eq!(plan.resolved_refs.len(), 2);
     assert_eq!(
         plan.resolved_refs[0].status,
-        crate::agent::manifest_schema::AgentManifestRefStatus::Resolved
+        verlet_agent::manifest_schema::AgentManifestRefStatus::Resolved
     );
     let expected_hash = format!("sha256:{}", hash());
     assert_eq!(
@@ -580,7 +581,7 @@ fn plan_records_resolved_and_unresolved_refs_and_publish_rejects_unresolved() {
     );
     assert_eq!(
         plan.resolved_refs[1].status,
-        crate::agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
+        verlet_agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
     );
 
     let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("unresolved"))
@@ -609,7 +610,7 @@ fn publish_verifies_operation_ref_exists_in_registry() {
     assert_eq!(record.name, "release-verifier");
     assert_eq!(
         record.resolved_refs[0].status,
-        crate::agent::manifest_schema::AgentManifestRefStatus::Resolved
+        verlet_agent::manifest_schema::AgentManifestRefStatus::Resolved
     );
 }
 
@@ -756,7 +757,7 @@ fn content_addressed_refs_must_end_after_sha256_digest() {
 
     assert_eq!(
         plan.resolved_refs[0].status,
-        crate::agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
+        verlet_agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
     );
     assert!(plan.resolved_refs[0].content_hash.is_none());
 

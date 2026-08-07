@@ -1,6 +1,6 @@
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncWriteExt as _;
-use verlet::EventStore as _;
+use verlet_history::EventStore as _;
 
 #[test]
 fn acp_agent_binary_reports_stable_version() {
@@ -32,12 +32,13 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let socket = root.join("app.sock");
-    let listen = verlet::AppServerListenAddr::Unix(socket.clone());
-    let mut app_config = verlet::VerletAppServerConfig::local(listen.clone(), &workspace);
+    let listen = verlet::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
+    let mut app_config =
+        verlet::adapters::app_server::VerletAppServerConfig::local(listen.clone(), &workspace);
     app_config.runtime_home = root.join("runtime");
     app_config.state_home = root.join("state");
     app_config.agent_registry_root = root.join("agents");
-    let app = verlet::VerletAppServer::new_local(app_config)
+    let app = verlet::adapters::app_server::VerletAppServer::new_local(app_config)
         .await
         .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
@@ -116,19 +117,20 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
         prompt["result"]["verlet"]["assistantText"],
         "local:process smoke"
     );
-    let store = verlet::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
-        .await
-        .unwrap();
+    let store =
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+            .await
+            .unwrap();
     let control_events = store
         .read_events(
-            &verlet::EventStreamId::new(format!("control:{session_id}")),
+            &verlet_history::EventStreamId::new(format!("control:{session_id}")),
             None,
         )
         .await
         .unwrap();
     let thread_events = store
         .read_events(
-            &verlet::EventStreamId::new(format!("thread:{session_id}")),
+            &verlet_history::EventStreamId::new(format!("thread:{session_id}")),
             None,
         )
         .await
@@ -156,21 +158,21 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
 }
 
 fn assert_admission_precedes_execution(
-    control_events: &[verlet::EventRecord],
-    thread_events: &[verlet::EventRecord],
+    control_events: &[verlet_history::EventRecord],
+    thread_events: &[verlet_history::EventRecord],
     route_id: &str,
 ) {
     let admission = control_events
         .iter()
         .find(|event| {
-            event.kind == verlet::EventKind::AdmissionDecided
+            event.kind == verlet_history::EventKind::AdmissionDecided
                 && event.payload["route_id"] == route_id
         })
         .expect("control stream missing expected admission.decided");
     let executed = thread_events
         .iter()
         .find(|event| {
-            event.kind == verlet::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.payload["runtime_kind"] != "thread_started"
         })
         .expect("thread stream missing executed turn session entry");

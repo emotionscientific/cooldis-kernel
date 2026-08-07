@@ -1,6 +1,8 @@
 //! The `blob` subcommand family.
 
-pub(super) async fn run_blob(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_blob(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -32,7 +34,9 @@ pub(super) async fn run_blob(mut args: Vec<std::ffi::OsString>) -> crate::Verlet
     }
 }
 
-pub(super) async fn blob_publish(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn blob_publish(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_blob_publish_args(args)?;
     if options.help {
         print_blob_publish_help();
@@ -43,8 +47,8 @@ pub(super) async fn blob_publish(args: Vec<std::ffi::OsString>) -> crate::Verlet
         .ok_or_else(|| crate::cli::usage_error("blob publish requires <file>"))?;
     let registry_root = options
         .registry_root
-        .unwrap_or_else(crate::default_blob_registry_root);
-    let registry = crate::LocalBlobRegistry::new(registry_root);
+        .unwrap_or_else(crate::agent::manifest::default_blob_registry_root);
+    let registry = verlet_operations::blob_store::LocalBlobRegistry::new(registry_root);
     let record = registry.publish_file(&file, options.name.as_deref())?;
     println!("published blob");
     println!("artifact {}", record.artifact_hash);
@@ -69,7 +73,7 @@ pub(super) struct BlobPublishArgs {
 
 pub(super) fn parse_blob_publish_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<BlobPublishArgs> {
+) -> crate::kernel::runtime_host::VerletResult<BlobPublishArgs> {
     let mut file = None;
     let mut name = None;
     let mut registry_root = None;

@@ -46,9 +46,9 @@ const ADMISSION_ROUTE_FUNCTION: &str = "admission_route/v1";
 pub(crate) struct AdmissionGateContext {
     pub(crate) route_id: String,
     pub(crate) policy_hash: String,
-    pub(crate) decision: crate::kernel::history::AdmissionDecision,
-    pub(crate) admissible: Option<Vec<crate::kernel::history::AdmissionDecision>>,
-    pub(crate) source_ingress_event_ids: Vec<crate::kernel::history::EventRecordId>,
+    pub(crate) decision: verlet_history::AdmissionDecision,
+    pub(crate) admissible: Option<Vec<verlet_history::AdmissionDecision>>,
+    pub(crate) source_ingress_event_ids: Vec<verlet_history::EventRecordId>,
     pub(crate) discharged_by: String,
     pub(crate) function: String,
 }
@@ -57,9 +57,9 @@ impl AdmissionGateContext {
     pub(crate) fn route_policy(
         route_id: String,
         policy_hash: String,
-        decision: crate::kernel::history::AdmissionDecision,
-        admissible: Vec<crate::kernel::history::AdmissionDecision>,
-        source_ingress_event_ids: Vec<crate::kernel::history::EventRecordId>,
+        decision: verlet_history::AdmissionDecision,
+        admissible: Vec<verlet_history::AdmissionDecision>,
+        source_ingress_event_ids: Vec<verlet_history::EventRecordId>,
     ) -> Self {
         Self {
             discharged_by: format!("policy:admission_route:{route_id}"),
@@ -74,16 +74,16 @@ impl AdmissionGateContext {
 
     pub(crate) fn surface_default(
         surface_name: &str,
-        source_ingress_event_ids: Vec<crate::kernel::history::EventRecordId>,
-    ) -> crate::VerletResult<Self> {
+        source_ingress_event_ids: Vec<verlet_history::EventRecordId>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let route_id = format!("surface:{surface_name}");
         let policy_hash =
             crate::agent::manifest_bind::canonical_json_hash(&surface_default_policy(&route_id))?;
         Ok(Self {
             route_id,
             policy_hash,
-            decision: crate::kernel::history::AdmissionDecision::Queue,
-            admissible: Some(vec![crate::kernel::history::AdmissionDecision::Queue]),
+            decision: verlet_history::AdmissionDecision::Queue,
+            admissible: Some(vec![verlet_history::AdmissionDecision::Queue]),
             source_ingress_event_ids,
             discharged_by: format!("policy:admission_surface:{surface_name}"),
             function: SURFACE_ADMISSION_FUNCTION.to_string(),
@@ -98,34 +98,35 @@ impl AdmissionGateContext {
 /// scheduling so no turn runs without an admission decision on the control
 /// stream.
 pub(crate) async fn append_admission_decided(
-    handle: &crate::RuntimeThreadHandle,
+    handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     context: AdmissionGateContext,
-) -> crate::VerletResult<crate::kernel::history::EventRecord> {
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     let record = admission_decided_record(handle.context().coordinates.clone(), context)?;
     handle.append_control_event(record).await
 }
 
 pub(crate) async fn submit_turn(
-    host: &crate::RuntimeHost,
-    thread_id: crate::ThreadId,
+    host: &crate::kernel::runtime_host::RuntimeHost,
+    thread_id: verlet_runtime_contracts::ThreadId,
     turn_id: impl Into<String>,
-    input: crate::TurnInput,
-    mode: crate::TurnSubmissionMode,
+    input: crate::kernel::runtime_host::turn::TurnInput,
+    mode: verlet_runtime_contracts::TurnSubmissionMode,
     admission: Option<AdmissionGateContext>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let reserved = reserve_turn(host, thread_id, turn_id, input, mode, admission).await?;
     submit_reserved(reserved).await;
     Ok(())
 }
 
 pub(crate) async fn reserve_turn(
-    host: &crate::RuntimeHost,
-    thread_id: crate::ThreadId,
+    host: &crate::kernel::runtime_host::RuntimeHost,
+    thread_id: verlet_runtime_contracts::ThreadId,
     turn_id: impl Into<String>,
-    input: crate::TurnInput,
-    mode: crate::TurnSubmissionMode,
+    input: crate::kernel::runtime_host::turn::TurnInput,
+    mode: verlet_runtime_contracts::TurnSubmissionMode,
     admission: Option<AdmissionGateContext>,
-) -> crate::VerletResult<crate::kernel::runtime_host::ReservedTurnSubmission> {
+) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::ReservedTurnSubmission>
+{
     host.reserve_turn_submission_at_choke_point(thread_id, turn_id, input, mode, admission)
         .await
 }
@@ -137,11 +138,11 @@ pub(crate) async fn submit_reserved(
 }
 
 pub(crate) fn admission_decided_record(
-    coordinates: crate::ThreadCoordinates,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
     context: AdmissionGateContext,
-) -> crate::VerletResult<crate::kernel::history::NewEventRecord> {
-    let kind = crate::kernel::history::EventKind::AdmissionDecided;
-    let payload = crate::kernel::history::AdmissionDecidedPayload {
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::NewEventRecord> {
+    let kind = verlet_history::EventKind::AdmissionDecided;
+    let payload = verlet_history::AdmissionDecidedPayload {
         route_id: context.route_id.clone(),
         policy_hash: context.policy_hash.clone(),
         decision: context.decision,
@@ -149,7 +150,9 @@ pub(crate) fn admission_decided_record(
         source_ingress_event_ids: context.source_ingress_event_ids.clone(),
     };
     let mut value = serde_json::to_value(payload).map_err(|err| {
-        crate::VerletError::History(format!("admission.decided payload codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "admission.decided payload codec failed: {err}"
+        ))
     })?;
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -157,12 +160,12 @@ pub(crate) fn admission_decided_record(
             serde_json::json!(kind.payload_schema_id()),
         );
     }
-    Ok(crate::kernel::history::NewEventRecord::discharged(
+    Ok(verlet_history::NewEventRecord::discharged(
         coordinates.clone(),
         kind,
         value,
-        crate::kernel::history::EventProvenance {
-            source_streams: vec![crate::kernel::history::EventStreamId::new(format!(
+        verlet_history::EventProvenance {
+            source_streams: vec![verlet_history::EventStreamId::new(format!(
                 "control:{}",
                 coordinates.thread_id
             ))],
@@ -170,7 +173,7 @@ pub(crate) fn admission_decided_record(
             discharged_by: Some(context.discharged_by),
             function: Some(context.function),
             config_hash: Some(context.policy_hash),
-            ..crate::kernel::history::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
     ))
 }
@@ -186,9 +189,9 @@ fn surface_default_policy(route_id: &str) -> serde_json::Value {
 
 #[cfg(test)]
 pub(crate) fn assert_admission_precedes_turn_records<'a>(
-    control_events: &'a [crate::kernel::history::EventRecord],
-    thread_events: &[crate::kernel::history::EventRecord],
-) -> &'a crate::kernel::history::EventRecord {
+    control_events: &'a [verlet_history::EventRecord],
+    thread_events: &[verlet_history::EventRecord],
+) -> &'a verlet_history::EventRecord {
     let admission = control_events
         .iter()
         .find(|event| event.kind.as_str() == "admission.decided")
@@ -269,7 +272,7 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
 }
 
 #[cfg(test)]
-fn event_order_key(event: &crate::kernel::history::EventRecord) -> (i64, String, i64, String) {
+fn event_order_key(event: &verlet_history::EventRecord) -> (i64, String, i64, String) {
     (
         event.created_at_ms,
         event.stream_id.to_string(),
@@ -349,8 +352,8 @@ mod tests {
 
     #[test]
     fn admission_order_key_matches_replay_merge_tie_breaks() {
-        let first = crate::kernel::history::EventRecordId::from_uuid(uuid::Uuid::now_v7());
-        let second = crate::kernel::history::EventRecordId::from_uuid(uuid::Uuid::now_v7());
+        let first = verlet_history::EventRecordId::from_uuid(uuid::Uuid::now_v7());
+        let second = verlet_history::EventRecordId::from_uuid(uuid::Uuid::now_v7());
 
         // UUIDv7's canonical hyphenated representation preserves UUID byte
         // order, and `Uuid::now_v7` is process-monotonic within a millisecond.

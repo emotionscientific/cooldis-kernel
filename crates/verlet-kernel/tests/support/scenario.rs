@@ -13,7 +13,7 @@
 //! the bounded sequence length and `scenario-ops-v1` fixes operation draws.
 //! Changing either label or the construction below is a vocabulary change.
 
-use verlet::EventStore as _;
+use verlet_history::EventStore as _;
 
 const SCENARIO_ASYNC_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const SCENARIO_ASYNC_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
@@ -39,7 +39,7 @@ impl Drop for ScenarioRunRoot {
 }
 
 struct DynRuntimeStore {
-    inner: std::sync::Arc<dyn verlet::RuntimeStore>,
+    inner: std::sync::Arc<dyn verlet_history::RuntimeStore>,
     canonical_timestamp_ms: i64,
     control: std::sync::Arc<ScenarioStoreControl>,
 }
@@ -52,13 +52,16 @@ struct ScenarioStoreControl {
 }
 
 impl DynRuntimeStore {
-    fn kind(&self, kind: verlet::SessionEntryKind) -> verlet::SessionEntryKind {
+    fn kind(&self, kind: verlet_history::SessionEntryKind) -> verlet_history::SessionEntryKind {
         let mut value = serde_json::to_value(&kind).expect("serialize scenario session entry");
         replace_timestamp_ms(&mut value, self.canonical_timestamp_ms);
         serde_json::from_value(value).expect("deserialize deterministic scenario session entry")
     }
 
-    fn events(&self, mut records: Vec<verlet::NewEventRecord>) -> Vec<verlet::NewEventRecord> {
+    fn events(
+        &self,
+        mut records: Vec<verlet_history::NewEventRecord>,
+    ) -> Vec<verlet_history::NewEventRecord> {
         for record in &mut records {
             record.created_at_ms = self.canonical_timestamp_ms;
         }
@@ -87,13 +90,13 @@ fn replace_timestamp_ms(value: &mut serde_json::Value, timestamp_ms: i64) {
 }
 
 #[async_trait::async_trait]
-impl verlet::SessionStore for DynRuntimeStore {
+impl verlet_history::SessionStore for DynRuntimeStore {
     async fn append(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-        parent_entry_id: Option<verlet::SessionEntryId>,
-        kind: verlet::SessionEntryKind,
-    ) -> verlet::HistoryResult<verlet::SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         self.inner
             .append(coordinates, parent_entry_id, self.kind(kind))
             .await
@@ -101,11 +104,11 @@ impl verlet::SessionStore for DynRuntimeStore {
 
     async fn append_with_provenance(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-        parent_entry_id: Option<verlet::SessionEntryId>,
-        kind: verlet::SessionEntryKind,
-        provenance: verlet::EventProvenance,
-    ) -> verlet::HistoryResult<verlet::SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+        provenance: verlet_history::EventProvenance,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         self.inner
             .append_with_provenance(coordinates, parent_entry_id, self.kind(kind), provenance)
             .await
@@ -113,10 +116,10 @@ impl verlet::SessionStore for DynRuntimeStore {
 
     async fn append_turn_input(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
-        kind: verlet::SessionEntryKind,
-    ) -> verlet::HistoryResult<verlet::SessionEntry> {
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         if self
             .control
             .pause_next_turn_input
@@ -132,32 +135,32 @@ impl verlet::SessionStore for DynRuntimeStore {
 
     async fn active_leaf(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-    ) -> verlet::HistoryResult<Option<verlet::SessionEntryId>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         self.inner.active_leaf(coordinates).await
     }
 
     async fn select_branch(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-        leaf_entry_id: Option<verlet::SessionEntryId>,
-    ) -> verlet::HistoryResult<()> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        leaf_entry_id: Option<verlet_history::SessionEntryId>,
+    ) -> verlet_history::HistoryResult<()> {
         self.inner.select_branch(coordinates, leaf_entry_id).await
     }
 
     async fn build_context(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-    ) -> verlet::HistoryResult<verlet::SessionContext> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionContext> {
         self.inner.build_context(coordinates).await
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &verlet::ThreadCoordinates,
-        source_leaf: Option<verlet::SessionEntryId>,
-        target_coordinates: &verlet::ThreadCoordinates,
-    ) -> verlet::HistoryResult<Option<verlet::SessionEntryId>> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        source_leaf: Option<verlet_history::SessionEntryId>,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         self.inner
             .clone_branch(source_coordinates, source_leaf, target_coordinates)
             .await
@@ -165,10 +168,10 @@ impl verlet::SessionStore for DynRuntimeStore {
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &verlet::ThreadCoordinates,
-        target_coordinates: &verlet::ThreadCoordinates,
-        base: verlet::ThreadBaseRef,
-    ) -> verlet::HistoryResult<()> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        base: verlet_history::ThreadBaseRef,
+    ) -> verlet_history::HistoryResult<()> {
         self.inner
             .fork_by_reference(source_coordinates, target_coordinates, base)
             .await
@@ -176,12 +179,12 @@ impl verlet::SessionStore for DynRuntimeStore {
 }
 
 #[async_trait::async_trait]
-impl verlet::EventStore for DynRuntimeStore {
+impl verlet_history::EventStore for DynRuntimeStore {
     async fn append_events(
         &self,
-        stream_id: &verlet::EventStreamId,
-        records: Vec<verlet::NewEventRecord>,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         self.inner
             .append_events(stream_id, self.events(records))
             .await
@@ -189,10 +192,10 @@ impl verlet::EventStore for DynRuntimeStore {
 
     async fn append_events_fenced(
         &self,
-        stream_id: &verlet::EventStreamId,
-        expected_next_sequence: verlet::EventSequence,
-        records: Vec<verlet::NewEventRecord>,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         self.inner
             .append_events_fenced(stream_id, expected_next_sequence, self.events(records))
             .await
@@ -200,41 +203,41 @@ impl verlet::EventStore for DynRuntimeStore {
 
     async fn read_events(
         &self,
-        stream_id: &verlet::EventStreamId,
-        from_sequence: Option<verlet::EventSequence>,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        from_sequence: Option<verlet_history::EventSequence>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         self.inner.read_events(stream_id, from_sequence).await
     }
 
     async fn read_events_after_cursor(
         &self,
-        stream_id: &verlet::EventStreamId,
-        cursor: &verlet::StreamCursorV1,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        cursor: &verlet_history::StreamCursorV1,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         self.inner.read_events_after_cursor(stream_id, cursor).await
     }
 }
 
 #[async_trait::async_trait]
-impl verlet::ObservationStore for DynRuntimeStore {
+impl verlet_history::ObservationStore for DynRuntimeStore {
     async fn append_observation(
         &self,
-        record: verlet::NewObservationRecord,
-    ) -> verlet::HistoryResult<verlet::ObservationRecord> {
+        record: verlet_history::NewObservationRecord,
+    ) -> verlet_history::HistoryResult<verlet_history::ObservationRecord> {
         self.inner.append_observation(record).await
     }
 
     async fn list_observations(
         &self,
-        scope: &verlet::ThreadCoordinates,
+        scope: &verlet_runtime_contracts::ThreadCoordinates,
         kind: Option<&str>,
-    ) -> verlet::HistoryResult<Vec<verlet::ObservationRecord>> {
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::ObservationRecord>> {
         self.inner.list_observations(scope, kind).await
     }
 }
 
 struct ScenarioProvider {
-    inner: verlet::LocalOfflineProviderClient,
+    inner: verlet_provider::LocalOfflineProviderClient,
     pause_next_complete: std::sync::atomic::AtomicBool,
     complete_started: tokio::sync::Notify,
 }
@@ -242,9 +245,9 @@ struct ScenarioProvider {
 impl ScenarioProvider {
     fn new() -> Self {
         Self {
-            inner: verlet::LocalOfflineProviderClient::new(
-                verlet::APP_SERVER_LOCAL_PROVIDER,
-                verlet::APP_SERVER_LOCAL_MODEL,
+            inner: verlet_provider::LocalOfflineProviderClient::new(
+                verlet::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+                verlet::adapters::app_server::APP_SERVER_LOCAL_MODEL,
             ),
             pause_next_complete: std::sync::atomic::AtomicBool::new(false),
             complete_started: tokio::sync::Notify::new(),
@@ -253,15 +256,15 @@ impl ScenarioProvider {
 }
 
 #[async_trait::async_trait]
-impl verlet::ProviderClient for ScenarioProvider {
-    fn capabilities(&self) -> Option<verlet::ProviderCapabilityRecord> {
+impl verlet_provider::ProviderClient for ScenarioProvider {
+    fn capabilities(&self) -> Option<verlet_provider::ProviderCapabilityRecord> {
         self.inner.capabilities()
     }
 
     async fn complete(
         &self,
-        request: &verlet::ProviderRequest,
-    ) -> verlet::ProviderResult<verlet::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         if self
             .pause_next_complete
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -622,8 +625,8 @@ fn clone_plan(
     }
 }
 
-fn scenario_route() -> verlet::VerletIoRouteConfig {
-    verlet::VerletIoRouteConfig {
+fn scenario_route() -> verlet::daemon::daemon_config::VerletIoRouteConfig {
+    verlet::daemon::daemon_config::VerletIoRouteConfig {
         id: "scenario".to_string(),
         kind: "scenario".to_string(),
         enabled: true,
@@ -635,7 +638,7 @@ fn scenario_route() -> verlet::VerletIoRouteConfig {
         ingress: None,
         egress_projection: Vec::new(),
         typing_simulation: None,
-        egress_retry: verlet::VerletEgressRetryConfig::default(),
+        egress_retry: verlet::daemon::daemon_config::VerletEgressRetryConfig::default(),
         telegram: None,
         metadata: std::collections::BTreeMap::new(),
     }
@@ -644,21 +647,21 @@ fn scenario_route() -> verlet::VerletIoRouteConfig {
 struct ScenarioHarness {
     root: std::path::PathBuf,
     route_db: std::path::PathBuf,
-    server: verlet::VerletAppServer,
-    bridge: verlet::VerletDaemonIoBridge,
+    server: verlet::adapters::app_server::VerletAppServer,
+    bridge: verlet::daemon::daemon_io::VerletDaemonIoBridge,
     queue: std::sync::Arc<dyn verlet_io_core::IngressQueueStore>,
     queue_inner: std::sync::Arc<ScenarioQueue>,
     probes: std::sync::Arc<std::sync::Mutex<QueueProbeLog>>,
     probe_cursor: usize,
     tick: std::sync::Arc<std::sync::atomic::AtomicU64>,
     store_control: std::sync::Arc<ScenarioStoreControl>,
-    runtime_store: std::sync::Arc<dyn verlet::RuntimeStore>,
-    raw_store: verlet::SqliteSessionStore,
+    runtime_store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+    raw_store: verlet_history_sqlite::SqliteSessionStore,
     provider: std::sync::Arc<ScenarioProvider>,
-    projector_host: verlet::RuntimeHost,
+    projector_host: verlet::kernel::runtime_host::RuntimeHost,
     plan: crate::support::fault_plan::FaultPlan,
     transcript: crate::support::transcript::TypedTranscript,
-    coordinates: Vec<verlet::ThreadCoordinates>,
+    coordinates: Vec<verlet_runtime_contracts::ThreadCoordinates>,
     collected: std::collections::BTreeMap<String, i64>,
     current_root: usize,
     root_count: usize,
@@ -696,26 +699,36 @@ impl ScenarioHarness {
         ));
         let provider_control = std::sync::Arc::new(ScenarioProvider::new());
         let applied = plan.apply(
-            std::sync::Arc::new(verlet::InMemorySessionStore::new()),
+            std::sync::Arc::new(verlet_history::InMemorySessionStore::new()),
             probed_queue,
             std::sync::Arc::clone(&provider_control),
         );
         let queue: std::sync::Arc<dyn verlet_io_core::IngressQueueStore> =
             std::sync::Arc::new(applied.queue);
-        let provider: std::sync::Arc<dyn verlet::ProviderClient> =
+        let provider: std::sync::Arc<dyn verlet_provider::ProviderClient> =
             std::sync::Arc::new(applied.provider);
-        let runtime_config = verlet::AgentLoopConfig::new(
-            verlet::ProviderApi::Other(verlet::APP_SERVER_LOCAL_PROVIDER.to_string()),
-            verlet::APP_SERVER_LOCAL_PROVIDER,
-            verlet::APP_SERVER_LOCAL_MODEL,
+        let runtime_config = verlet::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::Other(
+                verlet::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+            ),
+            verlet::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+            verlet::adapters::app_server::APP_SERVER_LOCAL_MODEL,
         );
-        let runtime_factory: std::sync::Arc<dyn verlet::AgentRuntimeFactory> =
-            std::sync::Arc::new(verlet::AgentLoopFactory::new(runtime_config, provider));
+        let runtime_factory: std::sync::Arc<
+            dyn verlet::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+        > = std::sync::Arc::new(verlet::adapters::agent_loop::AgentLoopFactory::new(
+            runtime_config,
+            provider,
+        ));
 
         let socket = root.join("app-server.sock");
-        let listen = verlet::AppServerListenAddr::parse(&format!("unix://{}", socket.display()))
-            .expect("scenario app-server listen address");
-        let mut config = verlet::VerletAppServerConfig::local(listen, "/workspace");
+        let listen = verlet::adapters::app_server::AppServerListenAddr::parse(&format!(
+            "unix://{}",
+            socket.display()
+        ))
+        .expect("scenario app-server listen address");
+        let mut config =
+            verlet::adapters::app_server::VerletAppServerConfig::local(listen, "/workspace");
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.user_state_home = root.join("user-state");
@@ -729,7 +742,7 @@ impl ScenarioHarness {
             Some(verlet::daemon::identity::PrincipalId::new("scenario-user"));
 
         let decorated_slot = std::sync::Arc::new(std::sync::Mutex::new(
-            None::<std::sync::Arc<dyn verlet::RuntimeStore>>,
+            None::<std::sync::Arc<dyn verlet_history::RuntimeStore>>,
         ));
         let decorated_capture = std::sync::Arc::clone(&decorated_slot);
         let store_control = std::sync::Arc::new(ScenarioStoreControl::default());
@@ -747,12 +760,12 @@ impl ScenarioHarness {
                         control: store_control_capture,
                     }),
                     std::sync::Arc::new(EmptyIngressQueue),
-                    std::sync::Arc::new(verlet::LocalOfflineProviderClient::new(
-                        verlet::APP_SERVER_LOCAL_PROVIDER,
-                        verlet::APP_SERVER_LOCAL_MODEL,
+                    std::sync::Arc::new(verlet_provider::LocalOfflineProviderClient::new(
+                        verlet::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+                        verlet::adapters::app_server::APP_SERVER_LOCAL_MODEL,
                     )),
                 );
-                let decorated: std::sync::Arc<dyn verlet::RuntimeStore> =
+                let decorated: std::sync::Arc<dyn verlet_history::RuntimeStore> =
                     std::sync::Arc::new(applied.store);
                 *decorated_capture.lock().unwrap() = Some(std::sync::Arc::clone(&decorated));
                 decorated
@@ -765,14 +778,15 @@ impl ScenarioHarness {
             .unwrap()
             .clone()
             .expect("session-store decorator should capture the installed store");
-        let projector_host = verlet::RuntimeHost::with_session_store(
+        let projector_host = verlet::kernel::runtime_host::RuntimeHost::with_session_store(
             std::sync::Arc::clone(&runtime_factory),
             std::sync::Arc::clone(&runtime_store),
         );
-        let raw_store = verlet::SqliteSessionStore::open(server.session_store_path())
-            .await
-            .expect("open scenario store for durable probes");
-        let bridge = verlet::VerletDaemonIoBridge::from_app_server(&server);
+        let raw_store =
+            verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
+                .await
+                .expect("open scenario store for durable probes");
+        let bridge = verlet::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(&server);
         let route = scenario_route();
         bridge
             .register_egress_route_config("scenario", "scenario", &route)
@@ -816,9 +830,10 @@ impl ScenarioHarness {
         }
     }
 
-    fn deterministic_thread_id(&self, index: usize) -> verlet::ThreadId {
+    fn deterministic_thread_id(&self, index: usize) -> verlet_runtime_contracts::ThreadId {
         let value = (u128::from(self.plan.seed) << 64) | 0x5343_454e_0000_0000u128 | index as u128;
-        verlet::ThreadId::parse_str(&uuid::Uuid::from_u128(value).to_string()).unwrap()
+        verlet_runtime_contracts::ThreadId::parse_str(&uuid::Uuid::from_u128(value).to_string())
+            .unwrap()
     }
 
     fn source() -> verlet_io_core::IoSource {
@@ -840,8 +855,8 @@ impl ScenarioHarness {
         )
     }
 
-    fn root_coordinates(&self, index: usize) -> verlet::ThreadCoordinates {
-        verlet::ThreadCoordinates {
+    fn root_coordinates(&self, index: usize) -> verlet_runtime_contracts::ThreadCoordinates {
+        verlet_runtime_contracts::ThreadCoordinates {
             tenant_id: self.server.tenant_id().to_string(),
             user_id: self.server.user_id().to_string(),
             session_id: Self::session_id(index),
@@ -849,7 +864,7 @@ impl ScenarioHarness {
         }
     }
 
-    fn reserve_root(&mut self, index: usize) -> verlet::ThreadCoordinates {
+    fn reserve_root(&mut self, index: usize) -> verlet_runtime_contracts::ThreadCoordinates {
         let coordinates = self.root_coordinates(index);
         let address = verlet_io_core::ThreadAddress::new(
             coordinates.tenant_id.clone(),
@@ -954,7 +969,11 @@ impl ScenarioHarness {
         previous
     }
 
-    fn rebind_root_to_child(&self, index: usize, coordinates: &verlet::ThreadCoordinates) {
+    fn rebind_root_to_child(
+        &self,
+        index: usize,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) {
         let address = verlet_io_core::ThreadAddress::new(
             coordinates.tenant_id.clone(),
             coordinates.user_id.clone(),
@@ -1046,7 +1065,10 @@ impl ScenarioHarness {
         envelope
     }
 
-    fn bound_coordinates(&self, root_index: usize) -> Option<verlet::ThreadCoordinates> {
+    fn bound_coordinates(
+        &self,
+        root_index: usize,
+    ) -> Option<verlet_runtime_contracts::ThreadCoordinates> {
         let address = verlet_io_core::ThreadAddress::new(
             self.server.tenant_id(),
             self.server.user_id(),
@@ -1065,31 +1087,35 @@ impl ScenarioHarness {
                 ],
                 |row| {
                     let thread_id: String = row.get(3)?;
-                    Ok(verlet::ThreadCoordinates {
+                    Ok(verlet_runtime_contracts::ThreadCoordinates {
                         tenant_id: row.get(0)?,
                         user_id: row.get(1)?,
                         session_id: row.get(2)?,
-                        thread_id: verlet::ThreadId::parse_str(&thread_id).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
+                        thread_id: verlet_runtime_contracts::ThreadId::parse_str(&thread_id)
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    3,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
                     })
                 },
             )
             .ok()
     }
 
-    fn bound_root_index(&self, coordinates: &verlet::ThreadCoordinates) -> Option<usize> {
+    fn bound_root_index(
+        &self,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> Option<usize> {
         (0..self.root_count).find(|index| {
             self.bound_coordinates(*index)
                 .is_some_and(|bound| bound.thread_id == coordinates.thread_id)
         })
     }
 
-    async fn wait_for_idle(&self, coordinates: &verlet::ThreadCoordinates) {
+    async fn wait_for_idle(&self, coordinates: &verlet_runtime_contracts::ThreadCoordinates) {
         let Ok(handle) = self.server.supervisor().get_thread_at(coordinates).await else {
             return;
         };
@@ -1098,9 +1124,9 @@ impl ScenarioHarness {
         loop {
             if matches!(
                 *status.borrow(),
-                verlet::ThreadStatus::Idle
-                    | verlet::ThreadStatus::Stopped
-                    | verlet::ThreadStatus::Failed
+                verlet_runtime_contracts::ThreadStatus::Idle
+                    | verlet_runtime_contracts::ThreadStatus::Stopped
+                    | verlet_runtime_contracts::ThreadStatus::Failed
             ) && handle.queued_command_count() == 0
             {
                 return;
@@ -1126,28 +1152,33 @@ impl ScenarioHarness {
 
     async fn wait_for_turn_input(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-        events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        events: &mut tokio::sync::broadcast::Receiver<
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
         turn_id: &str,
     ) {
         loop {
             match events.recv().await {
-                Ok(verlet::ThreadEvent::CanonicalMirror { entry, .. })
-                    if entry.turn_id.as_deref() == Some(turn_id) =>
-                {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror {
+                    entry,
+                    ..
+                }) if entry.turn_id.as_deref() == Some(turn_id) => {
                     return;
                 }
-                Ok(verlet::ThreadEvent::Failed { .. }) => {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed { .. }) => {
                     self.require_durable_turn_input(coordinates, turn_id, "failed")
                         .await;
                     return;
                 }
-                Ok(verlet::ThreadEvent::Stopped { .. }) => {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { .. }) => {
                     self.require_durable_turn_input(coordinates, turn_id, "stopped")
                         .await;
                     return;
                 }
-                Ok(verlet::ThreadEvent::Cancelled { .. }) => {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                    ..
+                }) => {
                     self.require_durable_turn_input(coordinates, turn_id, "cancelled")
                         .await;
                     return;
@@ -1169,10 +1200,10 @@ impl ScenarioHarness {
 
     async fn turn_input_is_durable(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
     ) -> bool {
-        let stream_id = verlet::EventStreamId::for_thread(coordinates);
+        let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
         self.raw_store
             .read_events(&stream_id, None)
             .await
@@ -1183,7 +1214,7 @@ impl ScenarioHarness {
             })
             .into_iter()
             .any(|event| {
-                event.kind == verlet::EventKind::SessionEntryAppended
+                event.kind == verlet_history::EventKind::SessionEntryAppended
                     && event.payload.get("turn_id").and_then(serde_json::Value::as_str)
                         == Some(turn_id)
             })
@@ -1191,7 +1222,7 @@ impl ScenarioHarness {
 
     async fn require_durable_turn_input(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
         terminal: &str,
     ) {
@@ -1203,7 +1234,7 @@ impl ScenarioHarness {
 
     async fn append_placement(
         &mut self,
-        coordinates: &verlet::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         state: &str,
         resident_state: Option<&str>,
     ) {
@@ -1244,13 +1275,13 @@ impl ScenarioHarness {
                     serde_json::json!(reservation_key),
                 );
             }
-            verlet::NewEventRecord::witnessed(
+            verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                verlet::EventKind::PlacementDecision,
+                verlet_history::EventKind::PlacementDecision,
                 payload,
             )
         };
-        let stream_id = verlet::EventStreamId::for_thread(coordinates);
+        let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
         for _ in 0..32 {
             if self
                 .runtime_store
@@ -1302,7 +1333,7 @@ impl ScenarioHarness {
     }
 
     async fn drain_queue(&mut self) -> usize {
-        let worker = verlet::VerletDaemonQueueWorker::new(
+        let worker = verlet::daemon::daemon_io::VerletDaemonQueueWorker::new(
             std::sync::Arc::clone(&self.queue),
             self.bridge.clone(),
             "scenario-worker",
@@ -1334,14 +1365,14 @@ impl ScenarioHarness {
     async fn collect_events(&mut self) {
         for coordinates in &self.coordinates {
             for stream_id in [
-                verlet::control_stream_id(coordinates),
-                verlet::EventStreamId::for_thread(coordinates),
+                verlet::kernel::control_decision::control_stream_id(coordinates),
+                verlet_history::EventStreamId::for_thread(coordinates),
             ] {
                 self.transcript.preserve_id(stream_id.as_str());
                 let from = self
                     .collected
                     .get(stream_id.as_str())
-                    .map(|sequence| verlet::EventSequence::new(sequence + 1));
+                    .map(|sequence| verlet_history::EventSequence::new(sequence + 1));
                 let events = self
                     .raw_store
                     .read_events(&stream_id, from)
@@ -1377,7 +1408,7 @@ impl ScenarioHarness {
         &self,
         worker_id: &'static str,
     ) -> tokio::task::JoinHandle<verlet_io_core::IoResult<usize>> {
-        let worker = verlet::VerletDaemonQueueWorker::new(
+        let worker = verlet::daemon::daemon_io::VerletDaemonQueueWorker::new(
             std::sync::Arc::clone(&self.queue),
             self.bridge.clone(),
             worker_id,
@@ -1399,7 +1430,10 @@ impl ScenarioHarness {
 
     /// Faulted harness-issued setup operations are receipts and failed retry
     /// attempts, never runner panics.
-    async fn fresh_active_root(&mut self, label: &str) -> verlet::ThreadCoordinates {
+    async fn fresh_active_root(
+        &mut self,
+        label: &str,
+    ) -> verlet_runtime_contracts::ThreadCoordinates {
         for retry in 0..32 {
             let root_index = self.root_count;
             self.root_count += 1;
@@ -1424,7 +1458,7 @@ impl ScenarioHarness {
                 .supervisor()
                 .get_thread_at(&coordinates)
                 .await
-                .is_ok_and(|handle| handle.status() == verlet::ThreadStatus::Idle)
+                .is_ok_and(|handle| handle.status() == verlet_runtime_contracts::ThreadStatus::Idle)
             {
                 self.runtime_generation += 1;
                 self.append_placement(&coordinates, "active", None).await;
@@ -1445,7 +1479,7 @@ impl ScenarioHarness {
         &mut self,
         policy: &str,
         label: &str,
-    ) -> Option<verlet::ThreadCoordinates> {
+    ) -> Option<verlet_runtime_contracts::ThreadCoordinates> {
         let root_index = self.root_count;
         self.root_count += 1;
         self.current_root = root_index;
@@ -1524,7 +1558,7 @@ impl ScenarioHarness {
                             &coordinates,
                             turn_id.clone(),
                             "steer",
-                            verlet::TurnSubmissionMode::Steer,
+                            verlet_runtime_contracts::TurnSubmissionMode::Steer,
                         )
                         .await
                         .is_ok()
@@ -1551,14 +1585,15 @@ impl ScenarioHarness {
                     let child_thread_id = self.deterministic_thread_id(
                         0x1000_0000usize.saturating_add(self.envelope_index),
                     );
-                    let control_stream = verlet::control_stream_id(&parent);
+                    let control_stream =
+                        verlet::kernel::control_decision::control_stream_id(&parent);
                     let claim = self
                         .runtime_store
                         .append_events(
                             &control_stream,
-                            vec![verlet::NewEventRecord::witnessed(
+                            vec![verlet_history::NewEventRecord::witnessed(
                                 parent.clone(),
-                                verlet::EventKind::IoIngressClaimed,
+                                verlet_history::EventKind::IoIngressClaimed,
                                 serde_json::json!({
                                     "ingress_envelope_ids": [&fork_envelope_id],
                                     "ingress_witness_event_ids": [],
@@ -1589,17 +1624,17 @@ impl ScenarioHarness {
                             .append_events(
                                 &control_stream,
                                 vec![
-                                    verlet::NewEventRecord::witnessed(
+                                    verlet_history::NewEventRecord::witnessed(
                                         parent.clone(),
-                                        verlet::EventKind::ThreadSpawned,
+                                        verlet_history::EventKind::ThreadSpawned,
                                         serde_json::json!({
                                             "child_thread_id": child.thread_id,
                                             "fork": {"claim_event_id": claim.id},
                                         }),
                                     ),
-                                    verlet::NewEventRecord::witnessed(
+                                    verlet_history::NewEventRecord::witnessed(
                                         parent,
-                                        verlet::EventKind::IoIngressSettled,
+                                        verlet_history::EventKind::IoIngressSettled,
                                         serde_json::json!({
                                             "claim_event_id": claim.id,
                                             "ingress_envelope_ids": [fork_envelope_id],
@@ -1656,8 +1691,8 @@ impl ScenarioHarness {
 pub struct StreamIoCrashReceipt {
     pub io_transcript: Vec<crate::support::simulated_io::IoTranscriptEntry>,
     pub integrity_check: Vec<String>,
-    pub event_ids: Vec<verlet::EventRecordId>,
-    pub expected_event_ids: Vec<verlet::EventRecordId>,
+    pub event_ids: Vec<verlet_history::EventRecordId>,
+    pub expected_event_ids: Vec<verlet_history::EventRecordId>,
     pub sequences: Vec<i64>,
 }
 
@@ -1669,32 +1704,32 @@ pub async fn run_stream_io_crash_scenario(seed: u64) -> Result<StreamIoCrashRece
     fn record(
         seed: u64,
         index: usize,
-        coordinates: &verlet::ThreadCoordinates,
-    ) -> verlet::NewEventRecord {
-        verlet::NewEventRecord {
-            id: verlet::EventRecordId::from_uuid(uuid::Uuid::from_u128(
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::NewEventRecord {
+        verlet_history::NewEventRecord {
+            id: verlet_history::EventRecordId::from_uuid(uuid::Uuid::from_u128(
                 (u128::from(seed) << 64) | 0x4150_0000u128 | index as u128,
             )),
             coordinates: coordinates.clone(),
             created_at_ms: seed as i64 + index as i64,
-            kind: verlet::EventKind::TurnSubmitted,
-            origin: verlet::EventOrigin::Witnessed,
-            provenance: verlet::EventProvenance::default(),
+            kind: verlet_history::EventKind::TurnSubmitted,
+            origin: verlet_history::EventOrigin::Witnessed,
+            provenance: verlet_history::EventProvenance::default(),
             payload: serde_json::json!({"turn_id": format!("io-crash-{index}")}),
         }
     }
 
     let path = std::path::PathBuf::from(format!("/simulated/emo-415-history-{seed:016x}.sqlite3"));
-    let coordinates = verlet::ThreadCoordinates {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: "emo-415-tenant".to_string(),
         user_id: "emo-415-user".to_string(),
         session_id: "emo-415-session".to_string(),
-        thread_id: verlet::ThreadId::parse_str(
+        thread_id: verlet_runtime_contracts::ThreadId::parse_str(
             &uuid::Uuid::from_u128((u128::from(seed) << 64) | 0x415u128).to_string(),
         )
         .map_err(|error| error.to_string())?,
     };
-    let stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let prefix = (0..3)
         .map(|index| record(seed, index, &coordinates))
         .collect::<Vec<_>>();
@@ -1875,7 +1910,7 @@ struct ScenarioStoreState {
     root: std::path::PathBuf,
     plan: crate::support::fault_plan::FaultPlan,
     transcript: crate::support::transcript::TypedTranscript,
-    coordinates: Vec<verlet::ThreadCoordinates>,
+    coordinates: Vec<verlet_runtime_contracts::ThreadCoordinates>,
     collected: std::collections::BTreeMap<String, i64>,
     current_root: usize,
     root_count: usize,
@@ -2334,7 +2369,7 @@ impl Scenario {
 /// reachable from here is a missing witness in the design, not a reason to
 /// widen this surface casually.
 pub struct ScenarioWorld<'a> {
-    pub store: &'a (dyn verlet::RuntimeStore + Send + Sync),
+    pub store: &'a (dyn verlet_history::RuntimeStore + Send + Sync),
     /// The ingress queue under test, when the scenario exercises ingress;
     /// bounded-queue invariants pass when it is absent.
     pub queue: Option<&'a (dyn verlet_io_core::IngressQueueStore + Send + Sync)>,
@@ -3612,16 +3647,18 @@ mod tests {
                 &coordinates,
                 format!("scenario-steer-{seed}-1"),
                 "steer",
-                verlet::TurnSubmissionMode::Steer,
+                verlet_runtime_contracts::TurnSubmissionMode::Steer,
             )
             .await
             .expect("submit paused idle steer");
         control.turn_input_started.notified().await;
         handle
-            .send(verlet::ThreadCommand::CancelTurn {
-                watchdog_token_id: u64::MAX,
-                reason: "scenario no-op cancel".to_string(),
-            })
+            .send(
+                verlet::kernel::runtime_host::runtime_api::ThreadCommand::CancelTurn {
+                    watchdog_token_id: u64::MAX,
+                    reason: "scenario no-op cancel".to_string(),
+                },
+            )
             .await
             .expect("queue no-op cancel behind paused steer");
         assert_eq!(handle.queued_command_count(), 1);
@@ -3683,10 +3720,12 @@ mod tests {
         let (lagged_tx, mut lagged_events) = tokio::sync::broadcast::channel(1);
         for text in ["first", "second"] {
             lagged_tx
-                .send(verlet::ThreadEvent::Output {
-                    thread_id: coordinates.thread_id,
-                    text: text.to_string(),
-                })
+                .send(
+                    verlet::kernel::runtime_host::runtime_api::ThreadEvent::Output {
+                        thread_id: coordinates.thread_id,
+                        text: text.to_string(),
+                    },
+                )
                 .expect("send synthetic lag event");
         }
         harness
@@ -3695,10 +3734,12 @@ mod tests {
 
         let (terminal_tx, mut terminal_events) = tokio::sync::broadcast::channel(1);
         terminal_tx
-            .send(verlet::ThreadEvent::Failed {
-                thread_id: coordinates.thread_id,
-                message: "synthetic terminal after durability".to_string(),
-            })
+            .send(
+                verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                    thread_id: coordinates.thread_id,
+                    message: "synthetic terminal after durability".to_string(),
+                },
+            )
             .expect("send synthetic terminal event");
         harness
             .wait_for_turn_input(&coordinates, &mut terminal_events, &turn_id)

@@ -1,4 +1,4 @@
-mod runner;
+pub mod runner;
 
 pub const DEFAULT_ENTRYPOINT: &str = "handle_turn";
 pub const DEFAULT_OPERATION_NAME: &str = "handle_turn";
@@ -17,18 +17,6 @@ pub enum VerletWasmError {
     #[error("runtime execution failed: {0}")]
     RuntimeExecution(String),
 }
-
-#[doc(hidden)]
-pub use runner::{
-    FS_MODE_READ, HTTP_ABI, OPERATION_ABI, STATUS_CAPABILITY_DENIED, STATUS_EOF,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
-};
-#[doc(hidden)]
-pub use runner::{
-    NormalizedHttpUrl, ensure_http_capability, execute_http_request, http_origin,
-    normalize_http_url,
-};
-pub use runner::{WasmModuleRuntime, WasmRuntimeFactory};
 
 #[derive(Clone, Debug)]
 pub enum WasmRuntimeArtifact {

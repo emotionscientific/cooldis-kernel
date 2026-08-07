@@ -20,16 +20,19 @@ async fn search_style_http_operation_registers_and_invokes_through_registry() {
     let http_grant = format!("net.http.private:POST:{base_url}");
     let wasm = wat::parse_str(render_search_fixture(&url, &http_grant))
         .expect("Example Search WAT fixture should compile to wasm");
-    let registry = verlet::OperationRegistry::new();
+    let registry = verlet_operations::operation_registry::OperationRegistry::new();
 
     registry
         .register(
-            verlet::OperationRegistration::new("search", verlet::WasmRuntimeArtifact::bytes(wasm))
-                .with_capability_grant(http_grant)
-                .with_capability_grant("secret:EXAMPLE_API_KEY")
-                .with_secret("EXAMPLE_API_KEY", "fixture-secret")
-                .with_metadata("provider", "search")
-                .with_metadata("shape", "http-api-wrapper"),
+            verlet_operations::operation_registry::OperationRegistration::new(
+                "search",
+                verlet_wasm::WasmRuntimeArtifact::bytes(wasm),
+            )
+            .with_capability_grant(http_grant)
+            .with_capability_grant("secret:EXAMPLE_API_KEY")
+            .with_secret("EXAMPLE_API_KEY", "fixture-secret")
+            .with_metadata("provider", "search")
+            .with_metadata("shape", "http-api-wrapper"),
         )
         .await
         .unwrap();
@@ -65,25 +68,31 @@ async fn search_style_http_operation_runs_through_shell_command() {
     let http_grant = format!("net.http.private:POST:{base_url}");
     let wasm = wat::parse_str(render_search_fixture(&url, &http_grant))
         .expect("Example Search WAT fixture should compile to wasm");
-    let registry = std::sync::Arc::new(verlet::OperationRegistry::new());
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
 
     registry
         .register(
-            verlet::OperationRegistration::new("search", verlet::WasmRuntimeArtifact::bytes(wasm))
-                .with_capability_grant(http_grant.clone())
-                .with_capability_grant("secret:EXAMPLE_API_KEY")
-                .with_secret("EXAMPLE_API_KEY", "fixture-secret")
-                .with_metadata("provider", "search")
-                .with_metadata("shape", "http-api-wrapper"),
+            verlet_operations::operation_registry::OperationRegistration::new(
+                "search",
+                verlet_wasm::WasmRuntimeArtifact::bytes(wasm),
+            )
+            .with_capability_grant(http_grant.clone())
+            .with_capability_grant("secret:EXAMPLE_API_KEY")
+            .with_secret("EXAMPLE_API_KEY", "fixture-secret")
+            .with_metadata("provider", "search")
+            .with_metadata("shape", "http-api-wrapper"),
         )
         .await
         .unwrap();
 
-    let config = verlet::VirtualBashRuntimeConfig::default()
+    let config = verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry)
         .with_capability_grant(http_grant)
         .with_capability_grant("secret:EXAMPLE_API_KEY");
-    let mut harness = verlet::BashkitExecutionHarness::new(config).await.unwrap();
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
+        .await
+        .unwrap();
     let output = harness
         .execute(r#"command -v search && search '{"query":"verlet wasm"}'"#)
         .await
@@ -117,46 +126,51 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
     let registry_root = root.join("operations");
     let artifact_path = root.join("search.wasm");
     std::fs::write(&artifact_path, wasm).unwrap();
-    let registry = verlet::LocalOperationRegistry::new(&registry_root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root);
     let record = registry
-        .publish_artifact(verlet::PublishOperationRequest {
-            name: "search".to_string(),
-            artifact_path: artifact_path.clone(),
-            source: verlet::PublishedOperationSource::Wasm {
-                bin_path: artifact_path,
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "search".to_string(),
+                artifact_path: artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact_path,
+                },
+                interface: None,
+                capability_grants: std::collections::BTreeSet::from([
+                    http_grant.clone(),
+                    "secret:EXAMPLE_API_KEY".to_string(),
+                ]),
+                metadata: std::collections::BTreeMap::new(),
             },
-            interface: None,
-            capability_grants: std::collections::BTreeSet::from([
-                http_grant.clone(),
-                "secret:EXAMPLE_API_KEY".to_string(),
-            ]),
-            metadata: std::collections::BTreeMap::new(),
-        })
+        )
         .await
         .unwrap();
-    let secret_store = verlet::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
-        .await
-        .unwrap();
+    let secret_store =
+        verlet_metadata::secret_store::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+            .await
+            .unwrap();
     secret_store
         .set_secret(
             "EXAMPLE_API_KEY",
             "fixture-secret",
-            verlet::SecretSourceKind::Env,
+            verlet_metadata::secret_store::SecretSourceKind::Env,
             Some("EXAMPLE_API_KEY".to_string()),
         )
         .await
         .unwrap();
 
-    let catalog = verlet::LocalPluginCatalog::load_records_with_secret_resolver(
-        &registry_root,
-        vec![record],
-        Vec::new(),
-        std::sync::Arc::new(secret_store),
-    )
-    .await
-    .unwrap();
-    let router = verlet::AgentToolRouter::new(catalog.operation_registry())
-        .with_capability_grants([http_grant, "secret:EXAMPLE_API_KEY".to_string()]);
+    let catalog =
+        verlet::operations::plugins::LocalPluginCatalog::load_records_with_secret_resolver(
+            &registry_root,
+            vec![record],
+            Vec::new(),
+            std::sync::Arc::new(secret_store),
+        )
+        .await
+        .unwrap();
+    let router =
+        verlet::agent::agent_tool_router::AgentToolRouter::new(catalog.operation_registry())
+            .with_capability_grants([http_grant, "secret:EXAMPLE_API_KEY".to_string()]);
     let definitions = router.tool_definitions().await;
     assert!(
         definitions
@@ -175,7 +189,7 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
 
     assert!(matches!(
         result,
-        verlet::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -270,14 +284,14 @@ async fn spawn_http_server(
     (base_url, handle)
 }
 
-fn tool_result_text(content: &[verlet::CanonicalContent]) -> String {
+fn tool_result_text(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            verlet::CanonicalContent::Text { text, .. } => Some(text.as_str()),
-            verlet::CanonicalContent::Thinking { .. }
-            | verlet::CanonicalContent::Image { .. }
-            | verlet::CanonicalContent::ToolCall { .. } => None,
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Thinking { .. }
+            | verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

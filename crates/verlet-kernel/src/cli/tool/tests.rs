@@ -87,7 +87,10 @@ fn parse_tool_source_add_accepts_remote_mcp_contract_fields() {
     let parsed = crate::cli::tool::parse_tool_source_add_args(args).unwrap();
 
     assert_eq!(parsed.name.as_deref(), Some("arcade"));
-    assert_eq!(parsed.kind, Some(crate::McpRemoteTransport::StreamableHttp));
+    assert_eq!(
+        parsed.kind,
+        Some(crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp)
+    );
     assert_eq!(parsed.url.as_deref(), Some("https://example.com/mcp"));
     assert_eq!(parsed.bearer_secret.as_deref(), Some("arcade.api_key"));
     assert_eq!(

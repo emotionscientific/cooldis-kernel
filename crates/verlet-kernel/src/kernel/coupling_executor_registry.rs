@@ -35,11 +35,13 @@ impl CouplingExecutorRegistry {
 }
 
 #[async_trait::async_trait]
-impl crate::CouplingExecutor for CouplingExecutorRegistry {
+impl crate::kernel::coupling_scheduler::CouplingExecutor for CouplingExecutorRegistry {
     async fn invoke(
         &self,
-        request: crate::CouplingInvocation,
-    ) -> crate::VerletResult<crate::CouplingExecutionResult> {
+        request: crate::kernel::coupling_scheduler::CouplingInvocation,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::coupling_scheduler::CouplingExecutionResult,
+    > {
         match registered_coupling_executor_for_id(&request.coupling.id) {
             Some(RegisteredCouplingExecutorKind::Stdlib) => {
                 crate::kernel::stdlib_couplings::StdlibCouplingExecutor
@@ -48,17 +50,21 @@ impl crate::CouplingExecutor for CouplingExecutorRegistry {
             }
             Some(RegisteredCouplingExecutorKind::Wasm) => {
                 let Some(executor) = &self.wasm else {
-                    return Err(crate::VerletError::RuntimeFactory(format!(
-                        "wasm coupling {:?} requires an operation registry root",
-                        request.coupling.id
-                    )));
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        format!(
+                            "wasm coupling {:?} requires an operation registry root",
+                            request.coupling.id
+                        ),
+                    ));
                 };
                 executor.invoke(request).await
             }
-            None => Err(crate::VerletError::RuntimeFactory(format!(
-                "no registered executor for coupling id {:?}",
-                request.coupling.id
-            ))),
+            None => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "no registered executor for coupling id {:?}",
+                    request.coupling.id
+                ),
+            )),
         }
     }
 }

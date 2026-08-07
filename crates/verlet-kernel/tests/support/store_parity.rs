@@ -1,18 +1,21 @@
-pub async fn session_store_parity_transcript<S: verlet::RuntimeStore + ?Sized>(
+pub async fn session_store_parity_transcript<S: verlet_history::RuntimeStore + ?Sized>(
     store: &S,
-) -> verlet::HistoryResult<crate::support::transcript::NormalizedTranscript> {
-    let coordinates = verlet::ThreadCoordinates {
+) -> verlet_history::HistoryResult<crate::support::transcript::NormalizedTranscript> {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: "parity-tenant".to_string(),
         user_id: "parity-user".to_string(),
         session_id: "parity-session".to_string(),
-        thread_id: verlet::ThreadId::parse_str("00000000-0000-0000-0000-000000000048").unwrap(),
+        thread_id: verlet_runtime_contracts::ThreadId::parse_str(
+            "00000000-0000-0000-0000-000000000048",
+        )
+        .unwrap(),
     };
     let root = store
         .append(
             &coordinates,
             None,
-            verlet::SessionEntryKind::Message {
-                message: verlet::CanonicalMessage::user_text_at("first", 1_000),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text_at("first", 1_000),
             },
         )
         .await?;
@@ -20,14 +23,14 @@ pub async fn session_store_parity_transcript<S: verlet::RuntimeStore + ?Sized>(
         .append(
             &coordinates,
             Some(root.entry_id),
-            verlet::SessionEntryKind::Message {
-                message: verlet::CanonicalMessage::Assistant {
-                    content: vec![verlet::CanonicalContent::text("second")],
-                    api: verlet::ProviderApi::OpenAIResponses,
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::Assistant {
+                    content: vec![verlet_history::CanonicalContent::text("second")],
+                    api: verlet_history::ProviderApi::OpenAIResponses,
                     provider: "parity-provider".to_string(),
                     model: "parity-model".to_string(),
-                    usage: verlet::CanonicalUsage::default(),
-                    stop_reason: verlet::CanonicalStopReason::EndTurn,
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                     error_message: None,
                     timestamp_ms: 2_000,
                 },
@@ -44,13 +47,23 @@ pub async fn session_store_parity_transcript<S: verlet::RuntimeStore + ?Sized>(
         .select_branch(&coordinates, Some(child.entry_id))
         .await?;
 
-    let stream_id = verlet::EventStreamId::new("parity:events");
+    let stream_id = verlet_history::EventStreamId::new("parity:events");
     let appended = store
         .append_events(
             &stream_id,
             vec![
-                event_record(&coordinates, 1, verlet::EventKind::TurnSubmitted, 3_000),
-                event_record(&coordinates, 2, verlet::EventKind::TurnCompleted, 4_000),
+                event_record(
+                    &coordinates,
+                    1,
+                    verlet_history::EventKind::TurnSubmitted,
+                    3_000,
+                ),
+                event_record(
+                    &coordinates,
+                    2,
+                    verlet_history::EventKind::TurnCompleted,
+                    4_000,
+                ),
             ],
         )
         .await?;
@@ -60,19 +73,19 @@ pub async fn session_store_parity_transcript<S: verlet::RuntimeStore + ?Sized>(
     let fenced = store
         .append_events_fenced(
             &stream_id,
-            verlet::EventSequence::new(3),
+            verlet_history::EventSequence::new(3),
             vec![event_record(
                 &coordinates,
                 3,
-                verlet::EventKind::LoopCompleted,
+                verlet_history::EventKind::LoopCompleted,
                 5_000,
             )],
         )
         .await?;
-    let append_ack = verlet::StreamAppendAckV1::from_appended(
+    let append_ack = verlet_history::StreamAppendAckV1::from_appended(
         stream_id,
         &appended,
-        vec![verlet::StreamAckClass::LocalCommitted],
+        vec![verlet_history::StreamAckClass::LocalCommitted],
     )?;
 
     let mut transcript = crate::support::transcript::TypedTranscript::new();
@@ -95,18 +108,18 @@ pub async fn session_store_parity_transcript<S: verlet::RuntimeStore + ?Sized>(
 }
 
 fn event_record(
-    coordinates: &verlet::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     id: u128,
-    kind: verlet::EventKind,
+    kind: verlet_history::EventKind,
     created_at_ms: i64,
-) -> verlet::NewEventRecord {
-    verlet::NewEventRecord {
-        id: verlet::EventRecordId::from_uuid(uuid::Uuid::from_u128(id)),
+) -> verlet_history::NewEventRecord {
+    verlet_history::NewEventRecord {
+        id: verlet_history::EventRecordId::from_uuid(uuid::Uuid::from_u128(id)),
         coordinates: coordinates.clone(),
         created_at_ms,
         kind,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
         payload: serde_json::json!({"step": id}),
     }
 }

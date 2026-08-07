@@ -67,8 +67,8 @@ pub struct HookMutationWitness {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionStartHookRequest {
-    pub coordinates: crate::ThreadCoordinates,
-    pub parent_thread_id: Option<crate::ThreadId>,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    pub parent_thread_id: Option<verlet_runtime_contracts::ThreadId>,
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<std::path::PathBuf>,
@@ -80,13 +80,13 @@ pub struct SessionStartHookRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UserPromptSubmitHookRequest {
-    pub turn_context: crate::TurnContextSnapshot,
+    pub turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot,
     pub prompt: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PreToolUseHookRequest {
-    pub turn_context: crate::TurnContextSnapshot,
+    pub turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot,
     pub call_id: String,
     pub tool_name: String,
     pub arguments: serde_json::Value,
@@ -94,7 +94,7 @@ pub struct PreToolUseHookRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PostToolUseHookRequest {
-    pub turn_context: crate::TurnContextSnapshot,
+    pub turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot,
     pub call_id: String,
     pub tool_name: String,
     pub arguments: serde_json::Value,
@@ -104,22 +104,22 @@ pub struct PostToolUseHookRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PreCompactHookRequest {
-    pub turn_context: crate::TurnContextSnapshot,
-    pub trigger: crate::CompactionTrigger,
+    pub turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot,
+    pub trigger: crate::kernel::compaction::CompactionTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_summary: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PostCompactHookRequest {
-    pub turn_context: crate::TurnContextSnapshot,
-    pub trigger: crate::CompactionTrigger,
+    pub turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot,
+    pub trigger: crate::kernel::compaction::CompactionTrigger,
     pub summary: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StopHookRequest {
-    pub turn_context: crate::TurnContextSnapshot,
+    pub turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_assistant_message: Option<String>,
 }
@@ -235,7 +235,10 @@ pub trait HookHandler: Send + Sync + 'static {
         None
     }
 
-    async fn run(&self, request: HookRequest) -> crate::VerletResult<HookHandlerOutput>;
+    async fn run(
+        &self,
+        request: HookRequest,
+    ) -> crate::kernel::runtime_host::VerletResult<HookHandlerOutput>;
 }
 
 #[derive(Clone, Default)]
@@ -571,12 +574,16 @@ impl HookHandler for CommandHookHandler {
     }
 
     fn command_sha256(&self) -> Option<String> {
-        Some(crate::agent::contracts::sha256_hex(self.command.as_bytes()))
+        Some(verlet_agent::contracts::sha256_hex(self.command.as_bytes()))
     }
 
-    async fn run(&self, request: HookRequest) -> crate::VerletResult<HookHandlerOutput> {
-        let input = serde_json::to_string(&request)
-            .map_err(|err| crate::VerletError::RuntimeExecution(err.to_string()))?;
+    async fn run(
+        &self,
+        request: HookRequest,
+    ) -> crate::kernel::runtime_host::VerletResult<HookHandlerOutput> {
+        let input = serde_json::to_string(&request).map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(err.to_string())
+        })?;
         let mut command = default_shell_command();
         command.arg(&self.command);
         command
@@ -589,11 +596,15 @@ impl HookHandler for CommandHookHandler {
             command.current_dir(cwd);
         }
         let mut child = command.spawn().map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!("hook spawn failed: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                "hook spawn failed: {err}"
+            ))
         })?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(input.as_bytes()).await.map_err(|err| {
-                crate::VerletError::RuntimeExecution(format!("failed to write hook stdin: {err}"))
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                    "failed to write hook stdin: {err}"
+                ))
             })?;
         }
         let output = tokio::time::timeout(
@@ -602,26 +613,32 @@ impl HookHandler for CommandHookHandler {
         )
         .await
         .map_err(|_| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "hook timed out after {}ms",
                 self.timeout_ms
             ))
         })?
-        .map_err(|err| crate::VerletError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(err.to_string())
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(crate::VerletError::RuntimeExecution(if stderr.is_empty() {
-                format!("hook exited with status {}", output.status)
-            } else {
-                stderr
-            }));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                if stderr.is_empty() {
+                    format!("hook exited with status {}", output.status)
+                } else {
+                    stderr
+                },
+            ));
         }
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if stdout.is_empty() {
             return Ok(HookHandlerOutput::default());
         }
         serde_json::from_str(&stdout).map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!("failed to parse hook stdout: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                "failed to parse hook stdout: {err}"
+            ))
         })
     }
 }
@@ -721,15 +738,15 @@ fn json_value_digest(before: &serde_json::Value, after: &serde_json::Value) -> H
     let before = serde_json::to_vec(before).unwrap_or_else(|_| before.to_string().into_bytes());
     let after = serde_json::to_vec(after).unwrap_or_else(|_| after.to_string().into_bytes());
     HookValueDigest {
-        before_sha256: crate::agent::contracts::sha256_hex(&before),
-        after_sha256: crate::agent::contracts::sha256_hex(&after),
+        before_sha256: verlet_agent::contracts::sha256_hex(&before),
+        after_sha256: verlet_agent::contracts::sha256_hex(&after),
     }
 }
 
 fn text_digest(before: &str, after: &str) -> HookValueDigest {
     HookValueDigest {
-        before_sha256: crate::agent::contracts::sha256_hex(before.as_bytes()),
-        after_sha256: crate::agent::contracts::sha256_hex(after.as_bytes()),
+        before_sha256: verlet_agent::contracts::sha256_hex(before.as_bytes()),
+        after_sha256: verlet_agent::contracts::sha256_hex(after.as_bytes()),
     }
 }
 
@@ -796,7 +813,8 @@ fn unix_timestamp_ms() -> u64 {
 fn default_shell_command() -> tokio::process::Command {
     #[cfg(windows)]
     {
-        let comspec = crate::env_compat::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        let comspec = verlet_runtime_contracts::env_compat::var("COMSPEC")
+            .unwrap_or_else(|_| "cmd.exe".to_string());
         let mut command = tokio::process::Command::new(comspec);
         command.arg("/C");
         command
@@ -804,7 +822,8 @@ fn default_shell_command() -> tokio::process::Command {
 
     #[cfg(not(windows))]
     {
-        let shell = crate::env_compat::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = verlet_runtime_contracts::env_compat::var("SHELL")
+            .unwrap_or_else(|_| "/bin/sh".to_string());
         let mut command = tokio::process::Command::new(shell);
         command.arg("-lc");
         command

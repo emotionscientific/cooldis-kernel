@@ -20,7 +20,7 @@ pub struct ThreadCheckpoint {
     pub lineage: ThreadCheckpointLineage,
     pub parent_checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_entry_id: Option<crate::kernel::history::SessionEntryId>,
+    pub active_entry_id: Option<verlet_history::SessionEntryId>,
     pub label: Option<String>,
     pub metadata: std::collections::BTreeMap<String, String>,
     pub created_at_ms: u64,
@@ -30,13 +30,13 @@ pub struct ThreadCheckpoint {
 pub enum ThreadCommand {
     Submit {
         turn_id: String,
-        input: crate::kernel::runtime_host::TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
         #[serde(default)]
         mode: verlet_runtime_contracts::TurnSubmissionMode,
     },
     Compact {
         turn_id: String,
-        trigger: crate::CompactionTrigger,
+        trigger: crate::kernel::compaction::CompactionTrigger,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
@@ -58,14 +58,14 @@ pub enum ThreadCommand {
 pub enum ThreadEvent {
     Runtime {
         thread_id: verlet_runtime_contracts::ThreadId,
-        event: crate::kernel::runtime_host::RuntimeEvent,
+        event: crate::kernel::runtime_host::runtime_events::RuntimeEvent,
     },
     Started {
         context: verlet_runtime_contracts::ThreadContext,
     },
     CanonicalMirror {
         thread_id: verlet_runtime_contracts::ThreadId,
-        entry: crate::kernel::history::SessionEntry,
+        entry: verlet_history::SessionEntry,
     },
     Output {
         thread_id: verlet_runtime_contracts::ThreadId,
@@ -93,7 +93,7 @@ pub trait AgentRuntime: Send + Sync + 'static {
     async fn run(
         self: Box<Self>,
         context: verlet_runtime_contracts::ThreadContext,
-        services: crate::kernel::runtime_host::RuntimeServices,
+        services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
         commands: tokio::sync::mpsc::Receiver<ThreadCommand>,
         events: tokio::sync::broadcast::Sender<ThreadEvent>,
         status: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,

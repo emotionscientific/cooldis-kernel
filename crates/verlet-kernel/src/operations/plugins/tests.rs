@@ -3,11 +3,13 @@ use bashkit::FileSystemExt as _;
 struct EmptySecretResolver;
 
 #[async_trait::async_trait]
-impl crate::SecretResolver for EmptySecretResolver {
+impl verlet_metadata::secret_store::SecretResolver for EmptySecretResolver {
     async fn resolve_secret(
         &self,
         _name: &str,
-    ) -> crate::SecretStoreResult<Option<crate::ResolvedSecret>> {
+    ) -> verlet_metadata::secret_store::SecretStoreResult<
+        Option<verlet_metadata::secret_store::ResolvedSecret>,
+    > {
         Ok(None)
     }
 }
@@ -28,18 +30,23 @@ impl StaticSecretResolver {
 }
 
 #[async_trait::async_trait]
-impl crate::SecretResolver for StaticSecretResolver {
+impl verlet_metadata::secret_store::SecretResolver for StaticSecretResolver {
     async fn resolve_secret(
         &self,
         name: &str,
-    ) -> crate::SecretStoreResult<Option<crate::ResolvedSecret>> {
-        Ok(self.secrets.get(name).map(|value| crate::ResolvedSecret {
-            name: name.to_string(),
-            value: value.clone(),
-            source_kind: crate::SecretSourceKind::Local,
-            source_label: None,
-            updated_at_ms: 0,
-        }))
+    ) -> verlet_metadata::secret_store::SecretStoreResult<
+        Option<verlet_metadata::secret_store::ResolvedSecret>,
+    > {
+        Ok(self
+            .secrets
+            .get(name)
+            .map(|value| verlet_metadata::secret_store::ResolvedSecret {
+                name: name.to_string(),
+                value: value.clone(),
+                source_kind: verlet_metadata::secret_store::SecretSourceKind::Local,
+                source_label: None,
+                updated_at_ms: 0,
+            }))
     }
 }
 
@@ -55,7 +62,7 @@ fn pinned_host_mount_rejects_repointing_after_bind_resolution() {
     let witnessed = std::fs::canonicalize(&selected).unwrap();
     std::fs::rename(&selected, &original).unwrap();
     std::os::unix::fs::symlink(&outside, &selected).unwrap();
-    let vfs = crate::VerletVfs::new(std::sync::Arc::new(bashkit::InMemoryFs::new()));
+    let vfs = verlet_vfs::VerletVfs::new(std::sync::Arc::new(bashkit::InMemoryFs::new()));
 
     let error = crate::operations::plugins::mount_plugin_filesystems(
         &vfs,
@@ -73,7 +80,7 @@ fn plugin_mount_assembly_rejects_spill_and_descendants() {
     std::fs::create_dir_all(&root).unwrap();
 
     for guest_path in ["/spill", "/spill/nested"] {
-        let vfs = crate::VerletVfs::new(std::sync::Arc::new(bashkit::InMemoryFs::new()));
+        let vfs = verlet_vfs::VerletVfs::new(std::sync::Arc::new(bashkit::InMemoryFs::new()));
         let error = crate::operations::plugins::mount_plugin_filesystems(
             &vfs,
             vec![crate::operations::plugins::PluginMount::host_read_write(
@@ -100,7 +107,7 @@ async fn catalog_vfs_allows_two_retention_sized_spill_files() {
 
     assert!(
         catalog.vfs().limits().max_file_size
-            >= u64::try_from(crate::SPILL_RETENTION_MAX_BYTES).unwrap()
+            >= u64::try_from(verlet_vbash::SPILL_RETENTION_MAX_BYTES).unwrap()
     );
     assert!(
         catalog.vfs().limits().max_total_bytes
@@ -177,9 +184,9 @@ async fn catalog_load_fails_closed_when_selected_secret_is_missing() {
 #[tokio::test]
 async fn catalog_loads_published_manifest_without_describing_wasm_blob() {
     let root = temp_dir("plugin-published-manifest-no-describe");
-    let registry = crate::LocalOperationRegistry::new(&root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&root);
     let artifact_hash = registry.blobs().put(b"not valid wasm").unwrap();
-    let manifest: crate::WasmOperationManifest = serde_json::from_value(serde_json::json!({
+    let manifest: verlet_abi::WasmOperationManifest = serde_json::from_value(serde_json::json!({
         "abi": "cooldis.operation/0.1",
         "operations": [{
             "id": 1,
@@ -192,13 +199,13 @@ async fn catalog_loads_published_manifest_without_describing_wasm_blob() {
         }]
     }))
     .unwrap();
-    let registered = crate::RegisteredOperation {
+    let registered = verlet_operations::RegisteredOperation {
         name: "invalid".to_string(),
         manifest: manifest.clone(),
         capability_grants: std::collections::BTreeSet::new(),
         metadata: Default::default(),
     };
-    let record = crate::PublishedOperationRecord {
+    let record = verlet_operations::operation_store::PublishedOperationRecord {
         schema_version: 1,
         name: registered.name.clone(),
         active_artifact_hash: artifact_hash,
@@ -207,10 +214,10 @@ async fn catalog_loads_published_manifest_without_describing_wasm_blob() {
         interface: None,
         capability_grants: std::collections::BTreeSet::new(),
         metadata: Default::default(),
-        source: crate::PublishedOperationSource::Wasm {
+        source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
             bin_path: root.join("invalid.wasm"),
         },
-        build: crate::PublishedOperationBuild {
+        build: verlet_operations::operation_store::PublishedOperationBuild {
             artifact_path: root.join("invalid.wasm"),
             published_at_ms: 0,
         },
@@ -234,7 +241,7 @@ async fn publish_multi_operation_record(
     root: &std::path::Path,
     record_name: &str,
     operations: &[(&str, Vec<&str>)],
-) -> crate::PublishedOperationRecord {
+) -> verlet_operations::operation_store::PublishedOperationRecord {
     let wasm =
         wat::parse_str(multi_operation_guest_with_required_capabilities(operations)).unwrap();
     let artifact = root.join(format!("{record_name}.wasm"));
@@ -247,15 +254,19 @@ async fn publish_multi_operation_record(
                 .map(|capability| (*capability).to_string())
         })
         .collect();
-    crate::LocalOperationRegistry::new(root)
-        .publish_artifact(crate::PublishOperationRequest {
-            name: record_name.to_string(),
-            artifact_path: artifact.clone(),
-            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
-            interface: None,
-            capability_grants,
-            metadata: Default::default(),
-        })
+    verlet_operations::operation_store::LocalOperationRegistry::new(root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: record_name.to_string(),
+                artifact_path: artifact.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact,
+                },
+                interface: None,
+                capability_grants,
+                metadata: Default::default(),
+            },
+        )
         .await
         .unwrap()
 }

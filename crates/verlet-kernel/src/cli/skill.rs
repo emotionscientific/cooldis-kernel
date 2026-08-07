@@ -1,6 +1,8 @@
 //! The `skill` subcommand family.
 
-pub(super) async fn run_skill(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_skill(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -34,7 +36,9 @@ pub(super) async fn run_skill(mut args: Vec<std::ffi::OsString>) -> crate::Verle
     }
 }
 
-pub(super) async fn skill_publish(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn skill_publish(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_skill_publish_args(args)?;
     if options.help {
         print_skill_publish_help();
@@ -44,11 +48,13 @@ pub(super) async fn skill_publish(args: Vec<std::ffi::OsString>) -> crate::Verle
         .package_dir
         .ok_or_else(|| crate::cli::usage_error("skill publish requires <dir>"))?;
     let registry_root = skill_registry_root(options.registry_root);
-    let registry = crate::LocalSkillRegistry::new(registry_root);
-    let record = registry.publish_directory(crate::PublishSkillPackageRequest {
-        package_dir,
-        name: options.name,
-    })?;
+    let registry = verlet_operations::skill_package::LocalSkillRegistry::new(registry_root);
+    let record = registry.publish_directory(
+        verlet_operations::skill_package::PublishSkillPackageRequest {
+            package_dir,
+            name: options.name,
+        },
+    )?;
     println!("published {}", record.name);
     println!("artifact {}", record.active_artifact_hash);
     println!("ref {}", record.ref_uri());
@@ -60,7 +66,9 @@ pub(super) async fn skill_publish(args: Vec<std::ffi::OsString>) -> crate::Verle
     Ok(())
 }
 
-pub(super) async fn skill_import(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn skill_import(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_skill_import_args(args)?;
     if options.help {
         print_skill_import_help();
@@ -72,17 +80,21 @@ pub(super) async fn skill_import(args: Vec<std::ffi::OsString>) -> crate::Verlet
     let skill_registry_root = skill_registry_root(options.registry_root);
     let blob_registry_root = options
         .blob_registry_root
-        .unwrap_or_else(crate::default_blob_registry_root);
-    let plan = crate::SkillImportPlan::from_directory(&skill_dir, options.name.as_deref())?;
+        .unwrap_or_else(crate::agent::manifest::default_blob_registry_root);
+    let plan = verlet_operations::skill_import::SkillImportPlan::from_directory(
+        &skill_dir,
+        options.name.as_deref(),
+    )?;
 
     let record_path = if options.dry_run {
         println!("dry-run {}", plan.package.name);
         None
     } else {
-        let skill_registry = crate::LocalSkillRegistry::new(&skill_registry_root);
+        let skill_registry =
+            verlet_operations::skill_package::LocalSkillRegistry::new(&skill_registry_root);
         let published = plan.publish(
             &skill_registry,
-            &crate::LocalBlobRegistry::new(&blob_registry_root),
+            &verlet_operations::blob_store::LocalBlobRegistry::new(&blob_registry_root),
         )?;
         println!("published {}", published.skill.name);
         Some(skill_registry.record_path(&published.skill.name)?)
@@ -136,7 +148,7 @@ pub(super) struct SkillImportArgs {
 
 pub(super) fn parse_skill_publish_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<SkillPublishArgs> {
+) -> crate::kernel::runtime_host::VerletResult<SkillPublishArgs> {
     let mut package_dir = None;
     let mut name = None;
     let mut registry_root = None;
@@ -181,7 +193,7 @@ pub(super) fn parse_skill_publish_args(
 
 pub(super) fn parse_skill_import_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<SkillImportArgs> {
+) -> crate::kernel::runtime_host::VerletResult<SkillImportArgs> {
     let mut skill_dir = None;
     let mut name = None;
     let mut registry_root = None;

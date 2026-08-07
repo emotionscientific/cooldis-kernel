@@ -19,30 +19,35 @@ fn rpc_client_errors_render_without_the_runtime_factory_prefix() {
         "failed to connect to the Verlet RPC endpoint `ws://127.0.0.1:1/rpc`"
     );
     assert_eq!(
-        crate::VerletError::RuntimeFactory("fixture failure".to_string()).to_string(),
+        crate::kernel::runtime_host::VerletError::RuntimeFactory("fixture failure".to_string())
+            .to_string(),
         "runtime factory failed: fixture failure"
     );
 }
 
 #[test]
 fn codex_tui_initialize_request_uses_codex_remote_shape() {
-    let message = crate::JsonRpcMessage::Request(crate::JsonRpcRequest {
-        id: crate::RequestId::String("initialize".to_string()),
-        method: "initialize".to_string(),
-        params: Some(serde_json::json!({
-            "clientInfo": {
-                "name": "codex",
-                "title": null,
-                "version": "0",
-            },
-            "capabilities": {
-                "experimentalApi": true,
-                "requestAttestation": false,
-                "optOutNotificationMethods": null,
-            },
-        })),
-        trace: None,
-    });
+    let message = crate::adapters::app_server::connection::JsonRpcMessage::Request(
+        crate::adapters::app_server::connection::JsonRpcRequest {
+            id: crate::adapters::app_server::connection::RequestId::String(
+                "initialize".to_string(),
+            ),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({
+                "clientInfo": {
+                    "name": "codex",
+                    "title": null,
+                    "version": "0",
+                },
+                "capabilities": {
+                    "experimentalApi": true,
+                    "requestAttestation": false,
+                    "optOutNotificationMethods": null,
+                },
+            })),
+            trace: None,
+        },
+    );
     let encoded = serde_json::to_value(message).unwrap();
     assert_eq!(
         encoded,
@@ -71,13 +76,17 @@ async fn codex_tui_driver_runs_prompt_against_app_server() {
     let root = std::path::PathBuf::from("/tmp")
         .join(format!("cdis-tui-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
-    let listen = crate::AppServerListenAddr::Unix(socket.clone());
-    let mut config =
-        crate::VerletAppServerConfig::local(listen.clone(), std::env::current_dir().unwrap());
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen.clone(),
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    let server = crate::VerletAppServer::new_local(config).await.unwrap();
+    let server = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
 
     wait_for_socket(&socket).await.unwrap();
@@ -155,13 +164,17 @@ async fn codex_tui_operator_client_covers_thread_lifecycle_methods() {
     let root = std::path::PathBuf::from("/tmp")
         .join(format!("cdis-operator-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
-    let listen = crate::AppServerListenAddr::Unix(socket.clone());
-    let mut config =
-        crate::VerletAppServerConfig::local(listen.clone(), std::env::current_dir().unwrap());
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen.clone(),
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    let server = crate::VerletAppServer::new_local(config).await.unwrap();
+    let server = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
 
     wait_for_socket(&socket).await.unwrap();
@@ -175,7 +188,7 @@ async fn codex_tui_operator_client_covers_thread_lifecycle_methods() {
     let config = client.config_read(false).await.unwrap();
     assert_eq!(
         config["config"]["model"].as_str(),
-        Some(crate::APP_SERVER_LOCAL_MODEL)
+        Some(crate::adapters::app_server::APP_SERVER_LOCAL_MODEL)
     );
 
     let thread = client.thread_start(serde_json::json!({})).await.unwrap();
@@ -205,7 +218,9 @@ async fn codex_tui_operator_client_covers_thread_lifecycle_methods() {
 }
 
 #[cfg(unix)]
-async fn wait_for_socket(path: &std::path::PathBuf) -> crate::VerletResult<()> {
+async fn wait_for_socket(
+    path: &std::path::PathBuf,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     for _ in 0..1_500 {
         if path.exists() {
             return Ok(());

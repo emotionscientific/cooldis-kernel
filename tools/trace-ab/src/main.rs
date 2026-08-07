@@ -86,7 +86,7 @@ fn run() -> Result<(), String> {
                     .parse::<u64>()
                     .map_err(|err| format!("invalid --timeout-secs: {err}"))
             })?;
-            let run_options = verlet_trace_ab::RunOptions {
+            let run_options = verlet_trace_ab::runner::RunOptions {
                 prompt,
                 workspace: required_path(&options, "workspace")?,
                 output_dir: required_path(&options, "output")?,
@@ -112,7 +112,7 @@ fn run() -> Result<(), String> {
                     .unwrap_or_else(|| "64".to_string()),
                 timeout: std::time::Duration::from_secs(timeout_secs),
             };
-            let artifacts = verlet_trace_ab::run_ab(&run_options)?;
+            let artifacts = verlet_trace_ab::runner::run_ab(&run_options)?;
             println!("pi trace: {}", artifacts.pi_trace.display());
             println!("verlet trace: {}", artifacts.verlet_trace.display());
             println!("diff: {}", artifacts.diff.display());

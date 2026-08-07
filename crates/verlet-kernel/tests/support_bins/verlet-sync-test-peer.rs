@@ -1,6 +1,6 @@
 use std::io::Write as _;
-use verlet::EventStore as _;
 use verlet::daemon::remote_store::propagator::StreamPropagator as _;
+use verlet_history::EventStore as _;
 
 #[tokio::main]
 async fn main() {
@@ -34,10 +34,11 @@ async fn run_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint_url = required_env("VERLET_SYNC_TEST_URL")?;
     let bearer_token = required_env("VERLET_SYNC_TEST_TOKEN")?;
-    let stream_id = verlet::EventStreamId::new(required_env("VERLET_SYNC_TEST_STREAM")?);
+    let stream_id = verlet_history::EventStreamId::new(required_env("VERLET_SYNC_TEST_STREAM")?);
     let grant: verlet::daemon::remote_store::lease::StreamLeaseGrantV1 =
         serde_json::from_str(&required_env("VERLET_SYNC_TEST_GRANT")?)?;
-    let store = verlet::SqliteSessionStore::open(std::path::PathBuf::from(child_db)).await?;
+    let store =
+        verlet_history_sqlite::SqliteSessionStore::open(std::path::PathBuf::from(child_db)).await?;
     if let Some(label) = label {
         store
             .append_events(&stream_id, vec![record(&label)])
@@ -80,7 +81,7 @@ async fn run_child(
             as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store,
         bearer_token,
-        std::sync::Arc::new(verlet::SystemDaemonClock),
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
     );
     let step = propagator.propagate_once(&mut state).await?;
     match step {
@@ -104,14 +105,14 @@ async fn run_child(
     Ok(())
 }
 
-fn record(label: &str) -> verlet::NewEventRecord {
-    verlet::NewEventRecord::witnessed(
+fn record(label: &str) -> verlet_history::NewEventRecord {
+    verlet_history::NewEventRecord::witnessed(
         verlet_runtime_contracts::ThreadCoordinates::new(
             "tenant-process",
             "user-process",
             "session-process",
         ),
-        verlet::EventKind::SessionEntryAppended,
+        verlet_history::EventKind::SessionEntryAppended,
         serde_json::json!({ "entry_id": label }),
     )
 }

@@ -1,38 +1,12 @@
 mod context_read_plan;
-mod kernel_control;
+pub mod kernel_control;
 mod loop_continuation;
-mod runtime_api;
-mod runtime_events;
-mod runtime_services;
+pub mod runtime_api;
+pub mod runtime_events;
+pub mod runtime_services;
 mod runtime_utils;
 mod thread_handle;
-mod turn;
-
-pub use kernel_control::{
-    AgentProcessCheckpointReceipt, AgentProcessChildRef, AgentProcessChildrenReceipt,
-    AgentProcessLifecycleReceipt, AgentProcessSpawnReceipt, AgentProcessStatusReceipt,
-    AgentProcessSubmitReceipt, AgentProcessWaitReceipt, RuntimeKernelControl, ThreadSpawnWitness,
-};
-pub use loop_continuation::LoopContinuationReceipt;
-pub use runtime_api::{
-    AgentRuntime, AgentRuntimeFactory, ProcessHandleIngressSink, RuntimeHostLifecycleSnapshot,
-    RuntimeHostSnapshot, ThreadCheckpoint, ThreadCheckpointLineage, ThreadCommand, ThreadEvent,
-    ThreadLifecycleSink, ThreadSnapshot,
-};
-pub use runtime_events::{RuntimeEvent, RuntimeEventKind, emit_runtime_event};
-pub(crate) use runtime_services::append_thread_joined_first_wins;
-pub use runtime_services::{RuntimeExecutionPolicy, RuntimeServices};
-pub use turn::{TurnContent, TurnContext, TurnContextSnapshot, TurnInput};
-
-pub use verlet_runtime_contracts::{
-    RuntimeApprovalDecision, RuntimeEventId, RuntimeModelRequestErrorClass,
-    RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
-    RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, ThreadCheckpointId, ThreadContext,
-    ThreadCoordinates, ThreadId, ThreadInitiationSource, ThreadInteractionKind,
-    ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadLineage, ThreadScope, ThreadSignal,
-    ThreadSignalId, ThreadSignalKind, ThreadSpawnAttribution, ThreadStatus, ThreadTopology,
-    TurnBudget, TurnSubmissionMode,
-};
+pub mod turn;
 
 pub type VerletResult<T> = Result<T, VerletError>;
 
@@ -49,35 +23,35 @@ pub enum VerletError {
     #[error("tenant already exists: {0}")]
     TenantAlreadyExists(String),
     #[error("thread not found: {0}")]
-    ThreadNotFound(ThreadId),
+    ThreadNotFound(verlet_runtime_contracts::ThreadId),
     #[error("thread already exists: {0}")]
-    ThreadAlreadyExists(ThreadId),
+    ThreadAlreadyExists(verlet_runtime_contracts::ThreadId),
     #[error("parent thread not found: {0}")]
-    ParentThreadNotFound(ThreadId),
+    ParentThreadNotFound(verlet_runtime_contracts::ThreadId),
     #[error("parent thread {parent_thread_id} belongs to {actual:?}, not {requested:?}")]
     ParentThreadScopeMismatch {
-        parent_thread_id: ThreadId,
-        requested: Box<ThreadScope>,
-        actual: Box<ThreadScope>,
+        parent_thread_id: verlet_runtime_contracts::ThreadId,
+        requested: Box<verlet_runtime_contracts::ThreadScope>,
+        actual: Box<verlet_runtime_contracts::ThreadScope>,
     },
     #[error("related thread not found: {0}")]
-    RelatedThreadNotFound(ThreadId),
+    RelatedThreadNotFound(verlet_runtime_contracts::ThreadId),
     #[error("related thread {thread_id} belongs to {actual:?}, not {requested:?}")]
     RelatedThreadScopeMismatch {
-        thread_id: ThreadId,
-        requested: Box<ThreadScope>,
-        actual: Box<ThreadScope>,
+        thread_id: verlet_runtime_contracts::ThreadId,
+        requested: Box<verlet_runtime_contracts::ThreadScope>,
+        actual: Box<verlet_runtime_contracts::ThreadScope>,
     },
     #[error("thread {thread_id} belongs to {actual:?}, not {requested:?}")]
     ThreadScopeMismatch {
-        thread_id: ThreadId,
-        requested: Box<ThreadScope>,
-        actual: Box<ThreadScope>,
+        thread_id: verlet_runtime_contracts::ThreadId,
+        requested: Box<verlet_runtime_contracts::ThreadScope>,
+        actual: Box<verlet_runtime_contracts::ThreadScope>,
     },
     #[error("invalid thread topology: {0}")]
     ThreadTopologyInvalid(String),
     #[error("thread command channel closed: {0}")]
-    ThreadClosed(ThreadId),
+    ThreadClosed(verlet_runtime_contracts::ThreadId),
     #[error("runtime factory failed: {0}")]
     RuntimeFactory(String),
     #[error("{0}")]
@@ -88,7 +62,7 @@ pub enum VerletError {
     History(String),
     #[error("thread {thread_id} policy violation {code}: {message}")]
     ThreadPolicyViolation {
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         code: &'static str,
         message: String,
     },
@@ -96,16 +70,16 @@ pub enum VerletError {
         "checkpoint {checkpoint_id} cannot resume thread {thread_id}: checkpoint resume only supports root threads; parent lineage {parent_thread_id} cannot be restored"
     )]
     CheckpointResumeRequiresRoot {
-        checkpoint_id: ThreadCheckpointId,
-        thread_id: ThreadId,
-        parent_thread_id: ThreadId,
+        checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
+        thread_id: verlet_runtime_contracts::ThreadId,
+        parent_thread_id: verlet_runtime_contracts::ThreadId,
     },
     #[error(
         "checkpoint {checkpoint_id} cannot resume thread {thread_id}: root lineage was not recorded; recreate the checkpoint before resuming"
     )]
     CheckpointResumeLineageUnknown {
-        checkpoint_id: ThreadCheckpointId,
-        thread_id: ThreadId,
+        checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
+        thread_id: verlet_runtime_contracts::ThreadId,
     },
     #[error("lifecycle operation {operation} is not supported yet: {reason}")]
     LifecycleUnsupported {
@@ -201,9 +175,9 @@ pub struct RuntimeHost {
 }
 
 fn fork_child_context_is_compatible(
-    context: &ThreadContext,
-    coordinates: &ThreadCoordinates,
-    parent_thread_id: ThreadId,
+    context: &verlet_runtime_contracts::ThreadContext,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    parent_thread_id: verlet_runtime_contracts::ThreadId,
 ) -> bool {
     context.coordinates == *coordinates
         && context.topology.branch_parent_thread_id() == Some(parent_thread_id)
@@ -211,18 +185,32 @@ fn fork_child_context_is_compatible(
 }
 
 struct RuntimeHostInner {
-    factory: std::sync::Arc<dyn AgentRuntimeFactory>,
-    runtime_store: std::sync::Arc<dyn crate::kernel::history::RuntimeStore>,
-    execution_policy: RuntimeExecutionPolicy,
-    threads:
-        tokio::sync::RwLock<std::collections::HashMap<ThreadId, std::sync::Arc<RuntimeThread>>>,
-    thread_start_reservations:
-        std::sync::Mutex<std::collections::HashMap<ThreadId, ThreadStartReservationState>>,
-    checkpoints:
-        tokio::sync::Mutex<std::collections::HashMap<ThreadCheckpointId, ThreadCheckpoint>>,
-    lifecycle_sink: tokio::sync::RwLock<Option<std::sync::Arc<dyn ThreadLifecycleSink>>>,
-    process_handle_ingress:
-        tokio::sync::RwLock<Option<std::sync::Arc<dyn ProcessHandleIngressSink>>>,
+    factory: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
+    runtime_store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+    execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
+    threads: tokio::sync::RwLock<
+        std::collections::HashMap<
+            verlet_runtime_contracts::ThreadId,
+            std::sync::Arc<RuntimeThread>,
+        >,
+    >,
+    thread_start_reservations: std::sync::Mutex<
+        std::collections::HashMap<verlet_runtime_contracts::ThreadId, ThreadStartReservationState>,
+    >,
+    checkpoints: tokio::sync::Mutex<
+        std::collections::HashMap<
+            verlet_runtime_contracts::ThreadCheckpointId,
+            crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+        >,
+    >,
+    lifecycle_sink: tokio::sync::RwLock<
+        Option<std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ThreadLifecycleSink>>,
+    >,
+    process_handle_ingress: tokio::sync::RwLock<
+        Option<
+            std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink>,
+        >,
+    >,
     process_handle_dispatcher: tokio::sync::RwLock<
         Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
     >,
@@ -232,30 +220,32 @@ struct RuntimeHostInner {
 }
 
 struct RuntimeThread {
-    context: ThreadContext,
-    services: RuntimeServices,
-    command_tx: tokio::sync::mpsc::Sender<ThreadCommand>,
+    context: verlet_runtime_contracts::ThreadContext,
+    services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    command_tx: tokio::sync::mpsc::Sender<crate::kernel::runtime_host::runtime_api::ThreadCommand>,
     command_capacity: usize,
-    event_tx: tokio::sync::broadcast::Sender<ThreadEvent>,
-    status_tx: tokio::sync::watch::Sender<ThreadStatus>,
-    status_rx: tokio::sync::watch::Receiver<ThreadStatus>,
+    event_tx: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    status_tx: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+    status_rx: tokio::sync::watch::Receiver<verlet_runtime_contracts::ThreadStatus>,
     cancellation: tokio_util::sync::CancellationToken,
     join_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    lifecycle: tokio::sync::Mutex<ThreadLifecycleRecord>,
-    checkpoints: tokio::sync::Mutex<Vec<ThreadCheckpoint>>,
+    lifecycle: tokio::sync::Mutex<verlet_runtime_contracts::ThreadLifecycleRecord>,
+    checkpoints:
+        tokio::sync::Mutex<Vec<crate::kernel::runtime_host::runtime_api::ThreadCheckpoint>>,
     pending_input_slots: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     turn_reservations: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 struct ThreadStartReservationState {
-    context: ThreadContext,
+    context: verlet_runtime_contracts::ThreadContext,
     settled: tokio::sync::watch::Sender<bool>,
 }
 
 struct ThreadStartReservation<'a> {
-    reservations:
-        &'a std::sync::Mutex<std::collections::HashMap<ThreadId, ThreadStartReservationState>>,
-    thread_id: ThreadId,
+    reservations: &'a std::sync::Mutex<
+        std::collections::HashMap<verlet_runtime_contracts::ThreadId, ThreadStartReservationState>,
+    >,
+    thread_id: verlet_runtime_contracts::ThreadId,
     settled: tokio::sync::watch::Sender<bool>,
     committed: bool,
 }
@@ -303,10 +293,12 @@ pub(crate) struct ReservedTurnSubmission {
     host: RuntimeHost,
     thread: RuntimeThreadHandle,
     reservation: Option<TurnIdReservation>,
-    command_permit: Option<tokio::sync::mpsc::OwnedPermit<ThreadCommand>>,
+    command_permit: Option<
+        tokio::sync::mpsc::OwnedPermit<crate::kernel::runtime_host::runtime_api::ThreadCommand>,
+    >,
     turn_id: String,
-    input: Option<TurnInput>,
-    mode: TurnSubmissionMode,
+    input: Option<crate::kernel::runtime_host::turn::TurnInput>,
+    mode: verlet_runtime_contracts::TurnSubmissionMode,
     turn_watchdog: Option<crate::kernel::runtime_host::turn::TurnWatchdogHandle>,
 }
 
@@ -365,11 +357,13 @@ impl ReservedTurnSubmission {
         let (Some(command_permit), Some(input)) = (command_permit, input) else {
             return false;
         };
-        let _ = command_permit.send(ThreadCommand::Submit {
-            turn_id: turn_id.clone(),
-            input,
-            mode,
-        });
+        let _ = command_permit.send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                turn_id: turn_id.clone(),
+                input,
+                mode,
+            },
+        );
         if let Some(reservation) = reservation.as_mut() {
             reservation.committed = true;
         }
@@ -377,7 +371,7 @@ impl ReservedTurnSubmission {
             host.spawn_turn_timeout_watchdog(thread.clone(), turn_watchdog);
         }
         thread
-            .record_signal(ThreadSignal::user_submit(
+            .record_signal(verlet_runtime_contracts::ThreadSignal::user_submit(
                 &thread.context().coordinates,
                 turn_id,
                 mode,
@@ -388,43 +382,49 @@ impl ReservedTurnSubmission {
 }
 
 impl RuntimeHost {
-    pub fn kernel_control(&self) -> RuntimeKernelControl {
-        RuntimeKernelControl::new(std::sync::Arc::downgrade(&self.inner))
+    pub fn kernel_control(
+        &self,
+    ) -> crate::kernel::runtime_host::kernel_control::RuntimeKernelControl {
+        crate::kernel::runtime_host::kernel_control::RuntimeKernelControl::new(
+            std::sync::Arc::downgrade(&self.inner),
+        )
     }
 
-    pub fn new(factory: std::sync::Arc<dyn AgentRuntimeFactory>) -> Self {
+    pub fn new(
+        factory: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
+    ) -> Self {
         Self::with_session_store(
             factory,
-            std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new()),
+            std::sync::Arc::new(verlet_history::InMemorySessionStore::new()),
         )
     }
 
     pub fn with_policy(
-        factory: std::sync::Arc<dyn AgentRuntimeFactory>,
-        execution_policy: RuntimeExecutionPolicy,
+        factory: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
+        execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
     ) -> Self {
         Self::with_session_store_and_policy(
             factory,
-            std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new()),
+            std::sync::Arc::new(verlet_history::InMemorySessionStore::new()),
             execution_policy,
         )
     }
 
     pub fn with_session_store(
-        factory: std::sync::Arc<dyn AgentRuntimeFactory>,
-        runtime_store: std::sync::Arc<dyn crate::kernel::history::RuntimeStore>,
+        factory: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
+        runtime_store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
     ) -> Self {
         Self::with_session_store_and_policy(
             factory,
             runtime_store,
-            RuntimeExecutionPolicy::default(),
+            crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy::default(),
         )
     }
 
     pub fn with_session_store_and_policy(
-        factory: std::sync::Arc<dyn AgentRuntimeFactory>,
-        runtime_store: std::sync::Arc<dyn crate::kernel::history::RuntimeStore>,
-        execution_policy: RuntimeExecutionPolicy,
+        factory: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
+        runtime_store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
     ) -> Self {
         Self {
             inner: std::sync::Arc::new(RuntimeHostInner {
@@ -442,7 +442,12 @@ impl RuntimeHost {
         }
     }
 
-    pub async fn set_lifecycle_sink(&self, sink: Option<std::sync::Arc<dyn ThreadLifecycleSink>>) {
+    pub async fn set_lifecycle_sink(
+        &self,
+        sink: Option<
+            std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ThreadLifecycleSink>,
+        >,
+    ) {
         *self.inner.lifecycle_sink.write().await = sink;
     }
 
@@ -455,12 +460,18 @@ impl RuntimeHost {
 
     pub async fn set_process_handle_ingress(
         &self,
-        sink: Option<std::sync::Arc<dyn ProcessHandleIngressSink>>,
+        sink: Option<
+            std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink>,
+        >,
     ) {
         *self.inner.process_handle_ingress.write().await = sink;
     }
 
-    async fn process_handle_ingress(&self) -> Option<std::sync::Arc<dyn ProcessHandleIngressSink>> {
+    async fn process_handle_ingress(
+        &self,
+    ) -> Option<
+        std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink>,
+    > {
         self.inner.process_handle_ingress.read().await.clone()
     }
 
@@ -486,22 +497,27 @@ impl RuntimeHost {
         self.inner.remote_thread_executor.read().await.clone()
     }
 
-    async fn lifecycle_sink(&self) -> Option<std::sync::Arc<dyn ThreadLifecycleSink>> {
+    async fn lifecycle_sink(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ThreadLifecycleSink>>
+    {
         self.inner.lifecycle_sink.read().await.clone()
     }
 
-    pub fn runtime_store(&self) -> std::sync::Arc<dyn crate::kernel::history::RuntimeStore> {
+    pub fn runtime_store(&self) -> std::sync::Arc<dyn verlet_history::RuntimeStore> {
         std::sync::Arc::clone(&self.inner.runtime_store)
     }
 
-    pub fn execution_policy(&self) -> &RuntimeExecutionPolicy {
+    pub fn execution_policy(
+        &self,
+    ) -> &crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy {
         &self.inner.execution_policy
     }
 
     pub async fn start_thread(
         &self,
-        coordinates: ThreadCoordinates,
-        topology: ThreadTopology,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
+        topology: verlet_runtime_contracts::ThreadTopology,
     ) -> VerletResult<RuntimeThreadHandle> {
         self.start_thread_with_topology_and_metadata(
             coordinates,
@@ -513,8 +529,8 @@ impl RuntimeHost {
 
     pub async fn start_thread_with_topology_and_metadata(
         &self,
-        coordinates: ThreadCoordinates,
-        topology: ThreadTopology,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
+        topology: verlet_runtime_contracts::ThreadTopology,
         metadata: std::collections::BTreeMap<String, String>,
     ) -> VerletResult<RuntimeThreadHandle> {
         self.start_thread_with_topology_and_metadata_inner(coordinates, topology, metadata, true)
@@ -523,8 +539,8 @@ impl RuntimeHost {
 
     pub(crate) async fn load_thread_with_topology_and_metadata(
         &self,
-        coordinates: ThreadCoordinates,
-        topology: ThreadTopology,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
+        topology: verlet_runtime_contracts::ThreadTopology,
         metadata: std::collections::BTreeMap<String, String>,
     ) -> VerletResult<RuntimeThreadHandle> {
         self.start_thread_with_topology_and_metadata_inner(coordinates, topology, metadata, false)
@@ -533,13 +549,16 @@ impl RuntimeHost {
 
     async fn start_thread_with_topology_and_metadata_inner(
         &self,
-        coordinates: ThreadCoordinates,
-        topology: ThreadTopology,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
+        topology: verlet_runtime_contracts::ThreadTopology,
         metadata: std::collections::BTreeMap<String, String>,
         record_start_identity: bool,
     ) -> VerletResult<RuntimeThreadHandle> {
-        let context =
-            ThreadContext::with_topology_and_metadata(coordinates, topology, metadata.clone());
+        let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+            coordinates,
+            topology,
+            metadata.clone(),
+        );
         let start_reservation = self.reserve_thread_start(&context).await?;
         self.start_reserved_thread(
             context,
@@ -554,7 +573,7 @@ impl RuntimeHost {
 
     async fn reserve_thread_start<'a>(
         &'a self,
-        context: &ThreadContext,
+        context: &verlet_runtime_contracts::ThreadContext,
     ) -> VerletResult<ThreadStartReservation<'a>> {
         let thread_id = context.coordinates.thread_id;
         let parent_thread_id = context.parent_thread_id;
@@ -585,7 +604,7 @@ impl RuntimeHost {
                 drop(threads);
                 if let Some(parent) = parent {
                     RuntimeThreadHandle { thread: parent }.emit_runtime(
-                        RuntimeEventKind::PolicyRejected {
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected {
                             code: "max_child_threads".to_string(),
                             message: message.clone(),
                         },
@@ -616,7 +635,10 @@ impl RuntimeHost {
 
     /// Waits until an in-flight start either finishes publishing or releases
     /// its reservation after failure.
-    pub(crate) async fn wait_for_thread_start_reservation(&self, thread_id: ThreadId) {
+    pub(crate) async fn wait_for_thread_start_reservation(
+        &self,
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) {
         let settled = lock_unpoisoned(&self.inner.thread_start_reservations)
             .get(&thread_id)
             .map(|reservation| reservation.settled.subscribe());
@@ -631,7 +653,7 @@ impl RuntimeHost {
 
     async fn start_reserved_thread(
         &self,
-        context: ThreadContext,
+        context: verlet_runtime_contracts::ThreadContext,
         metadata: std::collections::BTreeMap<String, String>,
         mut start_reservation: ThreadStartReservation<'_>,
         record_start_identity: bool,
@@ -655,7 +677,8 @@ impl RuntimeHost {
             ))
         });
         let (event_tx, _) = tokio::sync::broadcast::channel(1024);
-        let (status_tx, status_rx) = tokio::sync::watch::channel(ThreadStatus::Starting);
+        let (status_tx, status_rx) =
+            tokio::sync::watch::channel(verlet_runtime_contracts::ThreadStatus::Starting);
         let runtime_status_rx = status_rx.clone();
         let runtime_run_status_tx = status_tx.clone();
         let runtime_exit_status_tx = status_tx.clone();
@@ -666,7 +689,7 @@ impl RuntimeHost {
         let runtime_context = context.clone();
         let runtime_exit_coordinates = context.coordinates.clone();
         let runtime_parent_thread_id = context.parent_thread_id;
-        let mut services = RuntimeServices::new(
+        let mut services = crate::kernel::runtime_host::runtime_services::RuntimeServices::new(
             std::sync::Arc::clone(&self.inner.runtime_store),
             self.inner.execution_policy.clone(),
         )
@@ -697,28 +720,35 @@ impl RuntimeHost {
                 )
                 .await;
             let latest_status = *runtime_status_rx.borrow();
-            if !matches!(latest_status, ThreadStatus::Stopped | ThreadStatus::Failed) {
-                let _ = runtime_exit_status_tx.send(ThreadStatus::Failed);
-                emit_runtime_event(
+            if !matches!(
+                latest_status,
+                verlet_runtime_contracts::ThreadStatus::Stopped
+                    | verlet_runtime_contracts::ThreadStatus::Failed
+            ) {
+                let _ = runtime_exit_status_tx.send(verlet_runtime_contracts::ThreadStatus::Failed);
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     &runtime_exit_events,
                     &runtime_exit_coordinates,
-                    RuntimeEventKind::Recovery {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
                         action: "mark_failed".to_string(),
                         reason: "runtime exited without a terminal status".to_string(),
                     },
                 );
-                emit_runtime_event(
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     &runtime_exit_events,
                     &runtime_exit_coordinates,
-                    RuntimeEventKind::Failed {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Failed {
                         code: "runtime_exited".to_string(),
                         message: "runtime exited without a terminal status".to_string(),
                     },
                 );
             }
         });
-        let lifecycle =
-            ThreadLifecycleRecord::new(&context, ThreadLifecycleStatus::Starting, metadata);
+        let lifecycle = verlet_runtime_contracts::ThreadLifecycleRecord::new(
+            &context,
+            verlet_runtime_contracts::ThreadLifecycleStatus::Starting,
+            metadata,
+        );
         let thread = std::sync::Arc::new(RuntimeThread {
             context,
             services,
@@ -780,7 +810,7 @@ impl RuntimeHost {
 
         if let Some(parent_thread_id) = runtime_parent_thread_id {
             if let Ok(parent) = self.get_thread(parent_thread_id).await {
-                parent.emit_runtime(RuntimeEventKind::SubthreadStarted {
+                parent.emit_runtime(crate::kernel::runtime_host::runtime_events::RuntimeEventKind::SubthreadStarted {
                     child_thread_id: thread_id,
                 });
             }
@@ -804,7 +834,10 @@ impl RuntimeHost {
         }
     }
 
-    pub async fn get_thread(&self, thread_id: ThreadId) -> VerletResult<RuntimeThreadHandle> {
+    pub async fn get_thread(
+        &self,
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> VerletResult<RuntimeThreadHandle> {
         let threads = self.inner.threads.read().await;
         let thread = threads
             .get(&thread_id)
@@ -815,84 +848,106 @@ impl RuntimeHost {
 
     pub async fn submit(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         input: impl Into<String>,
     ) -> VerletResult<()> {
         self.submit_turn_with_mode(
             thread_id,
             turn_id,
-            TurnInput::text(input.into()),
-            TurnSubmissionMode::Queue,
+            crate::kernel::runtime_host::turn::TurnInput::text(input.into()),
+            verlet_runtime_contracts::TurnSubmissionMode::Queue,
         )
         .await
     }
 
     pub async fn submit_turn(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
-        input: TurnInput,
+        input: crate::kernel::runtime_host::turn::TurnInput,
     ) -> VerletResult<()> {
-        self.submit_turn_with_mode(thread_id, turn_id, input, TurnSubmissionMode::Queue)
-            .await
+        self.submit_turn_with_mode(
+            thread_id,
+            turn_id,
+            input,
+            verlet_runtime_contracts::TurnSubmissionMode::Queue,
+        )
+        .await
     }
 
     pub async fn submit_with_mode(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         input: impl Into<String>,
-        mode: TurnSubmissionMode,
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
     ) -> VerletResult<()> {
-        self.submit_turn_with_mode(thread_id, turn_id, TurnInput::text(input.into()), mode)
-            .await
+        self.submit_turn_with_mode(
+            thread_id,
+            turn_id,
+            crate::kernel::runtime_host::turn::TurnInput::text(input.into()),
+            mode,
+        )
+        .await
     }
 
     pub async fn steer(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         input: impl Into<String>,
     ) -> VerletResult<()> {
-        self.submit_with_mode(thread_id, turn_id, input, TurnSubmissionMode::Steer)
-            .await
+        self.submit_with_mode(
+            thread_id,
+            turn_id,
+            input,
+            verlet_runtime_contracts::TurnSubmissionMode::Steer,
+        )
+        .await
     }
 
     pub async fn interrupt_with(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         input: impl Into<String>,
     ) -> VerletResult<()> {
-        self.submit_with_mode(thread_id, turn_id, input, TurnSubmissionMode::Interrupt)
-            .await
+        self.submit_with_mode(
+            thread_id,
+            turn_id,
+            input,
+            verlet_runtime_contracts::TurnSubmissionMode::Interrupt,
+        )
+        .await
     }
 
     pub async fn resume_tool_call(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         call_id: impl Into<String>,
     ) -> VerletResult<()> {
         let thread = self.get_thread(thread_id).await?;
         thread
-            .send(ThreadCommand::ResumeToolCall {
-                turn_id: turn_id.into(),
-                call_id: call_id.into(),
-            })
+            .send(
+                crate::kernel::runtime_host::runtime_api::ThreadCommand::ResumeToolCall {
+                    turn_id: turn_id.into(),
+                    call_id: call_id.into(),
+                },
+            )
             .await
     }
 
     pub async fn continue_turn_if_requested(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         loop_id: impl Into<String>,
         parent_turn_id: impl Into<String>,
         next_turn_id: impl Into<String>,
         now_ms: i64,
         completed_continuations: u32,
-    ) -> VerletResult<LoopContinuationReceipt> {
+    ) -> VerletResult<crate::kernel::runtime_host::loop_continuation::LoopContinuationReceipt> {
         let loop_id = loop_id.into();
         let parent_turn_id = parent_turn_id.into();
         let next_turn_id = next_turn_id.into();
@@ -907,7 +962,9 @@ impl RuntimeHost {
             )
             .await?
         else {
-            return Ok(LoopContinuationReceipt::NoRequest);
+            return Ok(
+                crate::kernel::runtime_host::loop_continuation::LoopContinuationReceipt::NoRequest,
+            );
         };
         if let Some(receipt) =
             crate::kernel::runtime_host::loop_continuation::existing_continuation_receipt(
@@ -918,7 +975,7 @@ impl RuntimeHost {
             )
             .await?
         {
-            if let LoopContinuationReceipt::Accepted {
+            if let crate::kernel::runtime_host::loop_continuation::LoopContinuationReceipt::Accepted {
                 next_turn_id,
                 accepted_event_id,
                 ..
@@ -942,8 +999,8 @@ impl RuntimeHost {
                     self,
                     thread_id,
                     next_turn_id.clone(),
-                    TurnInput::text(request_payload.next_turn_input),
-                    TurnSubmissionMode::Queue,
+                    crate::kernel::runtime_host::turn::TurnInput::text(request_payload.next_turn_input),
+                    verlet_runtime_contracts::TurnSubmissionMode::Queue,
                     None,
                 )
                 .await?;
@@ -969,9 +1026,9 @@ impl RuntimeHost {
         )
         .await?
         {
-            crate::kernel::control_decision::TurnContinuationDecision::NoRequest => {
-                Ok(LoopContinuationReceipt::NoRequest)
-            }
+            crate::kernel::control_decision::TurnContinuationDecision::NoRequest => Ok(
+                crate::kernel::runtime_host::loop_continuation::LoopContinuationReceipt::NoRequest,
+            ),
             crate::kernel::control_decision::TurnContinuationDecision::Accept {
                 consumed_request_id,
                 mandate_id,
@@ -998,12 +1055,12 @@ impl RuntimeHost {
                     self,
                     thread_id,
                     next_turn_id.clone(),
-                    TurnInput::text(next_turn_input),
-                    TurnSubmissionMode::Queue,
+                    crate::kernel::runtime_host::turn::TurnInput::text(next_turn_input),
+                    verlet_runtime_contracts::TurnSubmissionMode::Queue,
                     None,
                 )
                 .await?;
-                Ok(LoopContinuationReceipt::Accepted {
+                Ok(crate::kernel::runtime_host::loop_continuation::LoopContinuationReceipt::Accepted {
                     loop_id,
                     parent_turn_id,
                     next_turn_id,
@@ -1024,7 +1081,7 @@ impl RuntimeHost {
                     consumed_request_id.unwrap_or(request_event.id),
                 )
                 .await?;
-                Ok(LoopContinuationReceipt::Rejected {
+                Ok(crate::kernel::runtime_host::loop_continuation::LoopContinuationReceipt::Rejected {
                     loop_id,
                     parent_turn_id,
                     reason,
@@ -1036,10 +1093,10 @@ impl RuntimeHost {
 
     pub async fn submit_turn_with_mode(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
-        input: TurnInput,
-        mode: TurnSubmissionMode,
+        input: crate::kernel::runtime_host::turn::TurnInput,
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
     ) -> VerletResult<()> {
         let admission = crate::kernel::admission::AdmissionGateContext::surface_default(
             crate::kernel::admission::HOST_SUBMIT_SURFACE,
@@ -1058,10 +1115,10 @@ impl RuntimeHost {
 
     pub(super) async fn reserve_turn_submission_at_choke_point(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
-        mut input: TurnInput,
-        mode: TurnSubmissionMode,
+        mut input: crate::kernel::runtime_host::turn::TurnInput,
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
         admission: Option<crate::kernel::admission::AdmissionGateContext>,
     ) -> VerletResult<ReservedTurnSubmission> {
         let turn_id = turn_id.into();
@@ -1087,7 +1144,7 @@ impl RuntimeHost {
             turn_id: turn_id.clone(),
             committed: false,
         };
-        if mode == TurnSubmissionMode::Queue
+        if mode == verlet_runtime_contracts::TurnSubmissionMode::Queue
             && let Some(max_pending_inputs) = self.inner.execution_policy.max_pending_inputs
         {
             let pending_input_slots =
@@ -1108,7 +1165,7 @@ impl RuntimeHost {
                     let message = format!(
                         "thread has {queued_commands} queued command(s); max pending input count is {max_pending_inputs}"
                     );
-                    thread.emit_runtime(RuntimeEventKind::PolicyRejected {
+                    thread.emit_runtime(crate::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected {
                         code: "max_pending_inputs".to_string(),
                         message: message.clone(),
                     });
@@ -1153,64 +1210,84 @@ impl RuntimeHost {
 
     pub async fn compact_thread(
         &self,
-        thread_id: ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         summary: Option<String>,
     ) -> VerletResult<()> {
         let thread = self.get_thread(thread_id).await?;
         thread
-            .send(ThreadCommand::Compact {
-                turn_id: turn_id.into(),
-                trigger: crate::CompactionTrigger::Manual,
-                summary,
-            })
+            .send(
+                crate::kernel::runtime_host::runtime_api::ThreadCommand::Compact {
+                    turn_id: turn_id.into(),
+                    trigger: crate::kernel::compaction::CompactionTrigger::Manual,
+                    summary,
+                },
+            )
             .await?;
         Ok(())
     }
 
-    pub async fn cancel(&self, thread_id: ThreadId, reason: impl Into<String>) -> VerletResult<()> {
+    pub async fn cancel(
+        &self,
+        thread_id: verlet_runtime_contracts::ThreadId,
+        reason: impl Into<String>,
+    ) -> VerletResult<()> {
         let reason = reason.into();
         let thread = self.get_thread(thread_id).await?;
-        thread.emit_runtime(RuntimeEventKind::Recovery {
-            action: "cancel_requested".to_string(),
-            reason: reason.clone(),
-        });
+        thread.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                action: "cancel_requested".to_string(),
+                reason: reason.clone(),
+            },
+        );
         thread
-            .record_signal(ThreadSignal::interrupt_cancel(
+            .record_signal(verlet_runtime_contracts::ThreadSignal::interrupt_cancel(
                 &thread.context().coordinates,
                 reason.clone(),
             ))
             .await;
         if matches!(
             thread.status(),
-            ThreadStatus::Starting
-                | ThreadStatus::Idle
-                | ThreadStatus::Stopped
-                | ThreadStatus::Failed
+            verlet_runtime_contracts::ThreadStatus::Starting
+                | verlet_runtime_contracts::ThreadStatus::Idle
+                | verlet_runtime_contracts::ThreadStatus::Stopped
+                | verlet_runtime_contracts::ThreadStatus::Failed
         ) && thread.queued_command_count() == 0
         {
             return Ok(());
         }
         thread
-            .send(ThreadCommand::Cancel {
-                reason: reason.clone(),
-            })
+            .send(
+                crate::kernel::runtime_host::runtime_api::ThreadCommand::Cancel {
+                    reason: reason.clone(),
+                },
+            )
             .await?;
         self.wait_for_cancel_grace(&thread).await?;
         Ok(())
     }
 
-    pub async fn shutdown_thread(&self, thread_id: ThreadId) -> VerletResult<()> {
+    pub async fn shutdown_thread(
+        &self,
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> VerletResult<()> {
         let thread = self.get_thread(thread_id).await?;
         let parent_thread_id = thread.context().parent_thread_id;
-        thread.emit_runtime(RuntimeEventKind::Recovery {
-            action: "shutdown_requested".to_string(),
-            reason: "shutdown_thread".to_string(),
-        });
-        match thread.send(ThreadCommand::Shutdown).await {
+        thread.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                action: "shutdown_requested".to_string(),
+                reason: "shutdown_thread".to_string(),
+            },
+        );
+        match thread
+            .send(crate::kernel::runtime_host::runtime_api::ThreadCommand::Shutdown)
+            .await
+        {
             Ok(()) => {
                 thread
-                    .record_signal(ThreadSignal::shutdown(&thread.context().coordinates))
+                    .record_signal(verlet_runtime_contracts::ThreadSignal::shutdown(
+                        &thread.context().coordinates,
+                    ))
                     .await;
             }
             Err(VerletError::ThreadClosed(_)) => {
@@ -1222,12 +1299,12 @@ impl RuntimeHost {
         let removed = self.remove_thread_if_current(&thread.thread).await;
         if removed && let Some(parent_thread_id) = parent_thread_id {
             if let Ok(parent) = self.get_thread(parent_thread_id).await {
-                parent.emit_runtime(RuntimeEventKind::SubthreadFinished {
+                parent.emit_runtime(crate::kernel::runtime_host::runtime_events::RuntimeEventKind::SubthreadFinished {
                     child_thread_id: thread_id,
                     status: if timed_out {
-                        ThreadLifecycleStatus::Failed
+                        verlet_runtime_contracts::ThreadLifecycleStatus::Failed
                     } else {
-                        ThreadLifecycleStatus::Stopped
+                        verlet_runtime_contracts::ThreadLifecycleStatus::Stopped
                     },
                 });
             }
@@ -1237,18 +1314,21 @@ impl RuntimeHost {
 
     pub async fn session_context(
         &self,
-        thread_id: ThreadId,
-    ) -> VerletResult<crate::kernel::history::SessionContext> {
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> VerletResult<verlet_history::SessionContext> {
         self.get_thread(thread_id).await?.session_context().await
     }
 
     /// Shuts down descendants before registered ancestors, with thread-id order
     /// breaking ties at the same topology depth.
-    pub async fn shutdown_all(&self) -> VerletResult<Vec<ThreadId>> {
+    pub async fn shutdown_all(&self) -> VerletResult<Vec<verlet_runtime_contracts::ThreadId>> {
         fn registered_depth(
-            thread_id: ThreadId,
-            parents: &std::collections::HashMap<ThreadId, Option<ThreadId>>,
-            path: &mut Vec<ThreadId>,
+            thread_id: verlet_runtime_contracts::ThreadId,
+            parents: &std::collections::HashMap<
+                verlet_runtime_contracts::ThreadId,
+                Option<verlet_runtime_contracts::ThreadId>,
+            >,
+            path: &mut Vec<verlet_runtime_contracts::ThreadId>,
         ) -> usize {
             if path.contains(&thread_id) {
                 return 0;
@@ -1308,35 +1388,45 @@ impl RuntimeHost {
                 return;
             };
             let thread = RuntimeThreadHandle { thread };
-            if thread.status() != ThreadStatus::Running || !watchdog.try_timeout() {
+            if thread.status() != verlet_runtime_contracts::ThreadStatus::Running
+                || !watchdog.try_timeout()
+            {
                 return;
             }
-            thread.emit_runtime(RuntimeEventKind::Timeout {
-                operation: "turn".to_string(),
-                timeout_ms,
-            });
-            thread.emit_runtime(RuntimeEventKind::Terminal {
-                state: RuntimeTerminalState::TimedOut,
-            });
+            thread.emit_runtime(
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Timeout {
+                    operation: "turn".to_string(),
+                    timeout_ms,
+                },
+            );
+            thread.emit_runtime(
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                    state: verlet_runtime_contracts::RuntimeTerminalState::TimedOut,
+                },
+            );
             let reason = format!("turn exceeded {timeout_ms}ms timeout");
             match thread.try_reserve_command() {
                 Ok(command_permit) => {
-                    command_permit.send(ThreadCommand::CancelTurn {
-                        watchdog_token_id,
-                        reason: reason.clone(),
-                    });
+                    command_permit.send(
+                        crate::kernel::runtime_host::runtime_api::ThreadCommand::CancelTurn {
+                            watchdog_token_id,
+                            reason: reason.clone(),
+                        },
+                    );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    if !watchdog.is_timed_out() || thread.status() != ThreadStatus::Running {
+                    if !watchdog.is_timed_out()
+                        || thread.status() != verlet_runtime_contracts::ThreadStatus::Running
+                    {
                         return;
                     }
-                    thread.set_status(ThreadStatus::Cancelling);
+                    thread.set_status(verlet_runtime_contracts::ThreadStatus::Cancelling);
                     thread.thread.cancellation.cancel();
                 }
             }
             thread
-                .record_signal(ThreadSignal::interrupt_cancel(
+                .record_signal(verlet_runtime_contracts::ThreadSignal::interrupt_cancel(
                     &thread.context().coordinates,
                     reason.clone(),
                 ))
@@ -1346,22 +1436,29 @@ impl RuntimeHost {
                 if watchdog.is_timed_out()
                     && matches!(
                         thread.status(),
-                        ThreadStatus::Running | ThreadStatus::Cancelling
+                        verlet_runtime_contracts::ThreadStatus::Running
+                            | verlet_runtime_contracts::ThreadStatus::Cancelling
                     )
                 {
-                    thread.emit_runtime(RuntimeEventKind::Timeout {
-                        operation: "cancel".to_string(),
-                        timeout_ms: cancel_timeout_ms,
-                    });
-                    thread.emit_runtime(RuntimeEventKind::Recovery {
-                        action: "abort_runtime".to_string(),
-                        reason: "cancel grace timeout elapsed after turn timeout".to_string(),
-                    });
-                    thread.set_status(ThreadStatus::Failed);
-                    thread.emit_runtime(RuntimeEventKind::Failed {
-                        code: "cancel_timeout".to_string(),
-                        message: "runtime did not cancel within grace timeout".to_string(),
-                    });
+                    thread.emit_runtime(
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Timeout {
+                            operation: "cancel".to_string(),
+                            timeout_ms: cancel_timeout_ms,
+                        },
+                    );
+                    thread.emit_runtime(
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                            action: "abort_runtime".to_string(),
+                            reason: "cancel grace timeout elapsed after turn timeout".to_string(),
+                        },
+                    );
+                    thread.set_status(verlet_runtime_contracts::ThreadStatus::Failed);
+                    thread.emit_runtime(
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Failed {
+                            code: "cancel_timeout".to_string(),
+                            message: "runtime did not cancel within grace timeout".to_string(),
+                        },
+                    );
                     thread.abort().await;
                 }
             }
@@ -1376,7 +1473,8 @@ impl RuntimeHost {
             loop {
                 if !matches!(
                     thread.status(),
-                    ThreadStatus::Running | ThreadStatus::Cancelling
+                    verlet_runtime_contracts::ThreadStatus::Running
+                        | verlet_runtime_contracts::ThreadStatus::Cancelling
                 ) {
                     return;
                 }
@@ -1386,25 +1484,33 @@ impl RuntimeHost {
         .await
         .is_ok();
         if completed {
-            thread.emit_runtime(RuntimeEventKind::Recovery {
-                action: "cancel_completed".to_string(),
-                reason: "runtime returned to a recoverable state".to_string(),
-            });
+            thread.emit_runtime(
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                    action: "cancel_completed".to_string(),
+                    reason: "runtime returned to a recoverable state".to_string(),
+                },
+            );
             return Ok(());
         }
-        thread.emit_runtime(RuntimeEventKind::Timeout {
-            operation: "cancel".to_string(),
-            timeout_ms,
-        });
-        thread.emit_runtime(RuntimeEventKind::Recovery {
-            action: "abort_runtime".to_string(),
-            reason: "cancel grace timeout elapsed".to_string(),
-        });
-        thread.set_status(ThreadStatus::Failed);
-        thread.emit_runtime(RuntimeEventKind::Failed {
-            code: "cancel_timeout".to_string(),
-            message: "runtime did not cancel within grace timeout".to_string(),
-        });
+        thread.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Timeout {
+                operation: "cancel".to_string(),
+                timeout_ms,
+            },
+        );
+        thread.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                action: "abort_runtime".to_string(),
+                reason: "cancel grace timeout elapsed".to_string(),
+            },
+        );
+        thread.set_status(verlet_runtime_contracts::ThreadStatus::Failed);
+        thread.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Failed {
+                code: "cancel_timeout".to_string(),
+                message: "runtime did not cancel within grace timeout".to_string(),
+            },
+        );
         thread.abort().await;
         Err(VerletError::ThreadPolicyViolation {
             thread_id: thread.context().coordinates.thread_id,
@@ -1416,37 +1522,48 @@ impl RuntimeHost {
     async fn wait_for_shutdown(&self, thread: &RuntimeThreadHandle) -> VerletResult<bool> {
         let Some(timeout_ms) = self.inner.execution_policy.shutdown_grace_timeout_ms else {
             thread.wait().await;
-            thread.emit_runtime(RuntimeEventKind::Recovery {
-                action: "shutdown_completed".to_string(),
-                reason: "runtime stopped".to_string(),
-            });
+            thread.emit_runtime(
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                    action: "shutdown_completed".to_string(),
+                    reason: "runtime stopped".to_string(),
+                },
+            );
             return Ok(false);
         };
         if thread
             .wait_timeout_or_abort(std::time::Duration::from_millis(timeout_ms))
             .await
         {
-            thread.emit_runtime(RuntimeEventKind::Recovery {
-                action: "shutdown_completed".to_string(),
-                reason: "runtime stopped".to_string(),
-            });
+            thread.emit_runtime(
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                    action: "shutdown_completed".to_string(),
+                    reason: "runtime stopped".to_string(),
+                },
+            );
             return Ok(false);
         }
-        thread.emit_runtime(RuntimeEventKind::Timeout {
-            operation: "shutdown".to_string(),
-            timeout_ms,
-        });
-        thread.emit_runtime(RuntimeEventKind::Recovery {
-            action: "abort_runtime".to_string(),
-            reason: "shutdown grace timeout elapsed".to_string(),
-        });
+        thread.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Timeout {
+                operation: "shutdown".to_string(),
+                timeout_ms,
+            },
+        );
+        thread.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
+                action: "abort_runtime".to_string(),
+                reason: "shutdown grace timeout elapsed".to_string(),
+            },
+        );
         thread.thread.cancellation.cancel();
-        thread.set_status(ThreadStatus::Failed);
+        thread.set_status(verlet_runtime_contracts::ThreadStatus::Failed);
         thread.abort().await;
         Ok(true)
     }
 
-    pub async fn children_of(&self, parent_thread_id: ThreadId) -> Vec<RuntimeThreadHandle> {
+    pub async fn children_of(
+        &self,
+        parent_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> Vec<RuntimeThreadHandle> {
         let threads = self.inner.threads.read().await;
         threads
             .values()
@@ -1458,7 +1575,7 @@ impl RuntimeHost {
 
     pub async fn children_of_at(
         &self,
-        parent_coordinates: &ThreadCoordinates,
+        parent_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> VerletResult<Vec<RuntimeThreadHandle>> {
         let parent = self.get_thread(parent_coordinates.thread_id).await?;
         let requested_scope = parent_coordinates.scope();
@@ -1475,11 +1592,11 @@ impl RuntimeHost {
 
     pub async fn create_checkpoint(
         &self,
-        thread_id: ThreadId,
-        parent_checkpoint_id: Option<ThreadCheckpointId>,
+        thread_id: verlet_runtime_contracts::ThreadId,
+        parent_checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
         label: Option<String>,
         metadata: std::collections::BTreeMap<String, String>,
-    ) -> VerletResult<ThreadCheckpoint> {
+    ) -> VerletResult<crate::kernel::runtime_host::runtime_api::ThreadCheckpoint> {
         let checkpoint = self
             .get_thread(thread_id)
             .await?
@@ -1495,7 +1612,7 @@ impl RuntimeHost {
 
     pub async fn resume_thread(
         &self,
-        checkpoint_id: ThreadCheckpointId,
+        checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
     ) -> VerletResult<RuntimeThreadHandle> {
         let checkpoint = self
             .inner
@@ -1515,18 +1632,20 @@ impl RuntimeHost {
     /// resume rejects parent or unknown lineage instead of flattening it.
     pub async fn resume_thread_from_checkpoint(
         &self,
-        checkpoint: ThreadCheckpoint,
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
     ) -> VerletResult<RuntimeThreadHandle> {
         match checkpoint.lineage {
-            ThreadCheckpointLineage::Root => {}
-            ThreadCheckpointLineage::Parent { parent_thread_id } => {
+            crate::kernel::runtime_host::runtime_api::ThreadCheckpointLineage::Root => {}
+            crate::kernel::runtime_host::runtime_api::ThreadCheckpointLineage::Parent {
+                parent_thread_id,
+            } => {
                 return Err(VerletError::CheckpointResumeRequiresRoot {
                     checkpoint_id: checkpoint.id,
                     thread_id: checkpoint.coordinates.thread_id,
                     parent_thread_id,
                 });
             }
-            ThreadCheckpointLineage::Unknown => {
+            crate::kernel::runtime_host::runtime_api::ThreadCheckpointLineage::Unknown => {
                 return Err(VerletError::CheckpointResumeLineageUnknown {
                     checkpoint_id: checkpoint.id,
                     thread_id: checkpoint.coordinates.thread_id,
@@ -1534,9 +1653,9 @@ impl RuntimeHost {
             }
         }
         let metadata = checkpoint.metadata.clone();
-        let context = ThreadContext::with_topology_and_metadata(
+        let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
             checkpoint.coordinates.clone(),
-            ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadTopology::root(),
             metadata.clone(),
         );
         let start_reservation = self.reserve_thread_start(&context).await?;
@@ -1556,8 +1675,8 @@ impl RuntimeHost {
 
     pub async fn fork_thread(
         &self,
-        thread_id: ThreadId,
-        checkpoint_id: Option<ThreadCheckpointId>,
+        thread_id: verlet_runtime_contracts::ThreadId,
+        checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
     ) -> VerletResult<RuntimeThreadHandle> {
         let checkpoint_id = checkpoint_id.ok_or_else(|| VerletError::LifecycleUnsupported {
             operation: "fork_thread",
@@ -1577,7 +1696,7 @@ impl RuntimeHost {
         if checkpoint.coordinates.thread_id != thread_id {
             return Err(VerletError::ThreadScopeMismatch {
                 thread_id,
-                requested: Box::new(ThreadScope {
+                requested: Box::new(verlet_runtime_contracts::ThreadScope {
                     tenant_id: checkpoint.coordinates.tenant_id.clone(),
                     user_id: checkpoint.coordinates.user_id.clone(),
                     session_id: checkpoint.coordinates.session_id.clone(),
@@ -1590,16 +1709,20 @@ impl RuntimeHost {
 
     pub async fn fork_thread_from_checkpoint(
         &self,
-        checkpoint: ThreadCheckpoint,
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
     ) -> VerletResult<RuntimeThreadHandle> {
-        self.fork_thread_from_checkpoint_with_id_inner(checkpoint, ThreadId::new(), true)
-            .await
+        self.fork_thread_from_checkpoint_with_id_inner(
+            checkpoint,
+            verlet_runtime_contracts::ThreadId::new(),
+            true,
+        )
+        .await
     }
 
     pub(crate) async fn fork_thread_from_checkpoint_with_id(
         &self,
-        checkpoint: ThreadCheckpoint,
-        child_thread_id: ThreadId,
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
     ) -> VerletResult<RuntimeThreadHandle> {
         self.fork_thread_from_checkpoint_with_id_inner(checkpoint, child_thread_id, false)
             .await
@@ -1607,11 +1730,11 @@ impl RuntimeHost {
 
     async fn fork_thread_from_checkpoint_with_id_inner(
         &self,
-        checkpoint: ThreadCheckpoint,
-        child_thread_id: ThreadId,
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
         notify_lifecycle_sink: bool,
     ) -> VerletResult<RuntimeThreadHandle> {
-        let fork_coordinates = ThreadCoordinates {
+        let fork_coordinates = verlet_runtime_contracts::ThreadCoordinates {
             tenant_id: checkpoint.coordinates.tenant_id.clone(),
             user_id: checkpoint.coordinates.user_id.clone(),
             session_id: checkpoint.coordinates.session_id.clone(),
@@ -1626,9 +1749,11 @@ impl RuntimeHost {
             "forked_from_checkpoint_id".to_string(),
             checkpoint.id.to_string(),
         );
-        let topology =
-            ThreadTopology::branch_from(checkpoint.coordinates.thread_id, Some(checkpoint.id));
-        let desired_context = ThreadContext::with_topology_and_metadata(
+        let topology = verlet_runtime_contracts::ThreadTopology::branch_from(
+            checkpoint.coordinates.thread_id,
+            Some(checkpoint.id),
+        );
+        let desired_context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
             fork_coordinates.clone(),
             topology,
             metadata.clone(),
@@ -1660,7 +1785,7 @@ impl RuntimeHost {
                 }
                 Err(err) => return Err(err),
             };
-            let stream_id = crate::kernel::history::EventStreamId::for_thread(&fork_coordinates);
+            let stream_id = verlet_history::EventStreamId::for_thread(&fork_coordinates);
             let events = self
                 .inner
                 .runtime_store
@@ -1669,7 +1794,7 @@ impl RuntimeHost {
                 .map_err(|err| VerletError::History(err.to_string()))?;
             let mut durable_start_context = None;
             for start in events.iter().rev().filter(|event| {
-                event.kind == crate::kernel::history::EventKind::SessionEntryAppended
+                event.kind == verlet_history::EventKind::SessionEntryAppended
                     && event
                         .payload
                         .get("entry_kind")
@@ -1694,7 +1819,7 @@ impl RuntimeHost {
                 let Ok(start_metadata) = serde_json::from_value(payload["metadata"].clone()) else {
                     continue;
                 };
-                let context = ThreadContext::with_topology_and_metadata(
+                let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
                     fork_coordinates.clone(),
                     topology,
                     start_metadata,
@@ -1730,7 +1855,7 @@ impl RuntimeHost {
                     .iter()
                     .rev()
                     .find_map(|entry| match &entry.kind {
-                        crate::kernel::history::SessionEntryKind::Runtime { kind, payload }
+                        verlet_history::SessionEntryKind::Runtime { kind, payload }
                             if kind == "thread_checkpoint" =>
                         {
                             Some(payload)
@@ -1751,7 +1876,7 @@ impl RuntimeHost {
                         ))
                     })
                     .and_then(|id| {
-                        ThreadCheckpointId::parse_str(id).map_err(|err| {
+                        verlet_runtime_contracts::ThreadCheckpointId::parse_str(id).map_err(|err| {
                             VerletError::History(format!(
                                 "reserved fork child {child_thread_id} checkpoint is invalid: {err}"
                             ))
@@ -1776,9 +1901,9 @@ impl RuntimeHost {
                     "forked_from_checkpoint_id".to_string(),
                     checkpoint_id.to_string(),
                 );
-                let context = ThreadContext::with_topology_and_metadata(
+                let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
                     fork_coordinates.clone(),
-                    ThreadTopology::branch_from(
+                    verlet_runtime_contracts::ThreadTopology::branch_from(
                         checkpoint.coordinates.thread_id,
                         Some(checkpoint_id),
                     ),
@@ -1814,8 +1939,8 @@ impl RuntimeHost {
 
     pub async fn checkpoint(
         &self,
-        checkpoint_id: ThreadCheckpointId,
-    ) -> VerletResult<ThreadCheckpoint> {
+        checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
+    ) -> VerletResult<crate::kernel::runtime_host::runtime_api::ThreadCheckpoint> {
         self.inner
             .checkpoints
             .lock()
@@ -1830,9 +1955,9 @@ impl RuntimeHost {
 
     pub async fn fork_history_by_reference(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        target_coordinates: &ThreadCoordinates,
-        base: crate::kernel::history::ThreadBaseRef,
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        base: verlet_history::ThreadBaseRef,
     ) -> VerletResult<()> {
         self.inner
             .runtime_store
@@ -1841,20 +1966,22 @@ impl RuntimeHost {
             .map_err(|err| VerletError::History(err.to_string()))
     }
 
-    pub async fn snapshot(&self) -> RuntimeHostSnapshot {
+    pub async fn snapshot(&self) -> crate::kernel::runtime_host::runtime_api::RuntimeHostSnapshot {
         let threads = self.inner.threads.read().await;
         let mut snapshots = Vec::with_capacity(threads.len());
         for thread in threads.values() {
-            snapshots.push(ThreadSnapshot {
+            snapshots.push(crate::kernel::runtime_host::runtime_api::ThreadSnapshot {
                 context: thread.context.clone(),
                 status: *thread.status_rx.borrow(),
             });
         }
         snapshots.sort_by_key(|snapshot| snapshot.context.coordinates.thread_id.to_string());
-        RuntimeHostSnapshot { threads: snapshots }
+        crate::kernel::runtime_host::runtime_api::RuntimeHostSnapshot { threads: snapshots }
     }
 
-    pub async fn lifecycle_snapshot(&self) -> RuntimeHostLifecycleSnapshot {
+    pub async fn lifecycle_snapshot(
+        &self,
+    ) -> crate::kernel::runtime_host::runtime_api::RuntimeHostLifecycleSnapshot {
         let threads = {
             let threads = self.inner.threads.read().await;
             threads
@@ -1868,7 +1995,7 @@ impl RuntimeHost {
             records.push(thread.lifecycle_record().await);
         }
         records.sort_by_key(|record| record.coordinates.thread_id.to_string());
-        RuntimeHostLifecycleSnapshot { records }
+        crate::kernel::runtime_host::runtime_api::RuntimeHostLifecycleSnapshot { records }
     }
 }
 

@@ -1319,11 +1319,11 @@ impl StreamCursorV1 {
 /// # Panics
 ///
 /// Panics on first use if any frozen schema is malformed.
-pub fn stream_schema_registry_v1() -> &'static verlet_runtime_contracts::SchemaRegistry {
-    static REGISTRY: std::sync::LazyLock<verlet_runtime_contracts::SchemaRegistry> =
+pub fn stream_schema_registry_v1() -> &'static verlet_runtime_contracts::schema::SchemaRegistry {
+    static REGISTRY: std::sync::LazyLock<verlet_runtime_contracts::schema::SchemaRegistry> =
         std::sync::LazyLock::new(|| {
-            (|| -> Result<verlet_runtime_contracts::SchemaRegistry, verlet_runtime_contracts::JsonSchemaValidationError> {
-            let mut registry = verlet_runtime_contracts::SchemaRegistry::new();
+            (|| -> Result<verlet_runtime_contracts::schema::SchemaRegistry, verlet_runtime_contracts::schema::JsonSchemaValidationError> {
+            let mut registry = verlet_runtime_contracts::schema::SchemaRegistry::new();
             registry.register(STREAM_RECORD_SCHEMA_V1, stream_record_schema_v1())?;
             registry.register(STREAM_CURSOR_SCHEMA_V1, stream_cursor_schema_v1())?;
             registry.register(
@@ -1510,7 +1510,7 @@ fn trace_id_from_context(trace_context: Option<&serde_json::Value>) -> Option<St
 pub fn validate_context_payload_schema_v1(
     kind: EventKind,
     payload: &serde_json::Value,
-) -> Result<(), verlet_runtime_contracts::JsonSchemaValidationError> {
+) -> Result<(), verlet_runtime_contracts::schema::JsonSchemaValidationError> {
     stream_schema_registry_v1().validate(kind.payload_schema_id(), payload)
 }
 

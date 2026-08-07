@@ -28,7 +28,7 @@ pub struct RustWasmBuildOutput {
 
 pub fn build_rust_wasm_module(
     options: RustWasmBuildOptions,
-) -> crate::VerletResult<RustWasmBuildOutput> {
+) -> crate::kernel::runtime_host::VerletResult<RustWasmBuildOutput> {
     let manifest_path = resolve_manifest_path(&options.module_path)?;
     let mut command = rust_wasm_cargo_command();
     command
@@ -42,20 +42,22 @@ pub fn build_rust_wasm_module(
     }
 
     let output = command.output().map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to run cargo for Rust Wasm build: {err}"
         ))
     })?;
     if !output.status.success() {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "Rust Wasm build failed for {}:\n{}{}",
-            manifest_path.display(),
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "Rust Wasm build failed for {}:\n{}{}",
+                manifest_path.display(),
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            ),
+        ));
     }
     let cargo_artifact_path = find_wasm_artifact_path(&output.stdout).ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "Rust Wasm build for {} did not report a .wasm compiler artifact",
             manifest_path.display()
         ))
@@ -68,17 +70,18 @@ pub fn build_rust_wasm_module(
     })
 }
 
-fn resolve_manifest_path(module_path: &std::path::Path) -> crate::VerletResult<std::path::PathBuf> {
+fn resolve_manifest_path(
+    module_path: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     let path = if module_path.file_name() == Some(std::ffi::OsStr::new("Cargo.toml")) {
         module_path.to_path_buf()
     } else {
         module_path.join("Cargo.toml")
     };
     if !path.exists() {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "Rust Wasm module manifest not found at {}",
-            path.display()
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("Rust Wasm module manifest not found at {}", path.display()),
+        ));
     }
     Ok(path)
 }
@@ -97,7 +100,8 @@ fn rust_wasm_cargo_command() -> std::process::Command {
         command
     } else {
         std::process::Command::new(
-            crate::env_compat::var("CARGO").unwrap_or_else(|_| "cargo".to_string()),
+            verlet_runtime_contracts::env_compat::var("CARGO")
+                .unwrap_or_else(|_| "cargo".to_string()),
         )
     };
     clean_rust_wasm_cargo_env(&mut command);
@@ -157,7 +161,7 @@ fn find_wasm_artifact_path(stdout: &[u8]) -> Option<std::path::PathBuf> {
 fn copy_wasm_artifact(
     manifest_path: &std::path::Path,
     artifact_path: &std::path::Path,
-) -> crate::VerletResult<std::path::PathBuf> {
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     let name = manifest_path
         .parent()
         .and_then(std::path::Path::file_name)
@@ -174,14 +178,14 @@ fn copy_wasm_artifact(
         .collect::<String>();
     let output_dir = std::env::temp_dir().join("verlet-wasm-builds");
     std::fs::create_dir_all(&output_dir).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to create stable Wasm build directory {}: {err}",
             output_dir.display()
         ))
     })?;
     let output_path = output_dir.join(format!("{name}-{}.wasm", uuid::Uuid::now_v7().simple()));
     std::fs::copy(artifact_path, &output_path).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to copy Wasm artifact {} to {}: {err}",
             artifact_path.display(),
             output_path.display()

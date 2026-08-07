@@ -2,16 +2,20 @@ mod support;
 
 #[tokio::test]
 async fn in_memory_and_sqlite_session_stores_have_observable_parity() {
-    let in_memory =
-        crate::support::session_store_parity_transcript(&verlet::InMemorySessionStore::new())
+    let in_memory = crate::support::store_parity::session_store_parity_transcript(
+        &verlet_history::InMemorySessionStore::new(),
+    )
+    .await
+    .unwrap();
+    let repeated = crate::support::store_parity::session_store_parity_transcript(
+        &verlet_history::InMemorySessionStore::new(),
+    )
+    .await
+    .unwrap();
+    let sqlite = crate::support::store_parity::session_store_parity_transcript(
+        &verlet_history_sqlite::SqliteSessionStore::in_memory()
             .await
-            .unwrap();
-    let repeated =
-        crate::support::session_store_parity_transcript(&verlet::InMemorySessionStore::new())
-            .await
-            .unwrap();
-    let sqlite = crate::support::session_store_parity_transcript(
-        &verlet::SqliteSessionStore::in_memory().await.unwrap(),
+            .unwrap(),
     )
     .await
     .unwrap();
@@ -31,7 +35,7 @@ fn transcript_normalizer_preserves_requested_lineage_ids() {
         "created_at_ms": 1_234,
         "duration_ms": 25,
     });
-    let mut transcript = crate::support::TypedTranscript::new();
+    let mut transcript = crate::support::transcript::TypedTranscript::new();
     transcript.preserve_id(lineage_id);
     transcript.push_receipt("lineage", &receipt);
 

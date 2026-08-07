@@ -1,6 +1,8 @@
 //! The `rpc` subcommand family.
 
-pub(super) async fn run_rpc(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_rpc(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -10,7 +12,7 @@ pub(super) async fn run_rpc(args: Vec<std::ffi::OsString>) -> crate::VerletResul
         return Ok(());
     }
     let options = parse_rpc_args(args)?;
-    let mut config = crate::VerletAppServerConfig::local(
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
         options.listen.clone(),
         options
             .cwd
@@ -25,14 +27,14 @@ pub(super) async fn run_rpc(args: Vec<std::ffi::OsString>) -> crate::VerletResul
         config.state_home = state_home;
     }
     let state_home = config.state_home.clone();
-    let server = crate::VerletAppServer::new_local(config).await?;
+    let server = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
     eprintln!("verlet rpc listening on {}", options.listen.display());
     eprintln!("verlet rpc state home: {}", state_home.display());
     match &options.listen {
-        crate::AppServerListenAddr::WebSocket(_) => eprintln!(
+        crate::adapters::app_server::AppServerListenAddr::WebSocket(_) => eprintln!(
             "Before starting this server, mint a bearer token with `verlet identity` against this state home; WebSocket clients pass that token in VERLET_APP_SERVER_TOKEN."
         ),
-        crate::AppServerListenAddr::Unix(_) => {
+        crate::adapters::app_server::AppServerListenAddr::Unix(_) => {
             eprintln!("Same-uid Unix socket peers need no token.");
         }
     }
@@ -41,13 +43,15 @@ pub(super) async fn run_rpc(args: Vec<std::ffi::OsString>) -> crate::VerletResul
 
 #[derive(Debug)]
 pub(super) struct RpcArgs {
-    listen: crate::AppServerListenAddr,
+    listen: crate::adapters::app_server::AppServerListenAddr,
     runtime_home: Option<std::path::PathBuf>,
     state_home: Option<std::path::PathBuf>,
     cwd: Option<std::path::PathBuf>,
 }
 
-pub(super) fn parse_rpc_args(args: Vec<std::ffi::OsString>) -> crate::VerletResult<RpcArgs> {
+pub(super) fn parse_rpc_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<RpcArgs> {
     let mut listen = None;
     let mut runtime_home = None;
     let mut state_home = None;
@@ -57,7 +61,9 @@ pub(super) fn parse_rpc_args(args: Vec<std::ffi::OsString>) -> crate::VerletResu
         match arg.to_string_lossy().as_ref() {
             "--listen" => {
                 let value = crate::cli::tool::required_string_value(&mut iter, "--listen")?;
-                listen = Some(crate::AppServerListenAddr::parse(&value)?);
+                listen = Some(crate::adapters::app_server::AppServerListenAddr::parse(
+                    &value,
+                )?);
             }
             "--runtime-home" => {
                 runtime_home = Some(std::path::PathBuf::from(

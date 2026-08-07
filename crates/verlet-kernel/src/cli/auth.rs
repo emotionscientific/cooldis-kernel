@@ -1,10 +1,12 @@
 //! The `auth` subcommand family.
 
-use crate::LlmProviderAuthStore as _;
-use crate::LlmProviderCatalogStore as _;
 use std::io::Read as _;
+use verlet_metadata::provider_store::LlmProviderAuthStore as _;
+use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 
-pub(super) async fn run_auth(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_auth(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -24,7 +26,9 @@ pub(super) async fn run_auth(mut args: Vec<std::ffi::OsString>) -> crate::Verlet
     }
 }
 
-pub(super) async fn auth_status(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn auth_status(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_auth_name_args(args, "auth status")?;
     if options.help {
         print_auth_status_help();
@@ -41,10 +45,13 @@ pub(super) async fn auth_status(args: Vec<std::ffi::OsString>) -> crate::VerletR
         .ok_or_else(|| {
             crate::cli::usage_error(format!("provider {provider_id:?} was not found"))
         })?;
-    let status =
-        crate::llm_provider_auth_status(&store, &provider, &crate::LlmProviderAuthContext::new())
-            .await
-            .map_err(crate::cli::secret::provider_cli_error)?;
+    let status = verlet_metadata::provider_store::llm_provider_auth_status(
+        &store,
+        &provider,
+        &verlet_metadata::provider_store::LlmProviderAuthContext::new(),
+    )
+    .await
+    .map_err(crate::cli::secret::provider_cli_error)?;
     let value = serde_json::json!({
         "provider_id": provider.provider_id,
         "display_name": provider.display_name,
@@ -55,13 +62,17 @@ pub(super) async fn auth_status(args: Vec<std::ffi::OsString>) -> crate::VerletR
     println!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!("failed to encode auth status: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to encode auth status: {err}"
+            ))
         })?
     );
     Ok(())
 }
 
-pub(super) async fn auth_set(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn auth_set(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_auth_set_args(args)?;
     if options.help {
         print_auth_set_help();
@@ -97,7 +108,7 @@ pub(super) async fn auth_set(args: Vec<std::ffi::OsString>) -> crate::VerletResu
     store
         .set_credential(
             &provider_id,
-            crate::LlmProviderCredential::ApiKey { key: value },
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey { key: value },
         )
         .await
         .map_err(crate::cli::secret::provider_cli_error)?;
@@ -105,7 +116,9 @@ pub(super) async fn auth_set(args: Vec<std::ffi::OsString>) -> crate::VerletResu
     Ok(())
 }
 
-pub(super) async fn auth_delete(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn auth_delete(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_auth_name_args(args, "auth delete")?;
     if options.help {
         print_auth_delete_help();
@@ -140,7 +153,7 @@ pub(super) struct AuthNameArgs {
 
 pub(super) fn parse_auth_set_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<AuthSetArgs> {
+) -> crate::kernel::runtime_host::VerletResult<AuthSetArgs> {
     let mut provider_id = None;
     let mut api_key_stdin = false;
     let mut state_home = None;
@@ -182,7 +195,7 @@ pub(super) fn parse_auth_set_args(
 pub(super) fn parse_auth_name_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
-) -> crate::VerletResult<AuthNameArgs> {
+) -> crate::kernel::runtime_host::VerletResult<AuthNameArgs> {
     let mut provider_id = None;
     let mut state_home = None;
     let mut help = false;

@@ -28,7 +28,7 @@ async fn run(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     publish_operation_record(&operation_registry_root)?;
 
     let addr = unused_loopback_addr()?;
-    let listen = verlet::AppServerListenAddr::WebSocket(addr);
+    let listen = verlet::adapters::app_server::AppServerListenAddr::WebSocket(addr);
     let (server_task, token) = start_server(
         root,
         &workspace,
@@ -131,21 +131,29 @@ async fn start_server(
     workspace: &std::path::Path,
     agent_registry_root: &std::path::Path,
     operation_registry_root: &std::path::Path,
-    listen: verlet::AppServerListenAddr,
-) -> Result<(tokio::task::JoinHandle<verlet::VerletResult<()>>, String), Box<dyn std::error::Error>>
-{
-    let mut config = verlet::VerletAppServerConfig::local(listen.clone(), workspace)
-        .with_capsule_bindings(
-            verlet::CapsuleBindingsConfig::default().with_registry_root(operation_registry_root),
-        );
+    listen: verlet::adapters::app_server::AppServerListenAddr,
+) -> Result<
+    (
+        tokio::task::JoinHandle<verlet::kernel::runtime_host::VerletResult<()>>,
+        String,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut config =
+        verlet::adapters::app_server::VerletAppServerConfig::local(listen.clone(), workspace)
+            .with_capsule_bindings(
+                verlet::adapters::app_server::CapsuleBindingsConfig::default()
+                    .with_registry_root(operation_registry_root),
+            );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
-    let server = verlet::VerletAppServer::new_local(config).await?;
-    let store = verlet::SqliteSessionStore::open(server.session_store_path()).await?;
+    let server = verlet::adapters::app_server::VerletAppServer::new_local(config).await?;
+    let store =
+        verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path()).await?;
     let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
         store,
-        std::sync::Arc::new(verlet::SystemDaemonClock),
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
         None,
     )
     .await?;
@@ -163,15 +171,18 @@ async fn start_server(
 async fn connect_client(
     url: &str,
     token: &str,
-) -> Result<verlet::CodexTuiTestClient<tokio::net::TcpStream>, Box<dyn std::error::Error>> {
+) -> Result<
+    verlet::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream>,
+    Box<dyn std::error::Error>,
+> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match verlet::CodexTuiTestClient::connect_websocket(
+        match verlet::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
             url,
-            verlet::CodexTuiConnectConfig {
+            verlet::adapters::codex_tui::CodexTuiConnectConfig {
                 client_name: "verlet-workbench-smoke".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..verlet::CodexTuiConnectConfig::default()
+                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -216,7 +227,8 @@ default_cwd = "."
 streaming = false
 "#,
     )?;
-    verlet::LocalAgentRegistry::new(agent_registry_root).publish_manifest_path(&manifest_path)?;
+    verlet::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
+        .publish_manifest_path(&manifest_path)?;
     Ok(())
 }
 
@@ -225,42 +237,45 @@ fn publish_operation_record(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let name = "workbench_lookup";
     let artifact_path = operation_registry_root.join(format!("{name}.wasm"));
-    let manifest = verlet::WasmOperationManifest {
+    let manifest = verlet_abi::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
-        operations: vec![verlet::WasmOperationDefinition {
+        operations: vec![verlet_abi::WasmOperationDefinition {
             id: 1,
             name: "lookup".to_string(),
-            input: verlet::WasmOperationValueKind::Text,
-            output: verlet::WasmOperationValueKind::Text,
-            events: verlet::WasmOperationEventKind::None,
-            mode: verlet::WasmOperationMode::Sync,
+            input: verlet_abi::WasmOperationValueKind::Text,
+            output: verlet_abi::WasmOperationValueKind::Text,
+            events: verlet_abi::WasmOperationEventKind::None,
+            mode: verlet_abi::WasmOperationMode::Sync,
             required_capabilities: Vec::new(),
         }],
     };
-    let registered = verlet::RegisteredOperation {
+    let registered = verlet_operations::RegisteredOperation {
         name: name.to_string(),
         manifest: manifest.clone(),
         capability_grants: std::collections::BTreeSet::new(),
         metadata: std::collections::BTreeMap::new(),
     };
-    let record = verlet::PublishedOperationRecord {
+    let record = verlet_operations::operation_store::PublishedOperationRecord {
         schema_version: 1,
         name: name.to_string(),
-        active_artifact_hash: verlet::wasm_sha256(b"workbench smoke operation placeholder"),
+        active_artifact_hash: verlet_operations::operation_store::wasm_sha256(
+            b"workbench smoke operation placeholder",
+        ),
         manifest,
         projections: registered.projections(),
         interface: None,
         capability_grants: std::collections::BTreeSet::new(),
         metadata: std::collections::BTreeMap::new(),
-        source: verlet::PublishedOperationSource::Wasm {
+        source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
             bin_path: artifact_path.clone(),
         },
-        build: verlet::PublishedOperationBuild {
+        build: verlet_operations::operation_store::PublishedOperationBuild {
             artifact_path,
             published_at_ms: unix_timestamp_ms(),
         },
     };
-    let registry = verlet::LocalOperationRegistry::new(operation_registry_root);
+    let registry =
+        verlet_operations::operation_store::LocalOperationRegistry::new(operation_registry_root);
     let record_path = registry.record_path(name)?;
     if let Some(parent) = record_path.parent() {
         std::fs::create_dir_all(parent)?;

@@ -4,7 +4,9 @@ use std::io::Write as _;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn run_debug(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_debug(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -26,7 +28,9 @@ pub(super) async fn run_debug(mut args: Vec<std::ffi::OsString>) -> crate::Verle
 /// `verlet debug rpc` — protocol-level debug client for a RUNNING daemon's
 /// app-server websocket. Connects with `CodexTuiTestClient::connect_websocket`,
 /// performs the initialize handshake, then dispatches a subcommand.
-pub(super) async fn run_debug_rpc(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_debug_rpc(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -95,7 +99,9 @@ pub(super) const DEBUG_RPC_TURN_TIMEOUT: std::time::Duration = std::time::Durati
 /// PARAMS_JSON is an inline JSON object (omitted = no params). Prints the
 /// result pretty-printed to stdout. A JSON-RPC error response prints the error
 /// to stderr and exits 1 (transport failures likewise).
-pub(super) async fn run_debug_rpc_call(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_debug_rpc_call(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_debug_rpc_call_args(args)?;
     let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
     let mut client = connect_debug_rpc_client(&url).await?;
@@ -115,7 +121,9 @@ pub(super) async fn run_debug_rpc_call(args: Vec<std::ffi::OsString>) -> crate::
 /// delta), terminated by a newline at turn completion. `--json` instead emits
 /// every notification scoped to the thread as one JSON object per line.
 /// Exit codes: 0 turn completed, 2 turn error, 1 transport/protocol failure.
-pub(super) async fn run_debug_rpc_turn(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_debug_rpc_turn(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_debug_rpc_turn_args(args)?;
     let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
     let mut client = connect_debug_rpc_client(&url).await?;
@@ -154,7 +162,9 @@ pub(super) async fn run_debug_rpc_turn(args: Vec<std::ffi::OsString>) -> crate::
 /// Subscribe and watch: `verlet debug rpc tail --thread <id>`.
 /// Resumes the thread for the subscription, then prints every received
 /// notification as one JSON object per line until Ctrl-C/EOF.
-pub(super) async fn run_debug_rpc_tail(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_debug_rpc_tail(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_debug_rpc_tail_args(args)?;
     let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
     let mut client = connect_debug_rpc_client(&url).await?;
@@ -169,26 +179,29 @@ pub(super) async fn run_debug_rpc_tail(args: Vec<std::ffi::OsString>) -> crate::
         .await?;
     loop {
         match client.next_event().await {
-            Ok(crate::CodexTuiEvent::Notification(notification)) => {
+            Ok(crate::adapters::codex_tui::CodexTuiEvent::Notification(notification)) => {
                 print_jsonl_notification(&notification)?;
             }
-            Ok(crate::CodexTuiEvent::Error(error)) => {
+            Ok(crate::adapters::codex_tui::CodexTuiEvent::Error(error)) => {
                 return Err(crate::cli::usage_error(format!(
                     "JSON-RPC error {}: {}",
                     error.error.code, error.error.message
                 )));
             }
-            Ok(crate::CodexTuiEvent::Request(_) | crate::CodexTuiEvent::Response(_)) => {}
+            Ok(
+                crate::adapters::codex_tui::CodexTuiEvent::Request(_)
+                | crate::adapters::codex_tui::CodexTuiEvent::Response(_),
+            ) => {}
             Err(err) if rpc_connection_was_closed(&err) => return Ok(()),
             Err(err) => return Err(err),
         }
     }
 }
 
-fn rpc_connection_was_closed(err: &crate::VerletError) -> bool {
+fn rpc_connection_was_closed(err: &crate::kernel::runtime_host::VerletError) -> bool {
     matches!(
         err,
-        crate::VerletError::RpcClient(message)
+        crate::kernel::runtime_host::VerletError::RpcClient(message)
             if message == "Verlet RPC connection closed"
                 || message.starts_with("Verlet RPC connection was closed by the endpoint:")
     )
@@ -212,7 +225,7 @@ notifications as JSONL with --json); tail prints notifications until Ctrl-C.\n"
 
 pub(super) fn parse_debug_rpc_call_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<DebugRpcCallArgs> {
+) -> crate::kernel::runtime_host::VerletResult<DebugRpcCallArgs> {
     let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
@@ -267,7 +280,7 @@ pub(super) fn parse_debug_rpc_call_args(
 
 pub(super) fn parse_debug_rpc_turn_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<DebugRpcTurnArgs> {
+) -> crate::kernel::runtime_host::VerletResult<DebugRpcTurnArgs> {
     let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
@@ -332,7 +345,7 @@ pub(super) fn parse_debug_rpc_turn_args(
 
 pub(super) fn parse_debug_rpc_tail_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<DebugRpcTailArgs> {
+) -> crate::kernel::runtime_host::VerletResult<DebugRpcTailArgs> {
     let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
@@ -371,7 +384,7 @@ pub(super) fn parse_debug_rpc_tail_args(
 
 pub(super) fn validate_debug_rpc_endpoint_args(
     endpoint: &DebugRpcEndpointArgs,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if endpoint.url.is_some() && endpoint.config.is_some() {
         return Err(debug_rpc_usage_error(
             "verlet debug rpc accepts --url or --config, not both",
@@ -382,16 +395,18 @@ pub(super) fn validate_debug_rpc_endpoint_args(
 
 pub(super) fn resolve_debug_rpc_endpoint(
     endpoint: &DebugRpcEndpointArgs,
-) -> crate::VerletResult<String> {
+) -> crate::kernel::runtime_host::VerletResult<String> {
     validate_debug_rpc_endpoint_args(endpoint)?;
     if let Some(url) = &endpoint.url {
         return Ok(url.clone());
     }
     if let Some(config_path) = &endpoint.config {
-        let loaded = crate::load_verlet_daemon_config(Some(config_path))?;
+        let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(config_path))?;
         match loaded.config.app_server.listen_addr()? {
-            crate::AppServerListenAddr::WebSocket(_) => return Ok(loaded.config.app_server.listen),
-            crate::AppServerListenAddr::Unix(_) => {
+            crate::adapters::app_server::AppServerListenAddr::WebSocket(_) => {
+                return Ok(loaded.config.app_server.listen);
+            }
+            crate::adapters::app_server::AppServerListenAddr::Unix(_) => {
                 return Err(crate::cli::usage_error(
                     "daemon listens on a unix socket; pass --url",
                 ));
@@ -403,23 +418,25 @@ pub(super) fn resolve_debug_rpc_endpoint(
 
 pub(super) async fn connect_debug_rpc_client(
     url: &str,
-) -> crate::VerletResult<crate::CodexTuiTestClient<tokio::net::TcpStream>> {
-    crate::CodexTuiTestClient::connect_websocket(
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream>,
+> {
+    crate::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
         url,
-        crate::CodexTuiConnectConfig {
+        crate::adapters::codex_tui::CodexTuiConnectConfig {
             client_name: "verlet-debug-rpc".to_string(),
-            ..crate::CodexTuiConnectConfig::default()
+            ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
         },
     )
     .await
 }
 
 pub(super) async fn stream_debug_rpc_turn(
-    client: &mut crate::CodexTuiTestClient<tokio::net::TcpStream>,
+    client: &mut crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream>,
     thread_id: &str,
     turn_id: &str,
     json_output: bool,
-) -> crate::VerletResult<DebugRpcTurnStreamResult> {
+) -> crate::kernel::runtime_host::VerletResult<DebugRpcTurnStreamResult> {
     let deadline = tokio::time::sleep(DEBUG_RPC_TURN_TIMEOUT);
     tokio::pin!(deadline);
     loop {
@@ -435,7 +452,7 @@ pub(super) async fn stream_debug_rpc_turn(
             }
             event = client.next_event() => {
                 match event? {
-                    crate::CodexTuiEvent::Notification(notification) => {
+                    crate::adapters::codex_tui::CodexTuiEvent::Notification(notification) => {
                         if json_output && notification_thread_id(&notification) == Some(thread_id) {
                             print_jsonl_notification(&notification)?;
                         }
@@ -464,7 +481,7 @@ pub(super) async fn stream_debug_rpc_turn(
                             return Ok(DebugRpcTurnStreamResult::Completed);
                         }
                     }
-                    crate::CodexTuiEvent::Error(error) => {
+                    crate::adapters::codex_tui::CodexTuiEvent::Error(error) => {
                         if !json_output {
                             println!();
                         }
@@ -473,7 +490,7 @@ pub(super) async fn stream_debug_rpc_turn(
                             error.error.code, error.error.message
                         )));
                     }
-                    crate::CodexTuiEvent::Request(_) | crate::CodexTuiEvent::Response(_) => {}
+                    crate::adapters::codex_tui::CodexTuiEvent::Request(_) | crate::adapters::codex_tui::CodexTuiEvent::Response(_) => {}
                 }
             }
         }
@@ -481,8 +498,8 @@ pub(super) async fn stream_debug_rpc_turn(
 }
 
 pub(super) fn print_jsonl_notification(
-    notification: &crate::JsonRpcNotification,
-) -> crate::VerletResult<()> {
+    notification: &crate::adapters::app_server::connection::JsonRpcNotification,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     serde_json::to_writer(std::io::stdout(), notification).map_err(|err| {
         crate::cli::usage_error(format!("failed to encode notification JSON: {err}"))
     })?;
@@ -490,7 +507,9 @@ pub(super) fn print_jsonl_notification(
     flush_stdout()
 }
 
-pub(super) fn notification_thread_id(notification: &crate::JsonRpcNotification) -> Option<&str> {
+pub(super) fn notification_thread_id(
+    notification: &crate::adapters::app_server::connection::JsonRpcNotification,
+) -> Option<&str> {
     notification
         .params
         .as_ref()
@@ -498,7 +517,9 @@ pub(super) fn notification_thread_id(notification: &crate::JsonRpcNotification) 
         .and_then(serde_json::Value::as_str)
 }
 
-pub(super) fn notification_delta(notification: &crate::JsonRpcNotification) -> Option<&str> {
+pub(super) fn notification_delta(
+    notification: &crate::adapters::app_server::connection::JsonRpcNotification,
+) -> Option<&str> {
     notification
         .params
         .as_ref()
@@ -507,7 +528,7 @@ pub(super) fn notification_delta(notification: &crate::JsonRpcNotification) -> O
 }
 
 pub(super) fn notification_is_turn_error(
-    notification: &crate::JsonRpcNotification,
+    notification: &crate::adapters::app_server::connection::JsonRpcNotification,
     thread_id: &str,
     turn_id: &str,
 ) -> bool {
@@ -529,7 +550,9 @@ pub(super) fn notification_is_turn_error(
             .is_some_and(|status| status == "failed" || status == "interrupted")
 }
 
-pub(super) fn notification_turn_error_message(notification: &crate::JsonRpcNotification) -> String {
+pub(super) fn notification_turn_error_message(
+    notification: &crate::adapters::app_server::connection::JsonRpcNotification,
+) -> String {
     notification
         .params
         .as_ref()
@@ -541,14 +564,16 @@ pub(super) fn notification_turn_error_message(notification: &crate::JsonRpcNotif
         .unwrap_or_else(|| crate::cli::console::notification_error_message(notification))
 }
 
-pub(super) fn debug_rpc_usage_error(message: impl Into<String>) -> crate::VerletError {
+pub(super) fn debug_rpc_usage_error(
+    message: impl Into<String>,
+) -> crate::kernel::runtime_host::VerletError {
     crate::cli::usage_error(format!(
         "{}\nUsage: verlet debug rpc --help",
         message.into()
     ))
 }
 
-pub(super) fn flush_stdout() -> crate::VerletResult<()> {
+pub(super) fn flush_stdout() -> crate::kernel::runtime_host::VerletResult<()> {
     std::io::stdout()
         .flush()
         .map_err(|err| crate::cli::usage_error(format!("failed to flush stdout: {err}")))

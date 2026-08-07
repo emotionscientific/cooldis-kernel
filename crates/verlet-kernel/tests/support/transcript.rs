@@ -25,7 +25,7 @@ impl TypedTranscript {
         self.preserved_ids.insert(id.into());
     }
 
-    pub fn push_event(&mut self, label: impl Into<String>, event: &verlet::EventRecord) {
+    pub fn push_event(&mut self, label: impl Into<String>, event: &verlet_history::EventRecord) {
         self.items.push(TypedTranscriptItem::Event {
             label: label.into(),
             value: serde_json::to_value(event).expect("event transcript serialization"),

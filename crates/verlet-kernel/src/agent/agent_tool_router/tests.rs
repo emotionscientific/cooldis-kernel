@@ -40,18 +40,18 @@ async fn router_invokes_registry_operation_and_returns_tool_result() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
-        } if content == vec![crate::CanonicalContent::text("echo:verlet")]
+        } if content == vec![verlet_history::CanonicalContent::text("echo:verlet")]
     ));
 }
 
 #[tokio::test]
 async fn router_invokes_kernel_tool_provider() {
     let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
-        crate::OperationRegistry::new(),
+        verlet_operations::operation_registry::OperationRegistry::new(),
     ))
     .with_kernel_tool_provider(std::sync::Arc::new(FakeKernelToolProvider));
 
@@ -61,7 +61,7 @@ async fn router_invokes_kernel_tool_provider() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -72,7 +72,7 @@ async fn router_invokes_kernel_tool_provider() {
 #[tokio::test]
 async fn router_outcome_adapter_wraps_synchronous_kernel_tools_as_completed() {
     let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
-        crate::OperationRegistry::new(),
+        verlet_operations::operation_registry::OperationRegistry::new(),
     ))
     .with_kernel_tool_provider(std::sync::Arc::new(FakeKernelToolProvider));
 
@@ -83,7 +83,7 @@ async fn router_outcome_adapter_wraps_synchronous_kernel_tools_as_completed() {
 
     assert!(matches!(
         result,
-        crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed(Some(crate::CanonicalMessage::ToolResult {
+        crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed(Some(verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -94,23 +94,24 @@ async fn router_outcome_adapter_wraps_synchronous_kernel_tools_as_completed() {
 #[tokio::test]
 async fn router_passes_turn_context_to_kernel_tool_provider() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
-        Option<crate::TurnContextSnapshot>,
+        Option<crate::kernel::runtime_host::turn::TurnContextSnapshot>,
     >::new()));
     let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
-        crate::OperationRegistry::new(),
+        verlet_operations::operation_registry::OperationRegistry::new(),
     ))
     .with_kernel_tool_provider(std::sync::Arc::new(RecordingKernelToolProvider {
         seen: std::sync::Arc::clone(&seen),
     }));
-    let input = crate::TurnInput::text("hello")
+    let input = crate::kernel::runtime_host::turn::TurnInput::text("hello")
         .with_cwd("/tmp/verlet-turn")
         .with_model("gpt-test")
         .with_provider("openai")
         .with_permission_profile("workspace-write")
         .with_metadata("source", "test");
-    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let turn_context = crate::TurnContext::new(
-        crate::ThreadContext::root(coordinates.clone()),
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let turn_context = crate::kernel::runtime_host::turn::TurnContext::new(
+        verlet_runtime_contracts::ThreadContext::root(coordinates.clone()),
         "turn-1",
         &input,
         tokio_util::sync::CancellationToken::new(),
@@ -127,7 +128,7 @@ async fn router_passes_turn_context_to_kernel_tool_provider() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             ..
         }
@@ -163,7 +164,7 @@ async fn router_returns_error_tool_result_for_bad_input_shape() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -185,7 +186,7 @@ async fn router_rejects_non_object_json_tool_arguments() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -213,7 +214,7 @@ async fn router_rejects_operation_when_tool_invocation_lacks_required_capability
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -242,7 +243,7 @@ async fn router_invokes_capability_protected_operation_when_granted() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -262,11 +263,11 @@ async fn router_checks_grant_expiry_live_at_each_tool_invocation() {
     .with_capability_grant("secret:EXAMPLE_API_KEY")
     .with_capability_grant("fs.read:/workspace")
     .with_capability_grant_expiries([
-        crate::AgentManifestGrantExpiry {
+        verlet_agent::manifest_schema::AgentManifestGrantExpiry {
             capability: "secret:EXAMPLE_API_KEY".to_string(),
             expires_at: "1970-01-01T00:00:01Z".to_string(),
         },
-        crate::AgentManifestGrantExpiry {
+        verlet_agent::manifest_schema::AgentManifestGrantExpiry {
             capability: "fs.read:/workspace".to_string(),
             expires_at: "1970-01-01T00:00:02Z".to_string(),
         },
@@ -291,14 +292,14 @@ async fn router_checks_grant_expiry_live_at_each_tool_invocation() {
 
     assert!(matches!(
         at_expiry,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             ..
         }
     ));
     assert!(matches!(
         after_expiry,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -318,7 +319,7 @@ async fn router_invokes_kernel_process_operation_alias() {
     let result = router
         .invoke_tool_call(
             "call_1",
-            crate::PROCESS_EXEC_OPERATION,
+            crate::operations::kernel_packages::PROCESS_EXEC_OPERATION,
             serde_json::json!({
                 "command": ["/bin/pwd"],
                 "yield_time_ms": 1_000,
@@ -327,7 +328,7 @@ async fn router_invokes_kernel_process_operation_alias() {
         )
         .await;
 
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: false,
         content,
         ..
@@ -354,7 +355,7 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
     let result = router
         .invoke_tool_call(
             "call_1",
-            crate::CHANNEL_EMIT_OPERATION,
+            crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION,
             serde_json::json!({
                 "channel": "slack",
                 "message": "Ready for review",
@@ -363,7 +364,7 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
         )
         .await;
 
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: false,
         content,
         ..
@@ -382,13 +383,13 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
 
 #[tokio::test]
 async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() {
-    let host = crate::RuntimeHost::new(std::sync::Arc::new(
-        crate::VirtualBashRuntimeFactory::default(),
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::capabilities::execution::VirtualBashRuntimeFactory::default(),
     ));
     let root = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -397,42 +398,42 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let spawn = router
         .invoke_tool_call(
             "spawn-call-1",
-            crate::THREAD_SPAWN_OPERATION,
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
             serde_json::json!({"task_name": "worker", "message": "echo first"}),
         )
         .await;
     let retry = router
         .invoke_tool_call(
             "spawn-call-1",
-            crate::THREAD_SPAWN_OPERATION,
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
             serde_json::json!({"task_name": "worker", "message": "echo retry"}),
         )
         .await;
     let duplicate = router
         .invoke_tool_call(
             "spawn-call-2",
-            crate::THREAD_SPAWN_OPERATION,
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
             serde_json::json!({"task_name": "worker", "message": "echo duplicate"}),
         )
         .await;
     let submit = router
         .invoke_tool_call(
             "submit-call-1",
-            crate::THREAD_SUBMIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
             serde_json::json!({"task_name": "worker", "message": "echo steered"}),
         )
         .await;
     let status = router
         .invoke_tool_call(
             "status-call-1",
-            crate::THREAD_STATUS_OPERATION,
+            crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
             serde_json::json!({"task_name": "worker"}),
         )
         .await;
     let wait = router
         .invoke_tool_call(
             "wait-call-1",
-            crate::THREAD_WAIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
             serde_json::json!({"task_name": "worker", "timeout_ms": 1_000}),
         )
         .await;
@@ -449,7 +450,7 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
         (&wait, "cooldis.thread_wait"),
         (&status, "cooldis.thread_status"),
     ] {
-        let crate::CanonicalMessage::ToolResult {
+        let verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -467,7 +468,7 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
         assert_eq!(value.as_object().unwrap().len(), 3);
     }
 
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -483,11 +484,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let missing = router
         .invoke_tool_call(
             "status-missing",
-            crate::THREAD_STATUS_OPERATION,
+            crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
             serde_json::json!({"task_name": "missing"}),
         )
         .await;
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -503,11 +504,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let missing_wait = router
         .invoke_tool_call(
             "wait-missing",
-            crate::THREAD_WAIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
             serde_json::json!({"task_name": "missing", "timeout_ms": 1}),
         )
         .await;
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -523,11 +524,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let rejected_raw_wait = router
         .invoke_tool_call(
             "wait-raw-id",
-            crate::THREAD_WAIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
             serde_json::json!({"target_thread_id": child_id, "timeout_ms": 1}),
         )
         .await;
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -543,11 +544,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let cancel = router
         .invoke_tool_call(
             "cancel-call-1",
-            crate::THREAD_CANCEL_OPERATION,
+            crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
             serde_json::json!({"task_name": "worker"}),
         )
         .await;
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: false,
         content,
         ..
@@ -570,11 +571,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let unavailable = router
         .invoke_tool_call(
             "status-call-2",
-            crate::THREAD_STATUS_OPERATION,
+            crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
             serde_json::json!({"task_name": "worker"}),
         )
         .await;
-    let crate::CanonicalMessage::ToolResult {
+    let verlet_history::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -604,11 +605,14 @@ async fn router_with_operation(
     input: &str,
     required_capabilities: Vec<&str>,
 ) -> crate::agent::agent_tool_router::AgentToolRouter {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
     let wasm = wat::parse_str(echo_operation_guest(prefix, input, &required_capabilities))
         .expect("echo operation fixture should compile");
-    let mut registration =
-        crate::OperationRegistration::new(name, crate::WasmRuntimeArtifact::bytes(wasm));
+    let mut registration = verlet_operations::operation_registry::OperationRegistration::new(
+        name,
+        verlet_wasm::WasmRuntimeArtifact::bytes(wasm),
+    );
     for capability in required_capabilities {
         registration = registration.with_capability_grant(capability);
     }
@@ -619,110 +623,127 @@ async fn router_with_operation(
 async fn router_with_kernel_process_operation(
     cwd: std::path::PathBuf,
 ) -> crate::agent::agent_tool_router::AgentToolRouter {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
-    let package = crate::verlet_process_kernel_package();
-    let context =
-        crate::ThreadContext::root(crate::ThreadCoordinates::new("tenant", "user", "session"));
-    let store: std::sync::Arc<dyn crate::RuntimeStore> =
-        std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    let package = crate::operations::kernel_packages::verlet_process_kernel_package();
+    let context = verlet_runtime_contracts::ThreadContext::root(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+    );
+    let store: std::sync::Arc<dyn verlet_history::RuntimeStore> =
+        std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
     let process_dispatcher = crate::kernel::process_handle_dispatch::test_process_dispatcher(
         store,
         context.coordinates.clone(),
     );
-    let dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> = std::sync::Arc::new(
-        crate::KernelProcessOperationProvider::new(context, cwd)
+    let dispatcher: std::sync::Arc<
+        dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+    > = std::sync::Arc::new(
+        crate::agent::agent_process::KernelProcessOperationProvider::new(context, cwd)
             .with_process_dispatcher(process_dispatcher),
     );
-    let mut registration = crate::KernelOperationRegistration::new(
-        crate::VERLET_PROCESS_PACKAGE,
+    let mut registration = verlet_operations::operation_registry::KernelOperationRegistration::new(
+        crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE,
         package.manifest.clone(),
     )
     .with_capability_grants(package.capability_grants.clone())
     .with_dispatcher(dispatcher);
     registration.metadata.insert(
-        crate::OPERATION_METADATA_RUNTIME_KIND.to_string(),
-        serde_json::json!(crate::KERNEL_RUNTIME_KIND),
+        crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::json!(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
     crate::agent::agent_tool_router::AgentToolRouter::new(registry)
         .with_capability_grants(package.capability_grants)
         .with_tool_aliases(vec![crate::agent::agent_tool_router::OperationToolAlias {
-            tool_name: crate::PROCESS_EXEC_OPERATION.to_string(),
-            registered_name: crate::VERLET_PROCESS_PACKAGE.to_string(),
-            operation_name: crate::PROCESS_EXEC_OPERATION.to_string(),
+            tool_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
+            registered_name: crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE.to_string(),
+            operation_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
             grant_expiries: Vec::new(),
         }])
 }
 
 async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_router::AgentToolRouter {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
-    let package = crate::verlet_notify_kernel_package();
-    let dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> =
-        std::sync::Arc::new(crate::KernelNotifyOperationProvider);
-    let mut registration = crate::KernelOperationRegistration::new(
-        crate::VERLET_NOTIFY_PACKAGE,
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    let package = crate::operations::kernel_packages::verlet_notify_kernel_package();
+    let dispatcher: std::sync::Arc<
+        dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+    > = std::sync::Arc::new(crate::agent::agent_process::KernelNotifyOperationProvider);
+    let mut registration = verlet_operations::operation_registry::KernelOperationRegistration::new(
+        crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
         package.manifest.clone(),
     )
     .with_capability_grants(package.capability_grants.clone())
     .with_dispatcher(dispatcher);
     registration.metadata.insert(
-        crate::OPERATION_METADATA_RUNTIME_KIND.to_string(),
-        serde_json::json!(crate::KERNEL_RUNTIME_KIND),
+        crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::json!(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
     crate::agent::agent_tool_router::AgentToolRouter::new(registry)
-        .with_capability_grant(crate::CHANNEL_EMIT_CAPABILITY)
+        .with_capability_grant(crate::operations::kernel_packages::CHANNEL_EMIT_CAPABILITY)
         .with_tool_aliases(vec![
             crate::agent::agent_tool_router::OperationToolAlias {
-                tool_name: crate::NOTIFY_PREVIEW_OPERATION.to_string(),
-                registered_name: crate::VERLET_NOTIFY_PACKAGE.to_string(),
-                operation_name: crate::NOTIFY_PREVIEW_OPERATION.to_string(),
+                tool_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION.to_string(),
+                registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE
+                    .to_string(),
+                operation_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION
+                    .to_string(),
                 grant_expiries: Vec::new(),
             },
             crate::agent::agent_tool_router::OperationToolAlias {
-                tool_name: crate::CHANNEL_EMIT_OPERATION.to_string(),
-                registered_name: crate::VERLET_NOTIFY_PACKAGE.to_string(),
-                operation_name: crate::CHANNEL_EMIT_OPERATION.to_string(),
+                tool_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
+                registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE
+                    .to_string(),
+                operation_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION
+                    .to_string(),
                 grant_expiries: Vec::new(),
             },
         ])
 }
 
 async fn router_with_kernel_thread_operations(
-    host: &crate::RuntimeHost,
-    context: crate::ThreadContext,
+    host: &crate::kernel::runtime_host::RuntimeHost,
+    context: verlet_runtime_contracts::ThreadContext,
 ) -> crate::agent::agent_tool_router::AgentToolRouter {
-    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
-    let package = crate::verlet_threads_kernel_package();
-    let dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> = std::sync::Arc::new(
-        crate::KernelThreadOperationProvider::new(host.kernel_control(), context),
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    let package = crate::operations::kernel_packages::verlet_threads_kernel_package();
+    let dispatcher: std::sync::Arc<
+        dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+    > = std::sync::Arc::new(
+        crate::agent::agent_process::KernelThreadOperationProvider::new(
+            host.kernel_control(),
+            context,
+        ),
     );
-    let mut registration = crate::KernelOperationRegistration::new(
-        crate::VERLET_THREADS_PACKAGE,
+    let mut registration = verlet_operations::operation_registry::KernelOperationRegistration::new(
+        crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
         package.manifest.clone(),
     )
     .with_capability_grants(package.capability_grants.clone())
     .with_dispatcher(dispatcher);
     registration.metadata.insert(
-        crate::OPERATION_METADATA_RUNTIME_KIND.to_string(),
-        serde_json::json!(crate::KERNEL_RUNTIME_KIND),
+        crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::json!(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
     crate::agent::agent_tool_router::AgentToolRouter::new(registry)
         .with_capability_grants(package.capability_grants)
         .with_tool_aliases(
             [
-                crate::THREAD_SPAWN_OPERATION,
-                crate::THREAD_SUBMIT_OPERATION,
-                crate::THREAD_WAIT_OPERATION,
-                crate::THREAD_STATUS_OPERATION,
-                crate::THREAD_CANCEL_OPERATION,
+                crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
+                crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
+                crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
+                crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
+                crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
             ]
             .into_iter()
             .map(
                 |operation| crate::agent::agent_tool_router::OperationToolAlias {
                     tool_name: operation.to_string(),
-                    registered_name: crate::VERLET_THREADS_PACKAGE.to_string(),
+                    registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE
+                        .to_string(),
                     operation_name: operation.to_string(),
                     grant_expiries: Vec::new(),
                 },
@@ -739,11 +760,11 @@ fn temp_cwd(name: &str) -> std::path::PathBuf {
     std::fs::canonicalize(cwd).unwrap()
 }
 
-fn tool_result_text(content: &[crate::CanonicalContent]) -> String {
+fn tool_result_text(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .find_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. } => Some(text.clone()),
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.clone()),
             _ => None,
         })
         .unwrap_or_default()
@@ -850,8 +871,8 @@ struct FakeKernelToolProvider;
 
 #[async_trait::async_trait]
 impl crate::agent::agent_tool_router::AgentKernelToolProvider for FakeKernelToolProvider {
-    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::new(
+    async fn tool_definitions(&self) -> Vec<verlet_provider::ToolDefinition> {
+        vec![verlet_provider::ToolDefinition::new(
             "record_context",
             "Return the current Verlet thread status.",
             serde_json::json!({
@@ -864,11 +885,11 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for FakeKernelTool
     async fn invoke_tool_call(
         &self,
         call: crate::agent::agent_tool_router::AgentKernelToolCall,
-    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
         if call.tool_name != "record_context" {
             return Ok(None);
         }
-        Ok(Some(crate::CanonicalMessage::tool_result(
+        Ok(Some(verlet_history::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             r#"{"status":"idle"}"#,
@@ -878,13 +899,15 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for FakeKernelTool
 }
 
 struct RecordingKernelToolProvider {
-    seen: std::sync::Arc<std::sync::Mutex<Vec<Option<crate::TurnContextSnapshot>>>>,
+    seen: std::sync::Arc<
+        std::sync::Mutex<Vec<Option<crate::kernel::runtime_host::turn::TurnContextSnapshot>>>,
+    >,
 }
 
 #[async_trait::async_trait]
 impl crate::agent::agent_tool_router::AgentKernelToolProvider for RecordingKernelToolProvider {
-    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::new(
+    async fn tool_definitions(&self) -> Vec<verlet_provider::ToolDefinition> {
+        vec![verlet_provider::ToolDefinition::new(
             "record_context",
             "Record the current Verlet turn context.",
             serde_json::json!({
@@ -897,9 +920,9 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for RecordingKerne
     async fn invoke_tool_call(
         &self,
         call: crate::agent::agent_tool_router::AgentKernelToolCall,
-    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
         self.seen.lock().unwrap().push(call.turn_context.clone());
-        Ok(Some(crate::CanonicalMessage::tool_result(
+        Ok(Some(verlet_history::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             "recorded",

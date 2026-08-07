@@ -9,7 +9,9 @@ fn patch_bump_version_rejects_overflow() {
 #[test]
 fn synthesized_default_manifest_preserves_slash_bearing_model_ids() {
     let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
-        crate::AppServerListenAddr::Unix(std::env::temp_dir().join("verlet-test.sock")),
+        crate::adapters::app_server::AppServerListenAddr::Unix(
+            std::env::temp_dir().join("verlet-test.sock"),
+        ),
         std::env::temp_dir(),
     );
     config.model_provider = "anthropic".to_string();
@@ -36,7 +38,7 @@ fn existing_legacy_default_agent_record_is_migrated_in_place() {
         uuid::Uuid::now_v7()
     ));
     let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
-        crate::AppServerListenAddr::Unix(root.join("app-server.sock")),
+        crate::adapters::app_server::AppServerListenAddr::Unix(root.join("app-server.sock")),
         &root,
     );
     config.agent_registry_root = root.join("agents");

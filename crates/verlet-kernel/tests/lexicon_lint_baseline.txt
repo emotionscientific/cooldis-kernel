@@ -15,5 +15,3 @@ crates/verlet-kernel/src/cli/console.rs capsule 18
 crates/verlet-kernel/src/cli/console/tests.rs capsule 3
 crates/verlet-kernel/src/cli/daemon/tests.rs capsule 1
 crates/verlet-kernel/src/kernel/context_compiler.rs hook 1
-crates/verlet-kernel/src/lib.rs capsule 6
-crates/verlet-kernel/src/lib.rs observation_store 1

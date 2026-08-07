@@ -16,7 +16,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     std::fs::create_dir_all(root.join("workspace")).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let listen = verlet::AppServerListenAddr::WebSocket(addr);
+    let listen = verlet::adapters::app_server::AppServerListenAddr::WebSocket(addr);
     let mut config = app_config(&root, listen);
     let authority = identity_authority(&config).await;
     let operator = verlet::daemon::identity::PrincipalId::new(OPERATOR_ID);
@@ -45,7 +45,9 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
         tenant_id: Some("test-tenant".to_string()),
         console_principal: Some(operator),
     });
-    let app = verlet::VerletAppServer::new(config).await.unwrap();
+    let app = verlet::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .unwrap();
     let store_path = app.session_store_path().to_path_buf();
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve_websocket_listener(listener).await });
@@ -53,7 +55,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     let mut operator_rpc = connect_rpc(addr, &operator_token).await;
     let auth_status = rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(100),
+        verlet::adapters::app_server::connection::RequestId::Integer(100),
         "getAuthStatus",
         serde_json::json!({}),
     )
@@ -63,7 +65,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     assert_eq!(auth_status["kind"], "operator");
     let thread = rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(2),
+        verlet::adapters::app_server::connection::RequestId::Integer(2),
         "thread/start",
         serde_json::json!({}),
     )
@@ -72,7 +74,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
     let command = rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(3),
+        verlet::adapters::app_server::connection::RequestId::Integer(3),
         "command/exec",
         serde_json::json!({ "command": ["/bin/sh", "-c", "printf operator"] }),
     )
@@ -81,7 +83,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     assert_eq!(command["stdout"], "operator");
     rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(4),
+        verlet::adapters::app_server::connection::RequestId::Integer(4),
         "turn/start",
         serde_json::json!({
             "threadId": thread_id,
@@ -95,7 +97,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     let mut adapter_rpc = connect_rpc(addr, &adapter_token).await;
     let denied_command = rpc_call(
         &mut adapter_rpc,
-        verlet::RequestId::Integer(2),
+        verlet::adapters::app_server::connection::RequestId::Integer(2),
         "command/exec",
         serde_json::json!({ "command": ["/bin/sh", "-c", "printf adapter"] }),
     )
@@ -106,7 +108,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     let denied_unknown = rpc_call(
         &mut adapter_rpc,
-        verlet::RequestId::Integer(3),
+        verlet::adapters::app_server::connection::RequestId::Integer(3),
         "future/host-method",
         serde_json::json!({}),
     )
@@ -117,7 +119,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     let denied_interactive = rpc_call(
         &mut adapter_rpc,
-        verlet::RequestId::Integer(4),
+        verlet::adapters::app_server::connection::RequestId::Integer(4),
         "thread/list",
         serde_json::json!({}),
     )
@@ -132,7 +134,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     ] {
         let denied_variant = rpc_call(
             &mut adapter_rpc,
-            verlet::RequestId::Integer(id),
+            verlet::adapters::app_server::connection::RequestId::Integer(id),
             method,
             serde_json::json!({}),
         )
@@ -145,7 +147,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     let sensitive_cwd = root.join("adapter-secret-cwd");
     let denied_override = rpc_call(
         &mut adapter_rpc,
-        verlet::RequestId::Integer(8),
+        verlet::adapters::app_server::connection::RequestId::Integer(8),
         "turn/start",
         serde_json::json!({
             "threadId": thread_id,
@@ -160,7 +162,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     rpc_call(
         &mut adapter_rpc,
-        verlet::RequestId::Integer(9),
+        verlet::adapters::app_server::connection::RequestId::Integer(9),
         "turn/start",
         serde_json::json!({
             "threadId": thread_id,
@@ -172,7 +174,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     let envelope_ingress = rpc_call(
         &mut adapter_rpc,
-        verlet::RequestId::Integer(10),
+        verlet::adapters::app_server::connection::RequestId::Integer(10),
         "ingress/submit",
         serde_json::json!({
             "threadId": thread_id,
@@ -186,7 +188,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     let denied_stream_append = rpc_call(
         &mut adapter_rpc,
-        verlet::RequestId::Integer(11),
+        verlet::adapters::app_server::connection::RequestId::Integer(11),
         "stream/append",
         serde_json::json!({
             "stream": "client:orch:auth",
@@ -204,7 +206,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(101),
+        verlet::adapters::app_server::connection::RequestId::Integer(101),
         "stream/append",
         serde_json::json!({
             "stream": "client:orch:auth",
@@ -220,7 +222,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     let ingress_events = rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(5),
+        verlet::adapters::app_server::connection::RequestId::Integer(5),
         "thread/events/list",
         serde_json::json!({
             "threadId": thread_id,
@@ -290,7 +292,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     execute_sql(&store_path, "DROP TABLE cooldis_identity_host_effects").await;
     let stream_witness_failure = rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(102),
+        verlet::adapters::app_server::connection::RequestId::Integer(102),
         "stream/append",
         serde_json::json!({
             "stream": "client:orch:unwitnessed",
@@ -306,7 +308,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
     assert_eq!(stream_witness_failure.code, -32000);
     let unwitnessed_stream = rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(103),
+        verlet::adapters::app_server::connection::RequestId::Integer(103),
         "stream/read",
         serde_json::json!({"stream": "client:orch:unwitnessed"}),
     )
@@ -316,7 +318,7 @@ async fn dispatcher_authorizes_at_the_rpc_choke_point_and_witnesses_decisions() 
 
     let witness_failure = rpc_call(
         &mut operator_rpc,
-        verlet::RequestId::Integer(6),
+        verlet::adapters::app_server::connection::RequestId::Integer(6),
         "command/exec",
         serde_json::json!({
             "command": ["/usr/bin/touch", marker.to_string_lossy()],
@@ -350,9 +352,9 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let listen = verlet::AppServerListenAddr::WebSocket(addr);
+    let listen = verlet::adapters::app_server::AppServerListenAddr::WebSocket(addr);
     let mut config = app_config(&root, listen);
-    config.console_assets = Some(verlet::ConsoleAssetConfig {
+    config.console_assets = Some(verlet::adapters::app_server::ConsoleAssetConfig {
         root: assets,
         session_token: "replaced-at-construction".to_string(),
     });
@@ -442,16 +444,18 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
         tenant_id: Some("test-tenant".to_string()),
         console_principal: Some(operator),
     });
-    let app = verlet::VerletAppServer::new(config).await.unwrap();
+    let app = verlet::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .unwrap();
     let store_path = app.session_store_path().to_path_buf();
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve_websocket_listener(listener).await });
 
-    let mut client = verlet::CodexTuiTestClient::connect_websocket(
+    let mut client = verlet::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
         &format!("ws://{addr}/rpc"),
-        verlet::CodexTuiConnectConfig {
+        verlet::adapters::codex_tui::CodexTuiConnectConfig {
             bearer_token: Some(accepted_token.clone()),
-            ..verlet::CodexTuiConnectConfig::default()
+            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
         },
     )
     .await
@@ -627,14 +631,15 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     let local_socket = local_root.join("app-server.sock");
     let local_config = app_config(
         &local_root,
-        verlet::AppServerListenAddr::Unix(local_socket.clone()),
+        verlet::adapters::app_server::AppServerListenAddr::Unix(local_socket.clone()),
     );
-    let local_app = verlet::VerletAppServer::new_local(local_config)
+    let local_app = verlet::adapters::app_server::VerletAppServer::new_local(local_config)
         .await
         .unwrap();
     let local_store = local_app.session_store_path().to_path_buf();
     let local_server = local_app.clone();
-    let local_listen = verlet::AppServerListenAddr::Unix(local_socket.clone());
+    let local_listen =
+        verlet::adapters::app_server::AppServerListenAddr::Unix(local_socket.clone());
     let mut local_task = tokio::spawn(async move { local_server.serve(local_listen).await });
     wait_for_path(&local_socket, &mut local_task).await;
     assert_eq!(
@@ -646,9 +651,9 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         0o600
     );
 
-    let mut local_client = verlet::CodexTuiTestClient::connect_unix(
+    let mut local_client = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
         &local_socket,
-        verlet::CodexTuiConnectConfig::default(),
+        verlet::adapters::codex_tui::CodexTuiConnectConfig::default(),
     )
     .await
     .unwrap();
@@ -664,7 +669,7 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     let managed_socket = managed_root.join("app-server.sock");
     let mut managed_config = app_config(
         &managed_root,
-        verlet::AppServerListenAddr::Unix(managed_socket.clone()),
+        verlet::adapters::app_server::AppServerListenAddr::Unix(managed_socket.clone()),
     );
     let authority = identity_authority(&managed_config).await;
     let operator = verlet::daemon::identity::PrincipalId::new(OPERATOR_ID);
@@ -710,7 +715,9 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
             console_principal: None,
         },
     );
-    let managed_app = verlet::VerletAppServer::new(managed_config).await.unwrap();
+    let managed_app = verlet::adapters::app_server::VerletAppServer::new(managed_config)
+        .await
+        .unwrap();
     let managed_store = managed_app.session_store_path().to_path_buf();
     let local_dispatch = managed_app
         .local_json_rpc_request("account/read", serde_json::json!({}))
@@ -722,7 +729,8 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
             .contains("local-mode operator principal")
     );
     let managed_server = managed_app.clone();
-    let managed_listen = verlet::AppServerListenAddr::Unix(managed_socket.clone());
+    let managed_listen =
+        verlet::adapters::app_server::AppServerListenAddr::Unix(managed_socket.clone());
     let mut managed_task = tokio::spawn(async move { managed_server.serve(managed_listen).await });
     wait_for_path(&managed_socket, &mut managed_task).await;
     assert_eq!(
@@ -734,11 +742,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         0o600
     );
 
-    let no_token = verlet::CodexTuiTestClient::connect_unix(
+    let no_token = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
         &managed_socket,
-        verlet::CodexTuiConnectConfig {
+        verlet::adapters::codex_tui::CodexTuiConnectConfig {
             bearer_token: None,
-            ..verlet::CodexTuiConnectConfig::default()
+            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
         },
     )
     .await;
@@ -748,11 +756,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     };
     assert!(no_token.to_string().contains("401"));
 
-    let unknown_token = verlet::CodexTuiTestClient::connect_unix(
+    let unknown_token = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
         &managed_socket,
-        verlet::CodexTuiConnectConfig {
+        verlet::adapters::codex_tui::CodexTuiConnectConfig {
             bearer_token: Some("unknown-token".to_string()),
-            ..verlet::CodexTuiConnectConfig::default()
+            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
         },
     )
     .await;
@@ -763,11 +771,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     assert!(unknown_token.to_string().contains("401"));
 
     for rejected_token in [expired_token, revoked_token, revoked_operator_token] {
-        let rejected = verlet::CodexTuiTestClient::connect_unix(
+        let rejected = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
             &managed_socket,
-            verlet::CodexTuiConnectConfig {
+            verlet::adapters::codex_tui::CodexTuiConnectConfig {
                 bearer_token: Some(rejected_token),
-                ..verlet::CodexTuiConnectConfig::default()
+                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await;
@@ -778,11 +786,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         assert!(rejected.to_string().contains("401"));
     }
 
-    let mut token_client = verlet::CodexTuiTestClient::connect_unix(
+    let mut token_client = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
         &managed_socket,
-        verlet::CodexTuiConnectConfig {
+        verlet::adapters::codex_tui::CodexTuiConnectConfig {
             bearer_token: Some(token.clone()),
-            ..verlet::CodexTuiConnectConfig::default()
+            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
         },
     )
     .await
@@ -878,7 +886,9 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
     let operator = verlet::daemon::identity::PrincipalId::new(OPERATOR_ID);
     let bootstrap_config = app_config(
         &root,
-        verlet::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
+        verlet::adapters::app_server::AppServerListenAddr::WebSocket(
+            "127.0.0.1:0".parse().unwrap(),
+        ),
     );
     let authority = identity_authority(&bootstrap_config).await;
     authority
@@ -893,9 +903,11 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
     for _ in 0..4 {
         let mut config = app_config(
             &root,
-            verlet::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
+            verlet::adapters::app_server::AppServerListenAddr::WebSocket(
+                "127.0.0.1:0".parse().unwrap(),
+            ),
         );
-        config.console_assets = Some(verlet::ConsoleAssetConfig {
+        config.console_assets = Some(verlet::adapters::app_server::ConsoleAssetConfig {
             root: assets.clone(),
             session_token: "replaced-at-construction".to_string(),
         });
@@ -906,7 +918,9 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
                 console_principal: Some(operator.clone()),
             },
         );
-        let app = verlet::VerletAppServer::new(config).await.unwrap();
+        let app = verlet::adapters::app_server::VerletAppServer::new(config)
+            .await
+            .unwrap();
         generations.push(app);
         assert_eq!(
             active_credential_count(&store_path, OPERATOR_ID).await,
@@ -929,9 +943,10 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
 
 fn app_config(
     root: &std::path::Path,
-    listen: verlet::AppServerListenAddr,
-) -> verlet::VerletAppServerConfig {
-    let mut config = verlet::VerletAppServerConfig::local(listen, root.join("workspace"));
+    listen: verlet::adapters::app_server::AppServerListenAddr,
+) -> verlet::adapters::app_server::VerletAppServerConfig {
+    let mut config =
+        verlet::adapters::app_server::VerletAppServerConfig::local(listen, root.join("workspace"));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
@@ -941,14 +956,16 @@ fn app_config(
 }
 
 async fn identity_authority(
-    config: &verlet::VerletAppServerConfig,
+    config: &verlet::adapters::app_server::VerletAppServerConfig,
 ) -> verlet::daemon::identity::SqliteIdentityAuthority {
-    let store = verlet::SqliteSessionStore::open(config.state_home.join("session_history.sqlite3"))
-        .await
-        .unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(
+        config.state_home.join("session_history.sqlite3"),
+    )
+    .await
+    .unwrap();
     verlet::daemon::identity::SqliteIdentityAuthority::new(
         store,
-        std::sync::Arc::new(verlet::SystemDaemonClock),
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
         None,
     )
     .await
@@ -971,7 +988,7 @@ async fn connect_rpc(
         .unwrap();
     rpc_call(
         &mut websocket,
-        verlet::RequestId::String("initialize".to_string()),
+        verlet::adapters::app_server::connection::RequestId::String("initialize".to_string()),
         "initialize",
         serde_json::json!({
             "clientInfo": {
@@ -989,12 +1006,14 @@ async fn connect_rpc(
     .unwrap();
     websocket
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&verlet::JsonRpcMessage::Notification(
-                verlet::JsonRpcNotification {
-                    method: "initialized".to_string(),
-                    params: None,
-                },
-            ))
+            serde_json::to_string(
+                &verlet::adapters::app_server::connection::JsonRpcMessage::Notification(
+                    verlet::adapters::app_server::connection::JsonRpcNotification {
+                        method: "initialized".to_string(),
+                        params: None,
+                    },
+                ),
+            )
             .unwrap()
             .into(),
         ))
@@ -1005,18 +1024,22 @@ async fn connect_rpc(
 
 async fn rpc_call(
     websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-    id: verlet::RequestId,
+    id: verlet::adapters::app_server::connection::RequestId,
     method: &str,
     params: serde_json::Value,
-) -> Result<serde_json::Value, verlet::JsonRpcErrorError> {
+) -> Result<serde_json::Value, verlet::adapters::app_server::connection::JsonRpcErrorError> {
     websocket
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&verlet::JsonRpcMessage::Request(verlet::JsonRpcRequest {
-                id: id.clone(),
-                method: method.to_string(),
-                params: Some(params),
-                trace: None,
-            }))
+            serde_json::to_string(
+                &verlet::adapters::app_server::connection::JsonRpcMessage::Request(
+                    verlet::adapters::app_server::connection::JsonRpcRequest {
+                        id: id.clone(),
+                        method: method.to_string(),
+                        params: Some(params),
+                        trace: None,
+                    },
+                ),
+            )
             .unwrap()
             .into(),
         ))
@@ -1027,15 +1050,25 @@ async fn rpc_call(
         let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
             continue;
         };
-        match serde_json::from_str::<verlet::JsonRpcMessage>(&text).unwrap() {
-            verlet::JsonRpcMessage::Response(response) if response.id == id => {
+        match serde_json::from_str::<verlet::adapters::app_server::connection::JsonRpcMessage>(
+            &text,
+        )
+        .unwrap()
+        {
+            verlet::adapters::app_server::connection::JsonRpcMessage::Response(response)
+                if response.id == id =>
+            {
                 return Ok(response.result);
             }
-            verlet::JsonRpcMessage::Error(error) if error.id == id => return Err(error.error),
-            verlet::JsonRpcMessage::Request(_)
-            | verlet::JsonRpcMessage::Notification(_)
-            | verlet::JsonRpcMessage::Response(_)
-            | verlet::JsonRpcMessage::Error(_) => {}
+            verlet::adapters::app_server::connection::JsonRpcMessage::Error(error)
+                if error.id == id =>
+            {
+                return Err(error.error);
+            }
+            verlet::adapters::app_server::connection::JsonRpcMessage::Request(_)
+            | verlet::adapters::app_server::connection::JsonRpcMessage::Notification(_)
+            | verlet::adapters::app_server::connection::JsonRpcMessage::Response(_)
+            | verlet::adapters::app_server::connection::JsonRpcMessage::Error(_) => {}
         }
     }
 }
@@ -1146,7 +1179,7 @@ fn injected_console_token(response: &str) -> String {
 
 async fn wait_for_path(
     path: &std::path::Path,
-    task: &mut tokio::task::JoinHandle<verlet::VerletResult<()>>,
+    task: &mut tokio::task::JoinHandle<verlet::kernel::runtime_host::VerletResult<()>>,
 ) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
@@ -1184,7 +1217,9 @@ async fn sql_count<P>(path: &std::path::Path, query: &str, params: P) -> i64
 where
     P: verlet_sqlite::IntoParams,
 {
-    let store = verlet::SqliteSessionStore::open(path).await.unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(path)
+        .await
+        .unwrap();
     let database = store.sqlite_database();
     let connection = database.connect().await.unwrap();
     let mut rows = connection.query(query, params).await.unwrap();
@@ -1192,7 +1227,9 @@ where
 }
 
 async fn execute_sql(path: &std::path::Path, statement: &str) {
-    let store = verlet::SqliteSessionStore::open(path).await.unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(path)
+        .await
+        .unwrap();
     let database = store.sqlite_database();
     let connection = database.connect().await.unwrap();
     connection.execute_batch(statement).await.unwrap();

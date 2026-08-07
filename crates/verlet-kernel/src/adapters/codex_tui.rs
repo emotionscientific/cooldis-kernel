@@ -24,7 +24,7 @@ impl Default for CodexTuiConnectConfig {
         // MCP, ACP, debug RPC, and other daemon clients inherit this config.
         // Managed callers provide their boundary credential via
         // VERLET_APP_SERVER_TOKEN; an explicit field value may override it.
-        let bearer_token = crate::env_compat::var("VERLET_APP_SERVER_TOKEN")
+        let bearer_token = verlet_runtime_contracts::env_compat::var("VERLET_APP_SERVER_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty());
         Self {
@@ -72,15 +72,15 @@ pub struct CodexTuiCompletedTurn {
     pub thread_id: String,
     pub turn_id: String,
     pub assistant_text: String,
-    pub notifications: Vec<crate::JsonRpcNotification>,
+    pub notifications: Vec<crate::adapters::app_server::connection::JsonRpcNotification>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CodexTuiEvent {
-    Notification(crate::JsonRpcNotification),
-    Request(crate::JsonRpcRequest),
-    Response(crate::JsonRpcResponse),
-    Error(crate::JsonRpcError),
+    Notification(crate::adapters::app_server::connection::JsonRpcNotification),
+    Request(crate::adapters::app_server::connection::JsonRpcRequest),
+    Response(crate::adapters::app_server::connection::JsonRpcResponse),
+    Error(crate::adapters::app_server::connection::JsonRpcError),
 }
 
 pub struct CodexTuiTestClient<S> {
@@ -97,7 +97,7 @@ impl CodexTuiTestClient<tokio::net::UnixStream> {
     pub async fn connect_unix(
         socket_path: impl Into<std::path::PathBuf>,
         config: CodexTuiConnectConfig,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let socket_path = socket_path.into();
         let endpoint = format!("unix://{}", socket_path.display());
         let mut request = CODEX_TUI_UDS_WEBSOCKET_HANDSHAKE_URL
@@ -130,7 +130,7 @@ impl CodexTuiTestClient<tokio::net::TcpStream> {
     pub async fn connect_websocket(
         url: &str,
         config: CodexTuiConnectConfig,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let endpoint = url.to_string();
         let authority = websocket_tcp_authority(url)?;
         let mut request = url
@@ -162,7 +162,7 @@ impl CodexTuiTestClient<tokio::net::TcpStream> {
 fn set_bearer_token(
     request: &mut tokio_tungstenite::tungstenite::http::Request<()>,
     token: Option<&str>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let Some(token) = token else {
         return Ok(());
     };
@@ -184,7 +184,7 @@ where
         mut websocket: tokio_tungstenite::WebSocketStream<S>,
         endpoint: impl Into<String>,
         config: CodexTuiConnectConfig,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let endpoint = endpoint.into();
         let (initialize_result, pending_events) =
             initialize_remote_connection(&mut websocket, &endpoint, config).await?;
@@ -200,19 +200,23 @@ where
         &self.initialize_result
     }
 
-    pub async fn account_read(&mut self) -> crate::VerletResult<serde_json::Value> {
+    pub async fn account_read(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request("account/read", serde_json::json!({ "includeToken": false }))
             .await
     }
 
-    pub async fn model_list(&mut self) -> crate::VerletResult<serde_json::Value> {
+    pub async fn model_list(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request("model/list", serde_json::json!({})).await
     }
 
     pub async fn config_read(
         &mut self,
         include_layers: bool,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request(
             "config/read",
             serde_json::json!({
@@ -225,7 +229,7 @@ where
     pub async fn thread_start(
         &mut self,
         params: serde_json::Value,
-    ) -> crate::VerletResult<CodexTuiThread> {
+    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
         let result = self.request("thread/start", params).await?;
         thread_from_result(result, "thread/start")
     }
@@ -234,7 +238,7 @@ where
         &mut self,
         thread_id: &str,
         include_turns: bool,
-    ) -> crate::VerletResult<CodexTuiThread> {
+    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
         let result = self
             .request(
                 "thread/resume",
@@ -247,7 +251,10 @@ where
         thread_from_result(result, "thread/resume")
     }
 
-    pub async fn thread_fork(&mut self, thread_id: &str) -> crate::VerletResult<CodexTuiThread> {
+    pub async fn thread_fork(
+        &mut self,
+        thread_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
         let result = self
             .request(
                 "thread/fork",
@@ -264,7 +271,7 @@ where
         &mut self,
         thread_id: &str,
         name: &str,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request(
             "thread/name/set",
             serde_json::json!({
@@ -278,7 +285,7 @@ where
     pub async fn thread_compact_start(
         &mut self,
         thread_id: &str,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request(
             "thread/compact/start",
             serde_json::json!({
@@ -292,7 +299,7 @@ where
         &mut self,
         thread_id: &str,
         include_turns: bool,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request(
             "thread/read",
             serde_json::json!({
@@ -303,11 +310,15 @@ where
         .await
     }
 
-    pub async fn thread_list(&mut self) -> crate::VerletResult<serde_json::Value> {
+    pub async fn thread_list(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request("thread/list", serde_json::json!({})).await
     }
 
-    pub async fn loaded_thread_list(&mut self) -> crate::VerletResult<serde_json::Value> {
+    pub async fn loaded_thread_list(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request("thread/loaded/list", serde_json::json!({}))
             .await
     }
@@ -315,7 +326,7 @@ where
     pub async fn thread_unsubscribe(
         &mut self,
         thread_id: &str,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request(
             "thread/unsubscribe",
             serde_json::json!({ "threadId": thread_id }),
@@ -327,7 +338,7 @@ where
         &mut self,
         thread_id: &str,
         text: &str,
-    ) -> crate::VerletResult<CodexTuiTurn> {
+    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiTurn> {
         let result = self
             .request(
                 "turn/start",
@@ -350,7 +361,7 @@ where
         thread_id: &str,
         expected_turn_id: &str,
         text: &str,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request(
             "turn/steer",
             serde_json::json!({
@@ -366,7 +377,7 @@ where
         &mut self,
         thread_id: &str,
         turn_id: &str,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request(
             "turn/interrupt",
             serde_json::json!({
@@ -381,7 +392,7 @@ where
         &mut self,
         prompt: &str,
         timeout: std::time::Duration,
-    ) -> crate::VerletResult<CodexTuiCompletedTurn> {
+    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiCompletedTurn> {
         let thread = self.thread_start(serde_json::json!({})).await?;
         let turn = self.turn_start_text(&thread.id, prompt).await?;
         self.wait_for_turn_completed(&thread.id, &turn.id, timeout)
@@ -393,7 +404,7 @@ where
         thread_id: &str,
         turn_id: &str,
         timeout_duration: std::time::Duration,
-    ) -> crate::VerletResult<CodexTuiCompletedTurn> {
+    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiCompletedTurn> {
         let deadline = tokio::time::sleep(timeout_duration);
         tokio::pin!(deadline);
         let mut assistant_text = String::new();
@@ -455,26 +466,28 @@ where
         &mut self,
         method: &str,
         params: serde_json::Value,
-    ) -> crate::VerletResult<serde_json::Value> {
-        let id = crate::RequestId::Integer(self.next_request_id);
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        let id = crate::adapters::app_server::connection::RequestId::Integer(self.next_request_id);
         self.next_request_id += 1;
         self.request_with_id(id, method, params).await
     }
 
     pub async fn request_with_id(
         &mut self,
-        id: crate::RequestId,
+        id: crate::adapters::app_server::connection::RequestId,
         method: &str,
         params: serde_json::Value,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         write_jsonrpc_message(
             &mut self.websocket,
-            crate::JsonRpcMessage::Request(crate::JsonRpcRequest {
-                id: id.clone(),
-                method: method.to_string(),
-                params: Some(params),
-                trace: None,
-            }),
+            crate::adapters::app_server::connection::JsonRpcMessage::Request(
+                crate::adapters::app_server::connection::JsonRpcRequest {
+                    id: id.clone(),
+                    method: method.to_string(),
+                    params: Some(params),
+                    trace: None,
+                },
+            ),
         )
         .await?;
 
@@ -498,25 +511,27 @@ where
         &mut self,
         method: &str,
         params: Option<serde_json::Value>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         write_jsonrpc_message(
             &mut self.websocket,
-            crate::JsonRpcMessage::Notification(crate::JsonRpcNotification {
-                method: method.to_string(),
-                params,
-            }),
+            crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+                crate::adapters::app_server::connection::JsonRpcNotification {
+                    method: method.to_string(),
+                    params,
+                },
+            ),
         )
         .await
     }
 
-    pub async fn next_event(&mut self) -> crate::VerletResult<CodexTuiEvent> {
+    pub async fn next_event(&mut self) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent> {
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(event);
         }
         self.read_event().await
     }
 
-    async fn read_event(&mut self) -> crate::VerletResult<CodexTuiEvent> {
+    async fn read_event(&mut self) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent> {
         loop {
             let message = self
                 .websocket
@@ -546,7 +561,7 @@ where
         }
     }
 
-    pub async fn close(&mut self) -> crate::VerletResult<()> {
+    pub async fn close(&mut self) -> crate::kernel::runtime_host::VerletResult<()> {
         self.websocket
             .close(None)
             .await
@@ -558,14 +573,18 @@ async fn initialize_remote_connection<S>(
     websocket: &mut tokio_tungstenite::WebSocketStream<S>,
     endpoint: &str,
     config: CodexTuiConnectConfig,
-) -> crate::VerletResult<(serde_json::Value, std::collections::VecDeque<CodexTuiEvent>)>
+) -> crate::kernel::runtime_host::VerletResult<(
+    serde_json::Value,
+    std::collections::VecDeque<CodexTuiEvent>,
+)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let initialize_request_id = crate::RequestId::String("initialize".to_string());
+    let initialize_request_id =
+        crate::adapters::app_server::connection::RequestId::String("initialize".to_string());
     write_jsonrpc_message(
         websocket,
-        crate::JsonRpcMessage::Request(crate::JsonRpcRequest {
+        crate::adapters::app_server::connection::JsonRpcMessage::Request(crate::adapters::app_server::connection::JsonRpcRequest {
             id: initialize_request_id.clone(),
             method: "initialize".to_string(),
             params: Some(serde_json::json!({
@@ -615,10 +634,12 @@ where
 
     write_jsonrpc_message(
         websocket,
-        crate::JsonRpcMessage::Notification(crate::JsonRpcNotification {
-            method: "initialized".to_string(),
-            params: None,
-        }),
+        crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+            crate::adapters::app_server::connection::JsonRpcNotification {
+                method: "initialized".to_string(),
+                params: None,
+            },
+        ),
     )
     .await?;
 
@@ -627,8 +648,8 @@ where
 
 async fn write_jsonrpc_message<S>(
     websocket: &mut tokio_tungstenite::WebSocketStream<S>,
-    message: crate::JsonRpcMessage,
-) -> crate::VerletResult<()>
+    message: crate::adapters::app_server::connection::JsonRpcMessage,
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -644,7 +665,7 @@ where
 
 async fn read_jsonrpc_event<S>(
     websocket: &mut tokio_tungstenite::WebSocketStream<S>,
-) -> crate::VerletResult<CodexTuiEvent>
+) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -676,16 +697,22 @@ where
     }
 }
 
-fn jsonrpc_event_from_text(text: &str) -> crate::VerletResult<CodexTuiEvent> {
-    match serde_json::from_str::<crate::JsonRpcMessage>(text)
+fn jsonrpc_event_from_text(text: &str) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent> {
+    match serde_json::from_str::<crate::adapters::app_server::connection::JsonRpcMessage>(text)
         .map_err(|err| tui_error(format!("invalid Verlet RPC message: {err}")))?
     {
-        crate::JsonRpcMessage::Notification(notification) => {
+        crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification) => {
             Ok(CodexTuiEvent::Notification(notification))
         }
-        crate::JsonRpcMessage::Request(request) => Ok(CodexTuiEvent::Request(request)),
-        crate::JsonRpcMessage::Response(response) => Ok(CodexTuiEvent::Response(response)),
-        crate::JsonRpcMessage::Error(error) => Ok(CodexTuiEvent::Error(error)),
+        crate::adapters::app_server::connection::JsonRpcMessage::Request(request) => {
+            Ok(CodexTuiEvent::Request(request))
+        }
+        crate::adapters::app_server::connection::JsonRpcMessage::Response(response) => {
+            Ok(CodexTuiEvent::Response(response))
+        }
+        crate::adapters::app_server::connection::JsonRpcMessage::Error(error) => {
+            Ok(CodexTuiEvent::Error(error))
+        }
     }
 }
 
@@ -701,7 +728,7 @@ fn string_field(
     value: &serde_json::Value,
     field: &str,
     context: &str,
-) -> crate::VerletResult<String> {
+) -> crate::kernel::runtime_host::VerletResult<String> {
     value
         .get(field)
         .and_then(serde_json::Value::as_str)
@@ -712,7 +739,7 @@ fn string_field(
 fn thread_from_result(
     result: serde_json::Value,
     method: &str,
-) -> crate::VerletResult<CodexTuiThread> {
+) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
     let thread = result
         .get("thread")
         .cloned()
@@ -727,7 +754,7 @@ fn codex_tui_websocket_config() -> tokio_tungstenite::tungstenite::protocol::Web
         .max_message_size(Some(CODEX_TUI_MAX_WEBSOCKET_MESSAGE_SIZE))
 }
 
-fn websocket_tcp_authority(url: &str) -> crate::VerletResult<&str> {
+fn websocket_tcp_authority(url: &str) -> crate::kernel::runtime_host::VerletResult<&str> {
     let rest = url
         .strip_prefix("ws://")
         .ok_or_else(|| tui_error(format!("Verlet RPC URL must start with ws://: {url:?}")))?;
@@ -741,8 +768,8 @@ fn websocket_tcp_authority(url: &str) -> crate::VerletResult<&str> {
     Ok(authority)
 }
 
-fn tui_error(message: impl Into<String>) -> crate::VerletError {
-    crate::VerletError::RpcClient(message.into())
+fn tui_error(message: impl Into<String>) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RpcClient(message.into())
 }
 
 #[cfg(test)]

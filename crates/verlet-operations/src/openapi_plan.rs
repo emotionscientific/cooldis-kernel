@@ -139,7 +139,9 @@ pub struct OperationImportPlan {
 }
 
 impl OperationImportPlan {
-    pub fn from_package(package: &crate::ImportPackageSource) -> Result<Self, OpenApiImportError> {
+    pub fn from_package(
+        package: &crate::import_package::ImportPackageSource,
+    ) -> Result<Self, OpenApiImportError> {
         let document: OpenApiDocument =
             serde_json::from_slice(&package.spec_bytes).map_err(|error| {
                 OpenApiImportError::InvalidDocument {
@@ -343,7 +345,7 @@ struct CandidateOperation {
 }
 
 fn normalize_document(
-    package: &crate::ImportPackageSource,
+    package: &crate::import_package::ImportPackageSource,
     document: OpenApiDocument,
 ) -> Result<OperationImportPlan, OpenApiImportError> {
     if !supported_openapi_version(&document.openapi) {
@@ -366,12 +368,13 @@ fn normalize_document(
             message: "server variables are unsupported in V1".to_string(),
         });
     }
-    let target = verlet_wasm::normalize_http_url(declared_server_url).map_err(|message| {
-        OpenApiImportError::InvalidServerUrl {
-            url: declared_server_url.clone(),
-            message,
-        }
-    })?;
+    let target =
+        verlet_wasm::runner::normalize_http_url(declared_server_url).map_err(|message| {
+            OpenApiImportError::InvalidServerUrl {
+                url: declared_server_url.clone(),
+                message,
+            }
+        })?;
     if target.has_credentials || target.has_query || target.has_fragment {
         return Err(OpenApiImportError::InvalidServerUrl {
             url: declared_server_url.clone(),
@@ -402,12 +405,13 @@ fn normalize_document(
             .alias
             .clone()
             .unwrap_or_else(|| candidate.source_name.clone());
-        let normalized_name = crate::validate_record_name(&name).map_err(|error| {
-            OpenApiImportError::InvalidOperationName {
-                name: name.clone(),
-                message: error.to_string(),
-            }
-        })?;
+        let normalized_name =
+            crate::operation_store::validate_record_name(&name).map_err(|error| {
+                OpenApiImportError::InvalidOperationName {
+                    name: name.clone(),
+                    message: error.to_string(),
+                }
+            })?;
         if normalized_name != name {
             return Err(OpenApiImportError::InvalidOperationName {
                 name,
@@ -489,7 +493,7 @@ fn normalize_operation(
     origin: &str,
     private_destination: bool,
     candidate: CandidateOperation,
-    auth: Option<&crate::ImportAuthDeclaration>,
+    auth: Option<&crate::import_package::ImportAuthDeclaration>,
 ) -> Result<ImportedOperationPlan, OpenApiImportError> {
     if candidate.operation.callbacks.is_some() {
         return Err(OpenApiImportError::CallbacksUnsupported {
@@ -558,7 +562,7 @@ fn normalize_operation(
     }
     validate_response_schemas(&candidate.source_name, &candidate.operation.responses)?;
     let input_schema = operation_input_schema(&parameters, request_body.as_ref());
-    verlet_runtime_contracts::validate_json_schema_subset(
+    verlet_runtime_contracts::schema::validate_json_schema_subset(
         &input_schema,
         &format!("import operation {name} input"),
     )
@@ -652,7 +656,7 @@ fn normalize_parameter(
             parameter: parameter.name,
         });
     }
-    verlet_runtime_contracts::validate_json_schema_subset(
+    verlet_runtime_contracts::schema::validate_json_schema_subset(
         &parameter.schema,
         &format!(
             "import operation {operation_id} parameter {}",
@@ -716,7 +720,7 @@ fn normalize_request_body(
         .schema
         .clone()
         .unwrap_or_else(|| serde_json::json!({"type": "object", "additionalProperties": true}));
-    verlet_runtime_contracts::validate_json_schema_subset(
+    verlet_runtime_contracts::schema::validate_json_schema_subset(
         &schema,
         &format!("import operation {operation_id} request body"),
     )
@@ -739,7 +743,7 @@ fn validate_response_schemas(
         let _ = &response.description;
         for media in response.content.values() {
             if let Some(schema) = &media.schema {
-                verlet_runtime_contracts::validate_json_schema_subset(
+                verlet_runtime_contracts::schema::validate_json_schema_subset(
                     schema,
                     &format!("import operation {operation_id} response"),
                 )
@@ -754,7 +758,7 @@ fn validate_response_schemas(
 }
 
 fn normalize_auth(
-    auth: Option<&crate::ImportAuthDeclaration>,
+    auth: Option<&crate::import_package::ImportAuthDeclaration>,
 ) -> Result<Vec<OperationSecretHeaderPlan>, OpenApiImportError> {
     let Some(auth) = auth else {
         return Ok(Vec::new());

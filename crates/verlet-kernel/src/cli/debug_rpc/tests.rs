@@ -116,7 +116,7 @@ fn parse_debug_rpc_turn_collects_json_thread_and_text() {
 
 #[test]
 fn notification_error_detection_handles_failed_completed_turn() {
-    let notification = crate::JsonRpcNotification {
+    let notification = crate::adapters::app_server::connection::JsonRpcNotification {
         method: "turn/completed".to_string(),
         params: Some(serde_json::json!({
             "threadId": "thread-1",
@@ -142,17 +142,23 @@ fn notification_error_detection_handles_failed_completed_turn() {
 #[test]
 fn rpc_tail_treats_remote_connection_close_as_success() {
     assert!(crate::cli::debug_rpc::rpc_connection_was_closed(
-        &crate::VerletError::RpcClient("Verlet RPC connection closed".to_string())
+        &crate::kernel::runtime_host::VerletError::RpcClient(
+            "Verlet RPC connection closed".to_string()
+        )
     ));
     assert!(crate::cli::debug_rpc::rpc_connection_was_closed(
-        &crate::VerletError::RpcClient(
+        &crate::kernel::runtime_host::VerletError::RpcClient(
             "Verlet RPC connection was closed by the endpoint: going away".to_string()
         )
     ));
     assert!(!crate::cli::debug_rpc::rpc_connection_was_closed(
-        &crate::VerletError::RpcClient("Verlet RPC connection read failed: reset".to_string())
+        &crate::kernel::runtime_host::VerletError::RpcClient(
+            "Verlet RPC connection read failed: reset".to_string()
+        )
     ));
     assert!(!crate::cli::debug_rpc::rpc_connection_was_closed(
-        &crate::VerletError::RuntimeFactory("Verlet RPC connection closed".to_string())
+        &crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            "Verlet RPC connection closed".to_string()
+        )
     ));
 }

@@ -15,55 +15,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
-    let build = verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(&module_path))?;
-    verlet::LocalOperationRegistry::new(&registry_root)
-        .publish_artifact(verlet::PublishOperationRequest {
-            name: "tailcat".to_string(),
-            artifact_path: build.artifact_path,
-            source: verlet::PublishedOperationSource::Rust {
-                module_path,
-                release: true,
+    let build = verlet::operations::operation_builder::build_rust_wasm_module(
+        verlet::operations::operation_builder::RustWasmBuildOptions::new(&module_path),
+    )?;
+    verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "tailcat".to_string(),
+                artifact_path: build.artifact_path,
+                source: verlet_operations::operation_store::PublishedOperationSource::Rust {
+                    module_path,
+                    release: true,
+                },
+                interface: None,
+                capability_grants: std::collections::BTreeSet::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
-            interface: None,
-            capability_grants: std::collections::BTreeSet::new(),
-            metadata: std::collections::BTreeMap::new(),
-        })
+        )
         .await?;
 
-    let catalog = verlet::LocalPluginCatalog::load(
-        verlet::LocalPluginCatalogConfig::new(&registry_root).with_mount(
-            verlet::PluginMount::host_read_only("/workspace", &workspace),
+    let catalog = verlet::operations::plugins::LocalPluginCatalog::load(
+        verlet::operations::plugins::LocalPluginCatalogConfig::new(&registry_root).with_mount(
+            verlet::operations::plugins::PluginMount::host_read_only("/workspace", &workspace),
         ),
     )
     .await?;
 
-    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
-        std::sync::Arc::new(verlet::OpenAIResponsesAdapter {
+    let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet_provider::OpenAIResponsesAdapter {
             include_encrypted_reasoning: false,
-            reasoning_summary: verlet::OpenAIReasoningSummary::Auto,
+            reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
         });
-    let client = std::sync::Arc::new(verlet::ProviderHttpClient::new(
-        verlet::ProviderEndpoint::openai_responses(&config.base_url, config.api_key.clone()),
+    let client = std::sync::Arc::new(verlet_provider::ProviderHttpClient::new(
+        verlet_provider::ProviderEndpoint::openai_responses(
+            &config.base_url,
+            config.api_key.clone(),
+        ),
         adapter,
     )?);
-    let mut runtime_config = verlet::AgentLoopConfig::new(
-        verlet::ProviderApi::OpenAIResponses,
+    let mut runtime_config = verlet::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
         "openai",
         config.model.clone(),
     );
     runtime_config.max_tokens = 256;
-    runtime_config.system.push(verlet::SystemBlock::text(format!(
+    runtime_config.system.push(verlet_provider::SystemBlock::text(format!(
         "You are testing a newly installed Verlet plugin. You must call the {TOOL_NAME} tool with input /workspace/input.txt before answering. After the tool result is visible, reply with exactly: {FINAL_MARKER}: <file content>. Do not invent the file content."
     )));
 
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(
-        verlet::AgentLoopFactory::new(runtime_config, client)
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        verlet::adapters::agent_loop::AgentLoopFactory::new(runtime_config, client)
             .with_operation_registry(catalog.operation_registry()),
     ));
     let thread = host
         .start_thread(
-            verlet::ThreadCoordinates::new("smoke_tenant", "smoke_user", "plugin_live"),
-            verlet::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new(
+                "smoke_tenant",
+                "smoke_user",
+                "plugin_live",
+            ),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await?;
     let mut events = thread.subscribe_events();
@@ -146,7 +157,9 @@ struct LivePluginTrace {
 }
 
 async fn collect_live_plugin_trace(
-    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
 ) -> Result<LivePluginTrace, Box<dyn std::error::Error>> {
     let mut saw_tool_start = false;
     let mut saw_tool_result = false;
@@ -154,8 +167,8 @@ async fn collect_live_plugin_trace(
         let event =
             tokio::time::timeout(std::time::Duration::from_secs(120), events.recv()).await??;
         match event {
-            verlet::ThreadEvent::Runtime { event, .. } => match event.kind {
-                verlet::RuntimeEventKind::ToolCallStarted { name, input, .. }
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. } => match event.kind {
+                verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted { name, input, .. }
                     if name == TOOL_NAME =>
                 {
                     if input.get("input").and_then(|value| value.as_str())
@@ -165,12 +178,12 @@ async fn collect_live_plugin_trace(
                     }
                     saw_tool_start = true;
                 }
-                verlet::RuntimeEventKind::ToolCallResult {
+                verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
                     output, success, ..
                 } if success && output == EXPECTED_FILE_CONTENT => {
                     saw_tool_result = true;
                 }
-                verlet::RuntimeEventKind::ToolCallResult {
+                verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
                     output, success, ..
                 } if success => {
                     return Err(format!(
@@ -181,12 +194,12 @@ async fn collect_live_plugin_trace(
                 }
                 _ => {}
             },
-            verlet::ThreadEvent::Output { text, .. } => {
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } => {
                 if text.contains(FINAL_MARKER) {
                     break text;
                 }
             }
-            verlet::ThreadEvent::Failed { message, .. } => return Err(message.into()),
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. } => return Err(message.into()),
             _ => {}
         }
     };

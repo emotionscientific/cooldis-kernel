@@ -1,6 +1,4 @@
-mod runner;
-
-pub use runner::{RunArtifacts, RunOptions, run_ab};
+pub mod runner;
 
 pub const COMMON_TRACE_SCHEMA: &str = "cooldis.trace.common/1";
 

@@ -1,11 +1,5 @@
-mod apply_patch;
-mod harness;
-
-pub use apply_patch::apply_patch_to_bashkit;
-pub use harness::{
-    BashkitExecutionConfig, BashkitExecutionHarness, BashkitLiveBackend, VbashOperationRegistry,
-    operation_shell_command_names,
-};
+pub mod apply_patch;
+pub mod harness;
 
 pub type VerletVirtualBashResult<T> = Result<T, VerletVirtualBashError>;
 
@@ -116,10 +110,10 @@ pub enum CommandRoute {
 }
 
 impl CommandRoute {
-    pub fn executor_kind(self) -> Option<verlet_process::ExternalExecutorKind> {
+    pub fn executor_kind(self) -> Option<verlet_process::execution::ExternalExecutorKind> {
         match self {
-            Self::HostBash => Some(verlet_process::ExternalExecutorKind::HostBash),
-            Self::RemoteLinux => Some(verlet_process::ExternalExecutorKind::RemoteLinux),
+            Self::HostBash => Some(verlet_process::execution::ExternalExecutorKind::HostBash),
+            Self::RemoteLinux => Some(verlet_process::execution::ExternalExecutorKind::RemoteLinux),
             Self::VirtualBash | Self::Deny => None,
         }
     }
@@ -285,7 +279,7 @@ pub fn validate_mounts(mounts: &[VirtualMount]) -> VerletVirtualBashResult<()> {
 
 pub async fn apply_external_file_writes(
     fs: &dyn bashkit::FileSystem,
-    result: &verlet_process::ExternalCommandResult,
+    result: &verlet_process::execution::ExternalCommandResult,
 ) -> VerletVirtualBashResult<()> {
     for write in &result.file_writes {
         validate_external_file_write(&write.path)?;
@@ -312,8 +306,8 @@ pub fn validate_external_file_write(path: &std::path::Path) -> VerletVirtualBash
     Ok(())
 }
 
-pub fn deny_output(label: &str) -> verlet_process::VirtualCommandOutput {
-    verlet_process::VirtualCommandOutput {
+pub fn deny_output(label: &str) -> verlet_process::execution::VirtualCommandOutput {
+    verlet_process::execution::VirtualCommandOutput {
         stdout: String::new(),
         stderr: format!("verlet: command denied by routing policy: {label}\n"),
         exit_code: 126,
@@ -324,8 +318,8 @@ pub fn deny_output(label: &str) -> verlet_process::VirtualCommandOutput {
 
 pub fn virtual_command_output_from_exec_result(
     result: bashkit::ExecResult,
-) -> verlet_process::VirtualCommandOutput {
-    verlet_process::VirtualCommandOutput {
+) -> verlet_process::execution::VirtualCommandOutput {
+    verlet_process::execution::VirtualCommandOutput {
         stdout: result.stdout,
         stderr: result.stderr,
         exit_code: result.exit_code,
@@ -335,7 +329,7 @@ pub fn virtual_command_output_from_exec_result(
 }
 
 pub fn exec_result_from_virtual_output(
-    output: verlet_process::VirtualCommandOutput,
+    output: verlet_process::execution::VirtualCommandOutput,
 ) -> bashkit::ExecResult {
     bashkit::ExecResult {
         stdout: output.stdout,
@@ -348,9 +342,9 @@ pub fn exec_result_from_virtual_output(
 }
 
 pub fn enforce_output_limit(
-    mut output: verlet_process::VirtualCommandOutput,
+    mut output: verlet_process::execution::VirtualCommandOutput,
     max_output_bytes: usize,
-) -> verlet_process::VirtualCommandOutput {
+) -> verlet_process::execution::VirtualCommandOutput {
     let capped_stdout = truncate_text_to_byte_limit(&mut output.stdout, max_output_bytes);
     let capped_stderr = truncate_text_to_byte_limit(&mut output.stderr, max_output_bytes);
     output.stdout_truncated |= capped_stdout;
@@ -850,7 +844,7 @@ mod tests {
     #[test]
     fn output_limit_marks_capped_streams() {
         let output = crate::enforce_output_limit(
-            verlet_process::VirtualCommandOutput {
+            verlet_process::execution::VirtualCommandOutput {
                 stdout: "abcdef".to_string(),
                 stderr: "xyz".to_string(),
                 exit_code: 0,
@@ -867,7 +861,7 @@ mod tests {
     #[test]
     fn output_limit_never_expands_past_the_byte_ceiling() {
         let output = crate::enforce_output_limit(
-            verlet_process::VirtualCommandOutput {
+            verlet_process::execution::VirtualCommandOutput {
                 stdout: "💥💥".to_string(),
                 stderr: String::new(),
                 exit_code: 0,

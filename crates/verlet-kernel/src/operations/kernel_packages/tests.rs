@@ -57,18 +57,18 @@ fn verlet_threads_package_declares_five_kernel_operations() {
         );
         assert_eq!(
             manifest_operation.input,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
         assert_eq!(
             manifest_operation.output,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
-        assert_eq!(manifest_operation.mode, crate::WasmOperationMode::Sync);
+        assert_eq!(manifest_operation.mode, verlet_abi::WasmOperationMode::Sync);
         assert_eq!(
             manifest_operation.events,
-            crate::WasmOperationEventKind::None
+            verlet_abi::WasmOperationEventKind::None
         );
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.input_schema,
             &format!(
                 "{}.{}.input",
@@ -77,7 +77,7 @@ fn verlet_threads_package_declares_five_kernel_operations() {
             ),
         )
         .unwrap();
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.output_schema,
             &format!(
                 "{}.{}.output",
@@ -96,7 +96,7 @@ fn verlet_threads_package_declares_five_kernel_operations() {
         let manual = interface.manual.as_ref().expect("operation manual");
         assert_eq!(
             manual.schema_version,
-            crate::operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION
+            verlet_operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION
         );
         assert_eq!(
             manual.tool_name,
@@ -266,18 +266,18 @@ fn verlet_schedule_package_declares_three_kernel_operations() {
         );
         assert_eq!(
             manifest_operation.input,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
         assert_eq!(
             manifest_operation.output,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
-        assert_eq!(manifest_operation.mode, crate::WasmOperationMode::Sync);
+        assert_eq!(manifest_operation.mode, verlet_abi::WasmOperationMode::Sync);
         assert_eq!(
             manifest_operation.events,
-            crate::WasmOperationEventKind::None
+            verlet_abi::WasmOperationEventKind::None
         );
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.input_schema,
             &format!(
                 "{}.{}.input",
@@ -286,7 +286,7 @@ fn verlet_schedule_package_declares_three_kernel_operations() {
             ),
         )
         .unwrap();
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.output_schema,
             &format!(
                 "{}.{}.output",
@@ -369,18 +369,18 @@ fn verlet_process_package_declares_four_kernel_operations() {
         );
         assert_eq!(
             manifest_operation.input,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
         assert_eq!(
             manifest_operation.output,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
-        assert_eq!(manifest_operation.mode, crate::WasmOperationMode::Sync);
+        assert_eq!(manifest_operation.mode, verlet_abi::WasmOperationMode::Sync);
         assert_eq!(
             manifest_operation.events,
-            crate::WasmOperationEventKind::None
+            verlet_abi::WasmOperationEventKind::None
         );
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.input_schema,
             &format!(
                 "{}.{}.input",
@@ -389,7 +389,7 @@ fn verlet_process_package_declares_four_kernel_operations() {
             ),
         )
         .unwrap();
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.output_schema,
             &format!(
                 "{}.{}.output",
@@ -407,7 +407,7 @@ fn verlet_process_package_declares_four_kernel_operations() {
         let manual = interface.manual.as_ref().expect("operation manual");
         assert_eq!(
             manual.schema_version,
-            crate::operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION
+            verlet_operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION
         );
         assert_eq!(
             manual.tool_name,
@@ -479,18 +479,18 @@ fn verlet_notify_package_declares_reference_channel_operations() {
         );
         assert_eq!(
             manifest_operation.input,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
         assert_eq!(
             manifest_operation.output,
-            crate::WasmOperationValueKind::Json
+            verlet_abi::WasmOperationValueKind::Json
         );
-        assert_eq!(manifest_operation.mode, crate::WasmOperationMode::Sync);
+        assert_eq!(manifest_operation.mode, verlet_abi::WasmOperationMode::Sync);
         assert_eq!(
             manifest_operation.events,
-            crate::WasmOperationEventKind::None
+            verlet_abi::WasmOperationEventKind::None
         );
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.input_schema,
             &format!(
                 "{}.{}.input",
@@ -499,7 +499,7 @@ fn verlet_notify_package_declares_reference_channel_operations() {
             ),
         )
         .unwrap();
-        verlet_runtime_contracts::validate_json_schema_subset(
+        verlet_runtime_contracts::schema::validate_json_schema_subset(
             &interface.output_schema,
             &format!(
                 "{}.{}.output",
@@ -517,7 +517,7 @@ fn verlet_notify_package_declares_reference_channel_operations() {
         let manual = interface.manual.as_ref().expect("operation manual");
         assert_eq!(
             manual.schema_version,
-            crate::operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION
+            verlet_operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION
         );
         assert_eq!(
             manual.tool_name,
@@ -701,7 +701,7 @@ fn verlet_threads_publish_is_idempotent_by_contract_hash() {
     );
     assert_eq!(
         second.source,
-        crate::PublishedOperationSource::Kernel {
+        verlet_operations::operation_store::PublishedOperationSource::Kernel {
             package: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE.to_string()
         }
     );
@@ -746,7 +746,7 @@ fn verlet_schedule_publish_is_idempotent_by_contract_hash() {
     );
     assert_eq!(
         second.source,
-        crate::PublishedOperationSource::Kernel {
+        verlet_operations::operation_store::PublishedOperationSource::Kernel {
             package: crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE.to_string()
         }
     );
@@ -791,7 +791,7 @@ fn verlet_process_publish_is_idempotent_by_contract_hash() {
     );
     assert_eq!(
         second.source,
-        crate::PublishedOperationSource::Kernel {
+        verlet_operations::operation_store::PublishedOperationSource::Kernel {
             package: crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE.to_string()
         }
     );
@@ -836,7 +836,7 @@ fn verlet_notify_publish_is_idempotent_by_contract_hash() {
     );
     assert_eq!(
         second.source,
-        crate::PublishedOperationSource::Kernel {
+        verlet_operations::operation_store::PublishedOperationSource::Kernel {
             package: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE.to_string()
         }
     );
@@ -870,7 +870,7 @@ fn validate_operation_output(
         .iter()
         .find(|operation| operation.name == operation_name)
         .unwrap_or_else(|| panic!("missing operation {operation_name}"));
-    verlet_runtime_contracts::validate_json_value_against_schema(
+    verlet_runtime_contracts::schema::validate_json_value_against_schema(
         &operation.output_schema,
         &value,
         &format!(

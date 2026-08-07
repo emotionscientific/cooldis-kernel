@@ -1,23 +1,25 @@
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let supervisor = verlet::VerletSupervisor::new();
+    let supervisor = verlet::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(verlet::TenantRegistration {
-            context: verlet::TenantRuntimeContext::local(
+        .register_tenant(verlet::kernel::supervisor::TenantRegistration {
+            context: verlet::kernel::supervisor::TenantRuntimeContext::local(
                 "tenant-smoke",
                 "/tmp/verlet-vbash-runtime",
                 "/tmp/verlet-vbash-state",
             ),
-            runtime_factory: std::sync::Arc::new(verlet::VirtualBashRuntimeFactory::default()),
+            runtime_factory: std::sync::Arc::new(
+                verlet::capabilities::execution::VirtualBashRuntimeFactory::default(),
+            ),
         })
         .await?;
 
     let thread = supervisor
-        .start_thread(verlet::ThreadStartRequest {
+        .start_thread(verlet::kernel::supervisor::ThreadStartRequest {
             tenant_id: "tenant-smoke".to_string(),
             user_id: "user-smoke".to_string(),
             session_id: "session-smoke".to_string(),
-            topology: verlet::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: Default::default(),
         })
         .await?;
@@ -35,8 +37,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             match events.recv().await? {
-                verlet::ThreadEvent::Output { text, .. } => break Ok::<_, broadcast_error>(text),
-                verlet::ThreadEvent::Failed { message, .. } => {
+                verlet::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } => {
+                    break Ok::<_, broadcast_error>(text);
+                }
+                verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                    message, ..
+                } => {
                     break Err(broadcast_error::failed(message));
                 }
                 _ => {}

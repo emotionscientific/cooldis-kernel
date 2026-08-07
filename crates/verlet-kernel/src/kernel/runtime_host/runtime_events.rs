@@ -162,7 +162,7 @@ pub enum RuntimeEventKind {
         purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
         duration_ms: u64,
         usage: verlet_runtime_contracts::RuntimeUsage,
-        stop_reason: crate::kernel::history::CanonicalStopReason,
+        stop_reason: verlet_history::CanonicalStopReason,
     },
     ModelRequestFailed {
         request_id: String,
@@ -206,7 +206,7 @@ pub enum RuntimeEventKind {
         label: Option<String>,
     },
     Compaction {
-        trigger: crate::CompactionTrigger,
+        trigger: crate::kernel::compaction::CompactionTrigger,
         summary: String,
     },
     Cancelled {
@@ -219,13 +219,15 @@ pub enum RuntimeEventKind {
 }
 
 pub fn emit_runtime_event(
-    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     kind: RuntimeEventKind,
 ) {
     let event = RuntimeEvent::new(coordinates.clone(), kind);
-    let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Runtime {
-        thread_id: coordinates.thread_id,
-        event,
-    });
+    let _ = events.send(
+        crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime {
+            thread_id: coordinates.thread_id,
+            event,
+        },
+    );
 }

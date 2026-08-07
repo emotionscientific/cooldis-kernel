@@ -67,7 +67,7 @@ fn violation(
 
 fn transcript_stream_ids(
     world: &crate::support::scenario::ScenarioWorld<'_>,
-) -> Vec<verlet::EventStreamId> {
+) -> Vec<verlet_history::EventStreamId> {
     let mut stream_ids = world
         .transcript
         .items
@@ -85,14 +85,14 @@ fn transcript_stream_ids(
     stream_ids.dedup();
     stream_ids
         .into_iter()
-        .map(verlet::EventStreamId::new)
+        .map(verlet_history::EventStreamId::new)
         .collect()
 }
 
 async fn durable_events(
     world: &crate::support::scenario::ScenarioWorld<'_>,
     invariant: &'static str,
-) -> Result<Vec<verlet::EventRecord>, Vec<crate::support::scenario::InvariantViolation>> {
+) -> Result<Vec<verlet_history::EventRecord>, Vec<crate::support::scenario::InvariantViolation>> {
     let mut events = Vec::new();
     let mut violations = Vec::new();
     for stream_id in transcript_stream_ids(world) {
@@ -154,12 +154,12 @@ impl crate::support::scenario::ScenarioInvariant for ReplayEquivalenceInvariant 
             // state exposed by SessionStore::active_leaf.
             let mut replayed_leaf: std::collections::BTreeMap<
                 String,
-                (verlet::ThreadCoordinates, Option<String>),
+                (verlet_runtime_contracts::ThreadCoordinates, Option<String>),
             > = std::collections::BTreeMap::new();
             for event in &events {
                 let key = event.coordinates.thread_id.to_string();
                 match event.kind {
-                    verlet::EventKind::SessionEntryAppended => {
+                    verlet_history::EventKind::SessionEntryAppended => {
                         if let Some(entry_id) = event
                             .payload
                             .get("entry_id")
@@ -171,7 +171,7 @@ impl crate::support::scenario::ScenarioInvariant for ReplayEquivalenceInvariant 
                             );
                         }
                     }
-                    verlet::EventKind::ThreadBranchSelected => {
+                    verlet_history::EventKind::ThreadBranchSelected => {
                         let selected = event
                             .payload
                             .get("selected_entry_id")
@@ -186,7 +186,7 @@ impl crate::support::scenario::ScenarioInvariant for ReplayEquivalenceInvariant 
             for (_, (coordinates, replayed)) in replayed_leaf {
                 match world.store.active_leaf(&coordinates).await {
                     Ok(current) => {
-                        let current = current.map(|entry_id: verlet::SessionEntryId| entry_id.to_string());
+                        let current = current.map(|entry_id: verlet_history::SessionEntryId| entry_id.to_string());
                         if current != replayed {
                             violations.push(violation(
                                 self.name(),
@@ -465,7 +465,7 @@ impl crate::support::scenario::ScenarioInvariant for NoDuplicateProjectedOutputI
             std::collections::HashMap::new();
         for event in events
             .into_iter()
-            .filter(|event| event.kind == verlet::EventKind::IoEgressDelivered)
+            .filter(|event| event.kind == verlet_history::EventKind::IoEgressDelivered)
         {
             let correlation = event
                 .payload
@@ -597,20 +597,23 @@ impl crate::support::scenario::ScenarioInvariant for TerminalConsistencyInvarian
 #[cfg(test)]
 mod tests {
     use crate::support::scenario::ScenarioInvariant as _;
-    use verlet::EventStore as _;
-    use verlet::SessionStore as _;
+    use verlet_history::EventStore as _;
+    use verlet_history::SessionStore as _;
 
-    fn coordinates() -> verlet::ThreadCoordinates {
-        verlet::ThreadCoordinates {
+    fn coordinates() -> verlet_runtime_contracts::ThreadCoordinates {
+        verlet_runtime_contracts::ThreadCoordinates {
             tenant_id: "scenario-tenant".to_string(),
             user_id: "scenario-user".to_string(),
             session_id: "scenario-session".to_string(),
-            thread_id: verlet::ThreadId::parse_str("00000000-0000-0000-0000-000000000400").unwrap(),
+            thread_id: verlet_runtime_contracts::ThreadId::parse_str(
+                "00000000-0000-0000-0000-000000000400",
+            )
+            .unwrap(),
         }
     }
 
-    fn stream_id() -> verlet::EventStreamId {
-        verlet::EventStreamId::new(
+    fn stream_id() -> verlet_history::EventStreamId {
+        verlet_history::EventStreamId::new(
             "thread:scenario-tenant:scenario-user:scenario-session:00000000-0000-0000-0000-000000000400",
         )
     }
@@ -618,22 +621,22 @@ mod tests {
     fn event(
         id: u128,
         at: i64,
-        kind: verlet::EventKind,
+        kind: verlet_history::EventKind,
         payload: serde_json::Value,
-    ) -> verlet::NewEventRecord {
-        verlet::NewEventRecord {
-            id: verlet::EventRecordId::from_uuid(uuid::Uuid::from_u128(id)),
+    ) -> verlet_history::NewEventRecord {
+        verlet_history::NewEventRecord {
+            id: verlet_history::EventRecordId::from_uuid(uuid::Uuid::from_u128(id)),
             coordinates: coordinates(),
             created_at_ms: at,
             kind,
-            origin: verlet::EventOrigin::Witnessed,
-            provenance: verlet::EventProvenance::default(),
+            origin: verlet_history::EventOrigin::Witnessed,
+            provenance: verlet_history::EventProvenance::default(),
             payload,
         }
     }
 
     fn transcript_for(
-        events: &[verlet::EventRecord],
+        events: &[verlet_history::EventRecord],
     ) -> crate::support::transcript::NormalizedTranscript {
         let mut transcript = crate::support::transcript::TypedTranscript::new();
         transcript.preserve_id(stream_id().as_str());
@@ -655,14 +658,14 @@ mod tests {
     }
 
     async fn append(
-        store: &verlet::InMemorySessionStore,
-        records: Vec<verlet::NewEventRecord>,
-    ) -> Vec<verlet::EventRecord> {
+        store: &verlet_history::InMemorySessionStore,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> Vec<verlet_history::EventRecord> {
         store.append_events(&stream_id(), records).await.unwrap()
     }
 
     fn world<'a>(
-        store: &'a verlet::InMemorySessionStore,
+        store: &'a verlet_history::InMemorySessionStore,
         transcript: &'a crate::support::transcript::NormalizedTranscript,
     ) -> crate::support::scenario::ScenarioWorld<'a> {
         crate::support::scenario::ScenarioWorld {
@@ -676,13 +679,13 @@ mod tests {
 
     #[tokio::test]
     async fn inv1_holds_for_monotonic_journal_whose_replay_matches_fold() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         store
             .append(
                 &coordinates(),
                 None,
-                verlet::SessionEntryKind::Message {
-                    message: verlet::CanonicalMessage::user_text_at("hello", 1),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text_at("hello", 1),
                 },
             )
             .await
@@ -699,13 +702,13 @@ mod tests {
 
     #[tokio::test]
     async fn inv1_reports_replay_fold_mismatch_from_bad_durable_history() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         store
             .append(
                 &coordinates(),
                 None,
-                verlet::SessionEntryKind::Message {
-                    message: verlet::CanonicalMessage::user_text_at("hello", 1),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text_at("hello", 1),
                 },
             )
             .await
@@ -715,7 +718,7 @@ mod tests {
             vec![event(
                 2,
                 2,
-                verlet::EventKind::ThreadBranchSelected,
+                verlet_history::EventKind::ThreadBranchSelected,
                 serde_json::json!({"selected_entry_id": null}),
             )],
         )
@@ -731,13 +734,13 @@ mod tests {
 
     #[tokio::test]
     async fn inv2_holds_for_one_active_runtime_and_clean_shutdown_cut() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![event(
                 10,
                 1,
-                verlet::EventKind::PlacementDecision,
+                verlet_history::EventKind::PlacementDecision,
                 serde_json::json!({
                     "runtime_id": "runtime-a", "runtime_state": "active"
                 }),
@@ -761,20 +764,20 @@ mod tests {
 
     #[tokio::test]
     async fn inv2_reports_two_durable_active_runtimes_for_one_thread() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     11,
                     1,
-                    verlet::EventKind::PlacementDecision,
+                    verlet_history::EventKind::PlacementDecision,
                     serde_json::json!({"runtime_id": "runtime-a", "runtime_state": "active"}),
                 ),
                 event(
                     12,
                     2,
-                    verlet::EventKind::PlacementDecision,
+                    verlet_history::EventKind::PlacementDecision,
                     serde_json::json!({"runtime_id": "runtime-b", "runtime_state": "active"}),
                 ),
             ],
@@ -790,20 +793,20 @@ mod tests {
 
     #[tokio::test]
     async fn inv2_reports_durable_execution_after_shutdown_completed() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     13,
                     1,
-                    verlet::EventKind::PlacementDecision,
+                    verlet_history::EventKind::PlacementDecision,
                     serde_json::json!({"runtime_id": "runtime-a", "runtime_state": "active"}),
                 ),
                 event(
                     14,
                     2,
-                    verlet::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({"turn_id": "after-shutdown"}),
                 ),
             ],
@@ -867,7 +870,7 @@ mod tests {
 
     #[tokio::test]
     async fn inv3_holds_when_expired_lease_was_redelivered_and_drain_is_empty() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let queue = EmptyQueue;
         let transcript = crate::support::transcript::NormalizedTranscript {
             items: vec![
@@ -895,7 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn inv3_discharges_completed_lease_but_reports_uncompleted_expired_lease() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let queue = EmptyQueue;
         let completed = crate::support::transcript::NormalizedTranscript {
             items: vec![
@@ -940,7 +943,7 @@ mod tests {
 
     #[tokio::test]
     async fn inv3_reports_expired_unredelivered_lease_and_nonempty_drain() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let queue = EmptyQueue;
         let transcript = crate::support::transcript::NormalizedTranscript {
             items: vec![
@@ -972,8 +975,8 @@ mod tests {
 
     #[tokio::test]
     async fn inv4_holds_for_one_delivery_per_correlation() {
-        let store = verlet::InMemorySessionStore::new();
-        let events = append(&store, vec![event(20, 1, verlet::EventKind::IoEgressDelivered, serde_json::json!({
+        let store = verlet_history::InMemorySessionStore::new();
+        let events = append(&store, vec![event(20, 1, verlet_history::EventKind::IoEgressDelivered, serde_json::json!({
             "dedupe_key": "source:0", "egress_kind": "text", "route_id": "route", "attempts": 2
         }))]).await;
         let transcript = transcript_for(&events);
@@ -987,20 +990,20 @@ mod tests {
 
     #[tokio::test]
     async fn inv4_reports_duplicate_delivery_records_for_one_correlation() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     21,
                     1,
-                    verlet::EventKind::IoEgressDelivered,
+                    verlet_history::EventKind::IoEgressDelivered,
                     serde_json::json!({"dedupe_key": "source:0"}),
                 ),
                 event(
                     22,
                     2,
-                    verlet::EventKind::IoEgressDelivered,
+                    verlet_history::EventKind::IoEgressDelivered,
                     serde_json::json!({"dedupe_key": "source:0"}),
                 ),
             ],
@@ -1021,20 +1024,20 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_holds_when_recovery_records_progress_after_terminal_resident() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     31,
                     1,
-                    verlet::EventKind::CouplingRunFailed,
+                    verlet_history::EventKind::CouplingRunFailed,
                     serde_json::json!({"resident_state": "failed", "reservation_key": "turn-1"}),
                 ),
                 event(
                     32,
                     2,
-                    verlet::EventKind::TurnResumed,
+                    verlet_history::EventKind::TurnResumed,
                     serde_json::json!({"reservation_progress": "turn-1"}),
                 ),
             ],
@@ -1058,20 +1061,20 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_orders_terminal_and_progress_by_transcript_sequence() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     34,
                     1,
-                    verlet::EventKind::CouplingRunFailed,
+                    verlet_history::EventKind::CouplingRunFailed,
                     serde_json::json!({"resident_state": "failed", "reservation_key": "turn-3"}),
                 ),
                 event(
                     35,
                     1,
-                    verlet::EventKind::TurnResumed,
+                    verlet_history::EventKind::TurnResumed,
                     serde_json::json!({"reservation_progress": "turn-3"}),
                 ),
             ],
@@ -1095,26 +1098,26 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_does_not_apply_an_earlier_probe_to_a_later_terminal_record() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     36,
                     1,
-                    verlet::EventKind::CouplingRunFailed,
+                    verlet_history::EventKind::CouplingRunFailed,
                     serde_json::json!({"resident_state": "failed", "reservation_key": "turn-4"}),
                 ),
                 event(
                     37,
                     1,
-                    verlet::EventKind::TurnResumed,
+                    verlet_history::EventKind::TurnResumed,
                     serde_json::json!({"reservation_progress": "turn-4"}),
                 ),
                 event(
                     38,
                     1,
-                    verlet::EventKind::CouplingRunCompleted,
+                    verlet_history::EventKind::CouplingRunCompleted,
                     serde_json::json!({"resident_state": "completed", "reservation_key": "turn-4"}),
                 ),
             ],
@@ -1138,13 +1141,13 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_reports_terminal_resident_without_post_recovery_progress() {
-        let store = verlet::InMemorySessionStore::new();
+        let store = verlet_history::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![event(
                 33,
                 1,
-                verlet::EventKind::CouplingRunCompleted,
+                verlet_history::EventKind::CouplingRunCompleted,
                 serde_json::json!({
                     "resident_state": "completed", "reservation_key": "turn-2"
                 }),

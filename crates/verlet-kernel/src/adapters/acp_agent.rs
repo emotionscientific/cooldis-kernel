@@ -38,7 +38,7 @@ pub struct VerletAcpAgentConfig {
 impl Default for VerletAcpAgentConfig {
     fn default() -> Self {
         Self {
-            daemon_socket: crate::default_verlet_daemon_socket_path(),
+            daemon_socket: crate::daemon::daemon_config::default_verlet_daemon_socket_path(),
             request_timeout: std::time::Duration::from_secs(120),
             agent_ref: None,
             cwd: None,
@@ -50,7 +50,7 @@ pub async fn serve_acp_stdio<R, W>(
     reader: R,
     writer: W,
     config: VerletAcpAgentConfig,
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -96,12 +96,14 @@ where
 async fn write_acp_response<W>(
     writer: &mut tokio::io::BufWriter<W>,
     response: &serde_json::Value,
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     let payload = serde_json::to_string(response).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to encode ACP response: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to encode ACP response: {err}"
+        ))
     })?;
     writer
         .write_all(payload.as_bytes())
@@ -119,7 +121,7 @@ struct VerletAcpAgent {
     state: std::sync::Arc<tokio::sync::Mutex<AcpAgentState>>,
     outbound: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
     #[cfg(unix)]
-    daemon_client: Option<crate::CodexTuiTestClient<tokio::net::UnixStream>>,
+    daemon_client: Option<crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>>,
 }
 
 impl VerletAcpAgent {
@@ -530,7 +532,8 @@ impl VerletAcpAgent {
     #[cfg(unix)]
     async fn client(
         &mut self,
-    ) -> Result<&mut crate::CodexTuiTestClient<tokio::net::UnixStream>, String> {
+    ) -> Result<&mut crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>, String>
+    {
         if self.daemon_client.is_none() {
             self.daemon_client = Some(connect_acp_client(&self.config).await?);
         }
@@ -541,12 +544,12 @@ impl VerletAcpAgent {
 #[cfg(unix)]
 async fn connect_acp_client(
     config: &VerletAcpAgentConfig,
-) -> Result<crate::CodexTuiTestClient<tokio::net::UnixStream>, String> {
-    let mut client = crate::CodexTuiTestClient::connect_unix(
+) -> Result<crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>, String> {
+    let mut client = crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
         config.daemon_socket.clone(),
-        crate::CodexTuiConnectConfig {
+        crate::adapters::codex_tui::CodexTuiConnectConfig {
             client_name: "verlet-acp-agent".to_string(),
-            ..crate::CodexTuiConnectConfig::default()
+            ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
         },
     )
     .await
@@ -561,11 +564,11 @@ async fn connect_acp_client(
 }
 
 async fn turn_start_text_with_config<S>(
-    client: &mut crate::CodexTuiTestClient<S>,
+    client: &mut crate::adapters::codex_tui::CodexTuiTestClient<S>,
     thread_id: &str,
     text: &str,
     config: &AcpSessionConfig,
-) -> crate::VerletResult<crate::CodexTuiTurn>
+) -> crate::kernel::runtime_host::VerletResult<crate::adapters::codex_tui::CodexTuiTurn>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -583,16 +586,20 @@ where
     }
     let result = client.request("turn/start", params).await?;
     let turn = result.get("turn").cloned().ok_or_else(|| {
-        crate::VerletError::RuntimeFactory("turn/start response missing turn".into())
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            "turn/start response missing turn".into(),
+        )
     })?;
     let id = turn
         .get("id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory("turn/start response turn missing id".into())
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "turn/start response turn missing id".into(),
+            )
         })?
         .to_string();
-    Ok(crate::CodexTuiTurn { id, raw: turn })
+    Ok(crate::adapters::codex_tui::CodexTuiTurn { id, raw: turn })
 }
 
 async fn clear_active_turn(
@@ -611,7 +618,7 @@ async fn clear_active_turn(
 fn prompt_completed_responses(
     request_id: serde_json::Value,
     session_id: &str,
-    completed: crate::CodexTuiCompletedTurn,
+    completed: crate::adapters::codex_tui::CodexTuiCompletedTurn,
     turn: serde_json::Value,
 ) -> Vec<serde_json::Value> {
     let completed_thread_id = completed.thread_id.clone();
@@ -657,7 +664,7 @@ fn prompt_completed_responses(
 }
 
 fn completed_turn_from_notifications(
-    notifications: &[crate::JsonRpcNotification],
+    notifications: &[crate::adapters::app_server::connection::JsonRpcNotification],
     turn_id: &str,
 ) -> Option<serde_json::Value> {
     notifications.iter().rev().find_map(|notification| {
@@ -675,7 +682,7 @@ fn completed_turn_from_notifications(
 fn acp_updates_from_notifications(
     session_id: &str,
     turn_id: &str,
-    notifications: &[crate::JsonRpcNotification],
+    notifications: &[crate::adapters::app_server::connection::JsonRpcNotification],
 ) -> Vec<serde_json::Value> {
     let mut updates = Vec::new();
     for notification in notifications {
@@ -844,7 +851,9 @@ fn usage_u64(usage: &serde_json::Value, field: &str) -> Option<u64> {
     usage.get(field).and_then(serde_json::Value::as_u64)
 }
 
-fn acp_stop_reason(notifications: &[crate::JsonRpcNotification]) -> &'static str {
+fn acp_stop_reason(
+    notifications: &[crate::adapters::app_server::connection::JsonRpcNotification],
+) -> &'static str {
     for notification in notifications.iter().rev() {
         if notification.method == "turn/completed"
             && notification
@@ -1208,8 +1217,10 @@ fn error_response(
     })
 }
 
-fn acp_io_error(error: std::io::Error) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(format!("ACP stdio I/O error: {error}"))
+fn acp_io_error(error: std::io::Error) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+        "ACP stdio I/O error: {error}"
+    ))
 }
 
 #[cfg(test)]
@@ -1377,9 +1388,11 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = crate::AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
+        let app = crate::adapters::app_server::VerletAppServer::new_local(app_config)
+            .await
+            .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
@@ -1421,11 +1434,11 @@ mod tests {
         assert_eq!(session["result"]["verlet"]["threadId"], session_id);
         assert_eq!(session["result"]["verlet"]["thread"]["id"], session_id);
 
-        let mut inspector = crate::CodexTuiTestClient::connect_unix(
+        let mut inspector = crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
             socket.clone(),
-            crate::CodexTuiConnectConfig {
+            crate::adapters::codex_tui::CodexTuiConnectConfig {
                 client_name: "verlet-acp-agent-test-inspector".to_string(),
-                ..crate::CodexTuiConnectConfig::default()
+                ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -1464,9 +1477,11 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = crate::AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
+        let app = crate::adapters::app_server::VerletAppServer::new_local(app_config)
+            .await
+            .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
@@ -1576,9 +1591,11 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = crate::AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
+        let app = crate::adapters::app_server::VerletAppServer::new_local(app_config)
+            .await
+            .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
@@ -1620,7 +1637,7 @@ mod tests {
         assert_config_current(
             &new_session["result"],
             "model",
-            crate::APP_SERVER_LOCAL_MODEL,
+            crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
         );
         assert_config_current(&new_session["result"], "thought_level", "none");
         assert_config_values_include(&new_session["result"], "thought_level", &["low", "high"]);
@@ -1642,7 +1659,7 @@ mod tests {
         assert_config_current(
             &set_thinking["result"],
             "model",
-            crate::APP_SERVER_LOCAL_MODEL,
+            crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
         );
 
         let set_model = serde_json::json!({
@@ -1652,13 +1669,17 @@ mod tests {
             "params": {
                 "sessionId": session_id,
                 "configId": "model",
-                "value": crate::APP_SERVER_LOCAL_MODEL,
+                "value": crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
             },
         });
         send(&mut write, &set_model.to_string()).await;
         let set_model = read_json_response(&mut lines, 4).await;
         assert!(set_model.get("error").is_none(), "{set_model}");
-        assert_config_current(&set_model["result"], "model", crate::APP_SERVER_LOCAL_MODEL);
+        assert_config_current(
+            &set_model["result"],
+            "model",
+            crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+        );
         assert_config_current(&set_model["result"], "thought_level", "low");
 
         let bad_value = serde_json::json!({
@@ -1718,21 +1739,29 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = crate::AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
         let provider = std::sync::Arc::new(ScriptedProviderClient::new(vec![
             provider_tool_call("call_1|fc_1", "missing_tool", serde_json::json!({})),
             provider_text("handled missing tool", 5, 6),
         ]));
-        let runtime_config =
-            crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
-        let runtime_factory = std::sync::Arc::new(
-            crate::AgentLoopFactory::new(runtime_config, provider.clone())
-                .with_operation_registry(std::sync::Arc::new(crate::OperationRegistry::new())),
+        let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIResponses,
+            "openai",
+            "gpt-test",
         );
-        let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
-            .await
-            .unwrap();
+        let runtime_factory = std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(runtime_config, provider.clone())
+                .with_operation_registry(std::sync::Arc::new(
+                    verlet_operations::operation_registry::OperationRegistry::new(),
+                )),
+        );
+        let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
+            app_config,
+            runtime_factory,
+        )
+        .await
+        .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
@@ -1839,20 +1868,26 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = crate::AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
         let provider = std::sync::Arc::new(PendingProviderClient::default());
-        let runtime_config =
-            crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIResponses,
+            "openai",
+            "gpt-test",
+        );
         let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
             runtime_config,
             provider.clone(),
             // lexicon-allow: capsule - existing app-server config type used by test runtime factory
             app_config.capsule_bindings.clone(),
         );
-        let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
-            .await
-            .unwrap();
+        let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
+            app_config,
+            runtime_factory,
+        )
+        .await
+        .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
@@ -1936,20 +1971,26 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = crate::AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
         let provider = std::sync::Arc::new(PendingProviderClient::default());
-        let runtime_config =
-            crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIResponses,
+            "openai",
+            "gpt-test",
+        );
         let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
             runtime_config,
             provider.clone(),
             // lexicon-allow: capsule - existing app-server config type used by test runtime factory
             app_config.capsule_bindings.clone(),
         );
-        let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
-            .await
-            .unwrap();
+        let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
+            app_config,
+            runtime_factory,
+        )
+        .await
+        .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
@@ -2081,20 +2122,22 @@ mod tests {
         std::fs::create_dir_all(&workspace)?;
         let socket = std::path::PathBuf::from("/tmp")
             .join(format!("cdis-acp-{}.sock", uuid::Uuid::now_v7().simple()));
-        let listen = crate::AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let mut app_config = isolated_app_config(listen.clone(), &root)
             .with_openai_chat_completions(
-                crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+                crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
                 live_config.base_url.clone(),
                 live_config.api_key.clone(),
                 live_config.model.clone(),
             );
-        if let crate::AppServerProviderConfig::OpenAIChatCompletions { headers, .. } =
-            &mut app_config.provider
+        if let crate::adapters::app_server::AppServerProviderConfig::OpenAIChatCompletions {
+            headers,
+            ..
+        } = &mut app_config.provider
         {
             headers.push(("X-Example-Provider".to_string(), "required".to_string()));
         }
-        let app = crate::VerletAppServer::new_local(app_config).await?;
+        let app = crate::adapters::app_server::VerletAppServer::new_local(app_config).await?;
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
@@ -2357,11 +2400,13 @@ mod tests {
     }
 
     fn isolated_app_config(
-        listen: crate::AppServerListenAddr,
+        listen: crate::adapters::app_server::AppServerListenAddr,
         root: &std::path::Path,
-    ) -> crate::VerletAppServerConfig {
-        let mut config =
-            crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    ) -> crate::adapters::app_server::VerletAppServerConfig {
+        let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+            listen,
+            std::env::current_dir().unwrap(),
+        );
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.user_state_home = root.join("user-state");
@@ -2375,7 +2420,7 @@ mod tests {
 
     #[derive(Default)]
     struct PendingProviderClient {
-        requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+        requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
         request_started: tokio::sync::Notify,
     }
 
@@ -2395,11 +2440,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::ProviderClient for PendingProviderClient {
+    impl verlet_provider::ProviderClient for PendingProviderClient {
         async fn complete(
             &self,
-            request: &crate::ProviderRequest,
-        ) -> crate::ProviderResult<crate::ProviderResponse> {
+            request: &verlet_provider::ProviderRequest,
+        ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
             self.requests.lock().unwrap().push(request.clone());
             self.request_started.notify_waiters();
             std::future::pending().await
@@ -2407,12 +2452,12 @@ mod tests {
     }
 
     struct ScriptedProviderClient {
-        requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
-        responses: std::sync::Mutex<Vec<crate::ProviderResponse>>,
+        requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+        responses: std::sync::Mutex<Vec<verlet_provider::ProviderResponse>>,
     }
 
     impl ScriptedProviderClient {
-        fn new(responses: Vec<crate::ProviderResponse>) -> Self {
+        fn new(responses: Vec<verlet_provider::ProviderResponse>) -> Self {
             Self {
                 requests: std::sync::Mutex::new(Vec::new()),
                 responses: std::sync::Mutex::new(responses.into_iter().rev().collect()),
@@ -2425,11 +2470,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::ProviderClient for ScriptedProviderClient {
+    impl verlet_provider::ProviderClient for ScriptedProviderClient {
         async fn complete(
             &self,
-            request: &crate::ProviderRequest,
-        ) -> crate::ProviderResult<crate::ProviderResponse> {
+            request: &verlet_provider::ProviderRequest,
+        ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
             self.requests.lock().unwrap().push(request.clone());
             Ok(self
                 .responses
@@ -2440,16 +2485,20 @@ mod tests {
         }
     }
 
-    fn provider_text(text: &str, input_tokens: u64, output_tokens: u64) -> crate::ProviderResponse {
-        crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text(text)],
-            usage: crate::CanonicalUsage {
+    fn provider_text(
+        text: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> verlet_provider::ProviderResponse {
+        verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(text)],
+            usage: verlet_history::CanonicalUsage {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         }
     }
 
@@ -2457,11 +2506,13 @@ mod tests {
         call_id: &str,
         name: &str,
         arguments: serde_json::Value,
-    ) -> crate::ProviderResponse {
-        crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::tool_call(call_id, name, arguments)],
-            usage: crate::CanonicalUsage::default(),
-            stop_reason: crate::CanonicalStopReason::ToolUse,
+    ) -> verlet_provider::ProviderResponse {
+        verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::tool_call(
+                call_id, name, arguments,
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::ToolUse,
         }
     }
 
@@ -2474,23 +2525,29 @@ mod tests {
 
     impl OpenAICompatibleLiveConfig {
         fn load() -> Result<Self, Box<dyn std::error::Error>> {
-            let base_url = crate::env_compat::var("VERLET_OPENAI_COMPATIBLE_URL")
+            let base_url =
+                verlet_runtime_contracts::env_compat::var("VERLET_OPENAI_COMPATIBLE_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "https://api.example.invalid/v1".to_string());
+            let api_key =
+                verlet_runtime_contracts::env_compat::var("VERLET_OPENAI_COMPATIBLE_API_KEY")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| {
+                        verlet_runtime_contracts::env_compat::var("OPENAI_COMPATIBLE_API_KEY")
+                            .ok()
+                            .filter(|value| !value.trim().is_empty())
+                    })
+                    .ok_or(
+                        "missing VERLET_OPENAI_COMPATIBLE_API_KEY or OPENAI_COMPATIBLE_API_KEY",
+                    )?;
+            let model = verlet_runtime_contracts::env_compat::var("VERLET_OPENAI_COMPATIBLE_MODEL")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "https://api.example.invalid/v1".to_string());
-            let api_key = crate::env_compat::var("VERLET_OPENAI_COMPATIBLE_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| {
-                    crate::env_compat::var("OPENAI_COMPATIBLE_API_KEY")
-                        .ok()
-                        .filter(|value| !value.trim().is_empty())
-                })
-                .ok_or("missing VERLET_OPENAI_COMPATIBLE_API_KEY or OPENAI_COMPATIBLE_API_KEY")?;
-            let model = crate::env_compat::var("VERLET_OPENAI_COMPATIBLE_MODEL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string());
+                .unwrap_or_else(|| {
+                    crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string()
+                });
             Ok(Self {
                 base_url,
                 api_key,

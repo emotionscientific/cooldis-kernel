@@ -9,15 +9,6 @@ pub mod env_compat;
 pub mod handle;
 pub mod schema;
 
-pub use handle::{
-    DispatchId, HANDLE_DISPATCH_CONTENT_KIND, HANDLE_OUTCOME_CONTENT_KIND, HandleDispatchEnvelope,
-    HandleId, HandleKind, HandleTerminalEnvelope, HandleTerminalOutcome,
-};
-pub use schema::{
-    JsonSchemaResult, JsonSchemaValidationError, MAX_JSON_SCHEMA_SUBSET_DEPTH, SchemaRegistry,
-    validate_json_schema_subset, validate_json_value_against_schema,
-};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ThreadId(uuid::Uuid);
 
