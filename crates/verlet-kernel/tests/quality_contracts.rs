@@ -39,11 +39,11 @@ fn workspace_layout_contract_matches_current_repository_shape() {
     for required in [
         "crates/verlet-kernel/src/kernel/runtime_host.rs",
         "crates/verlet-kernel/src/agent/agent_tool_router.rs",
-        "crates/verlet-kernel/src/adapters/app_server/mod.rs",
+        "crates/verlet-kernel/src/adapters/app_server.rs",
         "crates/verlet-kernel/src/capabilities/wasm_runner.rs",
         "crates/verlet-kernel/src/operations/operation_registry.rs",
         "crates/verlet-kernel/src/daemon/daemon_config.rs",
-        "crates/verlet-kernel/src/cli/mod.rs",
+        "crates/verlet-kernel/src/cli.rs",
         "crates/verlet-kernel/src/bin/verlet.rs",
         "crates/verlet-kernel/src/bin/verlet-mcp-server.rs",
         "crates/verlet-kernel/tests/runtime_loop_scenarios.rs",
@@ -62,6 +62,49 @@ fn workspace_layout_contract_matches_current_repository_shape() {
     ] {
         assert!(root.join(required).exists(), "{required} should exist");
     }
+}
+
+#[test]
+fn no_crate_mounts_a_module_through_mod_rs() {
+    const DIRECTORY_VISIT_MAX: usize = 10_000;
+
+    let crates = repo_root().join("crates");
+    let mut pending: Vec<std::path::PathBuf> = vec![crates.clone()];
+    let mut offenders: Vec<String> = Vec::new();
+
+    for _ in 0..DIRECTORY_VISIT_MAX {
+        let Some(directory) = pending.pop() else {
+            break;
+        };
+        for entry in std::fs::read_dir(&directory)
+            .unwrap_or_else(|err| panic!("read dir {}: {err}", directory.display()))
+        {
+            let path = entry.expect("directory entry should be readable").path();
+            let name = path.file_name().unwrap_or_default();
+            if path.is_dir() {
+                if name != "target" {
+                    pending.push(path);
+                }
+            } else if name == "mod.rs" {
+                offenders.push(
+                    path.strip_prefix(&crates)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    assert!(
+        pending.is_empty(),
+        "crates/ has more than {DIRECTORY_VISIT_MAX} directories; raise the bound"
+    );
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "modules mount through foo.rs + foo/bar.rs, never mod.rs; found {offenders:?}"
+    );
 }
 
 #[test]
@@ -213,7 +256,7 @@ fn public_docs_pin_repo_positioning_and_workflow() {
 #[test]
 fn public_api_coverage_tracks_docs_and_man_page_gaps() {
     let coverage = read(repo_root().join("docs/public-api-coverage.md"));
-    let cli = read(repo_root().join("crates/verlet-kernel/src/cli/mod.rs"));
+    let cli = read(repo_root().join("crates/verlet-kernel/src/cli.rs"));
 
     for surface in [
         "verlet",
@@ -367,7 +410,7 @@ fn non_test_request_paths_do_not_reintroduce_panic_shortcuts() {
     let request_paths = [
         "crates/verlet-kernel/src/adapters/app_server/connection.rs",
         "crates/verlet-kernel/src/adapters/app_server/default_manifest.rs",
-        "crates/verlet-kernel/src/adapters/app_server/mod.rs",
+        "crates/verlet-kernel/src/adapters/app_server.rs",
         "crates/verlet-kernel/src/adapters/app_server/subscriptions.rs",
         "crates/verlet-kernel/src/adapters/app_server/threads.rs",
         "crates/verlet-kernel/src/adapters/mcp_server.rs",

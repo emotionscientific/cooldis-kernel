@@ -1,3 +1,4 @@
+#[path = "support/test_mount.rs"]
 mod support;
 
 const RELEASE_VERIFIER_CONTRACT: &str = r#"---

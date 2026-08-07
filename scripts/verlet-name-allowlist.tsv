@@ -26,7 +26,7 @@ crates/verlet-kernel/src/adapters/agent_loop.rs	Stable persisted storage ABI or 
 crates/verlet-kernel/src/adapters/agent_loop/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/adapters/app_server/default_manifest.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/connection.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
-crates/verlet-kernel/src/adapters/app_server/mod.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/adapters/app_server.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/orchestrator_boundary.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/adapters/app_server/threads.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
@@ -55,7 +55,7 @@ crates/verlet-kernel/src/daemon/handle_ingress.rs	Stable persisted storage ABI o
 crates/verlet-kernel/src/daemon/identity.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/daemon/remote_store/endpoint.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/daemon/remote_store/lease.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
-crates/verlet-kernel/src/daemon/remote_store/mod.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
+crates/verlet-kernel/src/daemon/remote_store.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/daemon/remote_store/process_executor.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/daemon/remote_store/propagator.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/daemon/remote_store/queue.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.

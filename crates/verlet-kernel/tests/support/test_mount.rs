@@ -1,15 +1,39 @@
+//! The integration-test mount of the shared test-support tree.
+//!
+//! Every integration-test binary mounts this file as `crate::support`, the same
+//! module path `src/lib.rs` mounts `lib_mount.rs` at under `#[cfg(test)]`. One
+//! absolute path in both compilations is what lets the support files spell
+//! every path out in full instead of reaching through relative parent paths.
+//!
+//! The `scenario_*` seams are the deliberate difference between the two
+//! mounts: `lib_mount.rs` has the real implementations, which can reach
+//! crate-private kernel APIs; this file supplies panicking stubs plus a
+//! `scenario_unit_harness()` that returns `false`, so integration binaries skip
+//! the scenario bodies that need those seams.
+
 #![allow(dead_code)]
 
+#[path = "event_trace.rs"]
 pub(crate) mod event_trace;
+#[path = "fault.rs"]
 pub(crate) mod fault;
+#[path = "fault_plan.rs"]
 pub(crate) mod fault_plan;
+#[path = "invariant_claims.rs"]
 pub(crate) mod invariant_claims;
+#[path = "invariant_forks.rs"]
 pub(crate) mod invariant_forks;
+#[path = "invariants.rs"]
 pub(crate) mod invariants;
+#[path = "scenario.rs"]
 pub(crate) mod scenario;
+#[path = "scripted_provider.rs"]
 pub(crate) mod scripted_provider;
+#[path = "simulated_io.rs"]
 pub(crate) mod simulated_io;
+#[path = "store_parity.rs"]
 pub(crate) mod store_parity;
+#[path = "transcript.rs"]
 pub(crate) mod transcript;
 
 #[allow(unused_imports)]
