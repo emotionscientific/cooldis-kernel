@@ -1,0 +1,19 @@
+# rust-toolchain.toml — Single source of truth for the Rust toolchain.
+#
+# Consumed by: Cargo, rust-analyzer, rustup, and rust-overlay (via Nix).
+# Non-Nix developers can use this same file with rustup.
+
+[toolchain]
+channel = "stable"
+# For nightly, pin a specific date:
+# channel = "nightly-2026-04-01"
+
+profile = "default"
+
+# rust-src is CRITICAL on NixOS: without it, rust-analyzer cannot find
+# the standard library sources.
+components = ["rust-src", "rust-analyzer", "clippy", "rustfmt"]
+
+# The wasm smoke tests (`verlet-wasm-smoke`, the tests/fixtures/wasm-* guest
+# crates) build for wasm32, which is why every CI job installs it too.
+targets = ["wasm32-unknown-unknown"]

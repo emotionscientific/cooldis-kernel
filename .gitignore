@@ -1,6 +1,10 @@
 target/
 **/target/
 
+result
+result-*
+.direnv/
+
 .tmp/
 .site/
 # Local daemon runtime state (publish records embed absolute home paths).
