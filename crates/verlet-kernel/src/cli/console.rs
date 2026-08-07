@@ -314,22 +314,22 @@ pub(super) fn browser_open_command(url: &str) -> crate::VerletResult<std::proces
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn browser_open_command(url: &str) -> VerletResult<std::process::Command> {
+pub(super) fn browser_open_command(url: &str) -> crate::VerletResult<std::process::Command> {
     let mut command = std::process::Command::new("xdg-open");
     command.arg(url);
     Ok(command)
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn browser_open_command(url: &str) -> VerletResult<std::process::Command> {
+pub(super) fn browser_open_command(url: &str) -> crate::VerletResult<std::process::Command> {
     let mut command = std::process::Command::new("cmd");
     command.args(["/C", "start", "", url]);
     Ok(command)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-pub(super) fn browser_open_command(_url: &str) -> VerletResult<std::process::Command> {
-    Err(usage_error(
+pub(super) fn browser_open_command(_url: &str) -> crate::VerletResult<std::process::Command> {
+    Err(crate::cli::usage_error(
         "automatic browser open is not supported on this platform",
     ))
 }

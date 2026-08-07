@@ -72,7 +72,7 @@ async fn run_chat_console(
         #[cfg(not(unix))]
         {
             let _ = socket_path;
-            Err(usage_error(
+            Err(crate::cli::usage_error(
                 "private chat app-server sockets require a Unix platform",
             ))
         }
@@ -102,7 +102,9 @@ async fn run_attached_chat(
             #[cfg(not(unix))]
             {
                 let _ = path;
-                Err(usage_error("--attach unix://... requires a Unix platform"))
+                Err(crate::cli::usage_error(
+                    "--attach unix://... requires a Unix platform",
+                ))
             }
         }
         ChatAttachTarget::WebSocket(url) => {
