@@ -41,6 +41,13 @@ For the repository's fuller local checks, use:
 scripts/check-pre-push.sh
 ```
 
+Nix users can get the pinned toolchain plus `just`, `bun`, and `sccache` with
+`nix develop` (or `direnv allow`, which uses the checked-in `.envrc`). The
+toolchain comes from `rust-toolchain.toml`, the same file rustup reads, so both
+setups build the same thing. `nix build` produces the `verlet`,
+`verlet-mcp-server`, and `verlet-acp-agent` binaries. The flake is a convenience
+for local work; `.github/workflows/verify.yml` remains the gate.
+
 ## Contribution License
 
 The repository is licensed under the Apache License, Version 2.0. A future
